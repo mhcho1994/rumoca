@@ -1,0 +1,11 @@
+[package]
+name = "rumoca"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+lalrpop = "0.22.0"
+
+[dependencies]
+lalrpop-util = "0.22.0"
+logos = "0.14.2"
