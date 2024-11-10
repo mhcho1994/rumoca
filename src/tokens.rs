@@ -16,7 +16,7 @@ impl From<ParseIntError> for LexicalError {
 }
 
 #[derive(Logos, Clone, Debug, PartialEq)]
-#[logos(skip r"[ \t\n\f]+", skip r"#.*\n?", error = LexicalError)]
+#[logos(skip r"[ \t\n\f]+", skip r"//.*\n?", skip r"\/\*([^*]|\*[^\/])+\*\/", error = LexicalError)]
 pub enum Token {
     #[token("algorithm")]
     KeywordAlgorithm,
@@ -32,6 +32,8 @@ pub enum Token {
     KeywordClass,
     #[token("connect")]
     KeywordConnect,
+    #[token("connector")]
+    KeywordConnector,
     #[token("constant")]
     KeywordConstant,
     #[token("constrainedby")]
@@ -63,28 +65,94 @@ pub enum Token {
     #[token("external")]
     KeywordExternal,
     #[token("false")]
-    KeywordFinal,
-    #[token("final")]
-    KeywordFlow,
-    #[token("flow")]
-    KeywordFor,
-    #[token("for")]
-    KeywordFunction,
-    #[token("function")]
     KeywordFalse,
-    #[token("print")]
-    KeywordPrint,
+    #[token("final")]
+    KeywordFinal,
+    #[token("flow")]
+    KeywordFlow,
+    #[token("for")]
+    KeywordFor,
+    #[token("function")]
+    KeywordFunction,
+    #[token("if")]
+    KeywordIf,
+    #[token("import")]
+    KeywordImport,
+    #[token("impure")]
+    KeywordImpure,
+    #[token("in")]
+    KeywordIn,
+    #[token("initial")]
+    KeywordInitial,
+    #[token("inner")]
+    KeywordInner,
+    #[token("input")]
+    KeywordInput,
+    #[token("loop")]
+    KeywordLoop,
+    #[token("model")]
+    KeywordModel,
+    #[token("not")]
+    KeywordNot,
+    #[token("operator")]
+    KeywordOperator,
+    #[token("or")]
+    KeywordOr,
+    #[token("outer")]
+    KeywordOuter,
+    #[token("output")]
+    KeywordOutput,
+    #[token("package")]
+    KeywordPackage,
+    #[token("parameter")]
+    KeywordParameter,
+    #[token("partial")]
+    KeywordPartial,
+    #[token("protected")]
+    KeywordProtected,
+    #[token("public")]
+    KeywordPublic,
+    #[token("pure")]
+    KeywordPure,
+    #[token("record")]
+    KeywordRecord,
+    #[token("redeclare")]
+    KeywordRedeclare,
+    #[token("replaceable")]
+    KeywordReplaceable,
+    #[token("return")]
+    KeywordReturn,
+    #[token("stream")]
+    KeywordStream,
+    #[token("then")]
+    KeywordThen,
+    #[token("true")]
+    KeywordTrue,
+    #[token("type")]
+    KeywordType,
+    #[token("when")]
+    KeywordWhen,
+    #[token("while")]
+    KeywordWhile,
+    #[token("within")]
+    KeywordWithin,
 
-    #[regex("[_a-zA-Z][_0-9a-zA-Z]*", |lex| lex.slice().to_string())]
+    #[regex("[_a-zA-Z][_0-9a-zA-Z]*|\'[!#$%&()&*+,-./:;<>=?@\\[\\]^{}\\|~ \"]\'", |lex| lex.slice().to_string())]
     Identifier(String),
-    #[regex("[1-9][0-9]*", |lex| lex.slice().parse())]
-    Integer(i64),
+
+    #[regex("[1-9][0-9]*", |lex| lex.slice().parse::<i64>().unwrap(), priority=3)]
+    UnsignedInteger(i64),
+
+    #[regex(r"(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?", |lex| lex.slice().parse::<f64>().unwrap())]
+    UnsignedReal(f64),
 
     #[token("(")]
     LParen,
     #[token(")")]
     RParen,
     #[token("=")]
+    Equal,
+    #[token(":=")]
     Assign,
     #[token(";")]
     Semicolon,
@@ -97,6 +165,15 @@ pub enum Token {
     OperatorMul,
     #[token("/")]
     OperatorDiv,
+
+    #[token(".+")]
+    OperatorElemAdd,
+    #[token(".-")]
+    OperatorElemSub,
+    #[token(".*")]
+    OperatorElemMul,
+    #[token("./")]
+    OperatorElemDiv,
 }
 
 impl fmt::Display for Token {

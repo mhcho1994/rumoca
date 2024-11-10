@@ -14,6 +14,7 @@ extern {
         "break" => Token::KeywordBreak,
         "class" => Token::KeywordClass,
         "connect" => Token::KeywordConnect,
+        "connector" => Token::KeywordConnector,
         "constant" => Token::KeywordConstant,
         "constrainedby" => Token::KeywordConstrainedby,
         "der" => Token::KeywordDer,
@@ -34,17 +35,54 @@ extern {
         "flow" => Token::KeywordFlow,
         "for" => Token::KeywordFor,
         "function" => Token::KeywordFunction,
-        "print" => Token::KeywordPrint,
+        "if" => Token::KeywordIf,
+        "import" => Token::KeywordImport,
+        "impure" => Token::KeywordImpure,
+        "in" => Token::KeywordIn,
+        "initial" => Token::KeywordInitial,
+        "inner" => Token::KeywordInner,
+        "input" => Token::KeywordInput,
+        "loop" => Token::KeywordLoop,
+        "model" => Token::KeywordModel,
+        "not" => Token::KeywordNot,
+        "operator" => Token::KeywordOperator,
+        "or" => Token::KeywordOr,
+        "outer" => Token::KeywordOuter,
+        "output" => Token::KeywordOutput,
+        "package" => Token::KeywordPackage,
+        "parameter" => Token::KeywordParameter,
+        "partial" => Token::KeywordPartial,
+        "protected" => Token::KeywordProtected,
+        "public" => Token::KeywordPublic,
+        "pure" => Token::KeywordPure,
+        "record" => Token::KeywordRecord,
+        "redeclare" => Token::KeywordRedeclare,
+        "replaceable" => Token::KeywordReplaceable,
+        "return" => Token::KeywordReturn,
+        "stream" => Token::KeywordStream,
+        "then" => Token::KeywordThen,
+        "true" => Token::KeywordTrue,
+        "type" => Token::KeywordType,
+        "when" => Token::KeywordWhen,
+        "while" => Token::KeywordWhile,
+        "within" => Token::KeywordWithin,
+
         "identifier" => Token::Identifier(<String>),
-        "int" => Token::Integer(<i64>),
+        "unsigned_integer" => Token::UnsignedInteger(<i64>),
+        "unsigned_real" => Token::UnsignedReal(<f64>),
         "(" => Token::LParen,
         ")" => Token::RParen,
-        "=" => Token::Assign,
+        ":=" => Token::Assign,
+        "=" => Token::Equal,
         ";" => Token::Semicolon,
         "+" => Token::OperatorAdd,
         "-" => Token::OperatorSub,
         "*" => Token::OperatorMul,
         "/" => Token::OperatorDiv,
+        ".+" => Token::OperatorElemAdd,
+        ".-" => Token::OperatorElemSub,
+        ".*" => Token::OperatorElemMul,
+        "./" => Token::OperatorElemDiv,
     }
 }
 
@@ -57,16 +95,31 @@ pub StoredDefinition: ast::StoredDefinition = {
 }
 
 pub ClassDefinition: ast::ClassDefinition = {
-    "block" <name:"identifier">
+    <partial: "partial"?> <class_type: ClassType> <name:"identifier">
     <components: ComponentSection>
     <equations: EquationSection?>
-    "end" "block" ";" => {
+    <algorithms: AlgorithmSection?>
+    "end" "identifier" ";" => {
         ast::ClassDefinition {
             name: name,
+            class_type: class_type,
+            partial: partial.is_some(),
             components: components,
             equations: equations,
+            algorithms: algorithms
         }
     }
+}
+
+pub ClassType: ast::ClassType = {
+    "model" => ast::ClassType::Model,
+    "record" => ast::ClassType::Record,
+    "operator" "record" => ast::ClassType::OperatorRecord,
+    "block" => ast::ClassType::Block,
+    "expandable" "connector" => ast::ClassType::ExpandableConnector,
+    "connector" => ast::ClassType::Connector,
+    "type" => ast::ClassType::Type,
+    "package" => ast::ClassType::Package,
 }
 
 pub ComponentSection: Vec<ast::ComponentDeclaration> = {
@@ -82,14 +135,31 @@ pub ComponentDeclaration: ast::ComponentDeclaration = {
     },
 }
 
+//  equation-section :
+//    [ initial ] equation { equation ";" } 
+// TODO
+//  * handle initial
 pub EquationSection: Vec<ast::Equation> = {
-    "equation" <equations:Equation*> => equations
+    <_initial:"initial"?> "equation" <equations:Equation*> => equations
 }
 
-pub Script: Vec<ast::Statement> = {
-    <stmts:Statement*> => stmts
+//  algorithm-section :
+//    [ initial ] algorithm { statement ";" }
+// TODO
+//  * handle initial
+pub AlgorithmSection: Vec<ast::Statement> = {
+    <_initial:"initial"?> "algorithm" <statements:Statement*> => statements
 }
 
+//  equation :
+//    ( simple-expression "=" expression
+//      | if-equation
+//      | for-equation
+//      | connect-equation
+//      | when-equation
+//      | component-reference function-call-args
+//    )
+//    description 
 pub Equation: ast::Equation = {
     <lhs:Expression> "=" <rhs:Expression> ";" => {
         ast::Equation::Simple {
@@ -97,67 +167,130 @@ pub Equation: ast::Equation = {
             rhs
         }
     },
+    "der" "(" <lhs:Expression> ")" "=" <rhs:Expression> ";" => {
+        ast::Equation::Simple {
+            lhs,
+            rhs
+        }
+    },
+}
+
+//  component-reference :
+//    [ "." ] IDENT [ array-subscripts ] { "." IDENT [ array-subscripts ] } 
+pub ComponentReference: ast::ComponentReference = {
+    <name:"identifier"> => {
+        ast::ComponentReference{
+            name
+        }
+    },
 }
 
 pub Statement: ast::Statement = {
-    "block" <name:"identifier"> "=" <value:Expression> ";" => {
-        ast::Statement::Variable{
-            name,
-            value
+    <comp: ComponentReference> ":=" <expr:Expression> ";" => {
+        ast::Statement::Assignment{
+            comp,
+            expr
         }
     },
-    "print" <value:Expression> ";" => {
-        ast::Statement::Print {
-            value
-        }
-    },
+
 }
 
+//=============================================================================
+// A.2.7 Expressions
+//=============================================================================
+// expression :
+//    simple-expression
+//    | if expression then expression
+//      { elseif expression then expression }
+//      else expression 
+// simple-expression :
+//    logical-expression [ ":" logical-expression [ ":" logical-expression ] ]
+// logical-expression :
+//    logical-term { or logical-term }
+// logical-term :
+//    logical-factor { and logical-factor }
+// logical-factor :
+//    [ not ] relation
+// relation :
+//    arithmetic-expression [ relational-operator arithmetic-expression ]
+// relational-operator :
+//    "<" | "<=" | ">" | ">=" | "==" | "<>"
+// arithmetic-expression :
+//    [ add-operator ] term { add-operator term }
+// add-operator :
+//    "+" | "-" | ".+" | ".-"
+// term :
+//    factor { mul-operator factor }
+// mul-operator :
+//    "*" | "/" | ".*" | "./"
+// factor :
+//    primary [ ( "^" | ".^" ) primary ] 
 pub Expression: Box<ast::Expression> = {
     #[precedence(level="1")]
     Term,
 
     #[precedence(level="2")] #[assoc(side="left")]
     <lhs:Expression> "*" <rhs:Expression> => {
-        Box::new(ast::Expression::BinaryOperation {
+        Box::new(ast::Expression::Mul {
             lhs,
-            operator: ast::Operator::Mul,
             rhs
         })
     },
-
-    <lhs:Expression> "/" <rhs:Expression> => {
-        Box::new(ast::Expression::BinaryOperation {
+    <lhs:Expression> ".*" <rhs:Expression> => {
+        Box::new(ast::Expression::ElemMul {
             lhs,
-            operator: ast::Operator::Div,
+            rhs
+        })
+    },
+    <lhs:Expression> "/" <rhs:Expression> => {
+        Box::new(ast::Expression::Div {
+            lhs,
+            rhs
+        })
+    },
+    <lhs:Expression> "./" <rhs:Expression> => {
+        Box::new(ast::Expression::ElemDiv {
+            lhs,
             rhs
         })
     },
 
     #[precedence(level="3")] #[assoc(side="left")]
     <lhs:Expression> "+" <rhs:Expression> => {
-        Box::new(ast::Expression::BinaryOperation {
+        Box::new(ast::Expression::Add {
             lhs,
-            operator: ast::Operator::Add,
             rhs
         })
     },
-
-    <lhs:Expression> "-" <rhs:Expression> => {
-        Box::new(ast::Expression::BinaryOperation {
+    <lhs:Expression> ".+" <rhs:Expression> => {
+        Box::new(ast::Expression::ElemAdd {
             lhs,
-            operator: ast::Operator::Sub,
+            rhs
+        })
+    },
+    <lhs:Expression> "-" <rhs:Expression> => {
+        Box::new(ast::Expression::Sub {
+            lhs,
+            rhs
+        })
+    },
+    <lhs:Expression> ".-" <rhs:Expression> => {
+        Box::new(ast::Expression::ElemSub {
+            lhs,
             rhs
         })
     },
 }
 
 pub Term: Box<ast::Expression> = {
-    <val:"int"> => {
-        Box::new(ast::Expression::Integer(val))
+    <val:"unsigned_integer"> => {
+        Box::new(ast::Expression::UnsignedInteger(val))
     },
-    <name:"identifier"> => {
-        Box::new(ast::Expression::Variable(name))
+    <val:"unsigned_real"> => {
+        Box::new(ast::Expression::UnsignedReal(val))
+    },
+    <comp:ComponentReference> => {
+        Box::new(ast::Expression::Ref{comp})
     },
     "(" <Expression> ")",
 }

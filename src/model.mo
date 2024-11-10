@@ -1,5 +1,7 @@
-block x
-    Real x;
+model Integrator
+    Real x; // test
 equation
-    x = 1;
-end block;
+    der(x) = 1.0;
+algorithm
+    x := 1;
+end Integrator;
