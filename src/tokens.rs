@@ -64,8 +64,8 @@ pub enum Token {
     KeywordExtends,
     #[token("external")]
     KeywordExternal,
-    #[token("false")]
-    KeywordFalse,
+    //#[token("false")]
+    //KeywordFalse,
     #[token("final")]
     KeywordFinal,
     #[token("flow")]
@@ -126,8 +126,8 @@ pub enum Token {
     KeywordStream,
     #[token("then")]
     KeywordThen,
-    #[token("true")]
-    KeywordTrue,
+    //#[token("true")]
+    //KeywordTrue,
     #[token("type")]
     KeywordType,
     #[token("when")]
@@ -145,6 +145,9 @@ pub enum Token {
 
     #[regex(r"(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?", |lex| lex.slice().parse::<f64>().unwrap())]
     UnsignedReal(f64),
+
+    #[token(r"(true|false)?", |lex| lex.slice().parse::<bool>().unwrap())]
+    Boolean(bool),
 
     #[token("(")]
     LParen,

@@ -38,13 +38,25 @@ pub enum Equation {
         lhs: Box<Expression>,
         rhs: Box<Expression>,
     },
+    If {
+        if_cond: Box<Expression>,
+        if_eqs: Vec<Equation>,
+        else_if_blocks: Vec<EquationBlock>,
+        else_eqs: Option<Vec<Equation>>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EquationBlock {
+    pub cond: Box<Expression>,
+    pub eqs: Vec<Equation>
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expression {
     UnsignedInteger(i64),
     UnsignedReal(f64),
-    //Boolean(bool),
+    Boolean(bool),
     Ref {
         comp: ComponentReference,
     },

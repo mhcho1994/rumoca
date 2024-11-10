@@ -7,6 +7,7 @@ extern {
     type Location = usize;
     type Error = LexicalError;
     enum Token {
+        // keywords
         "algorithm" => Token::KeywordAlgorithm,
         "and" => Token::KeywordAnd,
         "annotation" => Token::KeywordAnnotation,
@@ -30,7 +31,6 @@ extern {
         "expandable" => Token::KeywordExpandable,
         "extends" => Token::KeywordExtends,
         "external" => Token::KeywordExternal,
-        "false" => Token::KeywordFalse,
         "final" => Token::KeywordFinal,
         "flow" => Token::KeywordFlow,
         "for" => Token::KeywordFor,
@@ -61,15 +61,17 @@ extern {
         "return" => Token::KeywordReturn,
         "stream" => Token::KeywordStream,
         "then" => Token::KeywordThen,
-        "true" => Token::KeywordTrue,
+        "boolean" => Token::Boolean,
         "type" => Token::KeywordType,
         "when" => Token::KeywordWhen,
         "while" => Token::KeywordWhile,
         "within" => Token::KeywordWithin,
 
+        // other lexical tokens
         "identifier" => Token::Identifier(<String>),
         "unsigned_integer" => Token::UnsignedInteger(<i64>),
         "unsigned_real" => Token::UnsignedReal(<f64>),
+        "boolean" => Token::Boolean(<bool>),
         "(" => Token::LParen,
         ")" => Token::RParen,
         ":=" => Token::Assign,
@@ -135,31 +137,37 @@ pub ComponentDeclaration: ast::ComponentDeclaration = {
     },
 }
 
-//  equation-section :
-//    [ initial ] equation { equation ";" } 
-// TODO
-//  * handle initial
+/*
+ equation-section :
+   [ initial ] equation { equation ";" } 
+TODO
+ * handle initial
+*/
 pub EquationSection: Vec<ast::Equation> = {
     <_initial:"initial"?> "equation" <equations:Equation*> => equations
 }
 
-//  algorithm-section :
-//    [ initial ] algorithm { statement ";" }
-// TODO
-//  * handle initial
+/*
+ algorithm-section :
+   [ initial ] algorithm { statement ";" }
+TODO
+ * handle initial
+*/
 pub AlgorithmSection: Vec<ast::Statement> = {
     <_initial:"initial"?> "algorithm" <statements:Statement*> => statements
 }
 
-//  equation :
-//    ( simple-expression "=" expression
-//      | if-equation
-//      | for-equation
-//      | connect-equation
-//      | when-equation
-//      | component-reference function-call-args
-//    )
-//    description 
+/*
+ equation :
+   ( simple-expression "=" expression
+     | if-equation
+     | for-equation
+     | connect-equation
+     | when-equation
+     | component-reference function-call-args
+   )
+   description
+*/
 pub Equation: ast::Equation = {
     <lhs:Expression> "=" <rhs:Expression> ";" => {
         ast::Equation::Simple {
@@ -175,8 +183,48 @@ pub Equation: ast::Equation = {
     },
 }
 
-//  component-reference :
-//    [ "." ] IDENT [ array-subscripts ] { "." IDENT [ array-subscripts ] } 
+/*
+ if-equation :
+   if expression then
+     { equation ";" }
+   { elseif expression then
+     { equation ";" }
+   }
+   [ else
+     { equation ";" }
+   ]
+*/
+pub IfEquation: ast::Equation = {
+    "if" <if_cond:Expression> "then" <if_eqs:Equation*> ";"
+    <else_if_blocks: ElseIfEquationBlock*>
+    <else_eqs: ElseEquationBlock?>
+    "end" "if" => {
+        ast::Equation::If {
+            if_cond, if_eqs,
+            else_if_blocks,
+            else_eqs,
+        }
+    }
+}
+
+pub ElseIfEquationBlock: ast::EquationBlock = {
+    "elseif" <cond:Expression> "then" <eqs:Equation*> ";" => {
+        ast::EquationBlock {
+            cond, eqs
+        }
+    }
+}
+
+pub ElseEquationBlock: Vec<ast::Equation> = {
+    "else" <eqs:Equation*> ";" => {
+        eqs
+    }
+}
+
+/*
+ component-reference :
+   [ "." ] IDENT [ array-subscripts ] { "." IDENT [ array-subscripts ] }
+*/
 pub ComponentReference: ast::ComponentReference = {
     <name:"identifier"> => {
         ast::ComponentReference{
@@ -195,36 +243,38 @@ pub Statement: ast::Statement = {
 
 }
 
-//=============================================================================
-// A.2.7 Expressions
-//=============================================================================
-// expression :
-//    simple-expression
-//    | if expression then expression
-//      { elseif expression then expression }
-//      else expression 
-// simple-expression :
-//    logical-expression [ ":" logical-expression [ ":" logical-expression ] ]
-// logical-expression :
-//    logical-term { or logical-term }
-// logical-term :
-//    logical-factor { and logical-factor }
-// logical-factor :
-//    [ not ] relation
-// relation :
-//    arithmetic-expression [ relational-operator arithmetic-expression ]
-// relational-operator :
-//    "<" | "<=" | ">" | ">=" | "==" | "<>"
-// arithmetic-expression :
-//    [ add-operator ] term { add-operator term }
-// add-operator :
-//    "+" | "-" | ".+" | ".-"
-// term :
-//    factor { mul-operator factor }
-// mul-operator :
-//    "*" | "/" | ".*" | "./"
-// factor :
-//    primary [ ( "^" | ".^" ) primary ] 
+/*
+=============================================================================
+A.2.7 Expressions
+=============================================================================
+expression :
+   simple-expression
+   | if expression then expression
+     { elseif expression then expression }
+     else expression 
+simple-expression :
+   logical-expression [ ":" logical-expression [ ":" logical-expression ] ]
+logical-expression :
+   logical-term { or logical-term }
+logical-term :
+   logical-factor { and logical-factor }
+logical-factor :
+   [ not ] relation
+relation :
+   arithmetic-expression [ relational-operator arithmetic-expression ]
+relational-operator :
+   "<" | "<=" | ">" | ">=" | "==" | "<>"
+arithmetic-expression :
+   [ add-operator ] term { add-operator term }
+add-operator :
+   "+" | "-" | ".+" | ".-"
+term :
+   factor { mul-operator factor }
+mul-operator :
+   "*" | "/" | ".*" | "./"
+factor :
+   primary [ ( "^" | ".^" ) primary ]
+*/
 pub Expression: Box<ast::Expression> = {
     #[precedence(level="1")]
     Term,
@@ -282,12 +332,28 @@ pub Expression: Box<ast::Expression> = {
     },
 }
 
+/*
+ primary :
+   UNSIGNED-NUMBER
+   | STRING
+   | false
+   | true
+   | ( component-reference | der | initial | pure ) function-call-args
+   | component-reference
+   | "(" output-expression-list ")" [ ( array-subscripts | "." IDENT ) ]
+   | "[" expression-list { ";" expression-list } "]"
+   | "{" array-arguments "}"
+   | end 
+*/
 pub Term: Box<ast::Expression> = {
     <val:"unsigned_integer"> => {
         Box::new(ast::Expression::UnsignedInteger(val))
     },
     <val:"unsigned_real"> => {
         Box::new(ast::Expression::UnsignedReal(val))
+    },
+    <val:"boolean"> => {
+        Box::new(ast::Expression::Boolean(val))
     },
     <comp:ComponentReference> => {
         Box::new(ast::Expression::Ref{comp})
