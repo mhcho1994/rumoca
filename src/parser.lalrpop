@@ -222,6 +222,45 @@ pub ElseEquationBlock: Vec<ast::Equation> = {
 }
 
 /*
+ if-statement :
+   if expression then
+     { statement ";" }
+   { elseif expression then
+     { statement ";" }
+   }
+   [ else
+     { statement ";" }
+   ]
+*/
+pub IfStatement: ast::Statement = {
+    "if" <if_cond:Expression> "then" <if_eqs:Statement*> ";"
+    <else_if_blocks: ElseIfStatementBlock*>
+    <else_eqs: ElseStatementBlock?>
+    "end" "if" => {
+        ast::Statement::If {
+            if_cond, if_eqs,
+            else_if_blocks,
+            else_eqs,
+        }
+    }
+}
+
+pub ElseIfStatementBlock: ast::StatementBlock = {
+    "elseif" <cond:Expression> "then" <eqs:Statement*> ";" => {
+        ast::StatementBlock {
+            cond, eqs
+        }
+    }
+}
+
+pub ElseStatementBlock: Vec<ast::Statement> = {
+    "else" <eqs:Statement*> ";" => {
+        eqs
+    }
+}
+
+
+/*
  component-reference :
    [ "." ] IDENT [ array-subscripts ] { "." IDENT [ array-subscripts ] }
 */

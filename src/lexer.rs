@@ -27,3 +27,23 @@ impl<'input> Iterator for Lexer<'input> {
             .map(|(token, span)| Ok((span.start, token?, span.end)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lexer() {
+        let filename = String::from("src/model.mo");
+        let source_code = std::fs::read_to_string(filename).unwrap();
+        let mut lexer = Lexer::new(&source_code);
+        loop {
+            match lexer.next() {
+                Some(result) => {
+                    println!("{:?}", result)
+                }
+                None => break,
+            }
+        }
+    }
+}
