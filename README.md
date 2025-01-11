@@ -184,6 +184,7 @@ or create your own using the widely used [JINJA](https://docs.rs/minijinja/lates
 * [MINIJINJA](https://github.com/mitsuhiko/minijinja) : JINJA Template Engine
 * [SERDE](https://github.com/serde-rs/serde) : AST Serialization
 * [CLAP](https://github.com/clap-rs/clap) : Command Line Argument Parser
+* [NDARRAY](https://github.com/rust-ndarray/ndarray) : N-dimensional arrays
 
 ## Roadmap
 
