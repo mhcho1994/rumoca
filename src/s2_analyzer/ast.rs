@@ -25,13 +25,12 @@ pub struct Class {
     pub u: OrderSet<String>,                     // input
     pub y: OrderSet<String>,                     // continuous output variables
     pub p: OrderSet<String>,                     // parameters
-    pub ode: OrderMap<String, Box<Expression>>,  // ordinary diff equation
+    pub ode: OrderMap<String, Expression>,       // ordinary diff equation
     pub algebraic: Vec<Equation>,                // algebraic eq
     pub algorithm: Vec<Statement>,               // algorithm stms
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[allow(clippy::vec_box)]
 pub struct Component {
     pub name: String,
     pub start: Option<Modification>,

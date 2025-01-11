@@ -436,7 +436,7 @@ pub ComponentDeclaration: ast::ComponentDeclaration = {
 }
 //✅ condition-attribute :
 //✅    if expression
-pub ConditionAttribute: Box<ast::Expression> = {
+pub ConditionAttribute: ast::Expression = {
     "if" <cond: Expression> => cond
 }
 //✅ declaration :
@@ -737,7 +737,7 @@ pub ElseStatementBlock: Vec<ast::Statement> = {
 //✅  simple-expression :
 //✅     logical-expression [ ":" logical-expression [ ":" logical-expression ] ]
 
-pub Expression: Box<ast::Expression> = {
+pub Expression: ast::Expression = {
     <simp:SimpleExpression> => {
         simp
     },
@@ -745,11 +745,11 @@ pub Expression: Box<ast::Expression> = {
     // <else_if_blocks: ElseIfExpressionBlock*>
     // <else_eq: ElseExpressionBlock?>
     //  => {
-    //     Box::new(ast::Expression::If {
+    //     ast::Expression::If {
     //         if_cond, if_eq,
     //         else_if_blocks,
     //         else_eq,
-    //     })
+    //     }
     // },
 }
 
@@ -761,7 +761,7 @@ pub ElseIfExpressionBlock: ast::ElseIfExpressionBlock = {
     }
 }
 
-pub ElseExpressionBlock: Box<ast::Expression> = {
+pub ElseExpressionBlock: ast::Expression = {
     "else" <eq:SimpleExpression> => {
         eq
     }
@@ -769,41 +769,41 @@ pub ElseExpressionBlock: Box<ast::Expression> = {
 
 pub ParenthesisExpression = SimpleExpression;
 
-pub SimpleExpression: Box<ast::Expression> = {
+pub SimpleExpression: ast::Expression = {
 //✅ simple-expression :
 //✅    logical-expression [ ":" logical-expression [ ":" logical-expression ] ]
     #[precedence(level="11")] #[assoc(side="left")]
     <lhs:SimpleExpression> ":" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Range {
-            lhs,
-            rhs,
-        })
+        ast::Expression::Range {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
 //✅ logical-expression :
 //✅    logical-term { or logical-term }
     #[precedence(level="10")] #[assoc(side="left")]
     <lhs:SimpleExpression> "or" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Or {
-            lhs,
-            rhs
-        })
+        ast::Expression::Or {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
 //✅ logical-term :
 //✅    logical-factor { and logical-factor }
     #[precedence(level="9")] #[assoc(side="left")]
     <lhs:SimpleExpression> "and" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::And {
-            lhs,
-            rhs
-        })
+        ast::Expression::And {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
 //✅ logical-factor :
 //✅    [ not ] relation
     #[precedence(level="8")]
     "not" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Not {
-            rhs
-        })
+        ast::Expression::Not {
+            rhs: Box::new(rhs),
+        }
     },
 //✅ relation :
 //✅    arithmetic-expression [ relational-operator arithmetic-expression ]
@@ -811,46 +811,46 @@ pub SimpleExpression: Box<ast::Expression> = {
 //✅    "<" | "<=" | ">" | ">=" | "==" | "<>"
     #[precedence(level="7")] #[assoc(side="left")]
     <lhs:SimpleExpression> "<" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::LessThan {
-            lhs,
-            rhs
-        })
+        ast::Expression::LessThan {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> ">" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::GreaterThan {
-            lhs,
-            rhs
-        })
+        ast::Expression::GreaterThan {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> "<=" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::LessThanOrEqual {
-            lhs,
-            rhs
-        })
+        ast::Expression::LessThanOrEqual {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> ">=" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::GreaterThanOrEqual {
-            lhs,
-            rhs
-        })
+        ast::Expression::GreaterThanOrEqual {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> "==" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Equal {
-            lhs,
-            rhs
-        })
+        ast::Expression::Equal {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> "<>" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::NotEqual {
-            lhs,
-            rhs
-        })
+        ast::Expression::NotEqual {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     #[precedence(level="12")] #[assoc(side="left")]
     "-" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Negative {
-            rhs
-        })
+        ast::Expression::Negative {
+            rhs: Box::new(rhs),
+        }
     },
 //✅ arithmetic-expression :
 //✅    [ add-operator ] term { add-operator term }
@@ -858,28 +858,28 @@ pub SimpleExpression: Box<ast::Expression> = {
 //✅    "+" | "-" | ".+" | ".-"
     #[precedence(level="5")] #[assoc(side="left")]
     <lhs:SimpleExpression> "+" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Add {
-            lhs,
-            rhs
-        })
+        ast::Expression::Add {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> ".+" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::ElemAdd {
-            lhs,
-            rhs
-        })
+        ast::Expression::ElemAdd {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> "-" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Sub {
-            lhs,
-            rhs
-        })
+        ast::Expression::Sub {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> ".-" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::ElemSub {
-            lhs,
-            rhs
-        })
+        ast::Expression::ElemSub {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
 //✅ term :
 //✅    factor { mul-operator factor }
@@ -887,43 +887,43 @@ pub SimpleExpression: Box<ast::Expression> = {
 //✅    "*" | "/" | ".*" | "./"
     #[precedence(level="4")] #[assoc(side="left")]
     <lhs:SimpleExpression> "*" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Mul {
-            lhs,
-            rhs
-        })
+        ast::Expression::Mul {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> ".*" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::ElemMul {
-            lhs,
-            rhs
-        })
+        ast::Expression::ElemMul {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> "/" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Div {
-            lhs,
-            rhs
-        })
+        ast::Expression::Div {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> "./" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::ElemDiv {
-            lhs,
-            rhs
-        })
+        ast::Expression::ElemDiv {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
 //✅ factor :
 //✅    primary [ ( "^" | ".^" ) primary ]
     #[precedence(level="3")] #[assoc(side="left")]
     <lhs:SimpleExpression> "^" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::Exp {
-            lhs,
-            rhs
-        })
+        ast::Expression::Exp {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
     <lhs:SimpleExpression> ".^" <rhs:SimpleExpression> => {
-        Box::new(ast::Expression::ElemExp {
-            lhs,
-            rhs
-        })
+        ast::Expression::ElemExp {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
     },
 //✅ primary :
 //✅    UNSIGNED-NUMBER
@@ -938,32 +938,32 @@ pub SimpleExpression: Box<ast::Expression> = {
 //🟥    | end
     #[precedence(level="0")]
     "(" <rhs:ParenthesisExpression> ")" => {
-        Box::new(ast::Expression::Parenthesis {
-            rhs
-        })
+        ast::Expression::Parenthesis {
+            rhs: Box::new(rhs)
+        }
     },
     "{" <args:CommaSeparatedList<Expression>> "}" => {
-        Box::new(ast::Expression::ArrayArguments {
+        ast::Expression::ArrayArguments {
             args
-        })
+        }
     },
     <val:"UNSIGNED-INTEGER"> => {
-        Box::new(ast::Expression::UnsignedInteger(val))
+        ast::Expression::UnsignedInteger(val)
     },
     <val:"UNSIGNED-REAL"> => {
-        Box::new(ast::Expression::UnsignedReal(val))
+        ast::Expression::UnsignedReal(val)
     },
     <val:"boolean"> => {
-        Box::new(ast::Expression::Boolean(val))
+        ast::Expression::Boolean(val)
     },
     <comp:ComponentReference> => {
-        Box::new(ast::Expression::Ref{comp})
+        ast::Expression::Ref{comp}
     },
     <comp:ComponentReference> <args:FunctionCallArguments> => {
-        Box::new(ast::Expression::FunctionCall {
+        ast::Expression::FunctionCall {
             comp,
             args
-        })
+        }
     },
 }
 
@@ -1019,7 +1019,7 @@ pub RefPart: ast::RefPart = {
 
 //✅ function-call-args :
 //✅    "(" [ function-arguments ] ")"
-pub FunctionCallArguments: Vec<Box<ast::Expression>> = {
+pub FunctionCallArguments: Vec<ast::Expression> = {
     "(" <args:CommaSeparatedList<Expression>> ")"  => args,
 }
 

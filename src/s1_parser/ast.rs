@@ -9,15 +9,13 @@ pub struct StoredDefinition {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[allow(clippy::vec_box)]
 pub struct ComponentDeclaration {
     pub declaration: Declaration,
-    pub condition_attribute: Option<Box<Expression>>,
+    pub condition_attribute: Option<Expression>,
     pub description: Description,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[allow(clippy::vec_box)]
 pub struct ComponentDeclaration1 {
     pub declaration: Declaration,
     pub description: Description,
@@ -103,10 +101,10 @@ pub enum Connection {
 pub enum Statement {
     Assignment {
         comp: ComponentReference,
-        rhs: Box<Expression>,
+        rhs: Expression,
     },
     If {
-        if_cond: Box<Expression>,
+        if_cond: Expression,
         if_eqs: Vec<Statement>,
         else_if_blocks: Vec<ElseIfStatementBlock>,
         else_eqs: Vec<Statement>,
@@ -129,14 +127,14 @@ pub struct ComponentReference {
 pub enum Equation {
     Der {
         comp: ComponentReference,
-        rhs: Box<Expression>,
+        rhs: Expression,
     },
     Simple {
-        lhs: Box<Expression>,
-        rhs: Box<Expression>,
+        lhs: Expression,
+        rhs: Expression,
     },
     If {
-        if_cond: Box<Expression>,
+        if_cond: Expression,
         if_eqs: Vec<Equation>,
         else_if_blocks: Vec<ElseIfEquationBlock>,
         else_eqs: Vec<Equation>,
@@ -145,24 +143,23 @@ pub enum Equation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ElseIfEquationBlock {
-    pub cond: Box<Expression>,
+    pub cond: Expression,
     pub eqs: Vec<Equation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ElseIfStatementBlock {
-    pub cond: Box<Expression>,
+    pub cond: Expression,
     pub eqs: Vec<Statement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ElseIfExpressionBlock {
-    pub cond: Box<Expression>,
-    pub then: Box<Expression>,
+    pub cond: Expression,
+    pub then: Expression,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[allow(clippy::vec_box)]
 pub enum Expression {
     UnsignedInteger(i64),
     UnsignedReal(f64),
@@ -265,11 +262,11 @@ pub enum Expression {
         else_eq: Option<Box<Expression>>,
     },
     ArrayArguments {
-        args: Vec<Box<Expression>>,
+        args: Vec<Expression>,
     },
     FunctionCall {
         comp: ComponentReference,
-        args: Vec<Box<Expression>>,
+        args: Vec<Expression>,
     },
 }
 
@@ -281,7 +278,7 @@ pub struct Description {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Modification {
-    pub expression: Box<Expression>,
+    pub expression: Expression,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -320,7 +317,7 @@ pub struct Component {
     pub name: String,
     pub array_subscripts: Vec<Subscript>,
     pub modification: Option<Modification>,
-    pub condition_attribute: Option<Box<Expression>>,
+    pub condition_attribute: Option<Expression>,
     pub description: Description,
 }
 
@@ -345,7 +342,7 @@ pub struct TypeSpecifier {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Subscript {
     Colon,
-    Expression(Box<Expression>),
+    Expression(Expression),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
