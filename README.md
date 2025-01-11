@@ -18,7 +18,7 @@ There are many excellent tools for analysis of cyber-physical systems, and rumoc
 aims to allow you to use the best tool for the job at hand.
 * [CasADi](https://github.com/casadi/casadi):
     * Written in C++: Interface Matlab/Python
-    * Algorithmic Differentiation
+    * Automatic Differentiation
     * Autonomy and Controls community
     * Code generation: C
 * [Sympy](https://github.com/sympy/sympy):
@@ -27,7 +27,7 @@ aims to allow you to use the best tool for the job at hand.
     * Code generation: user defined
 * [JAX](https://github.com/jax-ml/jax): 
     * Written in Python
-    * Algorithmic Differentiation
+    * Automatic Differentiation
     * Machine learning communicty
 * [PyCollimator](https://github.com/collimator-ai/pycollimator): 
     * Written in Python
