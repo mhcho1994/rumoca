@@ -1,9 +1,22 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Span {
+    pub left: usize,
+    pub right: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Within {
+    pub span: Span,
+    pub name: Name,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoredDefinition {
+    pub span: Span,
     pub classes: Vec<ClassDefinition>,
-    pub within: Option<Name>,
+    pub within: Option<Within>,
     pub model_md5: String,
     pub rumoca_git_hash: String,
 }
@@ -70,6 +83,7 @@ pub enum CompositionPart {
         elements: Vec<Element>,
     },
     EquationSection {
+        span: Span,
         initial: bool,
         equations: Vec<Equation>,
     },
@@ -401,19 +415,6 @@ pub struct TypePrefix {
     pub connection: Connection,
     pub variability: Variability,
     pub causality: Causality,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Component {
-    pub connection: Connection,
-    pub variability: Variability,
-    pub causality: Causality,
-    pub type_specifier: TypeSpecifier,
-    pub name: String,
-    pub array_subscripts: Vec<Subscript>,
-    pub modification: Option<Modification>,
-    pub condition_attribute: Option<Expression>,
-    pub description: Description,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

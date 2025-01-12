@@ -7,6 +7,13 @@ use ndarray::{ArrayBase, ArrayD, IxDyn, OwnedRepr};
 use std::collections::HashMap;
 use std::error::Error;
 
+#[macro_export]
+macro_rules! red_eprintln {
+    ($($arg:tt)*) => {{
+        eprintln!("\x1b[31m{}\x1b[0m", format!($($arg)*));
+    }};
+}
+
 pub fn evaluate(
     class: &ast::Class,
     expr: &Expression,
@@ -54,12 +61,14 @@ pub fn evaluate(
             Some(m) => match m {
                 Modification::Expression { expr } => match expr {
                     ModExpr::Expression { expr } => Ok(evaluate(class, expr)?),
-                    ModExpr::Break => {
-                        todo!("{:?}", m);
-                    }
+                    ModExpr::Break => Err("Break modification flattening not yet implemented"
+                        .to_string()
+                        .into()),
                 },
                 Modification::Class { .. } => {
-                    todo!("{:?}", m);
+                    Err("Class modification flattening not yet implemented"
+                        .to_string()
+                        .into())
                 }
             },
             None => {
@@ -122,11 +131,11 @@ pub fn evaluate_expressions(
                         start_vals.insert(name.clone(), evaluate(class, e).unwrap());
                     }
                     ModExpr::Break => {
-                        todo!("{:?}", m);
+                        red_eprintln!("Break modification flattening not yet implemented");
                     }
                 },
                 Modification::Class { .. } => {
-                    todo!("{:?}", m);
+                    red_eprintln!("Class modification flattening not yet implemented");
                 }
             }
         }
@@ -164,7 +173,7 @@ pub fn flatten_class(class: &parse_ast::ClassDefinition, def: &mut ast::Def) {
             }
         }
         parse_ast::ClassSpecifier::Extends { .. } => {
-            todo!("{:?}", class.class_specifier);
+            red_eprintln!("Class extends flattening not yet implemented");
         }
     }
 
@@ -172,26 +181,17 @@ pub fn flatten_class(class: &parse_ast::ClassDefinition, def: &mut ast::Def) {
 }
 pub fn flatten_composition_part(composition: &parse_ast::CompositionPart, class: &mut ast::Class) {
     match composition {
-        parse_ast::CompositionPart::ElementList {
-            visibility: _,
-            elements,
-        } => {
+        parse_ast::CompositionPart::ElementList { elements, .. } => {
             for elem in elements {
                 flatten_element(elem, class);
             }
         }
-        parse_ast::CompositionPart::EquationSection {
-            initial: _,
-            equations,
-        } => {
+        parse_ast::CompositionPart::EquationSection { equations, .. } => {
             for eq in equations {
                 flatten_equation(eq, class);
             }
         }
-        parse_ast::CompositionPart::AlgorithmSection {
-            initial: _,
-            statements,
-        } => {
+        parse_ast::CompositionPart::AlgorithmSection { statements, .. } => {
             for stmt in statements {
                 flatten_statement(stmt, class);
             }
@@ -257,13 +257,13 @@ pub fn flatten_element(elem: &Element, class: &mut ast::Class) {
             }
         }
         Element::ClassDefinition { .. } => {
-            todo!("{:?}", elem);
+            red_eprintln!("Class definition element not yet implemented");
         }
         Element::ImportClause { .. } => {
-            todo!("{:?}", elem);
+            red_eprintln!("Import element not yet implemented");
         }
         Element::ExtendsClause { .. } => {
-            todo!("{:?}", elem);
+            red_eprintln!("Extends clause element not yet implemented");
         }
     }
 }
@@ -287,13 +287,13 @@ pub fn flatten_equation(eq: &parse_ast::Equation, class: &mut ast::Class) {
             flatten_expression(rhs, class);
         }
         parse_ast::Equation::If { .. } => {
-            todo!("{:?}", eq);
+            red_eprintln!("If equation flattening not yet implemented");
         }
         parse_ast::Equation::For { .. } => {
-            todo!("{:?}", eq);
+            red_eprintln!("For equation flattening not yet implemented");
         }
         parse_ast::Equation::Connect { .. } => {
-            todo!("{:?}", eq);
+            red_eprintln!("Connect equation flattening not yet implemented");
         }
     }
 }
@@ -309,7 +309,7 @@ pub fn flatten_expression(expr: &Expression, class: &mut ast::Class) {
                     } else if class.y.contains(&comp_key) {
                         class.x.insert(comp_key.clone());
                     } else {
-                        panic!("derivative state not declared {:?}", comp_key);
+                        red_eprintln!("derivative state not declared {:?}", comp_key);
                     }
                     // TODO, need to solve for derivatives from equations
                     // setting derivatives to zero for now
@@ -345,19 +345,19 @@ pub fn flatten_statement(stmt: &parse_ast::Statement, class: &mut ast::Class) {
             class.algorithm.push(stmt.clone());
         }
         Statement::If { .. } => {
-            todo!("{:?}", stmt);
+            red_eprintln!("If statement flattening not yet implemented");
         }
         parse_ast::Statement::For { .. } => {
-            todo!("{:?}", stmt);
+            red_eprintln!("For statement flattening not yet implemented");
         }
         parse_ast::Statement::While { .. } => {
-            todo!("{:?}", stmt);
+            red_eprintln!("While statement flattening not yet implemented");
         }
         parse_ast::Statement::Break { .. } => {
-            todo!("{:?}", stmt);
+            red_eprintln!("Break statement flattening not yet implemented");
         }
         parse_ast::Statement::Return { .. } => {
-            todo!("{:?}", stmt);
+            red_eprintln!("Return statement flattening not yet implemented");
         }
     }
 }

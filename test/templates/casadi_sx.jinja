@@ -1,9 +1,4 @@
 {%- macro render_class(class) %}
-    {%- if class.class_type == "Model" -%}
-    {%- elif class.class_type == "Function" -%}
-    {%- else -%}
-        {{ panic("unhandled class type: " + class.class_type) }}
-    {%- endif -%}
 class {% if class.class_type == "Function" -%}__{% endif -%}{{ class.name }}(BaseModel):
     """
     {{ class.description }}

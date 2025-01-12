@@ -26,10 +26,15 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let def = s1_parser::parse_file(&args.model_file);
+
+    if args.verbose {
+        println!("def:\n{:#?}", def);
+    }
+
     let mut flat_def = s2_analyzer::flatten(&def).expect("failed to flatten");
 
     if args.verbose {
-        println!("{:#?}", flat_def);
+        println!("flat_def:\n{:#?}", flat_def);
     }
     let s = s4_generator::generate(&mut flat_def, &args.template_file)?;
     println!("{s:}");

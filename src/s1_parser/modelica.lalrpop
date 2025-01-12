@@ -142,13 +142,21 @@ extern {
 //✅ stored-definition :
 //✅    [ within [ name ] ";" ]
 //✅    { [ final ] class-definition ";" }
-pub Within: ast::Name = {
-    "within" <name:Name> ";" => name
+pub Within: ast::Within = {
+    <left: @L>"within" <name:Name> ";"<right: @R> => {
+        ast::Within {
+            span: ast::Span { left, right},
+            name,
+        }
+    }
 }
 pub StoredDefinition: ast::StoredDefinition = {
+    <left: @L>
     <within: Within?>
-    <classes:TerminatedList<ClassDefinitionWithFinal, ";">> => {
+    <classes:TerminatedList<ClassDefinitionWithFinal, ";">>
+    <right: @R> => {
         ast::StoredDefinition {
+            span: ast::Span { left, right},
             classes,
             within,
             rumoca_git_hash: "".to_string(),
@@ -643,8 +651,14 @@ pub ComponentDeclaration1: ast::ComponentDeclaration1 = {
 //✅ equation-section :
 //✅    [ initial ] equation { some-equation ";" }
 pub EquationSection: ast::CompositionPart = {
-    <initial:"initial"?> "equation" <equations:TerminatedList<Equation, ";">> => {
+    <left: @L>
+    <initial:"initial"?>
+    "equation"
+    <equations:TerminatedList<Equation, ";">>
+    <right: @R>
+    => {
         ast::CompositionPart::EquationSection {
+            span: ast::Span { left, right},
             initial: initial.is_some(),
             equations,
         }
@@ -653,7 +667,10 @@ pub EquationSection: ast::CompositionPart = {
 //✅ algorithm-section :
 //✅    [ initial ] algorithm { statement ";" }
 pub AlgorithmSection: ast::CompositionPart = {
-    <initial:"initial"?> "algorithm" <statements:TerminatedList<Statement, ";">> => {
+    <initial:"initial"?>
+    "algorithm"
+    <statements:TerminatedList<Statement, ";">>
+    => {
         ast::CompositionPart::AlgorithmSection {
             initial: initial.is_some(),
             statements,
