@@ -1,5 +1,6 @@
 use crate::s1_parser::ast::{
-    self as parse_ast, Causality, Element, Expression, Statement, Subscript, Variability,
+    self as parse_ast, Causality, Element, Expression, ModExpr, Modification, Statement, Subscript,
+    Variability,
 };
 use crate::s2_analyzer::ast;
 use ndarray::{ArrayBase, ArrayD, IxDyn, OwnedRepr};
@@ -50,7 +51,17 @@ pub fn evaluate(
             Ok(ArrayD::from_shape_vec(shape, values).unwrap())
         }
         Expression::Ref { comp } => match &class.components[&compref_to_string(comp)].start {
-            Some(m) => Ok(evaluate(class, &m.expression)?),
+            Some(m) => match m {
+                Modification::Expression { expr } => match expr {
+                    ModExpr::Expression { expr } => Ok(evaluate(class, expr)?),
+                    ModExpr::Break => {
+                        todo!("{:?}", m);
+                    }
+                },
+                Modification::Class { .. } => {
+                    todo!("{:?}", m);
+                }
+            },
             None => {
                 panic!("no start value defined for {:?}", comp);
             }
@@ -105,7 +116,19 @@ pub fn evaluate_expressions(
 ) {
     for (name, comp) in &class.components {
         if let Some(m) = &comp.start {
-            start_vals.insert(name.clone(), evaluate(class, &m.expression).unwrap());
+            match m {
+                Modification::Expression { expr } => match expr {
+                    ModExpr::Expression { expr: e } => {
+                        start_vals.insert(name.clone(), evaluate(class, e).unwrap());
+                    }
+                    ModExpr::Break => {
+                        todo!("{:?}", m);
+                    }
+                },
+                Modification::Class { .. } => {
+                    todo!("{:?}", m);
+                }
+            }
         }
     }
 }
@@ -123,14 +146,26 @@ pub fn set_start_expressions(
 
 pub fn flatten_class(class: &parse_ast::ClassDefinition, def: &mut ast::Def) {
     let mut fclass = ast::Class {
-        name: class.class_specifier.name.clone(),
         class_type: class.class_prefixes.class_type.clone(),
-        description: class.class_specifier.description.clone(),
         ..Default::default()
     };
 
-    for composition_part in &class.class_specifier.composition {
-        flatten_composition_part(composition_part, &mut fclass)
+    match &class.class_specifier {
+        parse_ast::ClassSpecifier::Long {
+            name,
+            description,
+            composition,
+            ..
+        } => {
+            fclass.name = name.clone();
+            fclass.description = description.clone();
+            for composition_part in composition.iter() {
+                flatten_composition_part(composition_part, &mut fclass)
+            }
+        }
+        parse_ast::ClassSpecifier::Extends { .. } => {
+            todo!("{:?}", class.class_specifier);
+        }
     }
 
     def.classes.insert(fclass.name.to_string(), fclass.clone());
@@ -165,21 +200,16 @@ pub fn flatten_composition_part(composition: &parse_ast::CompositionPart, class:
 }
 
 pub fn flatten_element(elem: &Element, class: &mut ast::Class) {
-    match &elem {
-        &Element::ComponentClause {
-            type_prefix,
-            type_specifier: _,
-            array_subscripts,
-            components,
-        } => {
-            for comp in components.iter() {
+    match elem {
+        Element::ComponentClause { flags: _, clause } => {
+            for comp in clause.components.iter() {
                 // determine array subscripts
                 let comp_sub = match &comp.declaration.array_subscripts {
                     Some(sub) => {
                         // already has array subscripts
                         sub.clone()
                     }
-                    None => match array_subscripts {
+                    None => match &clause.array_subscripts {
                         Some(clause_sub) => {
                             // take array subscripts from clause
                             clause_sub.clone()
@@ -202,11 +232,11 @@ pub fn flatten_element(elem: &Element, class: &mut ast::Class) {
                     .components
                     .insert(flat_comp.name.clone(), flat_comp.clone());
 
-                match type_prefix.variability {
+                match clause.type_prefix.variability {
                     Variability::Constant => {
                         class.c.insert(flat_comp.name.to_string());
                     }
-                    Variability::Continuous => match type_prefix.causality {
+                    Variability::Continuous => match clause.type_prefix.causality {
                         Causality::Input => {
                             class.u.insert(flat_comp.name.to_string());
                         }
@@ -226,6 +256,15 @@ pub fn flatten_element(elem: &Element, class: &mut ast::Class) {
                 }
             }
         }
+        Element::ClassDefinition { .. } => {
+            todo!("{:?}", elem);
+        }
+        Element::ImportClause { .. } => {
+            todo!("{:?}", elem);
+        }
+        Element::ExtendsClause { .. } => {
+            todo!("{:?}", elem);
+        }
     }
 }
 
@@ -242,20 +281,18 @@ pub fn compref_to_string(comp: &parse_ast::ComponentReference) -> String {
 
 pub fn flatten_equation(eq: &parse_ast::Equation, class: &mut ast::Class) {
     match eq {
-        parse_ast::Equation::Simple { lhs, rhs } => {
+        parse_ast::Equation::Simple { lhs, rhs, .. } => {
             class.algebraic.push(eq.clone());
             flatten_expression(lhs, class);
             flatten_expression(rhs, class);
         }
-        parse_ast::Equation::If {
-            if_cond: _,
-            if_eqs: _,
-            else_if_blocks: _,
-            else_eqs: _,
-        } => {
+        parse_ast::Equation::If { .. } => {
             todo!("{:?}", eq);
         }
-        parse_ast::Equation::For { indices: _, eqs: _ } => {
+        parse_ast::Equation::For { .. } => {
+            todo!("{:?}", eq);
+        }
+        parse_ast::Equation::Connect { .. } => {
             todo!("{:?}", eq);
         }
     }
@@ -304,24 +341,22 @@ pub fn flatten_expression(expr: &Expression, class: &mut ast::Class) {
 
 pub fn flatten_statement(stmt: &parse_ast::Statement, class: &mut ast::Class) {
     match &stmt {
-        Statement::Assignment { comp: _, rhs: _ } => {
+        Statement::Assignment { .. } => {
             class.algorithm.push(stmt.clone());
         }
-        Statement::If {
-            if_cond: _,
-            if_stmts: _,
-            else_if_blocks: _,
-            else_stmts: _,
-        } => {
+        Statement::If { .. } => {
             todo!("{:?}", stmt);
         }
-        parse_ast::Statement::For {
-            indices: _,
-            stmts: _,
-        } => {
+        parse_ast::Statement::For { .. } => {
             todo!("{:?}", stmt);
         }
-        parse_ast::Statement::While { cond: _, stmts: _ } => {
+        parse_ast::Statement::While { .. } => {
+            todo!("{:?}", stmt);
+        }
+        parse_ast::Statement::Break { .. } => {
+            todo!("{:?}", stmt);
+        }
+        parse_ast::Statement::Return { .. } => {
             todo!("{:?}", stmt);
         }
     }

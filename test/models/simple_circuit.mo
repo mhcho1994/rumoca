@@ -46,7 +46,7 @@ equation
 end Ground;
 
 class VsourceAC "Sin-wave voltage source"
-    extends  TwoPin;
+    extends TwoPin;
     parameter Real VA = 220 "Amplitude";
     parameter Real f = 50 "Frequency";
     constant Real PI = 3.14159;

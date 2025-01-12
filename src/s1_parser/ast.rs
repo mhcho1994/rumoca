@@ -27,12 +27,32 @@ pub struct ClassPrefixes {
     pub class_type: ClassType,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ClassSpecifier {
-    pub name: String,
-    pub description: Vec<String>,
-    pub composition: Vec<CompositionPart>,
-    pub name_end: String,
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ClassSpecifier {
+    Long {
+        name: String,
+        description: Vec<String>,
+        composition: Vec<CompositionPart>,
+        name_end: String,
+    },
+    Extends {
+        name: String,
+        modification: Option<Vec<Argument>>,
+        description: Vec<String>,
+        composition: Vec<CompositionPart>,
+        name_end: String,
+    },
+}
+
+impl Default for ClassSpecifier {
+    fn default() -> Self {
+        ClassSpecifier::Long {
+            name: "".to_string(),
+            description: Vec::new(),
+            composition: Vec::new(),
+            name_end: "".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -60,12 +80,39 @@ pub enum CompositionPart {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComponentClause {
+    pub type_prefix: TypePrefix,
+    pub type_specifier: TypeSpecifier,
+    pub array_subscripts: Option<Vec<Subscript>>,
+    pub components: Vec<ComponentDeclaration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ElementFlags {
+    pub replaceable: bool,
+    pub redeclare: bool,
+    pub final_: bool,
+    pub inner: bool,
+    pub outer: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Element {
+    ImportClause {
+        alias: String,
+        name: Name,
+        description: Description,
+    },
     ComponentClause {
-        type_prefix: TypePrefix,
+        flags: ElementFlags,
+        clause: ComponentClause,
+    },
+    ClassDefinition {
+        flags: ElementFlags,
+        def: ClassDefinition,
+    },
+    ExtendsClause {
         type_specifier: TypeSpecifier,
-        array_subscripts: Option<Vec<Subscript>>,
-        components: Vec<ComponentDeclaration>,
     },
 }
 
@@ -102,20 +149,30 @@ pub enum Statement {
     Assignment {
         comp: ComponentReference,
         rhs: Expression,
+        description: Description,
     },
     If {
         if_cond: Expression,
         if_stmts: Vec<Statement>,
         else_if_blocks: Vec<ElseIfStatementBlock>,
         else_stmts: Vec<Statement>,
+        description: Description,
     },
     For {
         indices: Vec<ForIndex>,
         stmts: Vec<Statement>,
+        description: Description,
     },
     While {
         cond: Expression,
         stmts: Vec<Statement>,
+        description: Description,
+    },
+    Break {
+        description: Description,
+    },
+    Return {
+        description: Description,
     },
 }
 
@@ -136,16 +193,24 @@ pub enum Equation {
     Simple {
         lhs: Expression,
         rhs: Expression,
+        description: Description,
     },
     If {
         if_cond: Expression,
         if_eqs: Vec<Equation>,
         else_if_blocks: Vec<ElseIfEquationBlock>,
         else_eqs: Vec<Equation>,
+        description: Description,
     },
     For {
         indices: Vec<ForIndex>,
         eqs: Vec<Equation>,
+        description: Description,
+    },
+    Connect {
+        lhs: ComponentReference,
+        rhs: ComponentReference,
+        description: Description,
     },
 }
 
@@ -288,15 +353,27 @@ pub enum Expression {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Description {
     pub strings: Vec<String>,
     pub annotation: Vec<Argument>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Modification {
-    pub expression: Expression,
+pub enum ModExpr {
+    Break,
+    Expression { expr: Expression },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Modification {
+    Expression {
+        expr: ModExpr,
+    },
+    Class {
+        args: Vec<Argument>,
+        expr: Option<ModExpr>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -366,7 +443,7 @@ pub enum Subscript {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum ClassType {
     #[default]
-    Unknown,
+    Class,
     Model,
     Record,
     OperatorRecord,

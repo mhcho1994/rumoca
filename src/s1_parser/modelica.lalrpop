@@ -204,6 +204,7 @@ pub ClassPrefixes: ast::ClassPrefixes = {
 }
 
 pub ClassType: ast::ClassType = {
+    "class" => ast::ClassType::Class,
     "model" => ast::ClassType::Model,
     "record" => ast::ClassType::Record,
     "operator" "record" => ast::ClassType::OperatorRecord,
@@ -227,18 +228,35 @@ pub ClassSpecifier: ast::ClassSpecifier = {
     <spec: LongClassSpecifier> => spec,
 }
 
+pub IDENT: String = {
+    <ident: "IDENT"> => ident,
+}
+
 //✅ long-class-specifier :
 //✅    IDENT description-string composition end IDENT
-//🟥    | extends IDENT [ class-modification ] description-string composition end IDENT
+//✅    | extends IDENT [ class-modification ] description-string composition end IDENT
 pub LongClassSpecifier: ast::ClassSpecifier = {
-    <name: "IDENT">
+    <name: IDENT>
     <description: DescriptionString?>
     <composition: Composition>
     "end"
-    <name_end: "IDENT"> => {
-        ast::ClassSpecifier {
+    <name_end: IDENT> => {
+        ast::ClassSpecifier::Long {
             name,
             description: description.unwrap_or(Vec::new()),
+            composition,
+            name_end,
+        }
+    },
+    "extends" <name: IDENT>
+    <modification: ClassModification?>
+    <description: DescriptionString>
+    <composition: CompositionPart*>
+    "end" <name_end: IDENT> => {
+        ast::ClassSpecifier::Extends {
+            name,
+            modification,
+            description,
             composition,
             name_end,
         }
@@ -320,37 +338,106 @@ pub ElementList: Vec<ast::Element> = {
     <elements:TerminatedList<Element, ";">> => elements
 }
 
-//🟨 element :
-//🟥    import-clause
-//🟥    | extends-clause
-//🟨    | [ redeclare ] [ final ] [ inner ] [ outer ] (
-//🟥        class-definition
-//🟥        | component-clause
-//🟥        | replaceable (
-//🟥          class-definition
+//✅ element :
+//✅    import-clause
+//✅    | extends-clause
+//✅    | [ redeclare ] [ final ] [ inner ] [ outer ] (
+//✅        class-definition
+//✅        | component-clause
+//✅        | replaceable (
+//✅          class-definition
 //✅          | component-clause)
 //🟥        [ constraining-clause description ])
+pub ElementFlags : ast::ElementFlags = {
+    <redeclare:"redeclare"?>
+    <final_:"final"?>
+    <inner:"inner"?>
+    <outer:"outer"?>
+    <replaceable:"replaceable"?> => {
+        ast::ElementFlags {
+            redeclare: redeclare.is_some(),
+            final_: final_.is_some(),
+            inner: inner.is_some(),
+            outer: outer.is_some(),
+            replaceable: replaceable.is_some(),
+        }
+    }
+}
 pub Element : ast::Element = {
-    <elem: ComponentClause> => elem
+    <flags: ElementFlags> <clause: ComponentClause> => {
+        ast::Element::ComponentClause {
+            flags,
+            clause,
+        }
+    },
+    <flags: ElementFlags> <def: ClassDefinition> => {
+        ast::Element::ClassDefinition {
+            flags,
+            def,
+        }
+    },
+    <extends: ExtendsClause> => extends,
 }
 
-//🟥 import-clause :
-//🟥    import
-//🟥    ( IDENT "=" name
-//🟥      | name [ ".*" | "." ( "*" | "{" import-list "}" ) ]
-//🟥    )
-//🟥    description
+//✅ import-clause :
+//✅    import
+//✅    ( IDENT "=" name
+//🟥      | name [ ".*" | "." ( "*" | "{" import-list "}" ) ])
+//✅    description
 
-//🟥 import-list :
-//🟥    IDENT { "," IDENT }
+pub ImportClause : ast::Element = {
+    // qualified import
+    "import" <name: Name> <description: Description> => {
+        ast::Element::ImportClause {
+            alias: "".to_string(),
+            name,
+            description,
+        }
+    },
+    // unqualified import
+    // "import" <name: Name> ".*" <description: Description> => {
+    //     ast::Element::ImportClause {
+    //         alias: None,
+    //         name,
+    //     }
+    // },
+    // renaming qualified import
+    // "import" <alias:IDENT> "=" <name: Name> <description: Description> => {
+    //     ast::Element::ImportClause {
+    //         alias: None,
+    //         name,
+    //     }
+    // },
+    // multiple definition import
+    // "import" <name:Name> "." "{" SeparatedListMinOne<IDENT, ","> "}"=> {
+    //     ast::Element::ImportClause {
+    //         alias: None,
+    //         name,
+    //     }
+    // }
+}
+
+//✅ import-list :
+//✅    IDENT { "," IDENT }
+// Note: flattened into import-clause
 
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // A.2.3 Extends
 // ✅: Implemented,  🟥: Not-Implemented, 🟨: Partial
 
-//🟥 extends-clause :
-//🟥    extends type-specifier [ class-or-inheritance-modification ] [ annotation-clause ]
+//✅ extends-clause :
+//✅    extends type-specifier
+//🟥    [ class-or-inheritance-modification ]
+//🟥    [ annotation-clause ]
+pub ExtendsClause: ast::Element = {
+    "extends"
+    <type_specifier: TypeSpecifier> => {
+        ast::Element::ExtendsClause {
+            type_specifier,
+        }
+    }
+}
 
 //🟥 constraining-clause :
 //🟥    constrainedby type-specifier [ class-modification ]
@@ -370,12 +457,12 @@ pub Element : ast::Element = {
 
 //✅ component-clause :
 //✅    type-prefix type-specifier [ array-subscripts ] component-list
-pub ComponentClause: ast::Element = {
+pub ComponentClause: ast::ComponentClause = {
     <type_prefix: TypePrefix>
     <type_specifier: TypeSpecifier>
     <array_subscripts: ArraySubscripts?>
     <components: ComponentList> => {
-        ast::Element::ComponentClause {
+        ast::ComponentClause {
             type_prefix,
             type_specifier,
             array_subscripts,
@@ -441,7 +528,7 @@ pub ConditionAttribute: ast::Expression = {
 //✅ declaration :
 //✅    IDENT [ array-subscripts ] [ modification ]
 pub Declaration: ast::Declaration = {
-    <name: "IDENT">
+    <name: IDENT>
     <array_subscripts:ArraySubscripts?>
     <modification:Modification?> => {
         ast::Declaration {
@@ -457,18 +544,28 @@ pub Declaration: ast::Declaration = {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // ✅: Implemented,  🟥: Not-Implemented, 🟨: Partial
 
-//🟨 modification :
-//🟥    class-modification [ "=" modification-expression ]
-//🟨    | "=" modification-expression
+//✅ modification :
+//✅    class-modification [ "=" modification-expression ]
+//✅    | "=" modification-expression
 pub Modification: ast::Modification = {
-    "=" <expression: Expression> => ast::Modification {
-        expression
-    }
+    <args: ClassModification> <expr: ("=" <ModExpr>)?> => ast::Modification::Class {
+        args,
+        expr,
+    },
+    "=" <expr: ModExpr> => ast::Modification::Expression {
+        expr,
+    },
 }
 
-//🟥 modification-expression :
-//🟥    expression
-//🟥    | break
+//✅ modification-expression :
+//✅    expression
+//✅    | break
+pub ModExpr: ast::ModExpr = {
+    <expr: Expression> => ast::ModExpr::Expression {
+        expr
+    },
+    "break" => ast::ModExpr::Break {}
+}
 
 //✅ class-modification :
 //✅    "(" [ argument-list ] ")"
@@ -568,41 +665,47 @@ pub AlgorithmSection: ast::CompositionPart = {
 //✅    ( simple-expression "=" expression
 //✅      | if-equation
 //✅      | for-equation
-//🟥      | connect-equation
+//✅      | connect-equation
 //🟥      | when-equation
 //🟥      | component-reference function-call-args )
 //🟥    description
 pub Equation: ast::Equation = {
-    <lhs:SimpleExpression> "=" <rhs:Expression> => {
+    <lhs:SimpleExpression> "=" <rhs:Expression> <description: Description>=> {
         ast::Equation::Simple {
             lhs,
-            rhs
+            rhs,
+            description,
         }
     },
     <eq: IfEquation> => eq,
     <eq: ForEquation> => eq,
+    <eq: ConnectEquation> => eq,
 }
 
 //✅ statement :
 //✅    ( component-reference ( ":=" expression | function-call-args )
 //🟥      | "(" output-expression-list ")" ":=" component-reference function-call-args
-//🟥      | break
-//🟥      | return
+//✅      | break
+//✅      | return
 //✅      | if-statement
 //✅      | for-statement
-//🟥      | while-statement
+//✅      | while-statement
 //🟥      | when-statement )
-//🟥    description
+//✅    description
 
 pub Statement: ast::Statement = {
-    <comp: ComponentReference> ":=" <rhs:Expression> => {
+    <comp: ComponentReference> ":=" <rhs:Expression> <description: Description> => {
         ast::Statement::Assignment{
             comp,
-            rhs
+            rhs,
+            description,
         }
     },
     <stmt: IfStatement> => stmt,
     <stmt: ForStatement> => stmt,
+    <stmt: WhileStatement> =>  stmt,
+    "break" <description: Description> => ast::Statement::Break { description },
+    "return" <description: Description> => ast::Statement::Return { description },
 }
 
 //✅ if-equation :
@@ -621,12 +724,13 @@ pub IfEquation: ast::Equation = {
     <if_eqs:TerminatedList<Equation, ";">>
     <else_if_blocks: ElseIfEquationBlock*>
     <else_eqs: ElseEquationBlock?>
-    "end" "if" => {
+    "end" "if" <description: Description> => {
         ast::Equation::If {
             if_cond,
             if_eqs,
             else_if_blocks,
             else_eqs: else_eqs.unwrap_or(Vec::new()),
+            description,
         }
     }
 }
@@ -661,11 +765,12 @@ pub IfStatement: ast::Statement = {
     <if_stmts:TerminatedList<Statement, ";">>
     <else_if_blocks: ElseIfStatementBlock*>
     <else_stmts: ElseStatementBlock?>
-    "end" "if" => {
+    "end" "if" <description: Description> => {
         ast::Statement::If {
             if_cond, if_stmts,
             else_if_blocks,
             else_stmts: else_stmts.unwrap_or(Vec::new()),
+            description,
         }
     }
 }
@@ -692,11 +797,12 @@ pub ElseStatementBlock: Vec<ast::Statement> = {
 pub ForEquation: ast::Equation = {
     "for" <indices: ForIndices> "loop"
     <eqs: TerminatedList<Equation, ";">>
-    "end" "for"
+    "end" "for" <description: Description>
     => {
         ast::Equation::For {
             indices,
             eqs,
+            description,
         }
     }
 }
@@ -708,11 +814,12 @@ pub ForEquation: ast::Equation = {
 pub ForStatement: ast::Statement = {
     "for" <indices: ForIndices> "loop"
     <stmts: TerminatedList<Statement, ";">>
-    "end" "for"
+    "end" "for" <description: Description>
     => {
         ast::Statement::For {
             indices,
             stmts,
+            description,
         }
     }
 }
@@ -726,7 +833,7 @@ pub ForIndices: Vec<ast::ForIndex> = {
 //✅ for-index :
 //✅    IDENT [ in expression ]
 pub ForIndex: ast::ForIndex = {
-    <ident: "IDENT"> <in_expr:("in" <Expression>)?> => {
+    <ident: IDENT> <in_expr:("in" <Expression>)?> => {
         ast::ForIndex {
             ident,
             in_expr,
@@ -746,6 +853,7 @@ pub WhileStatement: ast::Statement = {
         ast::Statement::While {
             cond,
             stmts,
+            description: ast::Description::default(),
         }
     }
 }
@@ -766,8 +874,20 @@ pub WhileStatement: ast::Statement = {
 //🟥    }
 //🟥    end when
 
-//🟥 connect-equation :
-//🟥    connect "(" component-reference "," component-reference ")"
+//✅ connect-equation :
+//✅    connect "(" component-reference "," component-reference ")"
+pub ConnectEquation: ast::Equation = {
+    "connect" "("
+    <lhs: ComponentReference> ","
+    <rhs: ComponentReference> ")"
+    <description: Description> => {
+        ast::Equation::Connect {
+            lhs,
+            rhs,
+            description,
+        }
+    }
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // A.2.7 Expressions
@@ -1038,7 +1158,7 @@ pub TypeSpecifier: ast::TypeSpecifier = {
 //✅ name :
 //✅    IDENT { "." IDENT }
 pub Name: ast::Name = {
-    <first:"IDENT"> <remaining: ("." <"IDENT">)*> => {
+    <first:IDENT> <remaining: ("." <IDENT>)*> => {
         let mut v = vec![first];
         v.extend(remaining);
         ast::Name {
@@ -1059,7 +1179,7 @@ pub ComponentReference: ast::ComponentReference = {
     },
 }
 pub RefPart: ast::RefPart = {
-    <name:"IDENT"> <array_subscripts:ArraySubscripts?> => {
+    <name:IDENT> <array_subscripts:ArraySubscripts?> => {
         ast::RefPart {
             name,
             array_subscripts: array_subscripts.unwrap_or(Vec::new()),

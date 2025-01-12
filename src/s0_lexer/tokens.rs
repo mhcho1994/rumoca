@@ -177,7 +177,7 @@ pub enum Token {
     #[regex("[_a-zA-Z][_0-9a-zA-Z]*", |lex| lex.slice().to_string())]
     Identifier(String),
 
-    #[regex("\"[ _0-9a-zA-Z]*\"", quoted_string_callback)]
+    #[regex("\"[\\- _0-9a-zA-Z]*\"", quoted_string_callback)]
     String(String),
 
     #[regex("[1-9][0-9]*", |lex| lex.slice().parse::<i64>().unwrap(), priority=3)]
