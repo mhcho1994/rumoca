@@ -466,6 +466,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "macro_rules_attribute"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a82271f7bc033d84bbca59a3ce3e4159938cb08a9c3aebbe54d215131518a13"
+dependencies = [
+ "macro_rules_attribute-proc_macro",
+ "paste",
+]
+
+[[package]]
+name = "macro_rules_attribute-proc_macro"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8dd856d451cc0da70e2ef2ce95a18e39a93b7558bedf10201ad28503f918568"
+
+[[package]]
 name = "matrixmultiply"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -583,6 +599,12 @@ dependencies = [
  "smallvec",
  "windows-targets",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "petgraph"
@@ -707,17 +729,32 @@ version = "0.4.5"
 dependencies = [
  "clap",
  "codespan-reporting",
- "lalrpop",
  "lalrpop-util",
  "logos",
  "md5",
  "minijinja",
  "ndarray",
  "ordermap",
- "rerun_except",
+ "rumoca_parser",
  "serde",
  "serde_json",
  "unindent",
+]
+
+[[package]]
+name = "rumoca_parser"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbaefdf13df6a6b7e7b73c0a29d41b95b30b601e62c4646613992fb755eaa03a"
+dependencies = [
+ "codespan-reporting",
+ "lalrpop",
+ "lalrpop-util",
+ "logos",
+ "macro_rules_attribute",
+ "md5",
+ "rerun_except",
+ "serde",
 ]
 
 [[package]]

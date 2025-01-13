@@ -1,10 +1,6 @@
-use rerun_except::rerun_except;
 use std::process::Command;
 
 fn main() {
-    lalrpop::process_root().unwrap();
-    rerun_except(&["*.mo", "*.jinja", "*.sdf", "*.py"]).unwrap();
-
     // create git hash
     let output = Command::new("git")
         .args(["describe", "--dirty", "--tags"])

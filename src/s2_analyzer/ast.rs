@@ -1,6 +1,8 @@
-use crate::s1_parser::ast::{ClassType, Equation, Expression, Modification, Statement, Subscript};
 use ndarray::{ArrayBase, IxDyn, OwnedRepr};
 use ordermap::{OrderMap, OrderSet};
+use rumoca_parser::s1_parser::ast::{
+    ClassType, Equation, Expression, Modification, Statement, Subscript,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]

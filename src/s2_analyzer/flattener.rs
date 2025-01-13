@@ -1,9 +1,9 @@
-use crate::s1_parser::ast::{
+use crate::s2_analyzer::ast;
+use ndarray::{ArrayBase, ArrayD, IxDyn, OwnedRepr};
+use rumoca_parser::s1_parser::ast::{
     self as parse_ast, Causality, Element, Expression, ModExpr, Modification, Statement, Subscript,
     Variability,
 };
-use crate::s2_analyzer::ast;
-use ndarray::{ArrayBase, ArrayD, IxDyn, OwnedRepr};
 use std::collections::HashMap;
 use std::error::Error;
 

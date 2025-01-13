@@ -1,6 +1,3 @@
-#![recursion_limit = "512"]
-mod s0_lexer;
-mod s1_parser;
 mod s2_analyzer;
 mod s3_optimizer;
 mod s4_generator;
@@ -25,7 +22,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let def = s1_parser::parse_file(&args.model_file);
+    let def = rumoca_parser::s1_parser::parse_file(&args.model_file);
 
     if args.verbose {
         println!("def:\n{:#?}", def);
