@@ -1,5 +1,5 @@
 model Integrator "hello"
     Real x;
 equation
-    der(x) = 1;
+    der(x) = cos(x);
 end Integrator;
