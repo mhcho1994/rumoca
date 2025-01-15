@@ -411,38 +411,12 @@
         filename="gz-sim-joint-controller-system"
         name="gz::sim::systems::JointController">
         <joint_name>RLWheelJoint</joint_name>
-        <use_force_commands>true</use_force_commands>
-        <use_actuator_msg>false</use_actuator_msg>
-        <p_gain>0.1</p_gain>
-        <i_gain>0.0</i_gain>
-        <d_gain>0.0</d_gain>
-      </plugin>
-      <plugin
-        filename="gz-sim-joint-controller-system"
-        name="gz::sim::systems::JointController">
         <joint_name>RRWheelJoint</joint_name>
-        <use_force_commands>true</use_force_commands>
-        <use_actuator_msg>false</use_actuator_msg>
-        <p_gain>0.1</p_gain>
-        <i_gain>0.0</i_gain>
-        <d_gain>0.0</d_gain>
-      </plugin>
-      <plugin
-        filename="gz-sim-joint-controller-system"
-        name="gz::sim::systems::JointController">
         <joint_name>FLWheelJoint</joint_name>
-        <use_force_commands>true</use_force_commands>
-        <use_actuator_msg>false</use_actuator_msg>
-        <p_gain>0.1</p_gain>
-        <i_gain>0.0</i_gain>
-        <d_gain>0.0</d_gain>
-      </plugin>
-      <plugin
-        filename="gz-sim-joint-controller-system"
-        name="gz::sim::systems::JointController">
         <joint_name>FRWheelJoint</joint_name>
         <use_force_commands>true</use_force_commands>
         <use_actuator_msg>false</use_actuator_msg>
+        <topic>/vehicle/throttle</topic>
         <p_gain>0.1</p_gain>
         <i_gain>0.0</i_gain>
         <d_gain>0.0</d_gain>
@@ -473,34 +447,7 @@
           <servo_min>500</servo_min>
           <servo_max>2000</servo_max>
           <type>COMMAND</type>
-          <cmd_topic>/model/vehicle/joint/RLWheelJoint/cmd_vel</cmd_topic>
-        </control>
-        <control channel="2">
-          <jointName>RRWheelJoint</jointName>
-          <multiplier>100.0</multiplier>
-          <offset>-0.5</offset>
-          <servo_min>1000</servo_min>
-          <servo_max>2000</servo_max>
-          <type>COMMAND</type>
-          <cmd_topic>/model/vehicle/joint/RRWheelJoint/cmd_vel</cmd_topic>
-        </control>
-        <control channel="2">
-          <jointName>FRWheelJoint</jointName>
-          <multiplier>100.0</multiplier>
-          <offset>-0.5</offset>
-          <servo_min>1000</servo_min>
-          <servo_max>2000</servo_max>
-          <type>COMMAND</type>
-          <cmd_topic>/model/vehicle/joint/FRWheelJoint/cmd_vel</cmd_topic>
-        </control>
-        <control channel="2">
-          <jointName>FLWheelJoint</jointName>
-          <multiplier>100.0</multiplier>
-          <offset>-0.5</offset>
-          <servo_min>1000</servo_min>
-          <servo_max>2000</servo_max>
-          <type>COMMAND</type>
-          <cmd_topic>/model/vehicle/joint/FLWheelJoint/cmd_vel</cmd_topic>
+          <cmd_topic>/vehicle/throttle</cmd_topic>
         </control>
       </plugin>
     </model>
