@@ -1,5 +1,5 @@
 model Ackermann "Ackermann rover"
-    parameter Real world_declination = 0.3;
+    parameter Real world_declination = 0.0;
     parameter Real wheel_seperation = 0.232;
     parameter Real wheel_base = 0.275;
     parameter Real wheel_radius = 0.058;
