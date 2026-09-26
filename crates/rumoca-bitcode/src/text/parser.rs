@@ -570,6 +570,7 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
                 RbcInline::Unstated
             };
             model.functions.push(RbcFunction {
+                calls: Vec::new(),
                 id,
                 name,
                 parameters,

@@ -218,6 +218,7 @@ fn map_fixture() -> (RbcModel, RbcModel) {
         provenance,
     });
     input.functions.push(RbcFunction {
+            calls: Vec::new(),
         id: FunctionId(0),
         name: "f".into(),
         parameters: vec![],
@@ -438,6 +439,7 @@ fn relocates_all_metadata_and_separate_equation_id_spaces() {
         },
     ];
     m.functions.push(RbcFunction {
+            calls: Vec::new(),
         id: FunctionId(0),
         name: "f".into(),
         parameters: vec![RbcFunctionParameter {

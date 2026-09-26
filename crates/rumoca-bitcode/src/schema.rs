@@ -1063,6 +1063,23 @@ pub struct RbcFunction {
     /// The MLS §18.3 `Inline`/`LateInline` request the declaration wrote.
     pub inline: RbcInline,
     pub body: RbcFunctionBody,
+    /// Functions this one calls, in first-seen order.
+    ///
+    /// A call inside an *equation* is already visible: `RbcExprNode::Call`
+    /// names its callee, so a consumer can read those edges off the
+    /// expression arena. A call inside a *function body* is not, because the
+    /// body is elided (`RbcFunctionBody::ElidedModelica`). Without this field
+    /// the call graph stops at the first function, and every consumer that
+    /// needs reachability over callables -- dead-code elimination, coverage,
+    /// "is this function used" -- either rebuilds it wrongly or gives up.
+    ///
+    /// Carrying the edges rather than the bodies keeps the property the
+    /// elision exists for: an edge list is a finite graph, not a program, so
+    /// nothing here reintroduces recursion as something the IR can *execute*.
+    /// A cycle in these edges is representable and is exactly what a
+    /// recursion check would look for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<FunctionId>,
     pub declaration: RbcProvenance,
 }
 
