@@ -577,8 +577,9 @@ pub(crate) fn process_connections(
     strict_validation: bool,
     oc_forest: &mut crate::vcg::OverconstrainedEquationForest,
 ) -> Result<(), FlattenError> {
-    // Build prefix-to-children index once for O(1) sub-variable lookups
-    let prefix_children = build_prefix_children(flat);
+    // The sub-variable indices are built after §9.1.3 augmentation below,
+    // because augmentation adds bus members and anything indexed before it is
+    // stale.
 
     // Collect all connections from class instances, excluding disabled components.
     // MLS §5.4: Redirect outer-prefixed connection paths to their inner equivalents.
@@ -600,7 +601,6 @@ pub(crate) fn process_connections(
     }
 
     let all_connections: Vec<&ast::InstanceConnection> = owned_connections.iter().collect();
-    let var_index = ConnectionVarIndex::new(flat);
     let endpoint_index = ConnectionEndpointIndex::new(overlay);
 
     // MLS §10.5: an endpoint subscript must select along a declared dimension.
@@ -609,9 +609,17 @@ pub(crate) fn process_connections(
     // subscript was meant to index.
     endpoint_index.check_connection_endpoint_subscripts(&all_connections)?;
 
-    // MLS §9.1.3 augmentation must happen before connection-set construction.
-    // Until the union elaboration exists, reject the unsupported case instead
-    // of silently connecting only the intersection of declared bus members.
+    // MLS §9.1.3 augmentation must happen before connection-set construction:
+    // a bus member that a connection brings into being has to exist as a
+    // variable before connection sets are built over it.
+    super::expandable::augment_expandable_connectors(&all_connections, flat, &endpoint_index)?;
+    // Augmentation adds variables, so every index built from `flat` above is
+    // stale from here on.
+    let var_index = ConnectionVarIndex::new(flat);
+    let prefix_children = build_prefix_children(flat);
+
+    // Whatever augmentation could not reconcile is still refused rather than
+    // connected as an intersection.
     reject_expandable_connector_augmentation(
         &all_connections,
         flat,

@@ -224,12 +224,40 @@ fn reject_sequential_tensor_loop(
     Ok(())
 }
 
+/// Variable references an expression reads *now*, skipping `pre`/`previous`.
+///
+/// A read beneath `pre` is the value the variable held entering the event, so
+/// it cannot observe a write made earlier in the same algorithm and cannot
+/// create the SSA hazard the caller is guarding against. Counting it rejected
+/// the ordinary hysteresis shape, where one `when` assigns a mode and a later
+/// `when` guards on `pre` of that same mode:
+///
+/// ```modelica
+/// when x1 <= -1 and not pre(valve1on) then valve1on := true;  end when;
+/// when x2 >=  1 and     pre(valve1on) then valve1on := false; end when;
+/// ```
+fn collect_current_var_refs(expression: &Expression, out: &mut Vec<VarName>) {
+    if let Expression::BuiltinCall {
+        function: rumoca_core::BuiltinFunction::Pre | rumoca_core::BuiltinFunction::Previous,
+        ..
+    } = expression
+    {
+        return;
+    }
+    if let Expression::VarRef { name, .. } = expression {
+        out.push(name.var_name().clone());
+    }
+    for child in super::expression_children(expression) {
+        collect_current_var_refs(child, out);
+    }
+}
+
 fn reject_reads_of_written(
     expression: &Expression,
     written: &HashSet<VarName>,
 ) -> Result<(), ToDaeError> {
     let mut references = Vec::new();
-    expression.collect_var_refs(&mut references);
+    collect_current_var_refs(expression, &mut references);
     let Some(target) = references
         .into_iter()
         .find(|target| written.contains(target))

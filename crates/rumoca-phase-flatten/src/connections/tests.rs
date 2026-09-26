@@ -444,28 +444,37 @@ fn expandable_connectors_with_same_declared_members_are_supported() {
 }
 
 #[test]
-fn expandable_connector_member_union_is_rejected_before_connection_sets() {
+fn expandable_connector_member_union_reaches_both_endpoints() {
+    // Was `..._is_rejected_before_connection_sets`, which pinned the refusal
+    // that stood in for MLS §9.1.3 until the elaboration existed. The property
+    // it protected -- that neither endpoint is silently dropped -- is asserted
+    // directly here instead, which is strictly more than the refusal proved.
     let mut flat = flat::Model::new();
     add_expandable_member(&mut flat, "a.left_only");
     add_expandable_member(&mut flat, "b.right_only");
     let overlay = expandable_connector_test_overlay();
     let mut oc_forest = crate::vcg::OverconstrainedEquationForest::empty();
 
-    let error = process_connections(&mut flat, &overlay, false, &mut oc_forest)
-        .expect_err("member-union augmentation must not silently drop both endpoints");
+    process_connections(&mut flat, &overlay, false, &mut oc_forest)
+        .expect("§9.1.3 augments each endpoint with the union of members");
 
-    assert!(matches!(
-        error,
-        FlattenError::UnsupportedExpandableConnectorAugmentation { .. }
-    ));
-    assert!(
-        flat.equations.is_empty(),
-        "the unsupported connection must fail before equations are generated"
-    );
+    for member in ["a.left_only", "a.right_only", "b.left_only", "b.right_only"] {
+        assert!(
+            flat.variables
+                .contains_key(&rumoca_core::VarName::new(member)),
+            "both buses take the union, so `{member}` must exist; got {:?}",
+            flat.variables
+                .keys()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
-fn expandable_connector_partial_member_union_is_rejected() {
+fn expandable_connector_partial_member_union_completes_the_missing_side() {
+    // Was `..._is_rejected`. Connecting only the declared intersection would
+    // drop `left_only` silently; the union must carry it to the peer.
     let mut flat = flat::Model::new();
     for name in ["a.shared", "a.left_only", "b.shared"] {
         add_expandable_member(&mut flat, name);
@@ -473,13 +482,18 @@ fn expandable_connector_partial_member_union_is_rejected() {
     let overlay = expandable_connector_test_overlay();
     let mut oc_forest = crate::vcg::OverconstrainedEquationForest::empty();
 
-    let error = process_connections(&mut flat, &overlay, false, &mut oc_forest)
-        .expect_err("connecting only the declared intersection is not MLS §9.1.3");
+    process_connections(&mut flat, &overlay, false, &mut oc_forest)
+        .expect("§9.1.3 completes the side that lacks a member");
 
-    assert!(matches!(
-        error,
-        FlattenError::UnsupportedExpandableConnectorAugmentation { .. }
-    ));
+    assert!(
+        flat.variables
+            .contains_key(&rumoca_core::VarName::new("b.left_only")),
+        "the peer must gain the member it lacked; got {:?}",
+        flat.variables
+            .keys()
+            .map(|name| name.as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

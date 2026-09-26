@@ -250,6 +250,27 @@ pub enum FlattenError {
         span: Span,
     },
 
+    /// An augmented expandable-connector member must be driven exactly once.
+    ///
+    /// MLS §9.1.3 adds a member with the type of what it was connected to, and
+    /// the resulting signal still obeys §9.3: one source, any number of sinks.
+    /// Two outputs on one member is an unresolvable conflict, and an input with
+    /// no output is an undriven signal; both are model errors that augmentation
+    /// must not paper over by connecting them anyway.
+    #[error("expandable connector member `{member}` has {sources} sources; exactly one is required")]
+    #[diagnostic(
+        code(rumoca::flatten::EF033),
+        help(
+            "MLS §9.1.3 with §9.3: an augmented member is an ordinary signal, so exactly one connection may drive it"
+        )
+    )]
+    ExpandableMemberSourceCount {
+        member: String,
+        sources: usize,
+        #[label("this member is driven {sources} times")]
+        span: Span,
+    },
+
     /// A constant/parameter binding expands into itself, so constant folding
     /// would never terminate.
     #[error("cyclic constant binding for `{name}`: {cycle}")]
@@ -475,6 +496,18 @@ impl FlattenError {
             b: String
         }
     );
+    /// Create an ExpandableMemberSourceCount error.
+    pub fn expandable_member_source_count(
+        member: impl Into<String>,
+        sources: usize,
+        span: Span,
+    ) -> Self {
+        Self::ExpandableMemberSourceCount {
+            member: member.into(),
+            sources,
+            span,
+        }
+    }
 
     /// Create a CyclicConstantBinding error.
     pub fn cyclic_constant_binding(
@@ -756,6 +789,7 @@ impl PhaseError for FlattenError {
             | Self::MissingFunctionSelectionIdentity { span, .. }
             | Self::UnhonoredFunctionRedeclare { span, .. }
             | Self::UnsupportedExpandableConnectorAugmentation { span, .. }
+            | Self::ExpandableMemberSourceCount { span, .. }
             | Self::CyclicConstantBinding { span, .. }
             | Self::InvalidConnectionGraph { span, .. }
             | Self::UnresolvedFlatReference { span, .. }

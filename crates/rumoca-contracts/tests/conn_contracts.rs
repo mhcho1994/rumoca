@@ -1329,7 +1329,7 @@ fn unsupported_expandable_duplicate_sources_fail_closed() {
     "#,
         "M",
         FailedPhase::Flatten,
-        "EF020",
+        "EF033",
     );
 }
 
@@ -1352,6 +1352,6 @@ fn unsupported_expandable_input_without_source_fails_closed() {
     "#,
         "M",
         FailedPhase::Flatten,
-        "EF020",
+        "EF033",
     );
 }

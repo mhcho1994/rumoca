@@ -92,6 +92,7 @@ use crate::errors::FlattenError;
 use crate::path_utils::{segments as path_segments_of, strip_array_index};
 
 mod endpoint_subscripts;
+mod expandable;
 mod equation_generation;
 mod member_pairing;
 mod path_index;
@@ -851,6 +852,18 @@ fn count_expanded_connector_matches(
         .count()
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
 /// Reject the unsupported part of MLS §9.1.3 before connection-set building.
 ///
 /// Identically declared expandable connectors need no augmentation and can use
@@ -872,12 +885,20 @@ fn reject_expandable_connector_augmentation(
         let subs_a = find_sub_variables_indexed(&path_a, prefix_children, var_index);
         let subs_b = find_sub_variables_indexed(&path_b, prefix_children, var_index);
         if subs_a.is_empty() || subs_b.is_empty() {
-            if endpoint_index.needs_expandable_augmentation(&conn.a)
-                || endpoint_index.needs_expandable_augmentation(&conn.b)
-            {
-                return Err(FlattenError::unsupported_expandable_connector_augmentation(
-                    path_a, path_b, conn.span,
-                ));
+            // An augmented bus member is a leaf variable, so it has no
+            // sub-variables to find. Absence from the *index* is not absence
+            // from the model, and rejecting on it would refuse exactly the
+            // members `augment_expandable_connectors` just created.
+            let resolved_a = expandable::endpoint_is_present(flat, &path_a, prefix_children, var_index);
+            let resolved_b = expandable::endpoint_is_present(flat, &path_b, prefix_children, var_index);
+            if !resolved_a || !resolved_b {
+                if endpoint_index.needs_expandable_augmentation(&conn.a)
+                    || endpoint_index.needs_expandable_augmentation(&conn.b)
+                {
+                    return Err(FlattenError::unsupported_expandable_connector_augmentation(
+                        path_a, path_b, conn.span,
+                    ));
+                }
             }
             continue;
         }

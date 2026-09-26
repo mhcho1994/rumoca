@@ -155,6 +155,115 @@ fn collect_equation_owners(
     Ok(())
 }
 
+/// Whether every self-assignment of `target` sits inside a `when` statement.
+///
+/// `count := count + 1` in a `when` reads the value `count` held entering the
+/// event, because a discrete variable keeps its value between events (MLS
+/// §8.3.5). That read is not a cycle: it is `pre(count)` by position rather
+/// than by spelling, and it is the ordinary way a counter is written.
+///
+/// Outside a `when` the same shape has no event to take its entry value from,
+/// so this deliberately answers only for the guarded case and leaves the
+/// unguarded one to be refused as before.
+fn self_assignments_are_all_guarded_by_when(
+    statements: &[rumoca_core::Statement],
+    target: &VarName,
+    roles: &HashMap<VarName, PlannedRole>,
+    inside_when: bool,
+) -> bool {
+    use rumoca_core::Statement;
+    let mut guarded = true;
+    let mut found = false;
+    for statement in statements {
+        match statement {
+            Statement::Assignment { comp, value, .. } => {
+                if rumoca_core::component_ref_to_base_reference(comp).var_name() == target
+                    && expression_reads_current_target(value, target, roles)
+                {
+                    found = true;
+                    guarded &= inside_when;
+                }
+            }
+            Statement::When { blocks, .. } => {
+                for block in blocks {
+                    if self_assignment_search(&block.stmts, target, roles, true, &mut found) {
+                        // nested search updates `found`; guarded stays true
+                    }
+                }
+            }
+            Statement::If { cond_blocks, else_block, .. } => {
+                for block in cond_blocks {
+                    guarded &= self_assignments_are_all_guarded_by_when(
+                        &block.stmts, target, roles, inside_when,
+                    );
+                    found |= self_assignment_exists(&block.stmts, target, roles);
+                }
+                if let Some(else_block) = else_block {
+                    guarded &= self_assignments_are_all_guarded_by_when(
+                        else_block, target, roles, inside_when,
+                    );
+                    found |= self_assignment_exists(else_block, target, roles);
+                }
+            }
+            Statement::For { equations, .. } => {
+                guarded &=
+                    self_assignments_are_all_guarded_by_when(equations, target, roles, inside_when);
+                found |= self_assignment_exists(equations, target, roles);
+            }
+            Statement::While { block, .. } => {
+                guarded &= self_assignments_are_all_guarded_by_when(
+                    &block.stmts, target, roles, inside_when,
+                );
+                found |= self_assignment_exists(&block.stmts, target, roles);
+            }
+            _ => {}
+        }
+    }
+    found && guarded
+}
+
+/// Record whether a guarded self-assignment exists beneath `statements`.
+fn self_assignment_search(
+    statements: &[rumoca_core::Statement],
+    target: &VarName,
+    roles: &HashMap<VarName, PlannedRole>,
+    _inside_when: bool,
+    found: &mut bool,
+) -> bool {
+    let present = self_assignment_exists(statements, target, roles);
+    *found |= present;
+    present
+}
+
+/// Whether `target` is assigned from its own current value anywhere below.
+fn self_assignment_exists(
+    statements: &[rumoca_core::Statement],
+    target: &VarName,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> bool {
+    use rumoca_core::Statement;
+    statements.iter().any(|statement| match statement {
+        Statement::Assignment { comp, value, .. } => {
+            rumoca_core::component_ref_to_base_reference(comp).var_name() == target
+                && expression_reads_current_target(value, target, roles)
+        }
+        Statement::When { blocks, .. } => blocks
+            .iter()
+            .any(|block| self_assignment_exists(&block.stmts, target, roles)),
+        Statement::If { cond_blocks, else_block, .. } => {
+            cond_blocks
+                .iter()
+                .any(|block| self_assignment_exists(&block.stmts, target, roles))
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| self_assignment_exists(block, target, roles))
+        }
+        Statement::For { equations, .. } => self_assignment_exists(equations, target, roles),
+        Statement::While { block, .. } => self_assignment_exists(&block.stmts, target, roles),
+        _ => false,
+    })
+}
+
 fn collect_algorithm_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
@@ -182,14 +291,21 @@ fn collect_algorithm_owners(
                     algorithm.span,
                     occurrence,
                 )?;
+                let entry_read = algorithm_reads_target_before_definition(
+                    &algorithm.statements,
+                    &name,
+                    roles,
+                    false,
+                )
+                .0;
                 let ordered_scalar_self_dependencies = dependencies.contains(&name)
-                    && !algorithm_reads_target_before_definition(
-                        &algorithm.statements,
-                        &name,
-                        roles,
-                        false,
-                    )
-                    .0;
+                    && (!entry_read
+                        || self_assignments_are_all_guarded_by_when(
+                            &algorithm.statements,
+                            &name,
+                            roles,
+                            false,
+                        ));
                 Ok(SourceTarget {
                     name,
                     dependencies,
