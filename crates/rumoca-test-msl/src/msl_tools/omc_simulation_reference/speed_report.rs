@@ -261,7 +261,7 @@ fn metric_definitions() -> serde_json::Value {
         "bin_low / bin_high_inclusive": "Inclusive bin bounds on the axis named by the containing key; bin_high_inclusive is null for the open top bin.",
         "agreement_bands": {
             "channel": "Per output channel, OMC vs rumoca traces are scored by a bounded-normalized L1 error in [0,1]: high if error <= 0.05, near (minor) if <= 0.20, else deviation.",
-            "high": "Model band: >=80% of channels are `high` AND <=1% are `deviation`.",
+            "high": "Model band: >=80% of channels are `high` AND none is `deviation` (the comparator's MODEL_HIGH_MAX_DEVIATION_CHANNEL_SHARE = 0).",
             "near": "Model band (a.k.a. minor): >=90% of channels are `high`+`near` AND <=10% are `deviation`. (`near` here is the same band counted as `minor_agreement` elsewhere.)",
             "deviation": "Model band: anything not meeting the `high` or `near` thresholds.",
         },

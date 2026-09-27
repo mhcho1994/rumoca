@@ -42,6 +42,8 @@ struct RumocaSeconds {
     jit: f64,
     /// Solve lowering, JIT, and preparation (`sim_build_seconds`).
     sim_build: f64,
+    /// Initialization (`ic_seconds`), timed apart from the integration.
+    initialization: f64,
     run: f64,
 }
 
@@ -96,29 +98,35 @@ impl Comparison {
     fn definition(self) -> &'static str {
         match self {
             Self::Total => {
-                "Rumoca = front end + Solve lowering + JIT + integration; OMC = `timeTotal`."
+                "Rumoca = front end + Solve lowering + JIT + initialization + integration; OMC = `timeTotal`."
             }
             Self::CompilerWork => {
                 "Rumoca = front end + Solve lowering (`compile_seconds + ir_solve_seconds`); \
                  OMC = `timeFrontend + timeBackend + timeSimCode + timeTemplates`. \
-                 Neither side includes native code generation."
+                 Neither side includes native code generation. OMC loads the library once per \
+                 session with `loadModel`, outside every per-model timer, while rumoca's \
+                 `compile_seconds` includes resolving the model's reachable library classes."
             }
             Self::Runnable => {
                 "Rumoca = front end + Solve lowering + Cranelift JIT (`compile_seconds + \
                  sim_build_seconds`); OMC = `timeTotal - timeSimulation`, which includes \
                  `timeCompile`, the C compiler and linker."
             }
-            Self::Simulation => "Rumoca = `sim_run_seconds`; OMC = `timeSimulation`.",
+            Self::Simulation => {
+                "Rumoca = initialization + integration (`ic_seconds + sim_run_seconds`); OMC = \
+                 `timeSimulation`, which includes its initialization. Both include writing the \
+                 output: N grid intervals (N + 1 points) by the same rule, plus event points."
+            }
         }
     }
 
     fn rumoca(self, record: &SpeedRecord) -> Option<f64> {
         let r = &record.rumoca;
         Some(match self {
-            Self::Total => r.front_end + r.sim_build + r.run,
+            Self::Total => r.front_end + r.sim_build + r.initialization + r.run,
             Self::CompilerWork => r.front_end + r.solve,
             Self::Runnable => r.front_end + r.sim_build,
-            Self::Simulation => r.run,
+            Self::Simulation => r.initialization + r.run,
         })
     }
 
@@ -161,6 +169,7 @@ impl Comparison {
             Self::Runnable | Self::Total => front_end
                 .into_iter()
                 .chain([("Solve lowering", r.solve), ("JIT", r.jit)])
+                .chain(matches!(self, Self::Total).then_some(("initialization", r.initialization)))
                 .chain(matches!(self, Self::Total).then_some(("integration", r.run)))
                 .collect(),
             Self::Simulation => return simulation_work(record.rumoca_settings.as_ref()),
@@ -194,7 +203,7 @@ pub(super) fn render_speed_section(results_dir: &Path) -> Result<String> {
             "_Speed vs OMC not measured: the run published no joined timing inputs._\n".to_string(),
         );
     };
-    let records = inputs.records();
+    let (records, other_context) = inputs.records();
     if records.is_empty() {
         return Ok("_No agreeing models had valid timings on both tools._\n".to_string());
     }
@@ -211,7 +220,7 @@ pub(super) fn render_speed_section(results_dir: &Path) -> Result<String> {
     out.push_str(&render_high_only_line(&records));
     out.push_str(FMU_PATH_LINE);
     out.push('\n');
-    out.push_str(&render_methodology(&inputs, &records));
+    out.push_str(&render_methodology(&inputs, &records, other_context));
     out.push_str("\n<details>\n<summary><strong>Speed by system size</strong></summary>\n");
     for comparison in COMPARISONS {
         out.push('\n');
@@ -226,12 +235,14 @@ const FMU_PATH_LINE: &str = "\n**FMU path:** not measured in CI; no CI job expor
      for timing. Local recipe: `rumoca compile <file> -m <Model> --target fmi3 --output <dir>` \
      plus the C build of the emitted sources, against OMC's `buildModelFMU(<Model>, version=\"3.0\")`.\n";
 
-/// The three result artifacts the section joins.
+/// The three result artifacts the section joins: rumoca's rows, OMC's
+/// reference, and the comparator's band table, whose `band` is the one owner
+/// of agreement (SPEC_0033 §6a).
 struct SpeedInputs {
     rumoca: Vec<Value>,
     omc: serde_json::Map<String, Value>,
     omc_timing: Value,
-    trace: serde_json::Map<String, Value>,
+    bands: Vec<Value>,
 }
 
 impl SpeedInputs {
@@ -239,7 +250,7 @@ impl SpeedInputs {
         let paths = [
             "msl_results.json",
             "omc_simulation_reference.json",
-            "sim_trace_comparison.json",
+            "msl_band_table.json",
         ]
         .map(|name| results_dir.join(name));
         if !paths.iter().all(|path| path.is_file()) {
@@ -247,11 +258,11 @@ impl SpeedInputs {
         }
         let msl = read_json_file(&paths[0])?;
         let omc = read_json_file(&paths[1])?;
-        let trace = read_json_file(&paths[2])?;
-        let (Some(rumoca), Some(omc_models), Some(trace)) = (
+        let table = read_json_file(&paths[2])?;
+        let (Some(rumoca), Some(omc_models), Some(bands)) = (
             msl.get("model_results").and_then(Value::as_array),
             omc.get("models").and_then(Value::as_object),
-            trace.get("models").and_then(Value::as_object),
+            table.get("rows").and_then(Value::as_array),
         ) else {
             return Ok(None);
         };
@@ -259,49 +270,60 @@ impl SpeedInputs {
             rumoca: rumoca.clone(),
             omc: omc_models.clone(),
             omc_timing: omc.get("timing").cloned().unwrap_or(Value::Null),
-            trace: trace.clone(),
+            bands: bands.clone(),
         }))
     }
 
-    fn records(&self) -> Vec<SpeedRecord> {
+    /// The timed models: in the comparator's `high` or `near` band, with
+    /// valid timings on both tools, and with an OMC timing taken in this run's
+    /// context; the second value counts agreeing models excluded because their
+    /// OMC timing came from another context (a cache of another run).
+    fn records(&self) -> (Vec<SpeedRecord>, usize) {
         let rumoca_by_name: BTreeMap<&str, &Value> = self
             .rumoca
             .iter()
             .filter_map(|model| Some((json_str(model, "model_name")?, model)))
             .collect();
-        self.trace
-            .iter()
-            .filter_map(|(name, trace)| {
-                let band = agreement_band(trace)?;
-                speed_record(
-                    name,
-                    band == Band::High,
-                    rumoca_by_name.get(name.as_str())?,
-                    self.omc.get(name)?,
+        let mut records = Vec::new();
+        let mut other_context = 0;
+        for row in &self.bands {
+            let (Some(name), Some(band)) = (json_str(row, "model_name"), json_str(row, "band"))
+            else {
+                continue;
+            };
+            if band != "high" && band != "near" {
+                continue;
+            }
+            let (Some(rumoca), Some(omc)) = (rumoca_by_name.get(name), self.omc.get(name)) else {
+                continue;
+            };
+            if !self.timed_in_this_context(omc) {
+                other_context += 1;
+                continue;
+            }
+            records.extend(speed_record(name, band == "high", rumoca, omc));
+        }
+        (records, other_context)
+    }
+
+    /// Whether `omc`'s timing was taken under this run's worker count, OMC
+    /// threads, and host.
+    fn timed_in_this_context(&self, omc: &Value) -> bool {
+        let Some(context) = omc.get("omc_timing_context") else {
+            return false;
+        };
+        let timing = &self.omc_timing;
+        let host = |value: &Value| {
+            value.get("host").map(|host| {
+                (
+                    host.get("image").cloned(),
+                    host.get("logical_cpus").cloned(),
                 )
             })
-            .collect()
-    }
-}
-
-#[derive(PartialEq, Eq)]
-enum Band {
-    High,
-    Near,
-}
-
-/// The model band of an agreeing trace comparison (the comparator's
-/// thresholds); `None` when the traces do not agree.
-fn agreement_band(trace: &Value) -> Option<Band> {
-    let high = json_f64(trace, "channel_high_percent").unwrap_or(0.0);
-    let near = json_f64(trace, "channel_minor_percent").unwrap_or(0.0);
-    let deviation = json_f64(trace, "channel_deviation_percent").unwrap_or(1.0);
-    if high >= 0.80 && deviation <= 0.01 {
-        Some(Band::High)
-    } else if high + near >= 0.90 && deviation <= 0.10 {
-        Some(Band::Near)
-    } else {
-        None
+        };
+        context.get("workers") == timing.get("workers_used")
+            && context.get("omc_threads") == timing.get("omc_threads")
+            && host(context) == host(timing)
     }
 }
 
@@ -319,6 +341,7 @@ fn speed_record(name: &str, high: bool, rumoca: &Value, omc: &Value) -> Option<S
         solve: seconds("ir_solve_seconds"),
         jit: seconds("sim_backend_build_seconds"),
         sim_build: nonnegative_json_f64(rumoca, "sim_build_seconds")?,
+        initialization: seconds("ic_seconds"),
         run: positive_json_f64(rumoca, "sim_run_seconds")?,
     };
     let total = positive_json_f64(omc, "total_system_seconds")?;
@@ -470,7 +493,11 @@ fn render_slower_than_omc(records: &[SpeedRecord]) -> String {
 }
 
 /// The recorded conditions of both tools' runs.
-fn render_methodology(inputs: &SpeedInputs, records: &[SpeedRecord]) -> String {
+fn render_methodology(
+    inputs: &SpeedInputs,
+    records: &[SpeedRecord],
+    other_context: usize,
+) -> String {
     let timing = &inputs.omc_timing;
     let count = |key| json_u64(timing, key).map_or("not recorded".to_string(), |v| v.to_string());
     let host = timing.get("host");
@@ -484,33 +511,26 @@ fn render_methodology(inputs: &SpeedInputs, records: &[SpeedRecord]) -> String {
             })
     };
     let omc_workers = json_u64(timing, "workers_used");
-    let rumoca_workers = json_u64(timing, "rumoca_sim_workers");
-    let contention = match (omc_workers, rumoca_workers) {
-        (Some(omc), Some(rumoca)) if omc == rumoca => "equal on both tools".to_string(),
-        (Some(omc), Some(rumoca)) if omc > rumoca => format!(
-            "**unequal**: OMC ran {omc} simulations at a time against rumoca's {rumoca}, which favours rumoca"
-        ),
-        (Some(omc), Some(rumoca)) => format!(
-            "**unequal**: rumoca ran {rumoca} simulations at a time against OMC's {omc}, which favours OMC"
-        ),
-        _ => "**not comparable**: a worker count was not recorded".to_string(),
-    };
     let ran = json_u64(timing, "batches_ran").unwrap_or(0);
     let total = json_u64(timing, "batches_total").unwrap_or(0);
     format!(
         "\n<details>\n<summary><strong>Methodology</strong></summary>\n\n\
          - Runner: image {}, environment {}, {} logical CPUs, {} physical cores; {} shard(s).\n\
          - Parallelism per shard: rumoca compile stage {}, rumoca simulations {}, OMC reference \
-         simulations {} (OMC threads {}); simulation contention {contention}.\n\
+         compile and simulation {} (OMC threads {}); compile contention {}; simulation contention {}.\n\
          - Solver and tolerance: rumoca {}; OMC {}.\n\
-         - Output density: rumoca {}; OMC {}.\n\
+         - Output density: {}\n\
+         - Initialization: {:.0}% of rumoca's simulation seconds; OMC's `timeSimulation` \
+         includes its initialization.\n\
          - Cache: OMC references ran for {ran} of {total} models this run ({} reused from cache); \
-         rumoca compiled and simulated every model this run.\n\
+         {other_context} agreeing models are excluded because their OMC timing was taken under \
+         another worker count, thread count, or host. Rumoca compiled and simulated every model \
+         this run.\n\
          - Front end scope: rumoca's `compile_seconds` covers resolving each model's reachable \
          library classes again for that model; OMC's `timeFrontend` follows one `loadModel` per \
          session, which no per-model OMC timer includes.\n\
-         - Parity gating: only models whose traces agree with OMC (high or near band) are timed; \
-         {} models.\n\n</details>\n",
+         - Parity gating: only models in the comparator's high or near band are timed; {} models.\
+         \n\n</details>\n",
         host_field("image"),
         host_field("runner_environment"),
         host_field("logical_cpus"),
@@ -520,13 +540,82 @@ fn render_methodology(inputs: &SpeedInputs, records: &[SpeedRecord]) -> String {
         count("rumoca_sim_workers"),
         count("workers_used"),
         count("omc_threads"),
-        setting_summary(records, true, &["solver", "rtol"]),
+        contention_flag(
+            "compile",
+            omc_workers,
+            json_u64(timing, "rumoca_stage_workers")
+        ),
+        contention_flag(
+            "simulation",
+            omc_workers,
+            json_u64(timing, "rumoca_sim_workers")
+        ),
+        setting_summary(records, true, &["integrator", "requested_solver", "rtol"]),
         setting_summary(records, false, &["method", "tolerance"]),
-        setting_summary(records, true, &["output_points"]),
-        setting_summary(records, false, &["number_of_intervals"]),
+        density_flag(records),
+        initialization_share(records),
         total.saturating_sub(ran),
         records.len(),
     )
+}
+
+/// Whether `stage` ran as many tasks at a time on both tools.
+fn contention_flag(stage: &str, omc: Option<u64>, rumoca: Option<u64>) -> String {
+    match (omc, rumoca) {
+        (Some(omc), Some(rumoca)) if omc == rumoca => "equal on both tools".to_string(),
+        (Some(omc), Some(rumoca)) if omc > rumoca => format!(
+            "**unequal**: OMC ran {omc} {stage} tasks at a time against rumoca's {rumoca}, which favours rumoca"
+        ),
+        (Some(omc), Some(rumoca)) => format!(
+            "**unequal**: rumoca ran {rumoca} {stage} tasks at a time against OMC's {omc}, which favours OMC"
+        ),
+        _ => format!("**not comparable**: a {stage} worker count was not recorded"),
+    }
+}
+
+/// Whether each timed model's output grid had as many intervals on both
+/// tools (N intervals are N + 1 points; event points come on top).
+fn density_flag(records: &[SpeedRecord]) -> String {
+    let intervals = |settings: Option<&Value>, key| settings.and_then(|s| json_u64(s, key));
+    let (mut equal, mut unequal, mut unrecorded) = (0, 0, 0);
+    for record in records {
+        let rumoca = intervals(record.rumoca_settings.as_ref(), "output_intervals");
+        let omc = intervals(record.omc_settings.as_ref(), "number_of_intervals");
+        match (rumoca, omc) {
+            (Some(rumoca), Some(omc)) if rumoca == omc => equal += 1,
+            (Some(_), Some(_)) => unequal += 1,
+            _ => unrecorded += 1,
+        }
+    }
+    let flag = if unequal == 0 && unrecorded == 0 {
+        "equal on every model".to_string()
+    } else {
+        format!(
+            "**unequal or unrecorded on {} models**",
+            unequal + unrecorded
+        )
+    };
+    format!(
+        "{flag}: {equal} models with the same number of grid intervals on both tools, \
+         {unequal} different, {unrecorded} not recorded. Both apply OMC's rule (the \
+         experiment `Interval`, else 500 intervals); rumoca's {}, OMC's {}.",
+        setting_summary(records, true, &["output_intervals"]),
+        setting_summary(records, false, &["number_of_intervals"]),
+    )
+}
+
+/// Rumoca's initialization seconds as a share of its simulation seconds.
+fn initialization_share(records: &[SpeedRecord]) -> f64 {
+    let initialization: f64 = records.iter().map(|r| r.rumoca.initialization).sum();
+    let simulation: f64 = records
+        .iter()
+        .map(|r| r.rumoca.initialization + r.rumoca.run)
+        .sum();
+    if simulation > 0.0 {
+        100.0 * initialization / simulation
+    } else {
+        0.0
+    }
 }
 
 /// The most common value of each `keys` setting across `records`, with its
