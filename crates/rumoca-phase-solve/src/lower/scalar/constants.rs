@@ -81,20 +81,8 @@ impl<'dae> ScalarSelector<'dae> {
                 self.constant_real_inner(element, selected, reach, active)
             }
             dae::ExpressionOperation::Comprehension { domain, body } => {
-                let body_count = scalar_count(self.view, body);
-                let point = self
-                    .view
-                    .domain(domain)
-                    .expect("checked comprehension domain resolves")
-                    .structured()
-                    .index_tuple_at(scalar / body_count)
-                    .map_err(|_| LowerError::contract("checked domain remains valid", span))?
-                    .ok_or_else(|| {
-                        LowerError::contract("checked scalar selects a domain point", span)
-                    })?;
-                let mut nested = self.clone();
-                nested.domain_points.push((domain, point));
-                nested.constant_real_inner(body, scalar % body_count, reach, active)
+                let (nested, body_scalar) = self.comprehension_point(domain, body, scalar)?;
+                nested.constant_real_inner(body, body_scalar, reach, active)
             }
             dae::ExpressionOperation::Coordinate(dae::CoordinateView::Binder(_)) => {
                 self.integer(expression, scalar).map(|value| value as f64)
