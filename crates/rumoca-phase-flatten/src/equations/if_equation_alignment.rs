@@ -82,3 +82,40 @@ pub(super) fn align_branches_by_assigned_target(
     reorder(else_equations, else_positions);
 }
 
+
+/// Row `eq_idx` of a run-time if-equation as one `v = if c1 then e1 elseif ...
+/// else eN` equation, when every branch's row assigns the same unsubscripted
+/// variable `v`.
+///
+/// This is the same equation as the conditional residual `if c1 then v - e1
+/// ... else v - eN` (MLS §8.3.4 selects one branch's row at every instant), in
+/// the explicit form that names `v` as the row's defined variable.
+pub(super) fn common_target_equation(
+    branches: &[(ast::Expression, Vec<SimpleEquation>)],
+    else_equations: &[SimpleEquation],
+    eq_idx: usize,
+    span: rumoca_core::Span,
+) -> Option<SimpleEquation> {
+    let else_equation = else_equations.get(eq_idx)?;
+    let target = assigned_target_identity(else_equation)?;
+    let same_target = branches.iter().all(|(_, equations)| {
+        equations
+            .get(eq_idx)
+            .and_then(assigned_target_identity)
+            .is_some_and(|identity| identity == target)
+    });
+    if !same_target {
+        return None;
+    }
+    Some(SimpleEquation {
+        lhs: else_equation.lhs.clone(),
+        rhs: ast::Expression::If {
+            branches: branches
+                .iter()
+                .map(|(condition, equations)| (condition.clone(), equations[eq_idx].rhs.clone()))
+                .collect(),
+            else_branch: std::sync::Arc::new(else_equation.rhs.clone()),
+            span,
+        },
+    })
+}

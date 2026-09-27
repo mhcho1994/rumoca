@@ -79,11 +79,27 @@ pub(super) fn expand_nested_if_to_simple(
         ));
     }
 
-    // Create simple equations with conditional residual semantics.
-    // Use `(if ... then residual_i else residual_j) = 0` so branch equations
-    // that target different variables remain semantically correct.
+    let mut expanded_branches = expanded_branches;
+    let mut else_simple_eqs = else_simple_eqs;
+    super::if_equation_alignment::align_branches_by_assigned_target(
+        &mut expanded_branches,
+        &mut else_simple_eqs,
+    );
+    // A row whose branches all assign one variable keeps that variable as its
+    // explicit left-hand side; any other row uses the conditional residual
+    // `(if ... then residual_i else residual_j) = 0`, which stays correct when
+    // the branch equations target different variables.
     let mut result = Vec::new();
     for eq_idx in 0..num_equations {
+        if let Some(equation) = super::if_equation_alignment::common_target_equation(
+            &expanded_branches,
+            &else_simple_eqs,
+            eq_idx,
+            span,
+        ) {
+            result.push(equation);
+            continue;
+        }
         let branches: Vec<(ast::Expression, ast::Expression)> = expanded_branches
             .iter()
             .map(|(cond, eqs)| (cond.clone(), build_simple_equation_residual(&eqs[eq_idx])))
@@ -229,6 +245,14 @@ fn build_conditional_residual_from_simple(
     eq_idx: usize,
     span: rumoca_core::Span,
 ) -> Result<ast::Expression, FlattenError> {
+    if let Some(equation) = super::if_equation_alignment::common_target_equation(
+        expanded_branches,
+        else_simple_eqs,
+        eq_idx,
+        span,
+    ) {
+        return Ok(build_simple_equation_residual(&equation));
+    }
     // Collect (condition, residual) pairs.
     let branches: Vec<(ast::Expression, ast::Expression)> = expanded_branches
         .iter()
