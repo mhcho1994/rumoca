@@ -565,7 +565,8 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
                 self.target.at(provenance).unary(operator, operand)
             }
             dae::ExpressionOperation::Binary { operator, lhs, rhs }
-                if super::builtin_profiles::is_differentiable_binary(operator) =>
+                if super::builtin_profiles::is_differentiable_binary(operator)
+                    || operator == dae::BinaryOperator::Power =>
             {
                 let lhs = self.materialize_exact_value(lhs, provenance)?;
                 let rhs = self.materialize_exact_value(rhs, provenance)?;
@@ -787,6 +788,7 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             dae::BinaryOperator::Divide | dae::BinaryOperator::ElementwiseDivide => {
                 self.differentiate_quotient(operator, lhs, rhs, order, provenance)
             }
+            dae::BinaryOperator::Power => self.differentiate_power(lhs, rhs, order, provenance),
             _ => unreachable!("differentiability preflight rejects this binary operator"),
         }
     }

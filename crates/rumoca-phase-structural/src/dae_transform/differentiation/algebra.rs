@@ -119,6 +119,90 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
         Ok(result)
     }
 
+    /// `d(u^v)` for a scalar base `u` and a time-invariant exponent `v`
+    /// (the preflight's `is_differentiable_power`): `v*u^(v-1)*du`, and at
+    /// order two `v*(v-1)*u^(v-2)*du^2 + v*u^(v-1)*d2u`.
+    pub(super) fn differentiate_power(
+        &mut self,
+        base: dae::ExprId<'source>,
+        exponent: dae::ExprId<'source>,
+        order: u8,
+        provenance: dae::DaeProvenance,
+    ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
+        assert!((1..=2).contains(&order));
+        let first = self.differentiate_order(base, 1, provenance)?;
+        let u = self.differentiation_value(base, provenance)?;
+        let v = self.differentiation_value(exponent, provenance)?;
+        let scaled_power = |this: &mut Self, drop: f64| {
+            let at = this.target.at(provenance);
+            let drop = at.literal(dae::DaeLiteral::Real(drop))?;
+            let reduced = this
+                .target
+                .at(provenance)
+                .binary(dae::BinaryOperator::Subtract, v, drop)?;
+            this.target
+                .at(provenance)
+                .binary(dae::BinaryOperator::Power, u, reduced)
+        };
+        let power_minus_one = scaled_power(self, 1.0)?;
+        let coefficient = self.target.at(provenance).binary(
+            dae::BinaryOperator::Multiply,
+            v,
+            power_minus_one,
+        )?;
+        if order == 1 {
+            return self.derivative_product(
+                dae::BinaryOperator::Multiply,
+                Derivative::Expression(coefficient),
+                first,
+                provenance,
+            );
+        }
+        let second = self.differentiate_order(base, 2, provenance)?;
+        let along_second = self.derivative_product(
+            dae::BinaryOperator::Multiply,
+            Derivative::Expression(coefficient),
+            second,
+            provenance,
+        )?;
+        let square = self.derivative_product(
+            dae::BinaryOperator::Multiply,
+            first,
+            first,
+            provenance,
+        )?;
+        let power_minus_two = scaled_power(self, 2.0)?;
+        let one = self
+            .target
+            .at(provenance)
+            .literal(dae::DaeLiteral::Real(1.0))?;
+        let v_minus_one = self
+            .target
+            .at(provenance)
+            .binary(dae::BinaryOperator::Subtract, v, one)?;
+        let falling = self
+            .target
+            .at(provenance)
+            .binary(dae::BinaryOperator::Multiply, v, v_minus_one)?;
+        let curvature = self.target.at(provenance).binary(
+            dae::BinaryOperator::Multiply,
+            falling,
+            power_minus_two,
+        )?;
+        let along_square = self.derivative_product(
+            dae::BinaryOperator::Multiply,
+            Derivative::Expression(curvature),
+            square,
+            provenance,
+        )?;
+        self.combine_sum(
+            dae::BinaryOperator::Add,
+            along_square,
+            along_second,
+            provenance,
+        )
+    }
+
     pub(super) fn differentiate_quotient(
         &mut self,
         operator: dae::BinaryOperator,

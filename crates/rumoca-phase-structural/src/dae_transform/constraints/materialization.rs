@@ -111,7 +111,7 @@ fn materialize_operation<'dae>(
             view, facts, operand, visited, context, states,
         ),
         dae::ExpressionOperation::Binary { operator, lhs, rhs }
-            if is_differentiable_binary(operator) =>
+            if is_differentiable_binary(operator) || operator == dae::BinaryOperator::Power =>
         {
             can_materialize_holonomic_value_in_context(view, facts, lhs, visited, context, states)
                 && can_materialize_holonomic_value_in_context(

@@ -37,7 +37,9 @@ use rumoca_ir_dae as dae;
 use crate::CausalDefinitions;
 use crate::residual_normalization::equation_sides;
 
-use super::builtin_profiles::{is_differentiable_binary, is_differentiable_builtin};
+use super::builtin_profiles::{
+    is_differentiable_binary, is_differentiable_builtin, is_differentiable_power,
+};
 use super::component_constraint::ComponentConstraint;
 use super::component_projection::projected_element;
 use super::equalities::{
@@ -1396,6 +1398,11 @@ impl<'facts, 'dae> HolonomicProofWalk<'facts, 'dae> {
                 operator: dae::UnaryOperator::Plus | dae::UnaryOperator::Negate,
                 operand,
             } => self.can_differentiate_order(operand, order, on_residual),
+            dae::ExpressionOperation::Binary { operator, lhs, rhs }
+                if is_differentiable_power(self.view, operator, lhs, rhs) =>
+            {
+                self.can_differentiate_order(lhs, order, on_residual)
+            }
             dae::ExpressionOperation::Binary { operator, lhs, rhs } => {
                 is_differentiable_binary(operator)
                     && self.can_differentiate_order(lhs, order, on_residual)
@@ -1719,6 +1726,11 @@ fn operation_is_differentiable<'dae>(
             operator: dae::UnaryOperator::Plus | dae::UnaryOperator::Negate,
             operand,
         } => is_differentiable_in_context(view, facts, operand, demoted, visited, context),
+        dae::ExpressionOperation::Binary { operator, lhs, rhs }
+            if context.is_empty() && is_differentiable_power(view, operator, lhs, rhs) =>
+        {
+            is_differentiable_in_context(view, facts, lhs, demoted, visited, context)
+        }
         dae::ExpressionOperation::Binary { operator, lhs, rhs }
             if is_differentiable_binary(operator) =>
         {
