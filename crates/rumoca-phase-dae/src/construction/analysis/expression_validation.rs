@@ -77,15 +77,21 @@ pub(super) fn validate_when_expression(
     roles: &HashMap<VarName, PlannedRole>,
     states: &HashSet<VarName>,
     clocked: bool,
-    enumeration_literals: &ShapeEnvironment,
+    model_values: &ShapeEnvironment,
 ) -> Result<(), ToDaeError> {
-    validate_expression_in_context_with_literals(
-        expression,
+    // The body reads the same model scope as a plain equation, so a range
+    // bound such as `1:n` over a settled parameter is proven the same way.
+    let binders = HashSet::new();
+    ExpressionValidator {
         roles,
         states,
-        when_body_context(clocked),
-        Some(enumeration_literals),
-    )
+        binders: &binders,
+        record_array_fields: None,
+        enumeration_literals: Some(model_values),
+        values: Some(model_values),
+        when_clause: when_body_context(clocked),
+    }
+    .validate(expression)
 }
 
 /// The `pre()` context of a when-clause body with the given clock ownership.

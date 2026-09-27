@@ -31,6 +31,7 @@ pub(crate) mod array_family;
 mod assert_equations;
 mod conditional_and_eval;
 mod der_divergent_branches;
+mod if_equation_alignment;
 mod parameter_selections;
 use der_divergent_branches::{branches_differ_in_der_targets, try_select_parameter_branch};
 use parameter_selections::branches_structurally_equal;
@@ -1507,7 +1508,7 @@ fn expand_if_equation(
         expanded_branches.push((block.cond.clone(), simple_eqs));
     }
 
-    let else_simple_eqs = if let Some(else_eqs) = else_block {
+    let mut else_simple_eqs = if let Some(else_eqs) = else_block {
         expand_to_simple_equations(ctx, else_eqs, prefix, span)?
     } else {
         vec![]
@@ -1524,7 +1525,7 @@ fn expand_if_equation(
         };
 
     if all_same_count {
-        // Fast path: position-based matching (original behavior)
+        if_equation_alignment::align_branches_by_assigned_target(&mut expanded_branches, &mut else_simple_eqs);
         let mut result = FlattenedEquations::default();
         let eq_context = ConditionalEquationContext {
             ctx,

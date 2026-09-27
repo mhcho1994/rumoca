@@ -147,6 +147,7 @@ use record_equations::analyze_record_equations;
 use sample_aliases::analyze_sample_aliases;
 use source_balance::{SourceBalanceInput, source_balance};
 use structured_families::validate_structured_families;
+pub(super) use structured_families::materialized_discrete_real_family;
 use unexecuted_branches::{check_function_assignment_shapes, check_unexecuted_branches};
 use when_chains::validate_when_chains;
 
