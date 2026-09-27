@@ -20,7 +20,7 @@ use diffsol::{
 use rumoca_solver::fmi_me::{
     MeAdvanceRequest, MeContinuousPoint, MeDerivativeHandle, MeIntegrationError,
     MeIntegratorBackend, MeNumericalFailure, MeNumericalSetup, MeStepCandidate,
-    accepted_interval_contains,
+    accepted_interval_contains, accepted_step_roundoff,
 };
 use self_cell::self_cell;
 
@@ -405,19 +405,27 @@ fn build_problem(
         .build()
         .map_err(|error| numerical(MeNumericalFailure::Construction, error));
     if let Ok(problem) = problem.as_mut() {
-        problem.ode_options.min_timestep = roundoff_step_floor(point.time(), initial_step);
+        problem.ode_options.min_timestep = scaled_step_floor(point.time(), initial_step);
     }
     probing.set(false);
     problem
 }
 
-/// The smallest step that still advances time distinguishably: four units of
-/// roundoff in the larger of the current time and the requested first step,
-/// the DASSL `hmin` rule. diffsol's default is an absolute `1e-13`, which is
-/// coarser than the first steps a nanosecond-scale circuit needs, so such a
-/// model failed at its start although every step it takes is resolvable.
-fn roundoff_step_floor(time: f64, initial_step: f64) -> f64 {
-    4.0 * f64::EPSILON * time.abs().max(initial_step.abs())
+/// diffsol's absolute minimum step.
+const ABSOLUTE_STEP_FLOOR: f64 = 1e-13;
+
+/// The smallest step BDF may take from `time`: diffsol's absolute floor,
+/// lowered to what the time coordinate can still resolve. A nanosecond-scale
+/// circuit needs first steps far below `1e-13` and failed at its start under
+/// the absolute floor although every step it takes is resolvable. The floor
+/// never drops below twice the host's accepted-step roundoff at `time`, so a
+/// step the solver may still take is one the host accepts as progress, and
+/// four units of roundoff in the requested first step bound it from below
+/// where `time` is zero (the DASSL `hmin` rule).
+fn scaled_step_floor(time: f64, initial_step: f64) -> f64 {
+    (2.0 * accepted_step_roundoff(time, 0.0))
+        .max(4.0 * f64::EPSILON * initial_step.abs())
+        .min(ABSOLUTE_STEP_FLOOR)
 }
 
 fn initial_state(
