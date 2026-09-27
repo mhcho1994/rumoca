@@ -185,6 +185,9 @@ fn materialize_algebraic<'dae>(
             )
         });
     }
+    if facts.is_zero_pinned(algebraic.index()) {
+        return true;
+    }
     facts
         .algebraic_value_definition(view, algebraic)
         .is_some_and(|(definition, _)| {

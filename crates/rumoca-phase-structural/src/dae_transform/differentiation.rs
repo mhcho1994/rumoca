@@ -681,6 +681,17 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
         {
             return self.materialize_component_value(&definition, provenance);
         }
+        if self.facts.is_zero_pinned(algebraic.index()) {
+            let variable = self
+                .source
+                .variable(algebraic.into())
+                .expect("materialized algebraic declaration resolves");
+            return super::expressions::shaped_zero(
+                self.target,
+                variable.value_type().dimensions(),
+                provenance,
+            );
+        }
         let (anchor, sign) = self
             .facts
             .algebraic_value_definition(self.source, algebraic)

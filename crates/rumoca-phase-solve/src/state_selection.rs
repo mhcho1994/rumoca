@@ -249,7 +249,9 @@ fn formal_below_retained_dimension<'model>(
     if prepared.inspect(|system| system.manifold.is_empty()) {
         return Ok(None);
     }
-    let formal = construct_formal_derivatives(model)?;
+    let Ok(formal) = construct_formal_derivatives(model) else {
+        return Ok(None);
+    };
     let dimension = formal.inspect(|formal| formal.formal_dimension());
     let retained = prepared.as_dae().inspect(|view| {
         view.variables()

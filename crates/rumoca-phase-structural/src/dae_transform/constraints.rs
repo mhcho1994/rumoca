@@ -140,6 +140,22 @@ impl DifferentiationFacts {
             .and_then(|definition| view.expression_id(definition as usize))
     }
 
+    /// An algebraic whose class a lone-member residual (`x = 0`) pins to zero,
+    /// so its exact value is zero although no expression names it.
+    pub(super) fn is_zero_pinned(&self, algebraic: u32) -> bool {
+        matches!(
+            self.equalities.value_anchor_of(algebraic),
+            Some((
+                super::equalities::EqualityAnchor::Invariant {
+                    value: None,
+                    zero: true,
+                    ..
+                },
+                _
+            ))
+        )
+    }
+
     /// Select the same exact value for materialization proof and reconstruction.
     /// An invariant class can prove a zero derivative without naming its value.
     pub(super) fn algebraic_value_definition<'dae>(

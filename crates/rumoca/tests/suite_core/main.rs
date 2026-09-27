@@ -73,6 +73,7 @@ mod event_latch_cascade;
 mod event_relation_cascade;
 mod final_parameter_modifiers;
 mod fixed_array_element_initialization;
+mod floating_star_index_reduction;
 mod fmi_me_host_divergence;
 mod fmi_projection_descriptors;
 mod fmi_pure_call_families;
