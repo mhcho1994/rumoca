@@ -335,3 +335,25 @@ fn a_discrete_memory_value_is_read_from_its_slot_at_every_call() {
         "the stored value is forwarded"
     );
 }
+
+/// A sharing that does not compute its program's values fails the proof: the
+/// program keeps its own operations and the failure is counted, never silent.
+#[test]
+fn a_sharing_that_fails_its_proof_is_counted_and_admits_nothing() {
+    let program = product_plus(0, 1, 1.0);
+    let other = product_plus(0, 1, 2.0);
+    let targets = [usize::MAX];
+    let wrong = SharedValueSegments::derive(&[AssignmentProgram {
+        ops: &other,
+        targets: &targets,
+    }]);
+    let before = shared_value_proof_failures();
+    assert!(admit_proven(wrong, &program, &targets).is_none());
+    assert!(shared_value_proof_failures() > before);
+    let right = SharedValueSegments::derive(&[AssignmentProgram {
+        ops: &program,
+        targets: &targets,
+    }]);
+    let admitted = admit_proven(right, &program, &targets).expect("a proven sharing");
+    assert_eq!(count(&admitted.ops, "StoreOutput"), 1);
+}

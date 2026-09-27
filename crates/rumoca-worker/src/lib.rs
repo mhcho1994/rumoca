@@ -845,6 +845,10 @@ pub struct WorkerModelResult {
     /// simulation completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sim_settings: Option<WorkerSimSettings>,
+    /// Single-program sharings whose shared-value proof failed while this
+    /// model was simulated (each ran unshared); absent when none failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_value_proof_failures: Option<u64>,
     pub ir_dae_file: Option<String>,
     pub ir_solve_file: Option<String>,
     pub ir_solve_error: Option<String>,
@@ -1003,6 +1007,7 @@ impl WorkerModelResult {
             projection_fallback_rate: None,
             projection_fallback_detail: None,
             sim_settings: None,
+            shared_value_proof_failures: None,
             ir_dae_file: None,
             ir_solve_file: None,
             ir_solve_error: None,

@@ -1311,11 +1311,14 @@ fn run_and_classify_simulation(
 ) {
     rumoca_sim::reset_projection_fallbacks();
     rumoca_sim::reset_step_counts();
+    let proof_failures_before = rumoca_sim::shared_value_proof_failures();
     let sim_start = Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_simulation_pipeline(result.dae.as_ref(), opts, progress, request)
     }));
     row.record_projection_fallbacks(&rumoca_sim::projection_fallbacks());
+    let proof_failures = rumoca_sim::shared_value_proof_failures() - proof_failures_before;
+    row.shared_value_proof_failures = (proof_failures > 0).then_some(proof_failures);
     let elapsed = sim_start.elapsed().as_secs_f64();
     match outcome {
         Ok(Ok(run)) => {

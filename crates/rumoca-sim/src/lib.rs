@@ -26,9 +26,10 @@ pub use rumoca_solver::{
     TimeoutBudget, TimeoutExceeded, build_simulation_metrics_value, build_simulation_payload,
     is_solver_timeout_panic, panic_on_expired_solver_deadline, projection_fallbacks,
     projection_fallbacks_value, reset_projection_fallbacks, reset_step_counts, run_timeout_result,
-    run_timeout_step, run_timeout_step_result, runtime_progress_snapshot, step_counts,
-    stop_time_reached_with_tol, time_advanced_with_tol, time_match_with_tol, trace_runtime_done,
-    trace_runtime_progress, trace_runtime_start, trace_runtime_step_fail, trace_runtime_timeout,
+    run_timeout_step, run_timeout_step_result, runtime_progress_snapshot,
+    shared_value_proof_failures, step_counts, stop_time_reached_with_tol, time_advanced_with_tol,
+    time_match_with_tol, trace_runtime_done, trace_runtime_progress, trace_runtime_start,
+    trace_runtime_step_fail, trace_runtime_timeout,
 };
 
 mod build_timing;

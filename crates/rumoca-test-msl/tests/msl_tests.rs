@@ -413,6 +413,9 @@ struct MslModelResult {
     /// The simulation's solver, tolerances, output points, steps, and events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sim_settings: Option<rumoca_worker::WorkerSimSettings>,
+    /// Failed single-program shared-value proofs while simulating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_value_proof_failures: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sim_trace_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

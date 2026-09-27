@@ -240,6 +240,13 @@ pub(crate) fn note_fallback(site: ProjectionSite, fallback: ProjectionFallback) 
     });
 }
 
+/// Single-program sharings whose shared-value proof failed in this process;
+/// each ran its program unshared (SPEC_0043 shared-value segments).
+#[must_use]
+pub fn shared_value_proof_failures() -> u64 {
+    rumoca_ir_solve::shared_value_proof_failures()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
