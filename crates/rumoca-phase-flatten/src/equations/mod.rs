@@ -793,12 +793,14 @@ fn expand_reduction_over_comprehension(
         "product" => rumoca_core::OpBinary::Mul,
         _ => return Ok(None),
     };
-    let [ast::Expression::ArrayComprehension {
-        expr: body,
-        indices,
-        filter,
-        ..
-    }] = args
+    let [
+        ast::Expression::ArrayComprehension {
+            expr: body,
+            indices,
+            filter,
+            ..
+        },
+    ] = args
     else {
         return Ok(None);
     };

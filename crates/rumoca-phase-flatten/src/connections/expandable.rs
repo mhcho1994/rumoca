@@ -10,8 +10,8 @@ use rustc_hash::FxHashMap;
 use rumoca_ir_ast as ast;
 use rumoca_ir_flat as flat;
 
-use super::equation_generation;
 use super::endpoint_subscripts::ConnectionEndpointIndex;
+use super::equation_generation;
 use super::{ConnectionVarIndex, find_sub_variables_indexed};
 use crate::errors::FlattenError;
 
@@ -36,7 +36,6 @@ pub(super) fn split_trailing_indices(path: &str) -> (&str, usize) {
     }
     (base, count)
 }
-
 
 /// Mirror every flat variable under `source` onto `target`, returning whether
 /// anything was added.
@@ -73,7 +72,7 @@ fn mirror_connector_members(
 
     let mut added = false;
     for (origin, suffix) in work {
-        let new_name = rumoca_core::VarName::new(&format!("{target}{suffix}"));
+        let new_name = rumoca_core::VarName::new(format!("{target}{suffix}"));
         if flat.variables.contains_key(&new_name) {
             continue;
         }
@@ -117,7 +116,6 @@ fn mirror_connector_members(
     Ok(added)
 }
 
-
 /// Whether `path` names an expandable connector instance already in Flat.
 fn is_expandable_instance(
     flat: &flat::Model,
@@ -133,7 +131,6 @@ fn is_expandable_instance(
                 .is_some_and(|variable| variable.from_expandable_connector)
         })
 }
-
 
 /// Elaborate MLS §9.1.3 expandable-connector member augmentation.
 ///
@@ -200,7 +197,6 @@ pub(super) fn augment_expandable_connectors(
     check_augmented_member_sources(connections, flat, endpoint_index)
 }
 
-
 /// Every augmented member must be driven exactly once.
 ///
 /// Augmentation gives a member the shape of what it was connected to, but the
@@ -232,7 +228,7 @@ fn check_augmented_member_sources(
             current = next;
         }
     }
-    let mut union = |parent: &mut IndexMap<String, String>, a: &str, b: &str| {
+    let union = |parent: &mut IndexMap<String, String>, a: &str, b: &str| {
         let (ra, rb) = (find(parent, a), find(parent, b));
         if ra != rb {
             parent.insert(ra, rb);
@@ -307,9 +303,7 @@ fn check_augmented_member_sources(
                 _ => {}
             }
             if endpoint_index.needs_expandable_augmentation(endpoint) {
-                augmented
-                    .entry(root)
-                    .or_insert((path.clone(), conn.span));
+                augmented.entry(root).or_insert((path.clone(), conn.span));
             }
         }
     }
@@ -326,7 +320,6 @@ fn check_augmented_member_sources(
     Ok(())
 }
 
-
 /// Whether a connect endpoint already names something in Flat.
 pub(super) fn endpoint_is_present(
     flat: &flat::Model,
@@ -337,7 +330,9 @@ pub(super) fn endpoint_is_present(
     let (base, _) = split_trailing_indices(path);
     flat.variables
         .contains_key(&rumoca_core::VarName::new(path))
-        || flat.variables.contains_key(&rumoca_core::VarName::new(base))
+        || flat
+            .variables
+            .contains_key(&rumoca_core::VarName::new(base))
         || !find_sub_variables_indexed(path, prefix_children, var_index).is_empty()
         || !find_sub_variables_indexed(base, prefix_children, var_index).is_empty()
 }

@@ -22,8 +22,8 @@ mod function_output_validation;
 mod function_param_alias;
 mod function_requests;
 mod higher_order;
-mod pure_constants;
 mod package_constants;
+mod pure_constants;
 #[cfg(test)]
 mod tests;
 
@@ -55,13 +55,13 @@ use function_context::{
 };
 pub(crate) use function_metadata::FunctionTypeCatalog;
 pub(crate) use function_metadata::lower_record_function_params;
-pub(crate) use higher_order::specialize_function_inputs;
-pub(crate) use pure_constants::fold_pure_constant_calls;
 use function_metadata::*;
 use function_output_validation::validate_function_outputs_assigned;
 use function_param_alias::function_param_type_alias_dims;
 use function_requests::{FunctionIdentitySet, same_function_request};
 pub(crate) use function_requests::{FunctionRequest, FunctionRequests};
+pub(crate) use higher_order::specialize_function_inputs;
+pub(crate) use pure_constants::fold_pure_constant_calls;
 
 use crate::algorithms;
 use crate::ast_lower;

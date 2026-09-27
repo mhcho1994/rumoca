@@ -48,7 +48,9 @@ end Derived;
 #[test]
 fn folding_on_replaces_a_derived_real_binding_with_its_value() {
     let mut session = session(true);
-    session.add_document("derived.mo", DERIVED).expect("fixture parses");
+    session
+        .add_document("derived.mo", DERIVED)
+        .expect("fixture parses");
     let compiled = session.compile_model("Derived").expect("model compiles");
 
     let binding = binding_of(&compiled.flat, "d");
@@ -61,7 +63,9 @@ fn folding_on_replaces_a_derived_real_binding_with_its_value() {
 #[test]
 fn folding_off_keeps_the_derived_real_binding_as_written() {
     let mut session = session(false);
-    session.add_document("derived.mo", DERIVED).expect("fixture parses");
+    session
+        .add_document("derived.mo", DERIVED)
+        .expect("fixture parses");
     let compiled = session.compile_model("Derived").expect("model compiles");
 
     let binding = binding_of(&compiled.flat, "d");

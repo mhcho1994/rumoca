@@ -27,12 +27,11 @@
 mod history_operator_checked;
 
 mod algorithm_parameter_range;
-mod bitcode_disasm;
-mod type_level_bounds;
 mod array_der_coupling_test;
 mod array_subscript_test;
 mod backend_executor_differential;
 mod balance_diagnostic;
+mod bitcode_disasm;
 mod cli_diagnostic_rendering;
 mod cli_emit;
 mod cli_fmt_lint;
@@ -92,6 +91,7 @@ mod pipeline_test;
 mod prepared_vectors_refresh;
 mod replaceable_function_redeclare;
 mod semi_linear_zero_flow;
+mod type_level_bounds;
 // quadrotor_se23_regression_test.rs lives in `suite_heavy_solve`
 // (required-features = ["heavy-solve-tests"]): until the compact Solve
 // function-fold owner lands, its guards grind through ~139 MB of

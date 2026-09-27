@@ -687,8 +687,8 @@ fn remap_component_reference(
 
 fn remap_equation_origin(origin: &mut flat::EquationOrigin, rename_map: &HashMap<String, String>) {
     match origin {
-        flat::EquationOrigin::ComponentEquation { .. }
-        | flat::EquationOrigin::Algorithm { .. } => {}
+        flat::EquationOrigin::ComponentEquation { .. } | flat::EquationOrigin::Algorithm { .. } => {
+        }
         // Both forms are remapped. Only the rendered description existed at
         // first and it was skipped here, so a flow sum kept the pre-simplified
         // names and anything reading it saw variables the model no longer had.

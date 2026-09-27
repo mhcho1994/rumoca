@@ -176,31 +176,40 @@ fn self_assignments_are_all_guarded_by_when(
     let mut found = false;
     for statement in statements {
         match statement {
-            Statement::Assignment { comp, value, .. } => {
+            Statement::Assignment { comp, value, .. }
                 if rumoca_core::component_ref_to_base_reference(comp).var_name() == target
-                    && expression_reads_current_target(value, target, roles)
-                {
-                    found = true;
-                    guarded &= inside_when;
-                }
+                    && expression_reads_current_target(value, target, roles) =>
+            {
+                found = true;
+                guarded &= inside_when;
             }
             Statement::When { blocks, .. } => {
                 for block in blocks {
-                    if self_assignment_search(&block.stmts, target, roles, true, &mut found) {
-                        // nested search updates `found`; guarded stays true
-                    }
+                    // The nested search updates `found`; `guarded` stays true
+                    // because everything it reaches is inside a when-clause.
+                    let _ = self_assignment_search(&block.stmts, target, roles, true, &mut found);
                 }
             }
-            Statement::If { cond_blocks, else_block, .. } => {
+            Statement::If {
+                cond_blocks,
+                else_block,
+                ..
+            } => {
                 for block in cond_blocks {
                     guarded &= self_assignments_are_all_guarded_by_when(
-                        &block.stmts, target, roles, inside_when,
+                        &block.stmts,
+                        target,
+                        roles,
+                        inside_when,
                     );
                     found |= self_assignment_exists(&block.stmts, target, roles);
                 }
                 if let Some(else_block) = else_block {
                     guarded &= self_assignments_are_all_guarded_by_when(
-                        else_block, target, roles, inside_when,
+                        else_block,
+                        target,
+                        roles,
+                        inside_when,
                     );
                     found |= self_assignment_exists(else_block, target, roles);
                 }
@@ -212,7 +221,10 @@ fn self_assignments_are_all_guarded_by_when(
             }
             Statement::While { block, .. } => {
                 guarded &= self_assignments_are_all_guarded_by_when(
-                    &block.stmts, target, roles, inside_when,
+                    &block.stmts,
+                    target,
+                    roles,
+                    inside_when,
                 );
                 found |= self_assignment_exists(&block.stmts, target, roles);
             }
@@ -250,7 +262,11 @@ fn self_assignment_exists(
         Statement::When { blocks, .. } => blocks
             .iter()
             .any(|block| self_assignment_exists(&block.stmts, target, roles)),
-        Statement::If { cond_blocks, else_block, .. } => {
+        Statement::If {
+            cond_blocks,
+            else_block,
+            ..
+        } => {
             cond_blocks
                 .iter()
                 .any(|block| self_assignment_exists(&block.stmts, target, roles))

@@ -137,6 +137,11 @@ impl CallbackRewriter {
         args: &[Expression],
         span: Span,
     ) -> Result<Expression, FlattenError> {
+        // One constructor for every way a callback's argument list can be
+        // wrong. Named here so each call site is a single expression.
+        let bad = |detail: &'static str| {
+            FlattenError::invalid_function_call_args(callback.reference.as_str(), detail, span)
+        };
         let unbound_slots = (0..callback.target.inputs.len())
             .filter(|slot| {
                 !callback
@@ -153,31 +158,17 @@ impl CallbackRewriter {
                     .iter()
                     .copied()
                     .find(|slot| callback.target.inputs[*slot].name == name)
-                    .ok_or_else(|| {
-                        FlattenError::invalid_function_call_args(
-                            callback.reference.as_str(),
-                            "unknown named callback input",
-                            span,
-                        )
-                    })?;
+                    .ok_or_else(|| bad("unknown named callback input"))?;
                 (slot, value)
             } else {
-                let slot = *unbound_slots.get(positional).ok_or_else(|| {
-                    FlattenError::invalid_function_call_args(
-                        callback.reference.as_str(),
-                        "too many callback inputs",
-                        span,
-                    )
-                })?;
+                let slot = *unbound_slots
+                    .get(positional)
+                    .ok_or_else(|| bad("too many callback inputs"))?;
                 positional += 1;
                 (slot, argument)
             };
             if supplied.insert(slot, value).is_some() {
-                return Err(FlattenError::invalid_function_call_args(
-                    callback.reference.as_str(),
-                    "duplicate callback input",
-                    span,
-                ));
+                return Err(bad("duplicate callback input"));
             }
         }
         let mut arguments = Vec::new();
@@ -189,13 +180,9 @@ impl CallbackRewriter {
             {
                 arguments.push(parameter_reference(&capture.parameter)?);
             } else {
-                let value = supplied.get(&slot).ok_or_else(|| {
-                    FlattenError::invalid_function_call_args(
-                        callback.reference.as_str(),
-                        "unfilled callback input",
-                        span,
-                    )
-                })?;
+                let value = supplied
+                    .get(&slot)
+                    .ok_or_else(|| bad("unfilled callback input"))?;
                 arguments.push((*value).clone());
             }
         }

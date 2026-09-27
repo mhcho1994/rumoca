@@ -232,7 +232,8 @@ const FOREIGN_SOURCE_ID_CRATES: &[&str] = &["rumoca-bitcode"];
 
 fn declares_its_own_source_id(path: &Path) -> bool {
     FOREIGN_SOURCE_ID_CRATES.iter().any(|crate_name| {
-        path.components().any(|component| component.as_os_str() == *crate_name)
+        path.components()
+            .any(|component| component.as_os_str() == *crate_name)
     })
 }
 

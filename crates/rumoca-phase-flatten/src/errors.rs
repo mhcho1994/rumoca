@@ -257,7 +257,9 @@ pub enum FlattenError {
     /// Two outputs on one member is an unresolvable conflict, and an input with
     /// no output is an undriven signal; both are model errors that augmentation
     /// must not paper over by connecting them anyway.
-    #[error("expandable connector member `{member}` has {sources} sources; exactly one is required")]
+    #[error(
+        "expandable connector member `{member}` has {sources} sources; exactly one is required"
+    )]
     #[diagnostic(
         code(rumoca::flatten::EF033),
         help(
@@ -456,7 +458,10 @@ pub enum FlattenError {
     /// A pure, fully evaluated binding attempts a source array coordinate that
     /// is outside the actual array. This code never reports an unsupported fold.
     #[error("constant evaluation proves array index out of bounds: index {index}, size {size}")]
-    #[diagnostic(code(rumoca::flatten::EF032), help("the declared binding accesses outside the supplied array"))]
+    #[diagnostic(
+        code(rumoca::flatten::EF032),
+        help("the declared binding accesses outside the supplied array")
+    )]
     ConstantIndexOutOfBounds {
         index: i64,
         size: usize,

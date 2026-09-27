@@ -10,8 +10,8 @@
 //!
 //! # Layering
 //!
-//! [`schema`] is the public contract. [`export`] projects a checked DAE into
-//! it; [`import`] validates an artifact and rebuilds a checked DAE from it.
+//! [`schema`] is the public contract. [`export()`] projects a checked DAE into
+//! it; [`import()`] validates an artifact and rebuilds a checked DAE from it.
 //! Neither direction exposes an internal Rumoca type, and the internal
 //! `DAE_SCHEMA_VERSION` is free to change without touching
 //! [`schema::RBC_VERSION`].
@@ -24,8 +24,8 @@
 //! producing an invalid model.
 
 pub mod build;
-mod connector_validation;
 pub mod codec;
+mod connector_validation;
 pub mod export;
 pub mod import;
 pub mod link;

@@ -41,10 +41,10 @@ pub mod cli;
 // Rumoca Bitcode CLI: the external compiler interface.
 #[cfg(feature = "scheduled-sim")]
 pub mod bitcode_cli;
+pub mod bitcode_disasm;
+pub mod bitcode_execution;
 #[cfg(feature = "scheduled-sim")]
 pub mod bitcode_link;
-pub mod bitcode_execution;
-pub mod bitcode_disasm;
 
 // CLI subcommand implementations. Declared here (rather than in `main.rs`) so
 // both the binary and the reusable `cli` module can reach them; `cli` owns the

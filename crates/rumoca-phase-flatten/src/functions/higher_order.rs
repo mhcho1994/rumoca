@@ -137,13 +137,14 @@ impl Specializer {
         let mut callbacks = Vec::new();
         let mut values = Vec::new();
         for (input, value) in function.inputs.iter().zip(args) {
-            if input.type_class == Some(ClassType::Function) {
-                let Some(callback) = self.callback(input, value)? else {
-                    return Ok(None);
-                };
-                callbacks.push(callback);
-            } else {
+            if input.type_class != Some(ClassType::Function) {
                 values.push(self.rewrite_expression(value)?);
+                continue;
+            }
+            // A function input this pass cannot bind leaves the call alone.
+            match self.callback(input, value)? {
+                Some(callback) => callbacks.push(callback),
+                None => return Ok(None),
             }
         }
         if callbacks.is_empty() {

@@ -18,7 +18,8 @@ pub(crate) fn fold_pure_constant_calls(model: &mut flat::Model) -> Result<(), Fl
     // value immutable. Every fixed parameter must be non-tunable first.
     let fixed_parameters_frozen = model.variables.values().all(|variable| {
         !matches!(variable.variability, Variability::Parameter(_))
-            || variable.fixed == Some(false) || variable.evaluate
+            || variable.fixed == Some(false)
+            || variable.evaluate
     });
     // A frozen parameter can depend on a later frozen parameter. Only insert
     // newly established values; the finite declaration set bounds this loop.
@@ -26,7 +27,9 @@ pub(crate) fn fold_pure_constant_calls(model: &mut flat::Model) -> Result<(), Fl
         let mut changed = false;
         for (name, variable) in &model.variables {
             if !(matches!(variable.variability, Variability::Constant(_))
-                || (matches!(variable.variability, Variability::Parameter(_)) && fixed_parameters_frozen && variable.evaluate))
+                || (matches!(variable.variability, Variability::Parameter(_))
+                    && fixed_parameters_frozen
+                    && variable.evaluate))
                 || variable.fixed == Some(false)
                 || context.parameters.contains_key(name.as_str())
             {
@@ -117,7 +120,6 @@ impl FallibleExpressionRewriter for PureCallFolder {
     }
 }
 impl FallibleStatementRewriter for PureCallFolder {}
-
 
 fn literal_value(value: Value, span: Span) -> Option<Expression> {
     let value = match value {

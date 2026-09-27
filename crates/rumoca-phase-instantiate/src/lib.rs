@@ -1254,7 +1254,10 @@ fn build_instance_data(
         from_expandable_connector: args.ctx.is_in_expandable_connector(),
         evaluate: args.evaluate
             || (args.ctx.options.freeze_parameters
-                && matches!(args.effective_variability, rumoca_core::Variability::Parameter(_))
+                && matches!(
+                    args.effective_variability,
+                    rumoca_core::Variability::Parameter(_)
+                )
                 && args.attrs.fixed != Some(false)),
         is_final: args.comp.is_final,
         is_overconstrained: args.ctx.is_in_overconstrained(),

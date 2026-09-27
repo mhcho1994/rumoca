@@ -33,12 +33,21 @@ fn disassemble(extra: &[&str]) -> String {
     let artifact = work.path().join("fixture.rbc");
 
     let compiled = Command::new(env!("CARGO_BIN_EXE_rumoca"))
-        .args(["compile", source.to_str().unwrap(), "--model", "DisasmFixture",
-               "--emit-bitcode", artifact.to_str().unwrap()])
+        .args([
+            "compile",
+            source.to_str().unwrap(),
+            "--model",
+            "DisasmFixture",
+            "--emit-bitcode",
+            artifact.to_str().unwrap(),
+        ])
         .output()
         .expect("compile runs");
-    assert!(artifact.exists(), "fixture must compile: {}",
-            String::from_utf8_lossy(&compiled.stderr));
+    assert!(
+        artifact.exists(),
+        "fixture must compile: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
 
     let mut args = vec!["bitcode", "disasm", artifact.to_str().unwrap()];
     args.extend_from_slice(extra);
@@ -46,8 +55,11 @@ fn disassemble(extra: &[&str]) -> String {
         .args(&args)
         .output()
         .expect("disasm runs");
-    assert!(listing.status.success(), "disasm must succeed: {}",
-            String::from_utf8_lossy(&listing.stderr));
+    assert!(
+        listing.status.success(),
+        "disasm must succeed: {}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
     String::from_utf8(listing.stdout).expect("utf8")
 }
 
@@ -62,8 +74,7 @@ fn equations_are_rendered_not_referenced() {
         "the residual should be resolved and infix, got:\n{listing}"
     );
     assert!(
-        listing.contains("0 = (der(v) - -(g / k))")
-            || listing.contains("0 = (der(v) - (-g / k))"),
+        listing.contains("0 = (der(v) - -(g / k))") || listing.contains("0 = (der(v) - (-g / k))"),
         "a nested expression should resolve through both operands, got:\n{listing}"
     );
     assert!(
@@ -81,7 +92,10 @@ fn a_derived_parameter_binding_is_shown_with_its_declaration() {
         listing.contains("parameter") && listing.contains("binding="),
         "parameter lines should show their binding, got:\n{listing}"
     );
-    assert!(listing.contains("der(x)"), "derivative coordinates spell as der(x)");
+    assert!(
+        listing.contains("der(x)"),
+        "derivative coordinates spell as der(x)"
+    );
 }
 
 #[test]

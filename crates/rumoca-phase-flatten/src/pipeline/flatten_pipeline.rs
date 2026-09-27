@@ -44,9 +44,7 @@ impl<'a> OverlayScopeIndex<'a> {
         let class_definitions = overlay
             .classes
             .values()
-            .filter_map(|class_data| {
-                Some((class_data.instance_id, class_data.class_def_id?))
-            })
+            .filter_map(|class_data| Some((class_data.instance_id, class_data.class_def_id?)))
             .collect();
         Self {
             classes,

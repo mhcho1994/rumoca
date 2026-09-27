@@ -1,7 +1,7 @@
 //! Rumoca Bitcode v2 → checked DAE.
 //!
 //! Import is deliberately *not* a deserializer that fills in structs. It runs
-//! [`crate::validate`] first, then rebuilds the model by issuing the DAE's own
+//! [`crate::validate()`] first, then rebuilds the model by issuing the DAE's own
 //! checked construction operations. Every one of the DAE's construction
 //! invariants therefore applies to imported bitcode exactly as it applies to a
 //! freshly compiled model — an artifact that has been through an untrusted

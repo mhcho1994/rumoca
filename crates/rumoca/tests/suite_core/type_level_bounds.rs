@@ -35,12 +35,15 @@ fn bound(flat: &rumoca_compile::compile::FlatModel, name: &str, which: &str) -> 
         "min" => &variable.min,
         _ => &variable.max,
     };
-    slot.as_ref().map_or_else(|| "<none>".to_string(), |e| format!("{e:?}"))
+    slot.as_ref()
+        .map_or_else(|| "<none>".to_string(), |e| format!("{e:?}"))
 }
 
 fn compiled() -> rumoca_compile::compile::CompilationResult {
     let mut session = Session::new(SessionConfig::default());
-    session.add_document("p.mo", FIXTURE).expect("fixture parses");
+    session
+        .add_document("p.mo", FIXTURE)
+        .expect("fixture parses");
     session.compile_model("P.M").expect("fixture compiles")
 }
 

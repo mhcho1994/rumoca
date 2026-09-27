@@ -11,9 +11,9 @@ mod certificate;
 mod certificate_tests;
 #[cfg(test)]
 mod compute_block_tests;
+pub mod execution;
 mod feature_query;
 pub mod fmi;
-pub mod execution;
 mod layout;
 mod linear_op;
 mod model;

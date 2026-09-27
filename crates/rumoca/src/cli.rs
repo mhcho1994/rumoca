@@ -22,7 +22,9 @@ mod model_resolution;
 mod parameter_profile_tests;
 mod value;
 
-pub(crate) use debug_tracing::{expand_trace_filter, init_debug_tracing, trace_requests_viewer};
+#[cfg(test)]
+pub(crate) use debug_tracing::expand_trace_filter;
+pub(crate) use debug_tracing::{init_debug_tracing, trace_requests_viewer};
 
 pub use compile_selectors::{CompilePhase, EmissionPolicyArg, InlinePolicyArg, ScalarizePolicyArg};
 
