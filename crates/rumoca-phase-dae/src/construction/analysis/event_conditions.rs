@@ -1,31 +1,14 @@
 use super::*;
 
-pub(super) fn validate_condition_expression(
-    expression: &Expression,
-    roles: &HashMap<VarName, PlannedRole>,
-    states: &HashSet<VarName>,
-    constants: &EvalContext,
-    sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
-) -> Result<(), ToDaeError> {
-    validate_condition_expression_in_context(
-        expression,
-        roles,
-        states,
-        constants,
-        sample_lattices,
-        PreContext::Continuous,
-        None,
-    )
-}
-
-/// Validate a when-clause's own activation condition.
+/// Validate a condition evaluated in continuous context: a when-clause's own
+/// activation condition or an equation-section assertion condition (MLS §8.3.7).
 ///
-/// The condition decides whether the event happens, so it keeps
-/// [`PreContext::Continuous`]'s `pre()` rule; what it gains over
-/// [`validate_condition_expression`] is the enumeration-literal catalog, so an
-/// activation guard may compare against `E.lit` (MLS §4.9.5) the same way a
-/// plain equation may.
-pub(super) fn validate_when_activation_condition(
+/// A when-clause condition decides whether the event happens, so it is not yet
+/// inside that event, and an assertion is checked along the continuous
+/// trajectory: both keep [`PreContext::Continuous`]'s `pre()` rule. Both read
+/// enumeration literals through the literal catalog, so they may compare
+/// against `E.lit` (MLS §4.9.5) the same way a plain equation may.
+pub(super) fn validate_condition_expression(
     expression: &Expression,
     roles: &HashMap<VarName, PlannedRole>,
     states: &HashSet<VarName>,

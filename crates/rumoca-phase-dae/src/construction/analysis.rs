@@ -66,7 +66,7 @@ use equation_partitions::{
 };
 use event_conditions::{
     evaluate_clock_seconds, evaluate_sample_schedule, validate_algorithm_condition,
-    validate_condition_expression, validate_when_activation_condition,
+    validate_condition_expression,
     validate_when_condition_expression,
 };
 use expression_events::analyze_expression_events;
@@ -571,7 +571,17 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
     )?;
     let (discrete_connection_ranks, aggregate_discrete_connections, discrete_value_topology) =
         analyze_discrete_connections(flat, &roles)?;
-    let initial = analyze_initial_owners(flat, &roles, &states, &constants, &mut sample_lattices)?;
+    let initial = analyze_initial_owners(
+        flat,
+        &roles,
+        AssertionScope {
+            roles: &expression_roles,
+            enumeration_literals: function_shapes.model_values(),
+        },
+        &states,
+        &constants,
+        &mut sample_lattices,
+    )?;
     let balance = analyze_source_balance(SourceBalanceAnalysisInput {
         flat,
         roles: &roles,
@@ -808,12 +818,19 @@ struct InitialOwners {
 fn analyze_initial_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
+    assertions: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<InitialOwners, ToDaeError> {
-    let mut algorithms =
-        analyze_initial_algorithm_owners(flat, roles, states, constants, sample_lattices)?;
+    let mut algorithms = analyze_initial_algorithm_owners(
+        flat,
+        roles,
+        assertions,
+        states,
+        constants,
+        sample_lattices,
+    )?;
     let discrete_equation_rows =
         claim_initial_discrete_equations(flat, roles, &mut algorithms.discrete_values)?;
     let parameter_equations = initial_parameter_equations::analyze(flat, roles)?;
@@ -1149,6 +1166,7 @@ fn analyze_source_balance(
 fn analyze_initial_algorithm_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
+    assertion_scope: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
@@ -1159,7 +1177,7 @@ fn analyze_initial_algorithm_owners(
             .iter()
             .chain(&flat.initial_assert_equations)
             .chain(&initial_algorithms.assertions),
-        roles,
+        assertion_scope,
         states,
         constants,
         sample_lattices,
@@ -1167,9 +1185,21 @@ fn analyze_initial_algorithm_owners(
     Ok(initial_algorithms)
 }
 
+/// The name scope an assertion's expressions are read in.
+///
+/// MLS §8.3.7 makes an assertion condition an ordinary Boolean expression, and
+/// MLS §4.9.5 makes `E.lit` an ordinary value in it, so the roles here are the
+/// *expression* roles that catalog enumeration literals, paired with the
+/// literal catalog that proves each literal's enumeration identity.
+#[derive(Clone, Copy)]
+struct AssertionScope<'scope> {
+    roles: &'scope HashMap<VarName, PlannedRole>,
+    enumeration_literals: &'scope ShapeEnvironment,
+}
+
 fn validate_assertions<'flat>(
     assertions: impl IntoIterator<Item = &'flat flat::AssertEquation>,
-    roles: &HashMap<VarName, PlannedRole>,
+    scope: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
@@ -1178,14 +1208,15 @@ fn validate_assertions<'flat>(
         require_span(assertion.span, "assert equation")?;
         validate_condition_expression(
             &assertion.condition,
-            roles,
+            scope.roles,
             states,
             constants,
             sample_lattices,
+            scope.enumeration_literals,
         )?;
-        validate_expression(&assertion.message, roles, states)?;
+        validate_expression(&assertion.message, scope.roles, states)?;
         if let Some(level) = &assertion.level {
-            validate_expression(level, roles, states)?;
+            validate_expression(level, scope.roles, states)?;
         }
     }
     Ok(())

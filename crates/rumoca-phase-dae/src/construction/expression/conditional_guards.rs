@@ -47,6 +47,31 @@ pub(in crate::construction) fn conditional_calls_a_user_function(
     scan.calls_function
 }
 
+/// Whether an attribute or binding conditional must fold at translation.
+///
+/// It folds when an arm calls a user function (see
+/// [`conditional_calls_a_user_function`]) or when this scope does not prove
+/// that every arm has the same shape. A run-time MLS §3.6.5 conditional needs
+/// type-compatible arms (MLS §6.7), which for arrays means equal sizes, so a
+/// conditional whose arms are not proven equal in shape selects structure: the
+/// parameters its guard reads are structural parameters (MLS §4.5), fixed at
+/// translation, and cannot be preserved as a run-time branch.
+pub(in crate::construction) fn attribute_conditional_folds(
+    branches: &[(Expression, Expression)],
+    else_branch: &Expression,
+    values: &ShapeEnvironment,
+) -> bool {
+    if conditional_calls_a_user_function(branches, else_branch) {
+        return true;
+    }
+    let Some(expected) = call_free_expression_shape(else_branch, values) else {
+        return true;
+    };
+    !branches.iter().all(|(_, value)| {
+        call_free_expression_shape(value, values).is_some_and(|shape| shape == expected)
+    })
+}
+
 /// [`retains_parameter_guard`] over the DAE coordinates of an equation: a
 /// parameter coordinate outside `evaluable` is tunable, and a state,
 /// algebraic, or discrete coordinate is an unknown.

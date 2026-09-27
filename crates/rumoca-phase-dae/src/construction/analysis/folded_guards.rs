@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use rumoca_core::{Expression, ExpressionVisitor};
 
 use super::super::expression::conditional_guards::{
-    conditional_calls_a_user_function, retains_flat_guard,
+    attribute_conditional_folds, retains_flat_guard,
 };
 use super::super::function_shapes::{ProvenValue, ShapeEnvironment};
 use super::{ValueReads, VarName, Variability, flat};
@@ -124,7 +124,7 @@ impl ExpressionVisitor for GuardScan<'_> {
             .take()
             .is_some_and(|span| self.values.is_structural_selection(span));
         let folds = if self.attribute_scope {
-            conditional_calls_a_user_function(branches, else_branch)
+            attribute_conditional_folds(branches, else_branch, self.values)
         } else {
             structural || !retains_flat_guard(self.flat, self.evaluable, branches, else_branch)
         };

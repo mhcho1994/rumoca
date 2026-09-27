@@ -8,7 +8,7 @@ use super::*;
 use calls::*;
 pub(super) use calls::{FunctionCallLowering, classify_function_call};
 use conditional_guards::{
-    conditional_calls_a_user_function, guard_reads_tunable_parameter, retains_equation_guard,
+    attribute_conditional_folds, guard_reads_tunable_parameter, retains_equation_guard,
 };
 use operators::*;
 use temporal::*;
@@ -1669,15 +1669,16 @@ fn lower_conditional_expression<'dae>(
     // re-selects the branch after the code is generated (an eFMI `Recalibrate`
     // runs the same statement). Folding it to the parameter's translation-time
     // value silently freezes the branch. The conditional is preserved only when
-    // no arm calls a user function: shape discovery prunes a dead arm's calls,
-    // so preserving an arm whose call carries no shape certificate could not be
-    // built. A structural guard, and any conditional with a call in an arm, keep
-    // folding exactly as before.
+    // no arm calls a user function and every arm has one proven shape
+    // ([`attribute_conditional_folds`]): shape discovery prunes a dead arm's
+    // calls, so preserving an arm whose call carries no shape certificate could
+    // not be built, and arms of different sizes select structure. A structural
+    // guard, and any such conditional, keep folding.
     // In an equation, such a guard is kept as a run-time branch when its arms
     // are structurally equal (SPEC_0040 DAE-C22); only a structural selection
     // is evaluated at translation.
     let preserve_tunable_conditional = if symbols.shapes.is_attribute_scope() {
-        !conditional_calls_a_user_function(branches, else_branch)
+        !attribute_conditional_folds(branches, else_branch, symbols.shapes)
             && branches
                 .iter()
                 .any(|(condition, _)| guard_reads_tunable_parameter(symbols.coordinates, condition))

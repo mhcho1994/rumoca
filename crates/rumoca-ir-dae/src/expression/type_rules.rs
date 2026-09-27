@@ -10,17 +10,11 @@ pub(super) fn validate_static_quotient(
         unreachable!("builtin result validation proves quotient arity")
     };
     let operator = quotient_name(builtin);
-    let Some(lhs) = static_numeric_value(storage, lhs.index()) else {
-        return Err(DaeConstructionError::NonStaticDiscontinuity {
-            operator,
-            span: at.span(),
-        });
-    };
-    let Some(rhs) = static_numeric_value(storage, rhs.index()) else {
-        return Err(DaeConstructionError::NonStaticDiscontinuity {
-            operator,
-            span: at.span(),
-        });
+    let (Some(lhs), Some(rhs)) = (
+        static_numeric_value(storage, lhs.index()),
+        static_numeric_value(storage, rhs.index()),
+    ) else {
+        return validate_time_invariant_quotient(storage, operator, [*lhs, *rhs], at);
     };
     let function = match builtin {
         PureBuiltin::Div => rumoca_core::BuiltinFunction::Div,
@@ -84,6 +78,41 @@ pub(super) fn validate_runtime_quotient(
                 span: at.span(),
             })
         }
+    }
+}
+
+/// MLS §3.7.2: `div`, `mod`, and `rem` trigger events where their result
+/// changes discontinuously during continuous integration. Operands of at most
+/// parameter variability, including the binders of a structured domain, are
+/// constant along every integration interval, so the quotient never changes
+/// there and needs no event owner. A statically proven zero divisor is still an
+/// undefined domain; a parameter divisor is evaluated with the same runtime
+/// domain check as any parameter reciprocal.
+fn validate_time_invariant_quotient(
+    storage: &Storage,
+    operator: &'static str,
+    [lhs, rhs]: [ExprId<'_>; 2],
+    at: DaeProvenance,
+) -> Result<(), DaeConstructionError> {
+    for operand in [lhs, rhs] {
+        if matches!(
+            storage.expr_variability(operand, at)?,
+            ExpressionVariability::Discrete | ExpressionVariability::Continuous
+        ) {
+            return Err(DaeConstructionError::NonStaticDiscontinuity {
+                operator,
+                span: at.span(),
+            });
+        }
+    }
+    match static_numeric_value(storage, rhs.index()) {
+        Some(divisor) if divisor == 0.0 || !divisor.is_finite() => {
+            Err(DaeConstructionError::UndefinedBuiltinDomain {
+                operator,
+                span: at.span(),
+            })
+        }
+        _ => Ok(()),
     }
 }
 
