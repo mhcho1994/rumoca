@@ -55,10 +55,15 @@ impl ReusableIncidence {
         }
     }
 
-    fn owner_rows(&self, owner: usize) -> Option<std::ops::Range<usize>> {
+    pub(crate) fn owner_rows(&self, owner: usize) -> Option<std::ops::Range<usize>> {
         let start = *self.owner_first_row.get(owner)?;
         let end = *self.owner_first_row.get(owner.checked_add(1)?)?;
         Some(start..end)
+    }
+
+    /// The scalar incidence rows, in equation order.
+    pub(crate) const fn rows(&self) -> &IncidenceRows {
+        &self.rows
     }
 }
 

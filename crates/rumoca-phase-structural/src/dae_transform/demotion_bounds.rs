@@ -16,6 +16,13 @@ pub(super) struct DemotionRowBounds {
     /// owners that mention the demoted variable, so this is the set of rows the
     /// incremental incidence reprojects; every other row is reused unchanged.
     variable_owners: Vec<Vec<usize>>,
+    /// The unknown columns of each state and algebraic variable, in the dense
+    /// variable order the incidence catalog uses (a state's columns are its
+    /// derivative scalars, an algebraic's its value scalars); `None` for a
+    /// variable with no unknown columns.
+    variable_columns: Vec<Option<std::ops::Range<usize>>>,
+    /// The total unknown column count.
+    unknown_count: usize,
 }
 
 impl DemotionRowBounds {
@@ -24,7 +31,21 @@ impl DemotionRowBounds {
             state_rows: vec![0; view.variable_count()],
             owner_rows: Vec::new(),
             variable_owners: vec![Vec::new(); view.variable_count()],
+            variable_columns: vec![None; view.variable_count()],
+            unknown_count: 0,
         };
+        for (id, variable) in view.variables() {
+            if !matches!(
+                variable.identity(),
+                dae::VariableIdentity::State(_) | dae::VariableIdentity::Algebraic(_)
+            ) {
+                continue;
+            }
+            let count = variable.value_type().scalar_count().unwrap_or(0);
+            let start = bounds.unknown_count;
+            bounds.unknown_count += count;
+            bounds.variable_columns[id.index() as usize] = Some(start..bounds.unknown_count);
+        }
         let mut traversal = dae::ExpressionTraversal::new();
         let mut seen = vec![0; view.variable_count()];
         let mut roots = Vec::new();
@@ -79,6 +100,26 @@ impl DemotionRowBounds {
             }
         }
         mask
+    }
+
+    /// The unknown columns of `variable`, if it has any.
+    pub(super) fn columns(&self, variable: u32) -> Option<std::ops::Range<usize>> {
+        self.variable_columns
+            .get(variable as usize)
+            .cloned()
+            .flatten()
+    }
+
+    /// The total unknown column count.
+    pub(super) const fn unknown_count(&self) -> usize {
+        self.unknown_count
+    }
+
+    /// The continuous owners that reference `variable`, ascending.
+    pub(super) fn owners(&self, variable: u32) -> &[usize] {
+        self.variable_owners
+            .get(variable as usize)
+            .map_or(&[], Vec::as_slice)
     }
 
     pub(super) fn cannot_sort(

@@ -215,3 +215,43 @@ fn pinned_blocks(count: usize, dimensions: Vec<u32>) -> dae::Dae {
     })
     .unwrap()
 }
+
+/// The structural residue bound never exceeds the residue of the system a
+/// demotion actually rebuilds, so a candidate it excludes cannot reduce.
+#[test]
+fn demotion_residue_bound_is_a_lower_bound_on_the_rebuilt_residue() {
+    let mut bounded = 0;
+    let models = [
+        pinned_blocks(3, vec![]),
+        pinned_blocks(3, vec![3]),
+        mixed_width_constraint().0,
+    ];
+    for model in &models {
+        let (analysis, reusable) = structural_analysis_capturing(model, None, None);
+        let residue = unmatched_residue(&analysis.err().expect("the fixture is singular"))
+            .expect("a singular fixture has a residue");
+        let reusable = reusable.expect("the fixture builds its incidence");
+        let source = ReductionSource::new(model);
+        let candidates = source.inspect(direct_state_constraints);
+        let screen =
+            demotion_screen::DemotionScreen::new(&reusable, &source.demotion_rows, residue);
+        for candidate in candidates.admissible.iter().chain(&candidates.conditional) {
+            let Some(bound) = source.inspect(|view, _| screen.residue_bound(view, candidate))
+            else {
+                continue;
+            };
+            let (rebuilt, _) =
+                rebuild_with_state_demotion_and_manifold(&source, *candidate, &[]).unwrap();
+            let actual = match structural_analysis(&rebuilt) {
+                Ok(_) => 0,
+                Err(error) => unmatched_residue(&error).expect("an ordinary singularity"),
+            };
+            assert!(
+                bound <= actual,
+                "bound {bound} exceeds rebuilt residue {actual}"
+            );
+            bounded += 1;
+        }
+    }
+    assert!(bounded > 0, "the fixtures exercise the bound");
+}

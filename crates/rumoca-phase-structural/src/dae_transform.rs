@@ -29,6 +29,7 @@ mod constant_values;
 mod constraints;
 mod declarations;
 mod demotion_bounds;
+mod demotion_screen;
 mod derivative_aliases;
 mod differentiation;
 mod equalities;
@@ -1166,6 +1167,14 @@ fn direct_reconstruction_rejection(
 }
 
 /// Try one list of demotion candidates against `model`.
+///
+/// The first strictly reducing candidate in order is taken; with none, the
+/// last residue-holding candidate is the fallback and the first blocked one
+/// the reported refusal. A candidate whose structural residue bound proves it
+/// cannot reduce (see [`demotion_screen`]) is never reconstructed while a
+/// reducing candidate is sought, which leaves the first reducing candidate
+/// unchanged; when none reduces, those candidates are reconstructed after all
+/// so the fallback and the refusal are chosen over every candidate in order.
 fn demotion_pass_with_observer(
     source: &ReductionSource<'_>,
     residue: usize,
@@ -1180,18 +1189,33 @@ fn demotion_pass_with_observer(
         group: policy.group,
         discovered: candidates.len(),
     });
-    let mut reduced: Option<(DirectStateConstraint, usize, DemotionStep)> = None;
-    let mut held: Option<(DirectStateConstraint, usize, DemotionStep)> = None;
-    let mut blocked = None;
-    for candidate in candidates {
-        if reduced.is_some()
+    let screen = policy
+        .reuse
+        .filter(|_| prior_manifold.is_empty() && residue > 0)
+        .map(|base| demotion_screen::DemotionScreen::new(base, &source.demotion_rows, residue));
+    let mut choice = PassChoice::default();
+    let mut deferred = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if choice.reduced.is_some()
             && source
                 .demotion_rows
                 .cannot_sort(candidate.state, residue, prior_manifold)
         {
             continue;
         }
-        match attempt_direct_candidate(
+        if let Some(bound) = screen
+            .as_ref()
+            .and_then(|screen| source.inspect(|view, _| screen.cannot_reduce(view, candidate)))
+        {
+            observer.observe(ReductionEvent::Attempt {
+                lane: Lane::Direct,
+                identity: Identity::Direct(DirectIdentity::from(candidate)),
+                outcome: AttemptOutcome::CannotReduce { bound },
+            });
+            deferred.push(index);
+            continue;
+        }
+        let attempt = attempt_direct_candidate(
             source,
             residue,
             stated,
@@ -1199,44 +1223,43 @@ fn demotion_pass_with_observer(
             prior_manifold,
             policy.reuse,
             observer,
-        )? {
-            DirectAttempt::Sorted {
-                rebuilt,
-                manifold,
-                structural,
-            } => {
-                return Ok(DemotionRound {
-                    step: Some(DemotionStep::Sorted {
-                        dae: rebuilt,
-                        manifold,
-                        structural,
-                    }),
-                    blocked: None,
-                });
-            }
-            DirectAttempt::Accepted {
-                candidate,
-                residue: next,
-                step,
-            } => {
-                let slot = if next < residue {
-                    &mut reduced
-                } else {
-                    &mut held
-                };
-                if next < residue {
-                    slot.get_or_insert((candidate, next, step));
-                } else {
-                    *slot = Some((candidate, next, step));
-                }
-            }
-            DirectAttempt::Blocked(discarded) => {
-                blocked.get_or_insert(discarded);
-            }
-            DirectAttempt::Rejected => {}
+        )?;
+        if let Some(sorted) = choice.record(index, residue, attempt) {
+            return Ok(sorted);
         }
     }
-    match reduced.or(if policy.allow_held { held } else { None }) {
+    if choice.reduced.is_none() {
+        for index in deferred {
+            let attempt = attempt_direct_candidate(
+                source,
+                residue,
+                stated,
+                &candidates[index],
+                prior_manifold,
+                policy.reuse,
+                observer,
+            )?;
+            debug_assert!(
+                !matches!(attempt, DirectAttempt::Sorted { .. })
+                    && !matches!(&attempt, DirectAttempt::Accepted { residue: next, .. } if *next < residue),
+                "a candidate the residue bound excludes cannot reduce"
+            );
+            if let Some(sorted) = choice.record(index, residue, attempt) {
+                return Ok(sorted);
+            }
+        }
+    }
+    let step = choice
+        .reduced
+        .map(|(_, candidate, next, step)| (candidate, next, step))
+        .or(if policy.allow_held {
+            choice
+                .held
+                .map(|(_, candidate, next, step)| (candidate, next, step))
+        } else {
+            None
+        });
+    match step {
         Some((candidate, residue_after, step)) => {
             observer.observe(ReductionEvent::Selected {
                 lane: Lane::Direct,
@@ -1251,8 +1274,81 @@ fn demotion_pass_with_observer(
         }
         None => Ok(DemotionRound {
             step: None,
-            blocked,
+            blocked: choice.blocked.map(|(_, discarded)| discarded),
         }),
+    }
+}
+
+/// The choices one direct pass has made so far, each with its candidate's
+/// position in the pass order.
+#[derive(Default)]
+struct PassChoice {
+    /// The first strictly reducing candidate.
+    reduced: Option<(usize, DirectStateConstraint, usize, DemotionStep)>,
+    /// The last residue-holding candidate.
+    held: Option<(usize, DirectStateConstraint, usize, DemotionStep)>,
+    /// The first candidate refused for a discarded initial value.
+    blocked: Option<(usize, DiscardedInitialValue)>,
+}
+
+impl PassChoice {
+    /// Record one attempt at pass position `index`; a sorted attempt ends the
+    /// pass with its round.
+    fn record(
+        &mut self,
+        index: usize,
+        residue: usize,
+        attempt: DirectAttempt,
+    ) -> Option<DemotionRound> {
+        match attempt {
+            DirectAttempt::Sorted {
+                rebuilt,
+                manifold,
+                structural,
+            } => Some(DemotionRound {
+                step: Some(DemotionStep::Sorted {
+                    dae: rebuilt,
+                    manifold,
+                    structural,
+                }),
+                blocked: None,
+            }),
+            DirectAttempt::Accepted {
+                candidate,
+                residue: next,
+                step,
+            } if next < residue => {
+                if self
+                    .reduced
+                    .as_ref()
+                    .is_none_or(|(first, ..)| index < *first)
+                {
+                    self.reduced = Some((index, candidate, next, step));
+                }
+                None
+            }
+            DirectAttempt::Accepted {
+                candidate,
+                residue: next,
+                step,
+            } => {
+                if self.held.as_ref().is_none_or(|(last, ..)| index > *last) {
+                    self.held = Some((index, candidate, next, step));
+                }
+                None
+            }
+            DirectAttempt::Blocked(discarded) => {
+                if self
+                    .blocked
+                    .as_ref()
+                    .is_none_or(|(first, _)| index < *first)
+                {
+                    self.blocked = Some((index, discarded));
+                }
+                None
+            }
+            DirectAttempt::Rejected => None,
+        }
     }
 }
 
