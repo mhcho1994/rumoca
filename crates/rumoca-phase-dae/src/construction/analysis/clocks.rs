@@ -96,6 +96,9 @@ pub(super) fn analyze_clocks(
             }
             continue;
         };
+        // `c = if p then c1 else c2` is the same parameter selection as the
+        // branch-wise `if p then c = c1 else c = c2`.
+        let rhs = static_clock_branch(rhs, constants, &clocks)?;
         let lhs_clock = whole_clock_reference(lhs, &clocks);
         let rhs_clock = whole_clock_reference(rhs, &clocks);
         match (lhs_clock, rhs_clock, periodic_constructor(rhs, constants)?) {
@@ -458,6 +461,11 @@ pub(super) fn analyze_clock_domains(
     )?);
     let mut owners = assign_domain_owners(&mut domains, seeds)?;
     own_named_sample_clocks(flat, sampled_targets, &ordinals, &mut domains, &mut owners)?;
+    // MLS §16.5.1 infers the clock of a `sample(u)` partition from the clock
+    // relations it takes part in, so every partition an exact conversion
+    // reaches from an owned partition is owned first; only a partition no
+    // relation reaches falls back to the model's unique clock.
+    propagate_clock_conversion_owners(&conversion_edges, &mut domains, &mut owners)?;
     infer_sampled_clock_owners(
         flat,
         plans,
