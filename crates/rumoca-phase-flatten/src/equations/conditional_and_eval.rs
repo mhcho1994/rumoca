@@ -38,7 +38,7 @@ pub(super) fn expand_nested_if_to_simple(
         expanded_branches.push((block.cond.clone(), simple_eqs));
     }
 
-    let else_simple_eqs = if let Some(else_eqs) = else_block {
+    let mut else_simple_eqs = if let Some(else_eqs) = else_block {
         expand_to_simple_equations(ctx, else_eqs, prefix, span)?
     } else {
         vec![]
@@ -79,8 +79,6 @@ pub(super) fn expand_nested_if_to_simple(
         ));
     }
 
-    let mut expanded_branches = expanded_branches;
-    let mut else_simple_eqs = else_simple_eqs;
     super::if_equation_alignment::align_branches_by_assigned_target(
         &mut expanded_branches,
         &mut else_simple_eqs,

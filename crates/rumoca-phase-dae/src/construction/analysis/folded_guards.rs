@@ -117,18 +117,10 @@ impl GuardScan<'_> {
             else {
                 continue;
             };
-            if when_conditional_selects_clock_structure(branches, else_branch.as_deref()) {
-                for (condition, _) in branches {
-                    let read = self.ordinary_parameters(condition);
-                    if !read.is_empty()
-                        && matches!(
-                            self.values.proven_value(condition),
-                            Some(ProvenValue::Boolean(_))
-                        )
-                    {
-                        self.record(read);
-                    }
-                }
+            let decided =
+                when_conditional_selects_clock_structure(branches, else_branch.as_deref());
+            for (condition, _) in branches.iter().filter(|_| decided) {
+                self.record_decided_guard(condition);
             }
             for (_, nested) in branches {
                 self.visit_clock_structure_conditionals(nested);
@@ -136,6 +128,19 @@ impl GuardScan<'_> {
             if let Some(nested) = else_branch {
                 self.visit_clock_structure_conditionals(nested);
             }
+        }
+    }
+
+    /// Record the parameters of one guard the parameter values decide.
+    fn record_decided_guard(&mut self, condition: &Expression) {
+        let read = self.ordinary_parameters(condition);
+        if !read.is_empty()
+            && matches!(
+                self.values.proven_value(condition),
+                Some(ProvenValue::Boolean(_))
+            )
+        {
+            self.record(read);
         }
     }
 

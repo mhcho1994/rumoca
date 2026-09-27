@@ -379,14 +379,8 @@ fn analyze_sampled_targets(
     Ok(sampled)
 }
 
-pub(super) fn analyze_clock_domains(
-    flat: &flat::Model,
-    roles: &HashMap<VarName, PlannedRole>,
-    plans: &HashMap<InstanceId, ClockPlan>,
-    clock_equation_rows: &HashSet<usize>,
-    sampled_targets: &HashMap<InstanceId, SampledTarget>,
-    constants: &EvalContext,
-) -> Result<ClockDomainAnalysis, ToDaeError> {
+/// An initial equation cannot own a clock-owned sample or previous value.
+fn reject_initial_clock_ownership(flat: &flat::Model) -> Result<(), ToDaeError> {
     let no_sampled_targets = HashMap::new();
     for equation in &flat.initial_equations {
         if let Some(span) = required_clock_owner_span(&equation.residual, flat, &no_sampled_targets)
@@ -398,6 +392,64 @@ pub(super) fn analyze_clock_domains(
             ));
         }
     }
+    Ok(())
+}
+
+/// The model equation rows the clock analysis registers.
+struct EquationRowScope<'a> {
+    flat: &'a flat::Model,
+    roles: &'a HashMap<VarName, PlannedRole>,
+    clock_equation_rows: &'a HashSet<usize>,
+    constants: &'a EvalContext,
+    ordinals: &'a HashMap<InstanceId, usize>,
+}
+
+/// Registers the clock incidence of every non-clock equation row and the
+/// conversion edge of every row that converts a value between clocks.
+fn register_equation_rows(
+    scope: EquationRowScope<'_>,
+    occurrences: &mut [Option<Span>],
+    domains: &mut DisjointDomains,
+) -> Result<(Vec<Vec<usize>>, Vec<ClockConversionEdge>), ToDaeError> {
+    let EquationRowScope {
+        flat,
+        roles,
+        clock_equation_rows,
+        constants,
+        ordinals,
+    } = scope;
+    let mut equation_members = vec![Vec::new(); flat.equations.len()];
+    let mut conversion_edges = Vec::new();
+    for (row, equation) in flat.equations.iter().enumerate() {
+        if clock_equation_rows.contains(&row) {
+            continue;
+        }
+        let incidence = expression_clock_incidence(&equation.residual, flat, roles);
+        equation_members[row] = register_incidence(&incidence, ordinals, occurrences, domains);
+        if let Some(conversion) = value_clock_conversion_equation(equation, constants)? {
+            let source_incidence = expression_clock_incidence(conversion.source, flat, roles);
+            let source_members =
+                register_incidence(&source_incidence, ordinals, occurrences, domains);
+            conversion_edges.push(ClockConversionEdge::new(
+                &equation_members[row],
+                &source_members,
+                conversion.kind,
+                conversion.span,
+            )?);
+        }
+    }
+    Ok((equation_members, conversion_edges))
+}
+
+pub(super) fn analyze_clock_domains(
+    flat: &flat::Model,
+    roles: &HashMap<VarName, PlannedRole>,
+    plans: &HashMap<InstanceId, ClockPlan>,
+    clock_equation_rows: &HashSet<usize>,
+    sampled_targets: &HashMap<InstanceId, SampledTarget>,
+    constants: &EvalContext,
+) -> Result<ClockDomainAnalysis, ToDaeError> {
+    reject_initial_clock_ownership(flat)?;
     let ordinals = flat
         .variables
         .iter()
@@ -411,27 +463,17 @@ pub(super) fn analyze_clock_domains(
         .collect::<HashMap<_, _>>();
     let mut domains = DisjointDomains::new(ordinals.len());
     let mut occurrences = vec![None; ordinals.len()];
-    let mut equation_members = vec![Vec::new(); flat.equations.len()];
-    let mut conversion_edges = Vec::new();
-    for (row, equation) in flat.equations.iter().enumerate() {
-        if clock_equation_rows.contains(&row) {
-            continue;
-        }
-        let incidence = expression_clock_incidence(&equation.residual, flat, roles);
-        equation_members[row] =
-            register_incidence(&incidence, &ordinals, &mut occurrences, &mut domains);
-        if let Some(conversion) = value_clock_conversion_equation(equation, constants)? {
-            let source_incidence = expression_clock_incidence(conversion.source, flat, roles);
-            let source_members =
-                register_incidence(&source_incidence, &ordinals, &mut occurrences, &mut domains);
-            conversion_edges.push(ClockConversionEdge::new(
-                &equation_members[row],
-                &source_members,
-                conversion.kind,
-                conversion.span,
-            )?);
-        }
-    }
+    let (equation_members, mut conversion_edges) = register_equation_rows(
+        EquationRowScope {
+            flat,
+            roles,
+            clock_equation_rows,
+            constants,
+            ordinals: &ordinals,
+        },
+        &mut occurrences,
+        &mut domains,
+    )?;
     conversion_edges.extend(clocked_binding_conversion_edges(
         flat,
         roles,
