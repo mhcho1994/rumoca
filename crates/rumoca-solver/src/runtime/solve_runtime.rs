@@ -991,7 +991,8 @@ impl SolveRuntime {
             compiled_event_action_rows: RefCell::new(FxHashMap::default()),
             failed_event_action_rows: RefCell::new(BTreeSet::new()),
             compiled_assignment_schedules: RefCell::new(FxHashMap::default()),
-            interpreted_assignment_schedules: Default::default(),
+            interpreted_assignment_schedules:
+                interpreted_schedules::InterpretedSchedules::construct(model)?,
             native_projection_assignments: Default::default(),
             compiled_output_scratch: RefCell::new(Vec::new()),
             clock_activation_cache: RefCell::new(ClockActivationCache::default()),

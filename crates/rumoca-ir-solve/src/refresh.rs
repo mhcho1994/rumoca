@@ -790,6 +790,11 @@ impl ContinuousRefreshOwners {
             .find(|program| program.id == id)
     }
 
+    /// Every issued exact assignment schedule.
+    pub fn exact_assignment_schedules(&self) -> &[ExactRefreshAssignmentSchedule] {
+        &self.exact_assignment_schedules
+    }
+
     pub fn exact_assignment_schedule(
         &self,
         sequence: RefreshSequenceId,
