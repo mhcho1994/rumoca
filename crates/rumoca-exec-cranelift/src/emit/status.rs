@@ -6,6 +6,7 @@ use cranelift_frontend::FunctionBuilder;
 
 const INDEX_OUT_OF_BOUNDS: i64 = 1;
 const LINEAR_SOLVE_FAILURE: i64 = 2;
+const INTEGER_QUOTIENT_FAILURE: i64 = 3;
 
 pub(super) fn check(status: u8) -> Result<(), CompileError> {
     match status {
@@ -15,6 +16,9 @@ pub(super) fn check(status: u8) -> Result<(), CompileError> {
         )),
         2 => Err(CompileError::Input(
             "native tensor linear solve is singular or non-finite".into(),
+        )),
+        3 => Err(CompileError::Input(
+            "native Integer quotient has a zero divisor or no representable result".into(),
         )),
         _ => Err(CompileError::Backend(format!(
             "unknown native kernel status {status}"
@@ -44,6 +48,10 @@ pub(super) fn require_index(builder: &mut FunctionBuilder<'_>, valid: Value) {
 
 pub(super) fn require_linear_solve(builder: &mut FunctionBuilder<'_>, valid: Value) {
     require(builder, valid, LINEAR_SOLVE_FAILURE);
+}
+
+pub(super) fn require_integer_quotient(builder: &mut FunctionBuilder<'_>, valid: Value) {
+    require(builder, valid, INTEGER_QUOTIENT_FAILURE);
 }
 
 fn require(builder: &mut FunctionBuilder<'_>, valid: Value, failure: i64) {

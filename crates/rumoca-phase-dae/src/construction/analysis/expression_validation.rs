@@ -605,7 +605,10 @@ impl ExpressionValidator<'_> {
                 ))
             };
         }
-        if matches!(function, BuiltinFunction::Interval | BuiltinFunction::FirstTick) {
+        if matches!(
+            function,
+            BuiltinFunction::Interval | BuiltinFunction::FirstTick
+        ) {
             if arguments.len() > 1 {
                 return Err(ToDaeError::unsupported_runtime_operator(
                     function.name(),

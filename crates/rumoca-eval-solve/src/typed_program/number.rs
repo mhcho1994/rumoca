@@ -175,6 +175,9 @@ fn eval_integer_binary(
         SolveBinaryOperator::Add => lhs.checked_add(rhs),
         SolveBinaryOperator::Subtract => lhs.checked_sub(rhs),
         SolveBinaryOperator::Multiply => lhs.checked_mul(rhs),
+        // Truncating quotient; `checked_div` refuses a zero divisor and the
+        // one overflowing quotient.
+        SolveBinaryOperator::Divide => lhs.checked_div(rhs),
         SolveBinaryOperator::Min => Some(lhs.min(rhs)),
         SolveBinaryOperator::Max => Some(lhs.max(rhs)),
         _ => None,

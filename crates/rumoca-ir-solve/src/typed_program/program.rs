@@ -1892,14 +1892,18 @@ fn require_provenance(provenance: Span) -> Result<(), SolveProgramConstructionEr
     Ok(())
 }
 
+/// `Divide` on Integer operands is the exact quotient truncated toward zero
+/// (MLS §3.7.2 `div`); a zero divisor or an unrepresentable quotient is an
+/// evaluation failure, never a wrapped or defaulted value.
 fn binary_operator_accepts(operator: SolveBinaryOperator, scalar: SolveScalarType) -> bool {
     match operator {
         SolveBinaryOperator::Add
         | SolveBinaryOperator::Subtract
         | SolveBinaryOperator::Multiply
+        | SolveBinaryOperator::Divide
         | SolveBinaryOperator::Min
         | SolveBinaryOperator::Max => scalar.is_numeric(),
-        SolveBinaryOperator::Divide | SolveBinaryOperator::Power | SolveBinaryOperator::Atan2 => {
+        SolveBinaryOperator::Power | SolveBinaryOperator::Atan2 => {
             matches!(scalar, SolveScalarType::Real { .. })
         }
         SolveBinaryOperator::And | SolveBinaryOperator::Or => scalar == SolveScalarType::Boolean,

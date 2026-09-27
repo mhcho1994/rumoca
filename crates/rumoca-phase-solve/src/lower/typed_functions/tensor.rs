@@ -595,11 +595,10 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
     /// Lower one MLS 3.7 §3.7.2 Operator 3.4/3.5/3.6 quotient with a checked
     /// Real result: `ratio = lhs / rhs`, floored (`mod`) or truncated
     /// (`div`/`rem`), then `lhs - quotient * rhs` for the remainder forms —
-    /// the same composition the model-level scalar lowering uses. A checked
-    /// Integer result keeps the typed rejection: exact integer quotients
-    /// cannot ride Binary64, and no typed integer quotient operation exists
-    /// yet. Mixed Integer operands promote through `IntegerToReal`, exactly
-    /// like the binary arithmetic promotion above.
+    /// the same composition the model-level scalar lowering uses. An Integer
+    /// result takes the exact integer composition of [`Self::integer_quotient`].
+    /// Mixed Integer operands promote through `IntegerToReal`, exactly like the
+    /// binary arithmetic promotion above.
     fn quotient(
         &mut self,
         value_type: dae::ValueTypeId<'dae>,
@@ -612,6 +611,9 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             .value_type(value_type)
             .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
             .scalar_type();
+        if result_scalar == dae::ScalarType::Integer {
+            return self.integer_quotient(value_type, builtin, arguments, at);
+        }
         if result_scalar != dae::ScalarType::Real {
             return Err(solve::SolveProgramConstructionError::InvalidCallInterface {
                 provenance: at,
@@ -657,6 +659,68 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         let register =
             self.builder
                 .binary(solve::SolveBinaryOperator::Subtract, lhs, multiple, at)?;
+        Ok(LoweredValue::scalar(value_type, register))
+    }
+
+    /// MLS 3.7 §3.7.2 quotients of Integer operands, exactly: `div(a, b)` is
+    /// the truncating Integer quotient `q`, `rem(a, b) = a - q*b`, and
+    /// `mod(a, b)` is `rem(a, b) + b` when that remainder is nonzero and its
+    /// sign differs from `b`'s, else `rem(a, b)`. A zero divisor fails the
+    /// quotient itself.
+    fn integer_quotient(
+        &mut self,
+        value_type: dae::ValueTypeId<'dae>,
+        builtin: dae::PureBuiltin,
+        arguments: dae::ExpressionOperands<'dae>,
+        at: rumoca_core::Span,
+    ) -> Result<LoweredValue<'program, 'dae>, solve::SolveProgramConstructionError> {
+        let lhs = self
+            .expression(arguments.get(0).expect("checked quotient dividend"))?
+            .only_register(at)?;
+        let rhs = self
+            .expression(arguments.get(1).expect("checked quotient divisor"))?
+            .only_register(at)?;
+        let quotient = self
+            .builder
+            .binary(solve::SolveBinaryOperator::Divide, lhs, rhs, at)?;
+        if builtin == dae::PureBuiltin::Div {
+            return Ok(LoweredValue::scalar(value_type, quotient));
+        }
+        let multiple =
+            self.builder
+                .binary(solve::SolveBinaryOperator::Multiply, quotient, rhs, at)?;
+        let remainder =
+            self.builder
+                .binary(solve::SolveBinaryOperator::Subtract, lhs, multiple, at)?;
+        if builtin == dae::PureBuiltin::Rem {
+            return Ok(LoweredValue::scalar(value_type, remainder));
+        }
+        let zero = solve::SolveValue::integer(arithmetic_profile(), 0).map_err(|_| {
+            solve::SolveProgramConstructionError::ProfileMismatch { provenance: at }
+        })?;
+        let zero = self.builder.constant(zero, at)?;
+        let nonzero =
+            self.builder
+                .compare(solve::SolveCompareOperator::NotEqual, remainder, zero, at)?;
+        let remainder_negative =
+            self.builder
+                .compare(solve::SolveCompareOperator::Less, remainder, zero, at)?;
+        let divisor_negative =
+            self.builder
+                .compare(solve::SolveCompareOperator::Less, rhs, zero, at)?;
+        let signs_differ = self.builder.compare(
+            solve::SolveCompareOperator::NotEqual,
+            remainder_negative,
+            divisor_negative,
+            at,
+        )?;
+        let adjust =
+            self.builder
+                .binary(solve::SolveBinaryOperator::And, nonzero, signs_differ, at)?;
+        let shifted = self
+            .builder
+            .binary(solve::SolveBinaryOperator::Add, remainder, rhs, at)?;
+        let register = self.builder.select(adjust, shifted, remainder, at)?;
         Ok(LoweredValue::scalar(value_type, register))
     }
 }

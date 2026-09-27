@@ -352,8 +352,16 @@ end FirstTick;
     let result = simulate(source, "FirstTick", 0.45, 0.01);
     for (tick, expected) in [100.0, 101.0, 102.0, 103.0, 104.0].iter().enumerate() {
         let time = tick as f64 / 10.0 + 0.05;
-        assert_eq!(value_at(&result, "count", time), *expected, "count at {time}");
+        assert_eq!(
+            value_at(&result, "count", time),
+            *expected,
+            "count at {time}"
+        );
         let changed = if tick == 3 { 1.0 } else { 0.0 };
-        assert_eq!(value_at(&result, "changed", time), changed, "changed at {time}");
+        assert_eq!(
+            value_at(&result, "changed", time),
+            changed,
+            "changed at {time}"
+        );
     }
 }

@@ -149,9 +149,8 @@ fn issue_first_tick<'dae>(
     span: Span,
 ) -> Result<dae::PreviousId<'dae>, dae::DaeConstructionError> {
     let provenance = dae::DaeProvenance::generated(dae::DaeGeneration::ClockLowering, span)?;
-    let value_type = construction.types(|types| {
-        types.derived(dae::ValueType::scalar(dae::ScalarType::Real), provenance)
-    })?;
+    let value_type = construction
+        .types(|types| types.derived(dae::ValueType::scalar(dae::ScalarType::Real), provenance))?;
     let (one, zero) = construction.expressions(|expressions| {
         Ok((
             expressions
@@ -190,9 +189,8 @@ fn issue_first_tick<'dae>(
     construction.discrete(|system| {
         system.real_equation(provenance, |equation| equation.residual(residual))
     })?;
-    construction.temporal(|temporal| {
-        temporal.previous_discrete_real(clock.into(), variable, provenance)
-    })
+    construction
+        .temporal(|temporal| temporal.previous_discrete_real(clock.into(), variable, provenance))
 }
 
 fn clocked_values_in_instance_order(
