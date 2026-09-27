@@ -30,9 +30,9 @@ use rumoca_worker::{
     MSL_SIM_OUTPUT_INTERVALS, ModelFailureBucket, ModelFailureClassification, ModelWorkerCommand,
     ModelWorkerControlMessage, ModelWorkerRequest, ModelWorkerResponse, WorkerMemorySnapshot,
     WorkerModelResult, WorkerProgressEvent, WorkerProgressEventKind, WorkerProgressPhase,
-    embedded_diagnostic_code, pin_current_thread_to_cpu_core, read_model_worker_request_file,
-    sim_error_diagnostic_code, start_worker_memory_limit, strict_compile_failure_row,
-    write_model_worker_response_file,
+    WorkerSimSettings, embedded_diagnostic_code, pin_current_thread_to_cpu_core,
+    read_model_worker_request_file, sim_error_diagnostic_code, start_worker_memory_limit,
+    strict_compile_failure_row, write_model_worker_response_file,
 };
 
 const DEFAULT_SIM_END_TIME_SECS: f64 = 1.0;
@@ -1310,6 +1310,7 @@ fn run_and_classify_simulation(
     progress: &ProgressLog,
 ) {
     rumoca_sim::reset_projection_fallbacks();
+    rumoca_sim::reset_step_counts();
     let sim_start = Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_simulation_pipeline(result.dae.as_ref(), opts, progress, request)
@@ -1330,6 +1331,11 @@ fn run_and_classify_simulation(
                 run.sim_run_seconds,
                 run.ic_seconds,
             );
+            row.sim_settings = Some(WorkerSimSettings::recorded(
+                opts,
+                &run.sim_result,
+                rumoca_sim::step_counts(),
+            ));
             if row.sim_status.as_deref() == Some("sim_ok") {
                 match write_sim_trace_artifact(request, &run.sim_result) {
                     Ok(path) => row.sim_trace_file = Some(path),

@@ -54,7 +54,7 @@ pub fn msl_sim_output_dt(
         })
 }
 
-pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 2;
+pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 3;
 pub const MODEL_WORKER_RESULT_FILE: &str = "result.json";
 pub const MODEL_WORKER_PARTIAL_RESULT_FILE: &str = "partial_result.json";
 /// Resident-plus-swap ceiling for one persistent MSL model worker.
@@ -829,6 +829,11 @@ pub struct WorkerModelResult {
     /// The run's fallback warnings behind `projection_fallback_rate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_fallback_detail: Option<String>,
+    /// How the simulation integrated: its solver, tolerances, output points,
+    /// and the accepted steps and located events it took. Absent when no
+    /// simulation completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_settings: Option<WorkerSimSettings>,
     pub ir_dae_file: Option<String>,
     pub ir_solve_file: Option<String>,
     pub ir_solve_error: Option<String>,
@@ -862,6 +867,47 @@ pub struct WorkerModelResult {
     /// the stage-specific code fields so consumers have one field to read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_error_code: Option<String>,
+}
+
+/// The integration settings and work of one simulation, recorded so a speed
+/// report can state what each tool was asked to compute (SPEC_0025).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkerSimSettings {
+    /// The requested solver family (`auto`, `bdf`, or `rk`).
+    pub solver: String,
+    pub rtol: f64,
+    pub atol: f64,
+    /// Recorded output points, including both end points.
+    pub output_points: usize,
+    /// Accepted integration steps.
+    pub steps: u64,
+    /// Located state and time events.
+    pub events: u64,
+}
+
+impl WorkerSimSettings {
+    /// The settings `options` asked for and the work `counts` recorded while
+    /// producing `result`.
+    #[must_use]
+    pub fn recorded(
+        options: &rumoca_sim::SimOptions,
+        result: &rumoca_sim::SimResult,
+        counts: rumoca_sim::HotpathStatsSnapshot,
+    ) -> Self {
+        let solver = match options.solver_mode {
+            rumoca_sim::SimSolverMode::Auto => "auto",
+            rumoca_sim::SimSolverMode::Bdf => "bdf",
+            rumoca_sim::SimSolverMode::RkLike => "rk",
+        };
+        Self {
+            solver: solver.to_string(),
+            rtol: options.rtol,
+            atol: options.atol,
+            output_points: result.times.len(),
+            steps: counts.solver_steps,
+            events: counts.root_hits,
+        }
+    }
 }
 
 impl WorkerModelResult {
@@ -936,6 +982,7 @@ impl WorkerModelResult {
             sim_trace_error: None,
             projection_fallback_rate: None,
             projection_fallback_detail: None,
+            sim_settings: None,
             ir_dae_file: None,
             ir_solve_file: None,
             ir_solve_error: None,

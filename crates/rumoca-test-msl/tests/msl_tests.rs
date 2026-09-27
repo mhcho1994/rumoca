@@ -410,6 +410,9 @@ struct MslModelResult {
     sim_run_seconds: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sim_wall_seconds: Option<f64>,
+    /// The simulation's solver, tolerances, output points, steps, and events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sim_settings: Option<rumoca_worker::WorkerSimSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sim_trace_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

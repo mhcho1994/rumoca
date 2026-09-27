@@ -531,6 +531,7 @@ fn worker_model_result_to_msl(result: WorkerModelResult) -> MslModelResult {
         sim_backend_build_seconds: result.sim_backend_build_seconds,
         sim_run_seconds: result.sim_run_seconds,
         sim_wall_seconds: result.sim_wall_seconds,
+        sim_settings: result.sim_settings,
         sim_trace_file: result.sim_trace_file,
         sim_perf_profile_file: result.sim_perf_profile_file,
         sim_trace_error: result.sim_trace_error,
