@@ -365,3 +365,56 @@ end FirstTick;
         );
     }
 }
+
+/// SOLVE-C57: a producer that reads another same-clock producer through a row
+/// between two discrete Real coordinates observes it on the tick, so the two
+/// are never fused into one entry read.
+#[test]
+fn connected_same_clock_producers_are_ordered_not_fused() {
+    let source = r#"
+model ConnectedFeedback
+  block Controller
+    input Real e;
+    output Real y;
+  protected
+    Real x(start = 0);
+  equation
+    when Clock() then
+      x = previous(x) + e;
+      y = x + e;
+    end when;
+  end Controller;
+  block Assign
+    input Real u;
+    output Real y;
+    input Clock clock;
+  equation
+    when clock then
+      y = u;
+    end when;
+  end Assign;
+  Clock c = Clock(1, 10);
+  Controller controller;
+  Assign assign;
+  Real s;
+  Real u2;
+  Real held;
+equation
+  s = sample(time, c);
+  assign.clock = c;
+  assign.u = s;
+  u2 = assign.y;
+  controller.e = 1 - u2;
+  held = hold(controller.y);
+end ConnectedFeedback;
+"#;
+    let result = simulate(source, "ConnectedFeedback", 0.35, 0.01);
+    for (tick, expected) in [2.0, 2.8, 3.5, 4.1].iter().enumerate() {
+        let time = tick as f64 / 10.0 + 0.05;
+        let actual = value_at(&result, "held", time);
+        assert!(
+            (actual - expected).abs() < 1.0e-12,
+            "held at {time}: {actual}"
+        );
+    }
+}

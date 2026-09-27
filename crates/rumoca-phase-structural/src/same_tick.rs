@@ -365,6 +365,7 @@ fn collect_discrete_real_writers<'dae>(
     writers: &mut Writers<'dae>,
     refresh_on_tick: &mut BTreeSet<u32>,
 ) {
+    let oriented = crate::CausalDiscretePlan::derive(view).ok();
     for index in 0..view.discrete_real_equation_count() {
         let equation = view
             .discrete_real_equation(index)
@@ -372,11 +373,21 @@ fn collect_discrete_real_writers<'dae>(
         if equation.activation() != dae::DiscreteRealActivation::Always {
             continue;
         }
-        if let Some((target, value)) = single_coordinate_definition(
+        // A row between two discrete Real coordinates (a connection) names no
+        // side by shape; its proven orientation is the causal discrete plan's.
+        let definition = single_coordinate_definition(
             view,
             equation.residual(),
             CoordinateKinds::AlgebraicOrDiscreteReal,
-        ) {
+        )
+        .or_else(|| {
+            let oriented = oriented.as_ref()?.discrete_real_definition(index)?;
+            Some((
+                dae::VariableId::from(oriented.target()).index(),
+                oriented.value(),
+            ))
+        });
+        if let Some((target, value)) = definition {
             record_definition(view, writers, target, value);
             refresh_on_tick.insert(target);
         }
