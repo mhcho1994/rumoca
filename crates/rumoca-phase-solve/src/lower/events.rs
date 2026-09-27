@@ -48,7 +48,7 @@ pub(super) fn lower_discrete_and_events<'dae>(
     ),
     LowerError,
 > {
-    let mut discrete = DiscreteRows::new(view);
+    let mut discrete = DiscreteRows::new(view)?;
     lower_discrete_real_equations(view, layout, clocks, &mut discrete)?;
     lower_discrete_value_owners(view, layout, clocks, &mut discrete)?;
     let mut event_actions = Vec::new();
@@ -333,15 +333,15 @@ enum EventIterationOwnerClaim {
 }
 
 impl<'dae> DiscreteRows<'dae> {
-    fn new(view: dae::DaeView<'dae>) -> Self {
-        let causal = rumoca_phase_structural::CausalDefinitions::derive(view);
-        Self {
+    fn new(view: dae::DaeView<'dae>) -> Result<Self, LowerError> {
+        let plan = causal_discrete_plan(view)?;
+        Ok(Self {
             same_tick_definitions: rumoca_phase_structural::SameTickDefinitions::derive(
-                view, &causal,
+                view, &plan,
             ),
             event_iteration_owners: vec![None; view.variable_count()],
             ..Self::default()
-        }
+        })
     }
 
     fn claim_scalar_event_owner(
@@ -1130,19 +1130,27 @@ fn lower_unconditional_discrete_real<'dae>(
 pub(super) fn resolve_discrete_real_definitions<'dae>(
     view: dae::DaeView<'dae>,
 ) -> Result<Vec<Option<(dae::DiscreteRealId<'dae>, dae::ExprId<'dae>)>>, LowerError> {
-    let plan = rumoca_phase_structural::CausalDiscretePlan::derive(view).map_err(|error| {
-        let rumoca_phase_structural::CausalDiscreteError::NonComputable { span } = error;
-        LowerError::non_computable(
-            "coupled discrete Real residual is not an explicit computable definition",
-            span,
-        )
-    })?;
+    let plan = causal_discrete_plan(view)?;
     Ok((0..view.discrete_real_equation_count())
         .map(|index| {
             plan.discrete_real_definition(index)
                 .map(|definition| (definition.target(), definition.value()))
         })
         .collect())
+}
+
+/// The causal orientation of every discrete Real row, or the row it cannot
+/// orient reported at its own span.
+fn causal_discrete_plan<'dae>(
+    view: dae::DaeView<'dae>,
+) -> Result<rumoca_phase_structural::CausalDiscretePlan<'dae>, LowerError> {
+    rumoca_phase_structural::CausalDiscretePlan::derive(view).map_err(|error| {
+        let rumoca_phase_structural::CausalDiscreteError::NonComputable { span } = error;
+        LowerError::non_computable(
+            "coupled discrete Real residual is not an explicit computable definition",
+            span,
+        )
+    })
 }
 
 fn lower_event_actions<'dae>(

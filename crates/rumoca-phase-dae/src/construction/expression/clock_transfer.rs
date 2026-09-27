@@ -10,7 +10,7 @@ pub(super) fn lower_clock_transfer<'dae>(
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
     let (source, input) =
         clock_transfer_input(function, arguments, symbols.functions, provenance.span())?;
-    let source_plan = expression_clock_plan(source, symbols.functions).ok_or(
+    let source_plan = expression_clock_plan(source, symbols.functions)?.ok_or(
         dae::DaeConstructionError::MissingClockDomainOwner {
             span: provenance.span(),
         },
@@ -125,10 +125,12 @@ fn clock_transfer_input<'expression>(
     }
 }
 
+/// The clock partition an operand belongs to, `None` when the operand alone
+/// does not name one; a malformed transfer operand or lattice is reported.
 fn expression_clock_plan(
     expression: &Expression,
     functions: &FunctionRegistry<'_, '_>,
-) -> Option<ClockPlan> {
+) -> Result<Option<ClockPlan>, dae::DaeConstructionError> {
     if let Expression::BuiltinCall {
         function,
         args,
@@ -143,13 +145,15 @@ fn expression_clock_plan(
                 | BuiltinFunction::BackSample
         )
     {
-        let (source, input) = clock_transfer_input(*function, args, functions, *span).ok()?;
+        let (source, input) = clock_transfer_input(*function, args, functions, *span)?;
         // An inferred factor is fixed only by the conversion's target partition,
         // which an operand alone does not name.
         let TransferInput::Exact(kind) = input else {
-            return None;
+            return Ok(None);
         };
-        let source = expression_clock_plan(source, functions)?;
+        let Some(source) = expression_clock_plan(source, functions)? else {
+            return Ok(None);
+        };
         let lattice = match kind {
             dae::ClockTransferKind::SubSample { factor } => source.lattice.sub_sample(factor),
             dae::ClockTransferKind::SuperSample { factor } => source.lattice.super_sample(factor),
@@ -162,15 +166,18 @@ fn expression_clock_plan(
                 resolution,
             } => source.lattice.back_sample(counter, resolution),
         }
-        .ok()?;
-        return Some(ClockPlan {
+        .map_err(|source| dae::DaeConstructionError::InvalidClockLattice {
+            source,
+            span: *span,
+        })?;
+        return Ok(Some(ClockPlan {
             lattice,
             constructor_span: *span,
-        });
+        }));
     }
     let mut owner = None;
     collect_expression_clock_plan(expression, functions, &mut owner);
-    owner
+    Ok(owner)
 }
 
 fn collect_expression_clock_plan(
