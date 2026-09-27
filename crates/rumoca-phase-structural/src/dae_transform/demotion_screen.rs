@@ -16,9 +16,12 @@
 //! state's derivative, or the coordinates its explicit derivative definition
 //! reads, which a first derivative rebuilds as written; and for an algebraic
 //! the state anchor the demotion selects for its equality class, else the
-//! closure of its causal definition. A function body reads no model
-//! coordinate, so a record field projected from a call reads the model only
-//! through the call's arguments. Paths the closure does not follow (a
+//! closure of its causal definition. A call with a supplied derivative reads
+//! its arguments' values and the derivatives of its tangent inputs only; an
+//! index the differentiator projects onto an element also follows that
+//! element. A function body reads no model coordinate, so a record field
+//! projected from a call reads the model only through the call's arguments.
+//! Paths the closure does not follow (a
 //! derivative read, a field projected from a coordinate, an auxiliary block,
 //! or a record component definition) leave the candidate unbounded. So a
 //! touched row after the demotion is contained in its prior row without `x`'s
@@ -239,8 +242,9 @@ impl<'dae> DerivativeClosure<'_, 'dae> {
     /// Follow the derivative of `expression`. A subexpression in a linear
     /// position (a sum, a difference, a sign, an array element, or a product
     /// or quotient with a parameter-only factor or divisor) contributes only
-    /// its derivative; anywhere else its coordinates' values also appear as
-    /// the chain rule's coefficients.
+    /// its derivative; at any other operation the subexpression's values
+    /// appear as the chain rule's coefficients and the operands the
+    /// differentiator reaches are followed.
     fn differentiate(&mut self, expression: dae::ExprId<'dae>) -> Option<()> {
         let mut stack = vec![expression];
         while let Some(expression) = stack.pop() {
@@ -286,10 +290,64 @@ impl<'dae> DerivativeClosure<'_, 'dae> {
                     rhs,
                 } if self.reads_parameters_only(rhs) => stack.push(lhs),
                 dae::ExpressionOperation::Array(elements) => stack.extend(elements.iter()),
-                _ => self.differentiate_coefficients(expression)?,
+                dae::ExpressionOperation::Field { .. } => {
+                    self.differentiate_coefficients(expression)?;
+                }
+                operation => {
+                    self.read_values(expression);
+                    stack.extend(self.derivative_operands(expression, &operation));
+                }
             }
         }
         Some(())
+    }
+
+    /// The operands whose derivatives the chain rule reads at a nonlinear
+    /// `expression`. A call with a supplied derivative reads the derivatives
+    /// of its tangent inputs only. An index the differentiator projects onto
+    /// an element of an array or causal definition reads that element's
+    /// derivative, taken here beside the operands'.
+    fn derivative_operands(
+        &self,
+        expression: dae::ExprId<'dae>,
+        operation: &dae::ExpressionOperation<'dae>,
+    ) -> Vec<dae::ExprId<'dae>> {
+        if matches!(operation, dae::ExpressionOperation::Call { .. })
+            && let Some(selected) = super::function_derivatives::select_derivative(
+                self.view,
+                &rumoca_eval_dae::FunctionCallContext::default(),
+                expression,
+                1,
+            )
+        {
+            return selected
+                .arguments
+                .iter()
+                .filter(|argument| argument.order > 0)
+                .map(|argument| argument.source)
+                .collect();
+        }
+        let mut operands: Vec<_> =
+            super::component_projection::projected_element(self.view, self.facts, expression)
+                .into_iter()
+                .collect();
+        dae::ExpressionTraversal::new().visit_pruned(self.view, [expression], |id, _| {
+            if id == expression {
+                return true;
+            }
+            operands.push(id);
+            false
+        });
+        operands
+    }
+
+    /// Read the value of every coordinate in `expression`.
+    fn read_values(&mut self, expression: dae::ExprId<'dae>) {
+        let (bounds, columns) = (self.bounds, &mut self.columns);
+        dae::ExpressionTraversal::new().visit_pruned(self.view, [expression], |_, node| {
+            columns.extend(value_columns(bounds, node).into_iter().flatten());
+            true
+        });
     }
 
     /// Whether `expression` reads no coordinate but parameters, so its
@@ -317,11 +375,11 @@ impl<'dae> DerivativeClosure<'_, 'dae> {
     /// the model only through the call's arguments, all in this subexpression.
     fn differentiate_coefficients(&mut self, expression: dae::ExprId<'dae>) -> Option<()> {
         let mut nodes = Vec::new();
-        dae::ExpressionTraversal::new().visit_pruned(self.view, [expression], |_, node| {
-            nodes.push(node);
+        dae::ExpressionTraversal::new().visit_pruned(self.view, [expression], |id, node| {
+            nodes.push((id, node));
             true
         });
-        for node in nodes {
+        for (id, node) in nodes {
             if reads_unprojected_columns(self.view, node) {
                 return None;
             }
@@ -333,6 +391,13 @@ impl<'dae> DerivativeClosure<'_, 'dae> {
                 }
                 dae::ExpressionOperation::Coordinate(dae::CoordinateView::Algebraic(algebraic)) => {
                     self.algebraic(algebraic)?;
+                }
+                dae::ExpressionOperation::Index { .. } => {
+                    // A projected element's derivative is followed as well.
+                    self.pending
+                        .extend(super::component_projection::projected_element(
+                            self.view, self.facts, id,
+                        ));
                 }
                 _ => {}
             }
