@@ -55,10 +55,23 @@ fn the_wire_carries_no_second_copy_of_what_the_equation_ir_owns() {
         );
     }
     assert!(
-        source.contains("pub trace_point: u32"),
-        "a sink member must name its trace point, which is the identity the \
-         equation IR issues"
+        source.contains("pub trace_point: TracePointRef"),
+        "a sink member must name its trace point through the id newtype: a \
+         bare u32 lets a trace point, a connector and a program expression \
+         index meet at a call site, and they are three different spaces"
     );
+    // The same reasoning as `ProgramExprId`. A bare `u32` on either of these
+    // is how the id spaces get crossed.
+    for declaration in [
+        "pub struct TracePointRef(pub u32)",
+        "pub struct ConnectorRef(pub u32)",
+        "pub connector: ConnectorRef",
+    ] {
+        assert!(
+            source.contains(declaration),
+            "execution.rs must declare `{declaration}`"
+        );
+    }
 }
 
 #[test]

@@ -75,6 +75,38 @@ pub struct Function {
 #[serde(transparent)]
 pub struct ProgramExprId(pub u32);
 
+/// A model trace point, as this crate can name one.
+///
+/// Deliberately a separate newtype from `rumoca_bitcode`'s `TracePointId`
+/// rather than a re-export: `rumoca-ir-solve` sits below `rumoca-bitcode` in
+/// the SPEC_0029 tier order and cannot see it. The reason for having a
+/// newtype at all is the `ProgramExprId` reason — a trace point id, a
+/// connector id and a program expression index are three different spaces
+/// that are all `u32`, and a bare `u32` lets any two of them meet at a call
+/// site without complaint. `#[serde(transparent)]`, so the wire still carries
+/// a bare integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TracePointRef(pub u32);
+
+impl std::fmt::Display for TracePointRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A model connector instance, as this crate can name one. Same reasoning as
+/// [`TracePointRef`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConnectorRef(pub u32);
+
+impl std::fmt::Display for ConnectorRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// One node of a program-local expression.
 ///
 /// Operands name earlier nodes, so the arena is acyclic by construction, as in
@@ -153,6 +185,7 @@ impl LoweringProfile {
                 name: "solve-scalar-v1",
                 backend_family: "rk-like",
                 scalar_only: true,
+                file_effects: true,
             },
         }
     }
@@ -163,6 +196,12 @@ pub struct ProfileExpansion {
     pub name: &'static str,
     pub backend_family: &'static str,
     pub scalar_only: bool,
+    /// Whether a target built from this profile can perform file effects at
+    /// all. `true` for every profile that exists today, which is why
+    /// `EX2-011` is currently unreachable; the field is here so that the
+    /// capability question has an answer other than "count the sinks", which
+    /// is a different question with a different fix.
+    pub file_effects: bool,
 }
 
 /// A receipt for one pass that edited this program.
@@ -223,16 +262,27 @@ pub struct SinkMetadata {
     /// Same-artifact reference. An id is admissible because a sink lives in the
     /// file its model does; the canonical-path rule binds `PassRecord`, which
     /// must survive a recompilation.
-    /// Absent when the sink is not connector instrumentation. Naming a
-    /// connector a sink does not belong to would be a fact a reader could act
-    /// on, so it is left out rather than defaulted.
+    ///
+    /// One option, not two: a connector without an orientation is not a
+    /// thing, and two independent `Option`s make that state representable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connector: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub orientation: Option<Orientation>,
+    pub connector: Option<ConnectorBinding>,
     /// Always present: the trace points this sink's rows are about. This is
-    /// the same identity a `snapshot.value` names.
+    /// the same identity a `snapshot.value` names, so a sink's references are
+    /// visible without walking its instructions.
     pub members: Vec<SinkMember>,
+}
+
+/// What a connector-instrumentation sink is attached to.
+///
+/// Absent from a sink that is not connector instrumentation. Naming a
+/// connector such a sink does not belong to would state a fact a reader could
+/// act on.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorBinding {
+    pub connector: ConnectorRef,
+    pub orientation: Orientation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,7 +295,7 @@ pub enum Orientation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SinkMember {
-    pub trace_point: u32,
+    pub trace_point: TracePointRef,
 }
 
 /// All effects are sequential. Branch regions and calls preserve that order;
@@ -263,7 +313,10 @@ pub enum Instruction {
     /// (`TracePointId`), never a `VariableId` and never a storage index: the
     /// trace point is the single registration site (D2).
     #[serde(rename = "snapshot.value")]
-    Value { result: String, trace_point: u32 },
+    Value {
+        result: String,
+        trace_point: TracePointRef,
+    },
     /// Evaluate a program-local expression into a declared local.
     ///
     /// v1 carried a register program from the derived form here and fed it

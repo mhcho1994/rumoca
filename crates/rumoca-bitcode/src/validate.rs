@@ -124,8 +124,8 @@ pub fn validate_execution_references(
     let known: std::collections::BTreeSet<u32> =
         model.trace_points.iter().map(|point| point.id.0).collect();
     let mut errors = Vec::new();
-    let mut check = |id: u32, where_: &str| {
-        if !known.contains(&id) {
+    let mut check = |id: rumoca_ir_solve::execution::TracePointRef, where_: &str| {
+        if !known.contains(&id.0) {
             errors.push(ValidationError::ExecutionReference(format!(
                 "{}: trace point {id} referenced by {where_} is not declared by the model",
                 code::UNKNOWN_TRACE_POINT

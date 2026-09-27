@@ -1,11 +1,12 @@
 //! CLI boundaries for public, writable execution artifacts.
+mod digest;
 mod overrides;
+
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use rumoca_bitcode::schema::{self, RbcModel};
+pub use digest::dependency_digest;
 use rumoca_bitcode::{Encoding, RbcFile};
 use rumoca_ir_solve as solve;
-use sha1::{Digest, Sha1};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Args)]
@@ -57,83 +58,10 @@ pub struct RunArgs {
 /// its `skip_serializing_if` decisions are not part of the model's meaning, and
 /// v1 hashed both. Each record is length-prefixed so no two different inputs
 /// can encode to the same bytes by concatenation.
-fn encode(out: &mut Vec<u8>, part: &[u8]) {
-    out.extend_from_slice(&(part.len() as u64).to_le_bytes());
-    out.extend_from_slice(part);
-}
-
-/// The component this variable belongs to, plus its own name, encoded as two
-/// length-prefixed records.
-///
-/// The two parts stay separate rather than being joined into one dotted
-/// string: a joined string invites a reader to split it again, and
-/// SPEC_0007's no-tokenizing rule is what that would violate. The hash
-/// consumes them as bytes and never re-parses.
-fn encode_component_path(out: &mut Vec<u8>, model: &RbcModel, variable: &schema::RbcVariable) {
-    let component = variable
-        .component
-        .and_then(|id| model.components.iter().find(|c| c.id == id));
-    match component {
-        Some(component) => encode(out, component.path.as_bytes()),
-        None => encode(out, b""),
-    }
-    encode(out, variable.name.as_bytes());
-}
-
-/// Hash the identities this program actually depends on.
-///
-/// v1 hashed the entire serialized model, so adding a trace point or rewriting
-/// an unrelated residual invalidated a logging program that referenced
-/// neither. This covers exactly the referenced trace points, the lowering
-/// profile's expansion, and the two contract versions.
-pub fn dependency_digest(
-    model: &RbcModel,
-    lowering: rumoca_ir_solve::execution::LoweringProfile,
-    referenced: &std::collections::BTreeSet<u32>,
-) -> Result<String> {
-    let mut bytes = Vec::new();
-    encode(&mut bytes, b"rumoca.execution.dependency.v1");
-    encode(
-        &mut bytes,
-        &u32::from(rumoca_bitcode::schema::RBC_VERSION).to_le_bytes(),
-    );
-    encode(
-        &mut bytes,
-        &rumoca_ir_solve::execution::EXECUTION_VERSION.to_le_bytes(),
-    );
-    let expansion = lowering.expansion();
-    encode(&mut bytes, expansion.name.as_bytes());
-    encode(&mut bytes, expansion.backend_family.as_bytes());
-    encode(&mut bytes, &[u8::from(expansion.scalar_only)]);
-    // Referenced trace points, in id order so the set's own ordering cannot
-    // change the digest.
-    for id in referenced {
-        let point = model
-            .trace_points
-            .iter()
-            .find(|p| p.id.0 == *id)
-            .with_context(|| format!("trace point {id} is referenced but not declared"))?;
-        let variable = model
-            .variables
-            .iter()
-            .find(|v| v.id == point.variable)
-            .with_context(|| format!("trace point {id} names an unknown variable"))?;
-        encode(&mut bytes, &id.to_le_bytes());
-        encode_component_path(&mut bytes, model, variable);
-        encode(&mut bytes, &variable.value_type.0.to_le_bytes());
-        encode(&mut bytes, format!("{:?}", variable.causality).as_bytes());
-        encode(
-            &mut bytes,
-            variable.unit.as_deref().unwrap_or("").as_bytes(),
-        );
-    }
-    Ok(format!("sha1:{:x}", Sha1::digest(&bytes)))
-}
-
 /// Trace points a program references, through instructions and sink members.
 pub fn referenced_trace_points(
     execution: &rumoca_ir_solve::execution::ExecutionArtifact,
-) -> std::collections::BTreeSet<u32> {
+) -> std::collections::BTreeSet<rumoca_ir_solve::execution::TracePointRef> {
     use rumoca_ir_solve::execution::Instruction;
     let mut found = std::collections::BTreeSet::new();
     for function in execution.program.functions.values() {
@@ -228,7 +156,7 @@ pub fn derive(file: &RbcFile) -> Result<solve::execution::NumericalProgram> {
                 .model
                 .trace_points
                 .iter()
-                .find(|p| p.id.0 == *id)
+                .find(|p| p.id.0 == id.0)
                 .with_context(|| format!("trace point {id} is referenced but not declared"))?;
             let variable = file
                 .model
@@ -236,7 +164,7 @@ pub fn derive(file: &RbcFile) -> Result<solve::execution::NumericalProgram> {
                 .iter()
                 .find(|v| v.id == point.variable)
                 .with_context(|| format!("trace point {id} names an unknown variable"))?;
-            Ok((*id, variable.id.0, variable.name.clone()))
+            Ok((id.0, variable.id.0, variable.name.clone()))
         })
         .collect::<Result<Vec<_>>>()?;
     let mut numerical =
@@ -261,7 +189,7 @@ pub fn derive(file: &RbcFile) -> Result<solve::execution::NumericalProgram> {
             .model
             .trace_points
             .iter()
-            .find(|p| p.id.0 == observation.trace_point)
+            .find(|p| p.id.0 == observation.trace_point.0)
         else {
             continue;
         };

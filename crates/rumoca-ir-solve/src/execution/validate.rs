@@ -14,13 +14,25 @@ pub mod code {
     pub const UNSUPPORTED_VERSION: &str = "EX2-001";
     /// A `csv.*` effect names a sink the program does not declare.
     pub const UNRESOLVED_SINK: &str = "EX2-010";
-    /// The target cannot perform file effects at all.
+    /// The target this profile expands to cannot perform file effects at all
+    /// (TRP-042). Distinct from `UNRESOLVED_SINK`: that one says the program
+    /// named a sink it did not declare, this one says no sink could work
+    /// here whatever it was called. Currently unreachable, because every
+    /// lowering profile that exists sets `file_effects`; the check is wired
+    /// to the profile rather than deleted so that adding a profile without
+    /// file effects is a one-line change with a diagnostic already in place.
     pub const MISSING_FILE_CAPABILITY: &str = "EX2-011";
     /// An effect appears in a lifecycle phase that cannot perform it, or
     /// names a resource that is not open in that phase.
     pub const EFFECT_LIFECYCLE: &str = "EX2-012";
     /// A written row does not have one value per declared column.
     pub const ROW_WIDTH: &str = "EX2-013";
+    /// Two sinks share a key or a filename.
+    pub const DUPLICATE_SINK: &str = "EX2-014";
+    /// A sink filename is not one relative, non-reserved path component.
+    pub const INVALID_SINK_PATH: &str = "EX2-015";
+    /// A sink declares no columns, so no row it wrote could be read back.
+    pub const EMPTY_SINK: &str = "EX2-016";
     /// Read of a local that is not declared, or not yet assigned.
     pub const UNDECLARED_LOCAL: &str = "EX2-020";
     /// Value of the wrong type for its position.
@@ -41,6 +53,16 @@ pub mod code {
     // Both codes stay documented and unallocated so they are not reused.
     /// The call graph contains a cycle.
     pub const RECURSIVE_CALL: &str = "EX2-030";
+    /// A helper's name carries no lifecycle prefix the reader knows.
+    pub const UNKNOWN_LIFECYCLE: &str = "EX2-031";
+    /// A call reaches a helper belonging to a different lifecycle phase.
+    pub const CROSS_LIFECYCLE_CALL: &str = "EX2-032";
+    /// A snapshot read appears outside the publish phase, where there is no
+    /// snapshot to read.
+    pub const SNAPSHOT_LIFECYCLE: &str = "EX2-033";
+    /// The two arms of an `if` leave different resources open, so what is
+    /// open after the join depends on the branch taken.
+    pub const BRANCH_RESOURCE_MISMATCH: &str = "EX2-034";
     /// An instruction references a trace point the model does not declare.
     pub const UNKNOWN_TRACE_POINT: &str = "EX2-040";
 }
@@ -63,7 +85,10 @@ pub fn validate(a: &ExecutionArtifact) -> Result<(), String> {
     let mut files = BTreeSet::new();
     for s in &a.program.sinks {
         if !keys.insert(s.key.clone()) || !files.insert(s.filename.clone()) {
-            return Err("duplicate CSV sink key or filename".into());
+            return Err(err(
+                code::DUPLICATE_SINK,
+                format_args!("`{}` repeats a sink key or filename", s.key),
+            ));
         }
         if s.filename.is_empty()
             || s.filename.contains(['/', '\\'])
@@ -71,10 +96,19 @@ pub fn validate(a: &ExecutionArtifact) -> Result<(), String> {
             || s.filename == ".."
             || s.filename == "manifest.json"
         {
-            return Err("CSV filename must be one relative, non-reserved path component".into());
+            return Err(err(
+                code::INVALID_SINK_PATH,
+                format_args!(
+                    "`{}` is not one relative, non-reserved path component",
+                    s.filename
+                ),
+            ));
         }
         if s.columns.is_empty() {
-            return Err("CSV sink declares no columns".into());
+            return Err(err(
+                code::EMPTY_SINK,
+                format_args!("`{}` declares no columns", s.key),
+            ));
         }
     }
     for phase in ["run_start", "publish", "run_finish"] {
@@ -107,7 +141,10 @@ pub fn validate(a: &ExecutionArtifact) -> Result<(), String> {
             .map(|p| p.0)
             .ok_or("helper function names require a lifecycle prefix, e.g. publish:check")?;
         if !matches!(phase, "run_start" | "publish" | "run_finish") {
-            return Err("unknown helper lifecycle".into());
+            return Err(err(
+                code::UNKNOWN_LIFECYCLE,
+                format_args!("`{name}` names no lifecycle this reader knows"),
+            ));
         }
         let mut resources = if phase == "run_start" {
             BTreeSet::new()
@@ -133,7 +170,10 @@ fn function_check(
         ));
     }
     if name != phase && !name.starts_with(&format!("{phase}:")) {
-        return Err("call crosses lifecycle boundary".into());
+        return Err(err(
+            code::CROSS_LIFECYCLE_CALL,
+            format_args!("`{name}` belongs to a different lifecycle than {phase}"),
+        ));
     }
     let function = a
         .program
@@ -241,7 +281,10 @@ fn body_check(
                     stack,
                 )?;
                 if left_resources != right_resources {
-                    return Err("branch resource states disagree".into());
+                    return Err(err(
+                        code::BRANCH_RESOURCE_MISMATCH,
+                        "the two arms leave different resources open",
+                    ));
                 }
                 *resources = left_resources;
                 for (name, state) in locals.iter_mut() {
@@ -297,7 +340,10 @@ fn snapshot<'a>(
     ty: ValueType,
 ) -> Result<Option<(&'a String, ValueType)>, String> {
     if phase != "publish" {
-        return Err("snapshot operation outside publish lifecycle".into());
+        return Err(err(
+            code::SNAPSHOT_LIFECYCLE,
+            format_args!("a snapshot read in {phase} has no snapshot to read"),
+        ));
     }
     Ok(Some((result, ty)))
 }
@@ -452,13 +498,18 @@ fn effect_check(
     locals: &BTreeMap<String, LocalState>,
     resources: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    // Two distinct failures, never merged: the sink id is not declared, or
-    // the program declares no sinks at all and so has no file-effect
-    // capability. They have different fixes.
-    if a.program.sinks.is_empty() {
+    // Two distinct failures, never merged, and they have different fixes:
+    // the *target* cannot write files at all, or it can and the program
+    // named a sink it never declared. "The program declares no sinks" is the
+    // second question in different words, not the first, so it is not asked
+    // here -- the lookup below reports it as EX2-010.
+    if !a.lowering.expansion().file_effects {
         return Err(err(
             code::MISSING_FILE_CAPABILITY,
-            format_args!("`{sink}` is a file effect but the program declares no CSV sink"),
+            format_args!(
+                "`{sink}` is a file effect, and profile {:?} expands to a target that performs none",
+                a.lowering
+            ),
         ));
     }
     let decl = a

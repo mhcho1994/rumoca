@@ -415,9 +415,10 @@ with program.builder("my.logger") as b:
     sink = b.declare_csv_sink(
         key="my-sink", filename="trace.csv",
         columns=[{"name": "t", "ty": "real"}, {"name": "T", "ty": "real"}],
-        # `members` is always present; `connector`/`orientation` only when the
-        # sink really is connector instrumentation.
-        metadata={"connector": 0, "orientation": "outside",
+        # `members` is always present. `connector` is one optional record, so
+        # a connector without an orientation is not representable; leave it
+        # out entirely when the sink is not connector instrumentation.
+        metadata={"connector": {"connector": 0, "orientation": "outside"},
                   "members": [{"trace_point": points["hot.port.T"]}]})
     with b.before_return("run_start") as ir:
         ir.emit("csv.open", sink=sink)

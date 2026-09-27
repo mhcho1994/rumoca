@@ -62,7 +62,7 @@ pub struct Projection {
 pub struct Observation {
     /// The trace point this observation answers. Keyed by the request, not by
     /// the variable: the trace point is the single registration site (D2).
-    pub trace_point: u32,
+    pub trace_point: super::TracePointRef,
     pub variable_id: u32,
     pub name: String,
     /// Physical role, borrowed from the trace point at derivation. Present so

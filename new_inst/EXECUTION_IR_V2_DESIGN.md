@@ -175,7 +175,37 @@ disagree, that is a pre-existing discrepancy and lands as its own commit with
 its own test *before* this milestone, so a golden diff here is never
 ambiguous about which change caused it.
 
-## 6. Decisions taken during implementation
+## 6. Required tests, as amended
+
+The milestone's §8 table was given in review and lives nowhere else in the
+repository, so it is recorded here with its amendments in place. A row marked
+**amended** differs from what was asked; the reason is in §7.
+
+| Test | Proves | Where |
+|---|---|---|
+| Serialized artifact contains no storage, rows, projections or observations | D1 | `test_derived_program_is_not_on_the_wire` |
+| `program` round-trips JSON ↔ CBOR; the **text profile refuses** an execution artifact rather than round-tripping it (**amended**) | D1 | `test_program_round_trips_across_every_wire_form` |
+| `run --backend rk45` derives the program and matches the pre-milestone result | D1 | thermal goldens, byte-identical at both scales |
+| `run --backend <other>` fails naming the backend | D1 | `test_backend_and_no_overwrite` |
+| v1 `execution.version` rejected with a stable code | D1 | `test_v1_artifact_is_rejected_with_a_stable_code` |
+| Unknown `TracePointId` fails validation; the helper creates trace points | D2 | `test_no_default_observation_and_helper_is_the_producer`, `EX2-040` |
+| No reader of an `observations` wire field (grep-based) | D2 | `execution_wire_boundary.rs` |
+| Digest stable under field reorder and optional-field toggles (**moot by construction; replaced** by type-identity tests) | D3 | `digest/tests.rs` |
+| Digest unchanged when an unreferenced residual is rewritten | D3 | `test_unreferenced_equation_edit_is_not_stale` |
+| Digest changed when a referenced variable is removed or retyped | D3 | `test_referenced_identity_change_is_stale_and_names_the_point` |
+| Undeclared local, type mismatch, `Text` in arithmetic, branch-scoped read: distinct stable codes (**amended**: the fourth is EX2-020, because the out-of-scope write is unrepresentable) | D4 | `test_each_name_and_type_defect_has_its_own_code` |
+| Operator enums round-trip; a misspelling is a deserialization error | D4 | `test_operator_enums_round_trip_and_a_typo_is_a_parse_error` |
+| A logging pass computes a derived column through typed `compute` | D4c | `test_logging_pass_computes_a_derived_column` |
+| Recursive `call` cycle rejected | D5 | `test_recursive_call_is_rejected` |
+| Effects are not reordered across a `publish` boundary | §5 | `test_effects_are_not_reordered_across_publish` |
+
+`new_inst/STUDENT_INSTRUCTIONS.md` §8 required that modifying *an equation*
+reject the instrumented program, which v2 deliberately no longer does. That
+file is the original contract, so its sentence stands as written and carries
+a dated amendment beneath it pointing here, rather than being rewritten: the
+record should show which rule applied when.
+
+## 7. Decisions taken during implementation
 
 Five points the note did not settle, resolved in code. Each changes something a
 reviewer would otherwise expect from §3 or §8.
@@ -222,13 +252,40 @@ trace point at derivation, so a reader does not infer "flow" from a member's
 name. This is the wire/emitted split the review asked for, and it is why
 `check_thermal_csv.py` still runs without importing Rumoca.
 
-**`SinkMetadata.connector` and `.orientation` are optional.** D4b specified
-both as required. Not every sink is connector instrumentation — ModelSan's
-variable logger and the tests' plain sinks are not — and writing `connector: 0`
-on one states a fact a reader could act on. `members` stays required, which is
-what preserves the D2 unification: a sink's trace-point references are visible
-without reading its instructions, and `referenced_trace_points` walks them. The
-emitted manifest resolves `connector_path` only when `connector` is present.
+**The digest's domain tag moved to `rumoca.execution.dependency.v2`.** The
+encoding changed, so every digest changes with it and any artifact carrying
+the old one reads as stale. No migration is needed and none was skipped: the
+execution v2 wire has never left this branch, so there is no artifact in the
+world holding a `dependency.v1` digest under an `EXECUTION_VERSION` of 2.
+Re-lowering regenerates it.
+
+**`SinkMetadata.connector` is one optional record.** An earlier revision had
+two independent `Option`s, which made "a connector with no orientation"
+representable. It is now `Option<ConnectorBinding { connector, orientation }>`:
+present together or absent together.
+
+**`EX2-011` asks the capability question, not the sink-count question.** It
+first fired on "the program declares no sinks", which is `EX2-010` in other
+words — the program named a sink it never declared — and not TRP-042's
+question of whether the target can write files at all. It is now wired to
+`ProfileExpansion::file_effects`, which every profile that exists sets, so
+the code is **currently unreachable** and documented as such, like EX2-023
+and EX2-024. A check that fires on the wrong condition is worse than none.
+
+**Every validator rejection carries a code.** Seven were bare strings:
+duplicate sink key or filename, invalid sink filename, empty sink, unknown
+helper lifecycle, cross-lifecycle call, branch resources disagreeing, and a
+snapshot read outside publish. They are now `EX2-014`, `EX2-015`, `EX2-016`,
+`EX2-031`, `EX2-032`, `EX2-034` and `EX2-033`. Without them
+`test_each_name_and_type_defect_has_its_own_code` was only half true.
+
+D4b specified the connector and orientation as required. Not every sink is
+connector instrumentation — ModelSan's variable logger and the tests' plain
+sinks are not — and writing `connector: 0` on one states a fact a reader
+could act on. `members` stays required, which is what preserves the D2
+unification: a sink's trace-point references are visible without reading its
+instructions, and `referenced_trace_points` walks them. The emitted manifest
+resolves `connector_path` only when the binding is present.
 
 **`manifest.json` no longer carries `variable_id` at all.** The review asked
 that it become an integer rather than `"5"`. Under D2 the identity a sink
@@ -236,6 +293,18 @@ member carries is its `trace_point`, which is an integer, and the resolved
 member record is `{trace_point, name, unit, kind}`. `check_thermal_csv.py`
 needed no change beyond its docstring: it reads `connector_path`, `name`,
 `unit` and `kind`, all of which the runtime still resolves.
+
+**The "field reorder and `skip_serializing_if`" test row is moot, and is
+replaced.** The note asked for a test that the digest is stable under struct
+field reordering and optional-field toggles. The digest encoder is
+hand-written and consumes nothing but bytes — it never goes through `serde` —
+so every serialization choice is outside the hash *by construction*, and a
+test asserting it would be testing that a call that does not happen does not
+happen. What needed a test instead is the property that replaced it: type
+identity is contents, not the id that happens to hold them.
+`crates/rumoca/src/bitcode_execution/digest/tests.rs` has seven, including
+the same type contents under reversed `TypeId` numbering hashing alike, and a
+retype that reuses its id still changing the digest.
 
 ### Verified
 

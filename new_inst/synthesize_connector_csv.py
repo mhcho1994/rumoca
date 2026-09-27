@@ -165,8 +165,8 @@ def instrument_all_connectors(program: Program, model: Model) -> None:
                 # Identity only. unit/kind/variable are reachable from the trace
                 # point, and the runtime denormalizes them into manifest.json.
                 metadata={
-                    "connector": int(connector.id),
-                    "orientation": connector.orientation,
+                    "connector": {"connector": int(connector.id),
+                                  "orientation": connector.orientation},
                     "members": [
                         {"trace_point": points[f"{connector.path}.{m.name}"]}
                         for m in members

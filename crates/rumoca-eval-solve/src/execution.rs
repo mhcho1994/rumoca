@@ -434,14 +434,15 @@ fn resolved_sinks(state: &CsvExecution) -> Result<serde_json::Value, String> {
                 "kind": observation.quantity,
             }));
         }
+        let binding = sink.metadata.connector.as_ref();
         sinks.push(serde_json::json!({
             "key": sink.key,
             "filename": sink.filename,
             "columns": sink.columns,
             "metadata": {
-                "connector": sink.metadata.connector,
+                "connector": binding.map(|b| b.connector),
                 "connector_path": path,
-                "orientation": sink.metadata.orientation,
+                "orientation": binding.map(|b| b.orientation),
                 "members": members,
             },
         }));

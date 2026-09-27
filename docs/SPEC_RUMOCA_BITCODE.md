@@ -159,7 +159,11 @@ The rules a consumer must observe:
 1. **Staleness is about referenced identity, not about the equations.** The
    `dependency_digest` covers the wire and execution versions, the expanded
    lowering profile, and — for each trace point the program *references* — its
-   id, component path, value type, causality and unit. Rewriting a residual the
+   id, component path, the **contents** of its type (scalar kind, dimensions,
+   and a record's name and fields), a causality tag, and its unit. A type is
+   never hashed by its `TypeId`: ids are per-compilation, so that would make
+   the digest depend on table layout and would miss a retype onto the same
+   id. Rewriting a residual the
    program does not observe leaves the program runnable; retyping or removing a
    variable it does observe does not. A mismatch is an error, not a re-lowering
    trigger: re-lowering is explicit, because replay discards execution-level
@@ -196,8 +200,12 @@ The rules a consumer must observe:
 7. **Structure, never flattened text.** A consumer that needs a component path
    or a member name takes it from `RbcConnectorInstance` and `RbcComponent`,
    not by splitting a variable's display name on `.`: a component named `a.b`
-   and a component `a` owning `b` flatten to the same text. The digest encodes
-   the path as two length-prefixed records for the same reason.
+   and a component `a` owning `b` flatten to the same text. The digest keeps
+   the component path and the variable name as two length-prefixed records
+   for the same reason — nothing re-splits them. `RbcComponent.path` is
+   itself a dotted string, so the ambiguity survives *inside* that field;
+   removing it means giving `RbcComponent` a structured path, which no
+   consumer needs yet.
 
 ### Scoping and ordering
 

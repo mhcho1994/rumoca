@@ -161,9 +161,10 @@ class ExecutionAcceptance(unittest.TestCase):
                 columns=[{"name": "T", "ty": "real"},
                          {"name": "Q_flow", "ty": "real"},
                          {"name": "power", "ty": "real"}],
-                metadata={"connector": 0, "orientation": "outside", "members": [
-                    {"trace_point": points["hot.port.T"]},
-                    {"trace_point": points["hot.port.Q_flow"]}]})
+                metadata={
+                    "connector": {"connector": 0, "orientation": "outside"},
+                    "members": [{"trace_point": points["hot.port.T"]},
+                                {"trace_point": points["hot.port.Q_flow"]}]})
             arena = p.expressions("publish")
             with b.before_return("run_start") as ir:
                 ir.emit("csv.open", sink=sink)

@@ -83,7 +83,7 @@ fn publication_program() -> solve::execution::ExecutionArtifact {
                     {"name": "id", "ty": "integer"},
                     {"name": "phase", "ty": "text"}
                 ],
-                "metadata": {"connector": 0, "orientation": "outside", "members": []}
+                "metadata": {"connector": {"connector": 0, "orientation": "outside"}, "members": []}
             }],
             "functions": {
                 "run_start": {

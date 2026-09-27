@@ -148,6 +148,23 @@ The example defaults to `scale=2`. This is an expression/equation rewrite, not m
 
 Also test the reverse sequence: lower and instrument, modify an equation, reject the stale executable, explicitly re-lower, replay the logger, and execute the new program. If this fails, equation transforms have not remained first-class.
 
+> **Amendment, 2026-09-27 — Execution IR v2, D3.** The sentence above is the
+> original contract and states the v1 rule. It is superseded, not corrected:
+> the v2 staleness digest covers the identities a program *references*, not
+> the equations, so rewriting the conductor law — which no trace point
+> observes — now leaves the instrumented program runnable. That is the
+> intended change; v1 rejected the edit and forced a re-lower that discarded
+> execution-level work the edit did not affect.
+>
+> The rejection path is still required, and is now provoked by changing a
+> referenced identity: retype or remove a variable a trace point names, see
+> the executable rejected as stale, explicitly re-lower, replay the logger,
+> and execute the new program. Both halves are tested —
+> `test_unreferenced_equation_edit_is_not_stale` and
+> `test_referenced_identity_change_is_stale_and_names_the_point`. Rationale
+> and the full amended test list are in
+> [EXECUTION_IR_V2_DESIGN.md](EXECUTION_IR_V2_DESIGN.md) §6–§7.
+
 ## 9. Implement the connector CSV pass
 
 The pass enumerates all connectors from semantic IR; it contains no thermal-specific names or formulas. It registers a CSV sink for each connector, loads its member values from the publication snapshot, and inserts ordinary executable `csv.write_row` instructions.

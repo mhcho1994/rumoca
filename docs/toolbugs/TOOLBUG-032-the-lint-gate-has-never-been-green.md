@@ -38,14 +38,29 @@ the milestone. The milestone's own additions to `rumoca-bitcode` are
 variant, at `validate.rs:24-28` and `112-164`; the six `validate.rs` findings
 are at lines 449, 585, 598, 616 and 1025.
 
+## Reconciliation with SPEC_0021
+
+The repository's own size gate passes while clippy's `too_many_lines` fails,
+and that is not a contradiction: they measure different things against
+different ceilings. SPEC_0021's enforced threshold is **per file, at 2000
+lines** (`code_size_budget_test::test_production_rust_files_stay_under_action_required_size`,
+`ACTION_REQUIRED_LINES = 2000`); clippy's `too_many_lines` is **per function,
+at 100**, which matches SPEC_0021's *research* note ("functions over 100
+lines correlate with higher defect rates") but is not the number the spec
+enforces. So the six functions here — the largest at 936 lines — are
+genuinely over the line SPEC_0021 argues for and under the one it gates on.
+
+The disposition follows from that: these six belong in SPEC_0021's ledger as
+acknowledged function-size debt, not in this milestone. Nothing in the
+current gate configuration is wrong; the two thresholds simply disagree about
+what a unit is, and picking one is a spec decision rather than a code change.
+
 ## Why it is not fixed here
 
 `excessive_nesting` in a recursive-descent parser is not a mechanical fix: the
 68 sites are match arms and error closures whose nesting *is* the grammar.
 Doing them inside a milestone that touches two of those files would put ~70
-unrelated hunks into a diff whose subject is the wire format, and the
-`too_many_lines` findings overlap SPEC_0021, which has its own ledger and
-acknowledgement process.
+unrelated hunks into a diff whose subject is the wire format.
 
 ## What was fixed
 

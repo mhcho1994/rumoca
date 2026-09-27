@@ -56,7 +56,7 @@ pub fn export(
         let instructions = observation(model, name)
             .map_err(|e| format!("trace point {trace_point} ({name}): {e}"))?;
         observations.push(public::Observation {
-            trace_point: *trace_point,
+            trace_point: public::TracePointRef(*trace_point),
             variable_id: *variable_id,
             name: name.clone(),
             quantity: None,

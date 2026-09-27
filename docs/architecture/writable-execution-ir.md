@@ -128,15 +128,22 @@ text.
 |---|---|
 | `EX2-001` | Artifact declares a version this reader does not implement |
 | `EX2-010` | A `csv.*` effect names a sink the program does not declare |
-| `EX2-011` | The target cannot perform file effects at all |
+| `EX2-011` | The profile expands to a target that performs no file effects (*currently unreachable*: every profile sets `file_effects`) |
 | `EX2-012` | An effect is in a lifecycle phase that cannot perform it, or names a resource not open there |
 | `EX2-013` | A written row does not have one value per declared column |
+| `EX2-014` | Two sinks share a key or a filename |
+| `EX2-015` | A sink filename is not one relative, non-reserved path component |
+| `EX2-016` | A sink declares no columns |
 | `EX2-020` | Read of a local that is not declared, or not yet assigned |
 | `EX2-021` | Value of the wrong type for its position |
 | `EX2-022` | `Text` used outside a CSV column or an assert message |
 | `EX2-023` | *Reserved, unallocated* — inner-scope declarations are unrepresentable |
 | `EX2-024` | *Reserved, unallocated* — a `VariableId` expression leaf is unrepresentable |
 | `EX2-030` | The call graph contains a cycle |
+| `EX2-031` | A helper's name carries no lifecycle prefix the reader knows |
+| `EX2-032` | A call reaches a helper in a different lifecycle phase |
+| `EX2-033` | A snapshot read outside the publish phase, where there is no snapshot |
+| `EX2-034` | The two arms of an `if` leave different resources open |
 | `EX2-040` | An instruction or sink references a trace point the model does not declare |
 
 A caller matches on the code, never on message text.
@@ -157,6 +164,9 @@ second copy could diverge from the first.
 
 The validator reports an undeclared sink id (`EX2-010`) separately from a
 target that cannot write files at all (`EX2-011`): they have different fixes.
+`EX2-011` is answered by the lowering profile's `file_effects` expansion
+field, not by counting declared sinks — "the program declares no sinks" is
+the `EX2-010` question in other words.
 
 The runtime does not enumerate connectors or infer sink membership. It executes
 only the serialized instructions. Filenames are single path components, opened
@@ -196,7 +206,14 @@ it covers exactly what the program depends on:
 |---|---|
 | `RBC_VERSION`, `EXECUTION_VERSION` | a wire change invalidates every program |
 | the expanded `lowering` profile | a different derivation is a different program |
-| per referenced trace point: id, component path, value type, causality, unit | the identities `snapshot.value` resolves against |
+| per referenced trace point: id, component path, type **contents**, causality tag, unit | the identities `snapshot.value` resolves against |
+
+A type is hashed by its contents — scalar kind, dimensions and, for a record,
+its name and fields, recursively — never by its `TypeId`. Type ids are
+per-compilation, so hashing the number would make the digest depend on how
+one run laid out its type table, and would miss a retype that lands on the
+same id. Causality is hashed as an explicit per-variant byte tag rather than
+`Debug` output, which is not a contract anyone promised to keep.
 
 It does **not** hash the equations. Rewriting a residual the program does not
 observe leaves it runnable, which is the point: v1 hashed the whole equation
