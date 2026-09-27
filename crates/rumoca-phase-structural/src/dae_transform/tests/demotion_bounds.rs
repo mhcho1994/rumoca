@@ -259,12 +259,11 @@ fn demotion_residue_bound_is_a_lower_bound_on_the_rebuilt_residue() {
 
 /// `x = w + u; w = s; der(s) = -s; der(x) = 1`, demoting `x` by `x = w`:
 /// `der(x)` becomes the derivative of `w`, which the differentiator reads
-/// through `w = s` as `der(s)`, a column `w` itself does not show. A bound
-/// built from `w`'s columns alone lets that row match `x` and bounds the
-/// residue at 0, while the rebuilt system leaves it at 2, so the screen must
-/// not bound a definition that reads an algebraic.
+/// through the equality `w = s` as `der(s)`, a column `w` itself does not
+/// show. The closure follows `w` to its state anchor, so the bound includes
+/// the `der(s)` column and never exceeds the rebuilt residue of 2.
 #[test]
-fn a_definition_reading_an_algebraic_is_not_bounded() {
+fn a_definition_reading_an_anchored_algebraic_is_bounded_soundly() {
     let text = "Real x; Real s; Real w; Real u; equation x=w+u; w=s; der(s)=-s; der(x)=1;";
     let mut sources = SourceMap::new();
     let source = sources.add("algebraic_definition.mo", text);
@@ -325,10 +324,82 @@ fn a_definition_reading_an_algebraic_is_not_bounded() {
         "the demotion leaves der(x) and der(s) competing"
     );
     let screen = demotion_screen::DemotionScreen::new(&reusable, &source.demotion_rows, 1);
-    assert_eq!(
-        source.inspect(|view, facts| screen.residue_bound(view, facts, &candidate)),
-        None,
-        "a bound here would undercount the rebuilt residue"
+    let bound = source
+        .inspect(|view, facts| screen.residue_bound(view, facts, &candidate))
+        .expect("the closure follows w through its state anchor");
+    assert!(bound <= 2, "bound {bound} exceeds the rebuilt residue 2");
+}
+
+/// `x = w + u; w = s*s; u = s; der(s) = -s; der(x) = 1`, demoting `x` by
+/// `x = w + u`: `w` has no state anchor, so the differentiator reads its
+/// causal definition `s*s`, and `u` its anchor `s`. The closure follows both
+/// to `der(s)`, and the bound never exceeds the rebuilt residue.
+#[test]
+fn a_definition_reading_a_causally_defined_algebraic_is_bounded_soundly() {
+    let text = "Real x; Real s; Real w; Real u; equation x=w+u; w=s*s; u=s; der(s)=-s; der(x)=1;";
+    let mut sources = SourceMap::new();
+    let source = sources.add("causal_definition.mo", text);
+    let at = source_provenance(source, text, text);
+    let mut defined = None;
+    let model = dae::Dae::construct(sources, |model| {
+        let scalar = model
+            .types(|types| types.derived(dae::ValueType::scalar(dae::ScalarType::Real), at))?;
+        let (x, s, w, u) = model.variables(|variables| {
+            Ok((
+                variables.state(VarName::new("x"), scalar, at, Default::default())?,
+                variables.state(VarName::new("s"), scalar, at, Default::default())?,
+                variables.algebraic(VarName::new("w"), scalar, at, Default::default())?,
+                variables.algebraic(VarName::new("u"), scalar, at, Default::default())?,
+            ))
+        })?;
+        let residuals = model.expressions(|e| {
+            let xv = e.at(at).coordinate(dae::CoordinateInput::State(x))?;
+            let sv = e.at(at).coordinate(dae::CoordinateInput::State(s))?;
+            let wv = e.at(at).coordinate(dae::CoordinateInput::Algebraic(w))?;
+            let uv = e.at(at).coordinate(dae::CoordinateInput::Algebraic(u))?;
+            let dx = e.at(at).coordinate(dae::CoordinateInput::Derivative(x))?;
+            let ds = e.at(at).coordinate(dae::CoordinateInput::Derivative(s))?;
+            let one = e.at(at).literal(dae::DaeLiteral::Real(1.0))?;
+            let sum = e.at(at).binary(dae::BinaryOperator::Add, wv, uv)?;
+            defined = Some(DirectStateConstraint {
+                state: x.index(),
+                rhs: StateDefinition::Expression(sum.index()),
+                rhs_sign: super::super::equalities::EqualitySign::Same,
+                owner: at,
+            });
+            let square = e.at(at).binary(dae::BinaryOperator::Multiply, sv, sv)?;
+            Ok([
+                e.at(at).binary(dae::BinaryOperator::Subtract, xv, sum)?,
+                e.at(at).binary(dae::BinaryOperator::Subtract, wv, square)?,
+                e.at(at).binary(dae::BinaryOperator::Subtract, uv, sv)?,
+                e.at(at).binary(dae::BinaryOperator::Add, ds, sv)?,
+                e.at(at).binary(dae::BinaryOperator::Subtract, dx, one)?,
+            ])
+        })?;
+        model.continuous(|continuous| {
+            for residual in residuals {
+                continuous.value_equation(at, residual)?;
+            }
+            Ok(())
+        })
+    })
+    .unwrap();
+    let (_, reusable) = structural_analysis_capturing(&model, None, None);
+    let reusable = reusable.expect("the fixture builds its incidence");
+    let source = ReductionSource::new(&model);
+    let candidate = defined.expect("the fixture defines x by w + u");
+    let (rebuilt, _) = rebuild_with_state_demotion_and_manifold(&source, candidate, &[]).unwrap();
+    let actual = structural_analysis(&rebuilt)
+        .err()
+        .and_then(|error| unmatched_residue(&error))
+        .unwrap_or(0);
+    let screen = demotion_screen::DemotionScreen::new(&reusable, &source.demotion_rows, 1);
+    let bound = source
+        .inspect(|view, facts| screen.residue_bound(view, facts, &candidate))
+        .expect("the closure follows w through its causal definition");
+    assert!(
+        bound <= actual,
+        "bound {bound} exceeds rebuilt residue {actual}"
     );
 }
 

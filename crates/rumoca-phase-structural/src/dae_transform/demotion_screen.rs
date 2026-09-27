@@ -9,19 +9,21 @@
 //! are unchanged too. Every other owner keeps its exact rows, which the
 //! incremental incidence already relies on.
 //!
-//! The bound applies only when `rhs` reads no algebraic coordinate and no
-//! record field or constructor, and reads no state whose explicit derivative
-//! definition reads one either: the differentiator reads an algebraic's
-//! equality anchor, causal definition, auxiliary block, or record component
-//! definitions, whose columns `rhs` does not show. Without those, the
-//! derivative of `rhs` reads only coordinates `rhs` reads and the
-//! derivatives of the states among them; a function body reads no model
-//! coordinate. So a touched row after the demotion is contained in its prior
+//! The derivative of `rhs` reads a closure of columns that `DerivativeClosure`
+//! collects by following every path the differentiator can take: the values
+//! of the coordinates read, a state's derivative (or the values its explicit
+//! derivative definition reads), and for an algebraic the state anchor of its
+//! equality class under each anchor mode the reconstruction may select, else
+//! the closure of its causal definition. A function body reads no model
+//! coordinate. Paths the closure does not follow (a derivative or record read,
+//! an auxiliary block, a record component definition, or a derivative
+//! definition reading a derivative, algebraic, or record) leave the candidate
+//! unbounded. So a touched row after the demotion is contained in its prior
 //! row without `x`'s columns, plus `x`'s columns, plus, when it read
-//! `der(x)`, the columns of every state or algebraic `rhs` reads. A maximum
-//! matching on these superset rows is at least the true one, so its residue
-//! `E + U - 2M` is a lower bound on the rebuilt system's residue: when the
-//! bound is not below the current residue, the demotion cannot reduce it.
+//! `der(x)`, the closure. A maximum matching on these superset rows is at
+//! least the true one, so its residue `E + U - 2M` is a lower bound on the
+//! rebuilt system's residue: when the bound is not below the current residue,
+//! the demotion cannot reduce it.
 
 use rumoca_ir_dae as dae;
 
@@ -51,9 +53,8 @@ impl<'a> DemotionScreen<'a> {
     }
 
     /// The residue lower bound of demoting `candidate`, when the bound
-    /// applies: an exact expression definition whose coordinates are values
-    /// (never a derivative or an algebraic, and no record field or constructor)
-    /// and a state with unknown columns.
+    /// applies: an exact expression definition whose derivative closure is
+    /// followed completely, and a state with unknown columns.
     pub(super) fn residue_bound(
         &self,
         view: dae::DaeView<'_>,
@@ -65,38 +66,17 @@ impl<'a> DemotionScreen<'a> {
         };
         let state_columns = self.bounds.columns(candidate.state)?;
         let rhs = view.expression_id(rhs as usize)?;
-        let mut derivative_columns = Vec::new();
-        let mut unbounded = false;
-        let mut definitions = Vec::new();
-        dae::ExpressionTraversal::new().visit_pruned(view, [rhs], |_, node| {
-            unbounded |= reads_hidden_columns(node);
-            // A state with an explicit derivative definition differentiates into
-            // that definition, rebuilt as values; it is checked below.
-            if let dae::ExpressionOperation::Coordinate(dae::CoordinateView::State(state)) =
-                node.operation()
-                && let Some(definition) = facts.derivative_definitions[state.index() as usize]
-            {
-                definitions.extend(view.expression_id(definition.expression as usize));
-            }
-            if let Some(columns) = node
-                .variable_coordinate()
-                .and_then(|variable| self.bounds.columns(variable.index()))
-            {
-                derivative_columns.extend(columns);
-            }
-            true
-        });
-        // A derivative definition is rebuilt as values: a state or parameter read
-        // there is known and a read of the demoted state lands in its own
-        // columns, which every touched row carries, so the definition adds no
-        // column unless it reads one the bound cannot see.
-        dae::ExpressionTraversal::new().visit_pruned(view, definitions, |_, node| {
-            unbounded |= reads_hidden_columns(node);
-            true
-        });
-        if unbounded {
-            return None;
+        let derivative_columns = DerivativeClosure {
+            view,
+            facts,
+            bounds: self.bounds,
+            demoted: candidate.state,
+            columns: Vec::new(),
+            algebraics: std::collections::BTreeSet::new(),
+            pending: vec![rhs],
+            rates: Vec::new(),
         }
+        .collect()?;
         let touched = self.bounds.owners(candidate.state);
         let n_eq = self.base.rows().len();
         let mut rows = IncidenceRowsBuilder::with_row_capacity(n_eq);
@@ -164,4 +144,117 @@ fn reads_hidden_columns(node: dae::ExpressionView<'_>) -> bool {
         ) | dae::ExpressionOperation::Field { .. }
             | dae::ExpressionOperation::Record(_)
     )
+}
+
+/// The unknown columns the derivative of a demotion's definition can read,
+/// following every path the differentiator can take, or `None` when a path
+/// reads columns this closure does not follow.
+///
+/// Differentiating an expression reads the values of the coordinates it reads
+/// and, per coordinate: nothing for a parameter or time; for a state, its
+/// derivative, or the values its explicit derivative definition reads; for an
+/// algebraic, its auxiliary block or record component definition (not
+/// followed), else the state anchor of its equality class (whichever of the
+/// exact, affine, or demotion anchor the reconstruction selects, all taken
+/// here), else the derivative of its causal definition. A derivative read, a
+/// record field, or a record constructor is not followed.
+struct DerivativeClosure<'a, 'dae> {
+    view: dae::DaeView<'dae>,
+    facts: &'a super::constraints::DifferentiationFacts,
+    bounds: &'a DemotionRowBounds,
+    demoted: u32,
+    columns: Vec<usize>,
+    /// Algebraics already followed.
+    algebraics: std::collections::BTreeSet<u32>,
+    /// Expressions whose derivative is still to be followed.
+    pending: Vec<dae::ExprId<'dae>>,
+    /// Explicit derivative definitions, read as values.
+    rates: Vec<dae::ExprId<'dae>>,
+}
+
+impl<'dae> DerivativeClosure<'_, 'dae> {
+    fn collect(mut self) -> Option<Vec<usize>> {
+        while let Some(expression) = self.pending.pop() {
+            self.differentiate(expression)?;
+        }
+        let mut hidden = false;
+        dae::ExpressionTraversal::new().visit_pruned(self.view, self.rates.clone(), |_, node| {
+            hidden |= reads_hidden_columns(node);
+            true
+        });
+        (!hidden).then_some(self.columns)
+    }
+
+    fn differentiate(&mut self, expression: dae::ExprId<'dae>) -> Option<()> {
+        let mut nodes = Vec::new();
+        dae::ExpressionTraversal::new().visit_pruned(self.view, [expression], |_, node| {
+            nodes.push(node);
+            true
+        });
+        for node in nodes {
+            if matches!(
+                node.operation(),
+                dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(_))
+                    | dae::ExpressionOperation::Field { .. }
+                    | dae::ExpressionOperation::Record(_)
+            ) {
+                return None;
+            }
+            if let Some(columns) = node
+                .variable_coordinate()
+                .and_then(|variable| self.bounds.columns(variable.index()))
+            {
+                self.columns.extend(columns);
+            }
+            match node.operation() {
+                dae::ExpressionOperation::Coordinate(dae::CoordinateView::State(state)) => {
+                    self.state(state.index());
+                }
+                dae::ExpressionOperation::Coordinate(dae::CoordinateView::Algebraic(algebraic)) => {
+                    self.algebraic(algebraic)?;
+                }
+                _ => {}
+            }
+        }
+        Some(())
+    }
+
+    /// A state's derivative: its column, or the values its definition reads.
+    fn state(&mut self, state: u32) {
+        self.columns
+            .extend(self.bounds.columns(state).into_iter().flatten());
+        if let Some(definition) = self.facts.derivative_definitions[state as usize] {
+            self.rates
+                .extend(self.view.expression_id(definition.expression as usize));
+        }
+    }
+
+    fn algebraic(&mut self, algebraic: dae::AlgebraicId<'dae>) -> Option<()> {
+        let index = algebraic.index();
+        if !self.algebraics.insert(index) {
+            return Some(());
+        }
+        if self.facts.auxiliary_blocks[index as usize].is_some()
+            || self.facts.component_definitions[index as usize].is_some()
+        {
+            return None;
+        }
+        let equalities = &self.facts.equalities;
+        let anchors = [
+            equalities.anchor_of(index),
+            equalities.value_anchor_of(index),
+            equalities.anchor_for_demotion(index, self.demoted),
+        ];
+        for (anchor, _) in anchors.iter().flatten() {
+            if let super::equalities::EqualityAnchor::State(state) = anchor {
+                self.state(*state);
+            }
+        }
+        // Some anchor mode finds none, so the causal definition is followed.
+        if anchors.iter().any(Option::is_none) {
+            let definition = self.facts.algebraic_definition(self.view, algebraic)?;
+            self.pending.push(definition);
+        }
+        Some(())
+    }
 }
