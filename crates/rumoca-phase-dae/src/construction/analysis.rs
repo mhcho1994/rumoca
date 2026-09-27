@@ -232,7 +232,10 @@ pub(super) enum FunctionPlan {
         source: Vec<rumoca_core::Statement>,
         statements: Vec<FunctionStatementPlan>,
         generated_booleans: Vec<(VarName, Span)>,
-        certified_output_seeds: Vec<(VarName, FunctionValueSeed)>,
+        /// Values defined at function entry: outputs a disjoint early-return
+        /// certificate proves total, and values with a zero extent, which have
+        /// no element to write (MLS §12.4.4).
+        entry_seeds: Vec<(VarName, FunctionValueSeed)>,
     },
     GuardedReturn {
         branches: Vec<Vec<FunctionStatementPlan>>,

@@ -134,12 +134,13 @@ fn validate_statement_function(
         returned.has_returns,
     )?;
     let mut definitions = FunctionDefinitions::new(function);
-    let certified_output_seeds = certified_return_output_seeds(
+    let mut entry_seeds = certified_return_output_seeds(
         function,
         returned.has_returns,
         returned_context,
         &mut definitions,
     )?;
+    entry_seeds.extend(definitions.empty_value_seeds(returned_context)?);
     let statements = validate_function_statements(&source, returned_context, &mut definitions)?;
     require_total_outputs(function, &definitions)?;
     Ok(FunctionPlan::Statements {
@@ -150,7 +151,7 @@ fn validate_statement_function(
             .iter()
             .map(|guard| (guard.target.clone(), guard.span))
             .collect(),
-        certified_output_seeds,
+        entry_seeds,
     })
 }
 
@@ -177,6 +178,7 @@ fn validate_nonreturn_path(
         false,
     )?;
     let mut definitions = FunctionDefinitions::new(function);
+    definitions.empty_value_seeds(nonreturn_context)?;
     validate_function_statements(&source, nonreturn_context, &mut definitions)?;
     require_total_outputs(function, &definitions)
 }

@@ -18,8 +18,16 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         rhs: dae::ExprId<'dae>,
         at: rumoca_core::Span,
     ) -> Result<LoweredValue<'program, 'dae>, solve::SolveProgramConstructionError> {
-        let mut lhs_value = self.expression(lhs)?.only_register(at)?;
-        let mut rhs_value = self.expression(rhs)?.only_register(at)?;
+        let lhs_lowered = self.expression(lhs)?;
+        let rhs_lowered = self.expression(rhs)?;
+        // MLS 3.7 §10.6: an element-wise result over a zero-size operand is
+        // itself zero-size, which holds no leaf; the operands are still lowered
+        // above, so any call they contain keeps its evaluation.
+        if self.is_zero_size(value_type)? {
+            return Ok(LoweredValue::empty(value_type));
+        }
+        let mut lhs_value = lhs_lowered.only_register(at)?;
+        let mut rhs_value = rhs_lowered.only_register(at)?;
         let lhs_type = self
             .view
             .expression(lhs)
@@ -424,6 +432,13 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         ) {
             argument_value = self.coerce_value(argument_value, value_type, at)?;
         }
+        // MLS 3.7 §10.3.4: a zero-size array holds no leaf, and its sum or
+        // product is the operation's identity element.
+        if argument_value.leaves.is_empty()
+            && matches!(builtin, dae::PureBuiltin::Sum | dae::PureBuiltin::Product)
+        {
+            return self.reduction_identity(value_type, builtin == dae::PureBuiltin::Sum, at);
+        }
         let value = argument_value.only_register(at)?;
         let register = match builtin {
             dae::PureBuiltin::Abs => self
@@ -507,6 +522,38 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             }
             _ => Err(solve::SolveProgramConstructionError::InvalidCallInterface { provenance: at }),
         }?;
+        Ok(LoweredValue::scalar(value_type, register))
+    }
+
+    /// The identity of `sum` (zero) or `product` (one) in the result's scalar
+    /// type, the value of that reduction over a zero-size array.
+    fn reduction_identity(
+        &mut self,
+        value_type: dae::ValueTypeId<'dae>,
+        sum: bool,
+        at: rumoca_core::Span,
+    ) -> Result<LoweredValue<'program, 'dae>, solve::SolveProgramConstructionError> {
+        let scalar = self
+            .view
+            .value_type(value_type)
+            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
+            .scalar_type();
+        let value = match scalar {
+            dae::ScalarType::Real => {
+                solve::SolveValue::real(arithmetic_profile(), if sum { 0.0 } else { 1.0 })
+            }
+            dae::ScalarType::Integer => {
+                solve::SolveValue::integer(arithmetic_profile(), i64::from(!sum)).map_err(|_| {
+                    solve::SolveProgramConstructionError::InvalidCallInterface { provenance: at }
+                })?
+            }
+            _ => {
+                return Err(solve::SolveProgramConstructionError::InvalidCallInterface {
+                    provenance: at,
+                });
+            }
+        };
+        let register = self.builder.constant(value, at)?;
         Ok(LoweredValue::scalar(value_type, register))
     }
 
