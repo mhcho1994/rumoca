@@ -379,6 +379,10 @@ fn reverse_row_adjoints(
             LinearOp::LoadSeed { dst, index } => accumulate(cot.seed, index, take_adj(adj, dst)),
             LinearOp::Move { dst, src } => {
                 let dst_adj = take_adj(adj, dst);
+                // A copy carries an unselected arm's mark to its source.
+                if skips_untaken(untaken, adj, dst, dst_adj, &[src]) {
+                    continue;
+                }
                 add_adj(adj, src, dst_adj);
             }
             // A selection eagerly evaluates its unselected arm, whose partials may
@@ -776,7 +780,8 @@ mod tests {
         assert!(cot_y[0].is_nan(), "{cot_y:?}");
     }
 
-    /// `if true then y0 else y0 * (1 / y1)` at `y1 = 0`: the unselected arm
+    /// `if true then y0 else copy(y0 * (1 / y1))` at `y1 = 0`: the unselected arm,
+    /// reached through a copy,
     /// evaluates `y0 * inf`, whose partial in `y0` is infinite. Its adjoint is
     /// zero, so it must add nothing, leaving `df/dy0 = 1` and `df/dy1 = 0`.
     #[test]
@@ -798,11 +803,12 @@ mod tests {
                     lhs: 0,
                     rhs: 3,
                 },
+                LinearOp::Move { dst: 6, src: 4 },
                 LinearOp::Select {
                     dst: 5,
                     cond: 2,
                     if_true: 0,
-                    if_false: 4,
+                    if_false: 6,
                 },
                 LinearOp::StoreOutput { src: 5 },
             ]],
