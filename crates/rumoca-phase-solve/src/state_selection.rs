@@ -68,10 +68,39 @@ pub(crate) fn prepare<'source>(
     let folded = fold_evaluable_parameters(model)?;
     let inlined = inline_annotated_calls(folded.as_ref().unwrap_or(model))?.or(folded);
     let quotient = quotient_aliases(inlined.as_ref().unwrap_or(model))?.or(inlined);
-    match fold_constant_values(quotient.as_ref().unwrap_or(model))?.or(quotient) {
-        None => prepare_source(model, overrides),
-        Some(transformed) => prepare_quotient(transformed, overrides),
-    }
+    let selection = match fold_constant_values(quotient.as_ref().unwrap_or(model))?.or(quotient) {
+        None => prepare_source(model, overrides)?,
+        Some(transformed) => prepare_quotient(transformed, overrides)?,
+    };
+    own_selection_loop_guards(selection)
+}
+
+/// SPEC_0044 ME-EVENT-008: after BLT, a relation inside `smooth` that reads
+/// an unknown of its own algebraic loop owns an event, in the primary system
+/// and in every alternate chart alike, so their layouts stay identical.
+fn own_selection_loop_guards(
+    selection: PreparedSelection<'_>,
+) -> Result<PreparedSelection<'_>, StructuralError> {
+    let PreparedSelection {
+        primary,
+        alternates,
+        exchanges,
+        formal_aliases,
+    } = selection;
+    let alternates = alternates
+        .into_iter()
+        .map(|alternate| {
+            alternate
+                .map(rumoca_phase_structural::own_loop_guarded_relations)
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PreparedSelection {
+        primary: rumoca_phase_structural::own_loop_guarded_relations(primary)?,
+        alternates,
+        exchanges,
+        formal_aliases,
+    })
 }
 
 /// Prepare an owned alias quotient and detach the result from its borrow.

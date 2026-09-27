@@ -2172,6 +2172,16 @@ notes = 'div/ceil/floor/integer are constructed and lowered as pure builtins (So
 tier = 1
 
 [[contracts]]
+id = 'EXPR-041'
+category = 'Expression'
+name = 'smooth event freedom'
+mls_ref = '§3.7.5'
+requirement = 'A tool is free to not generate events for expressions inside smooth; smooth does not guarantee that no events will be generated'
+status = 'Implemented'
+notes = 'Rumoca takes the freedom except for a relation inside smooth(0, ..) whose operands are unknowns of its own algebraic block, which owns an event (SPEC_0044 ME-EVENT-008); crates/rumoca/tests/suite_core/loop_guarded_smooth_relations.rs checks both sides of the rule.'
+tier = 1
+
+[[contracts]]
 id = 'FUNC-001'
 category = 'Function'
 name = 'Input/output only'

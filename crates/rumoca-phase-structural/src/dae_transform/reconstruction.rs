@@ -17,6 +17,8 @@ mod evaluable_parameters;
 pub(super) use evaluable_parameters::rebuild_folded_parameters;
 mod inline_calls;
 pub(super) use inline_calls::rebuild_inlined_calls;
+mod loop_guards;
+pub(super) use loop_guards::rebuild_loop_guards;
 mod formal;
 pub(super) use formal::rebuild_formal;
 mod state_candidates;

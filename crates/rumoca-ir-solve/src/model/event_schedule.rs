@@ -97,6 +97,7 @@ pub enum EventScheduleError {
     RelationPassMustSettleOnce,
     SettlePassMustStartWithOwners,
     SettlePassMustCheckOnce,
+    SurfaceNeedsBothSides,
 }
 
 impl std::fmt::Display for EventScheduleError {
@@ -115,6 +116,7 @@ impl std::fmt::Display for EventScheduleError {
             Self::SettlePassMustCheckOnce => {
                 "a settle pass must check convergence exactly once, after a changing step"
             }
+            Self::SurfaceNeedsBothSides => "a relation surface needs two passes, one on each side",
         })
     }
 }
@@ -130,6 +132,8 @@ pub struct EventIterationSchedule {
     settle_pass: Vec<SettleStep>,
     fixed_point_cap: usize,
     stalled_settle: CoupledNewtonPolicy,
+    relation_surface_window: usize,
+    mode_search_relations: usize,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +143,8 @@ struct EventScheduleWire {
     settle_pass: Vec<SettleStep>,
     fixed_point_cap: usize,
     stalled_settle: CoupledNewtonPolicy,
+    relation_surface_window: usize,
+    mode_search_relations: usize,
 }
 
 impl TryFrom<EventScheduleWire> for EventIterationSchedule {
@@ -151,7 +157,9 @@ impl TryFrom<EventScheduleWire> for EventIterationSchedule {
             wire.settle_pass,
             wire.fixed_point_cap,
             wire.stalled_settle,
-        )
+        )?
+        .with_relation_surface_window(wire.relation_surface_window)
+        .map(|schedule| schedule.with_mode_search_relations(wire.mode_search_relations))
     }
 }
 
@@ -216,6 +224,8 @@ impl EventIterationSchedule {
             settle_pass,
             fixed_point_cap,
             stalled_settle,
+            relation_surface_window: 0,
+            mode_search_relations: 0,
         })
     }
 
@@ -254,6 +264,8 @@ impl EventIterationSchedule {
                 iteration_cap: 32,
                 line_search_halvings: 16,
             },
+            relation_surface_window: 8,
+            mode_search_relations: 4,
         }
     }
 
@@ -276,6 +288,47 @@ impl EventIterationSchedule {
 
     pub const fn stalled_settle(&self) -> &CoupledNewtonPolicy {
         &self.stalled_settle
+    }
+
+    /// The passes an iteration looks back over for a repeated state: when a
+    /// pass returns to the discrete values and relation memory of one of
+    /// them with the coordinate unchanged, every state of that cycle is a
+    /// fixed point, so its alternating relations sit on a surface where their
+    /// expression is continuous, as a relation inside `smooth` does
+    /// (ME-EVENT-008). Zero disables the rule.
+    pub const fn relation_surface_window(&self) -> usize {
+        self.relation_surface_window
+    }
+
+    /// Relations an iteration that entered a cycle may search jointly for a
+    /// consistent mode: the cycling relations and every relation reading a
+    /// coordinate one of them reads. Each assignment of their sides is
+    /// projected, and the first whose relations all agree with the sides
+    /// they were given is taken, which is how an MLS Appendix B iteration
+    /// crosses a fold that its passes alone cannot reach. Zero disables the
+    /// search; a larger set keeps the surface rule.
+    pub const fn mode_search_relations(&self) -> usize {
+        self.mode_search_relations
+    }
+
+    /// Set [`Self::mode_search_relations`].
+    #[must_use]
+    pub const fn with_mode_search_relations(mut self, relations: usize) -> Self {
+        self.mode_search_relations = relations;
+        self
+    }
+
+    /// Set [`Self::relation_surface_window`]. A cycle visits both sides of a
+    /// relation, so a nonzero window below two is refused.
+    pub fn with_relation_surface_window(
+        mut self,
+        window: usize,
+    ) -> Result<Self, EventScheduleError> {
+        if window == 1 {
+            return Err(EventScheduleError::SurfaceNeedsBothSides);
+        }
+        self.relation_surface_window = window;
+        Ok(self)
     }
 }
 
@@ -300,7 +353,9 @@ mod tests {
                 standard.settle_pass().to_vec(),
                 standard.fixed_point_cap(),
                 *standard.stalled_settle(),
-            ),
+            )
+            .and_then(|schedule| schedule.with_relation_surface_window(8))
+            .map(|schedule| schedule.with_mode_search_relations(4)),
             Ok(standard)
         );
     }

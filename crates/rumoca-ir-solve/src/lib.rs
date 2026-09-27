@@ -71,7 +71,7 @@ pub use linear_op::{
 pub use model::*;
 pub use parameter_reads::read_parameter_slots;
 pub use refresh::*;
-pub use root_search::{RootSearchPlan, RootSearchRole, TimeRootSign};
+pub use root_search::{RootSearchPlan, RootSearchRole, TimeRootSign, root_neighborhoods};
 pub use shape_error::{AffineTensorNodeKind, SolveProblemShapeContractError};
 pub use tangent_lanes::{
     ColoredLaneCall, ColoredTangentPlan, TangentLaneError, TangentLaneProgram, TangentRowSource,

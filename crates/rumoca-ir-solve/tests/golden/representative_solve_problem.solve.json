@@ -433,7 +433,9 @@
         "stalled_settle": {
           "iteration_cap": 32,
           "line_search_halvings": 16
-        }
+        },
+        "relation_surface_window": 8,
+        "mode_search_relations": 4
       }
     },
     "runtime_assignment_rhs": {

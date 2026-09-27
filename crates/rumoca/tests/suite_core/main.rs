@@ -125,6 +125,7 @@ mod jacobian_finite_difference;
 mod jacobian_refusal_diagnostic;
 mod jacobian_refused_forms;
 mod jacobian_standard_modelica;
+mod loop_guarded_smooth_relations;
 mod matrix_reduction_dimensions;
 mod mlir_verification_wiring;
 mod mod_propagation_test;

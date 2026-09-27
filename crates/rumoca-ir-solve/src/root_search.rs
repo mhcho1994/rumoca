@@ -91,6 +91,33 @@ impl RootSearchPlan {
     }
 }
 
+/// The relation neighborhood of every root-condition output: the outputs,
+/// itself included, that read a solver coordinate it reads. An event that
+/// cycles between sides of one relation searches its neighborhood jointly
+/// for a consistent mode (SPEC_0044 ME-EVENT-008).
+pub fn root_neighborhoods(
+    roots: &ScalarProgramBlock,
+) -> Result<Vec<Vec<usize>>, crate::StructuralPatternError> {
+    let mut reads = Vec::new();
+    for program in roots.programs() {
+        reads.extend(StructuralPattern::derive_output_y_dependencies(
+            program, None,
+        )?);
+    }
+    Ok(reads
+        .iter()
+        .enumerate()
+        .map(|(this, read): (usize, &BTreeSet<usize>)| {
+            reads
+                .iter()
+                .enumerate()
+                .filter(|(index, other)| *index == this || !read.is_disjoint(other))
+                .map(|(index, _)| index)
+                .collect()
+        })
+        .collect())
+}
+
 fn classify_block(
     roots: &ScalarProgramBlock,
     static_y: &BTreeSet<usize>,

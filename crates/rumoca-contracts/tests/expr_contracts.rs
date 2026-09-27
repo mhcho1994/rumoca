@@ -1,6 +1,6 @@
 //! EXPR (Expression/Operator) contract tests - MLS §3
 //!
-//! Tests for the 40 expression contracts defined in SPEC_0022.
+//! Tests for the 41 expression contracts defined in SPEC_0022.
 
 use rumoca_compile::compile::FailedPhase;
 use rumoca_contracts::test_support::{
@@ -1012,5 +1012,33 @@ fn expr_031_spatial_distribution_vectorized_rejected_as_unsupported() {
         "M",
         FailedPhase::ToDae,
         "ED008",
+    );
+}
+
+// =============================================================================
+// EXPR-041: smooth event freedom (MLS §3.7.5)
+// "A tool is free to not generate events for expressions inside smooth.
+// However, smooth does not guarantee that no events will be generated."
+//
+// A relation inside `smooth` over a state keeps the freedom and compiles as a
+// continuous expression. The exception (a relation whose operands are
+// unknowns of its own algebraic block owns an event, SPEC_0044 ME-EVENT-008)
+// needs the block structure of Solve lowering, so both sides of the rule are
+// checked in crates/rumoca/tests/suite_core/loop_guarded_smooth_relations.rs.
+// =============================================================================
+
+#[test]
+fn expr_041_smooth_relation_over_a_state() {
+    expect_balanced(
+        r#"
+        model Test
+            Real x(start = -1, fixed = true);
+            Real y;
+        equation
+            der(x) = 1;
+            y = smooth(0, if x < 0 then 0 else x);
+        end Test;
+    "#,
+        "Test",
     );
 }

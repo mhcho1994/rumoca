@@ -48,6 +48,8 @@ mod function_derivatives;
 mod functions;
 mod initial_pins;
 mod inline_calls;
+mod loop_guards;
+pub use loop_guards::own_loop_guarded_relations;
 mod observation;
 mod parameter_conditionals;
 mod reconstruction;

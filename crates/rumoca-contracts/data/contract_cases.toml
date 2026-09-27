@@ -1017,6 +1017,13 @@ kind = 'Compile'
 outcome = 'Accept'
 
 [[cases]]
+contract_id = 'EXPR-041'
+case_id = 'expr_041_smooth_relation_over_a_state'
+test_file = 'tests/expr_contracts.rs'
+kind = 'Compile'
+outcome = 'Accept'
+
+[[cases]]
 contract_id = 'FUNC-001'
 case_id = 'func_001_input_output_ok'
 test_file = 'tests/func_contracts.rs'

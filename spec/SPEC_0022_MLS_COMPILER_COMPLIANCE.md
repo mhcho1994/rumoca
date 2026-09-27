@@ -22,7 +22,7 @@ This document catalogs the implicit and explicit contracts from the Modelica Lan
 | §4.1 LEX contracts | 326–345 | Contract catalog heading + lexical rules (13 contracts) |
 | §4.2 DECL contracts | 346–386 | Declaration rules (36 contracts) |
 | §4.3 INST contracts | 387–444 | Instantiation rules (53 contracts) |
-| §4.4 EXPR contracts | 445–489 | Expression/operator rules (40 contracts) |
+| §4.4 EXPR contracts | 445–489 | Expression/operator rules (41 contracts) |
 | §4.5 EQN contracts | 490–532 | Equation rules (38 contracts) |
 | §4.6 ALG contracts | 533–554 | Algorithm rules (17 contracts) |
 | §4.7 CONN contracts | 555–589 | Connection rules (30 contracts) |
@@ -493,6 +493,7 @@ Defines state-to-state transitions with priority and timing control.
 | EXPR-038 | smooth differentiability | §3.7.5 | "smooth(p, expr) treats expression as p times continuously differentiable" |
 | EXPR-039 | noEvent event suppression | §3.3 | "noEvent suppresses event generation for relational operators within its scope" |
 | EXPR-040 | Event triggering operators | §3.7.2 | "div, ceil, floor, integer can only change values at events and will trigger events as needed" |
+| EXPR-041 | smooth event freedom | §3.7.5 | "A tool is free to not generate events for expressions inside smooth. However, smooth does not guarantee that no events will be generated." Rumoca takes the freedom except for a relation inside `smooth(0, ..)` whose operands are unknowns of its own algebraic block, which owns an MLS §8.5 event (SPEC_0044 ME-EVENT-008) |
 
 ### 4.5 Equation Contracts (EQN)
 
@@ -938,7 +939,7 @@ areas.
 | Lexical | LEX | 13 |
 | Declarations | DECL | 36 |
 | Instantiation | INST | 54 |
-| Expressions | EXPR | 40 |
+| Expressions | EXPR | 41 |
 | Equations | EQN | 39 |
 | Algorithms | ALG | 17 |
 | Connections | CONN | 30 |
@@ -953,7 +954,7 @@ areas.
 | State Machines | SM | 8 |
 | Annotations | ANN | 17 |
 | Unit Expressions | UNIT | 9 |
-| **Total** | | **443** |
+| **Total** | | **444** |
 
 ---
 

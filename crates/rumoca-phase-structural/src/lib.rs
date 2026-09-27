@@ -38,8 +38,8 @@ pub use dae_transform::{
     ReductionSnapshot, ReductionStop, StateSelection, UnmatchedKind, UnmatchedName,
     alias_quotient_report, construct_formal_derivatives, fold_constant_values,
     fold_evaluable_parameters, formal_alias_quotient_report, inline_annotated_calls,
-    inline_formal_calls, inspect_prepare_for_solve, inspect_quotient_aliases, prepare_for_solve,
-    quotient_aliases, quotient_formal_aliases,
+    inline_formal_calls, inspect_prepare_for_solve, inspect_quotient_aliases,
+    own_loop_guarded_relations, prepare_for_solve, quotient_aliases, quotient_formal_aliases,
 };
 pub use diagnostic_codes::STRUCTURAL_DIAGNOSTIC_CODES;
 pub use diagnostics::{AlgebraicLoop, StructuralDiagnostics};

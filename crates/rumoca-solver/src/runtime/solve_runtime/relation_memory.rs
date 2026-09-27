@@ -215,6 +215,8 @@ impl SolveRuntime {
         // view before any row evaluates; row-wide clock owners are only an
         // execution filter and cannot stand in for these expression leaves.
         write_clock_activation_params(&self.model, p, t);
+        let window = self.event_schedule().relation_surface_window();
+        let mut history = std::collections::VecDeque::with_capacity(window + 1);
         for event_iteration in 0..self.event_schedule().fixed_point_cap() {
             // Appendix B fixes `pre` for one complete equation pass, then
             // advances ordinary event history atomically from that pass before
@@ -253,7 +255,8 @@ impl SolveRuntime {
                 root_relation_overrides,
                 &mut project_algebraics,
             )?;
-            if !changed && event_iteration_plan_settled(&self.model, y, p)? {
+            let surface = on_relation_surface(&mut history, window, y, p, tol);
+            if surface || (!changed && event_iteration_plan_settled(&self.model, y, p)?) {
                 return self.eval_event_actions(y, p, event_pre_p, t, row_filter);
             }
         }
@@ -353,6 +356,8 @@ impl SolveRuntime {
         project_algebraics: &mut ProjectAlgebraics<'_>,
     ) -> Result<bool, RuntimeSolveError> {
         let mut changed_any = false;
+        let window = self.event_schedule().relation_surface_window();
+        let mut history = std::collections::VecDeque::with_capacity(window + 1);
         for relation_iteration in 0..self.event_schedule().fixed_point_cap() {
             let pass = self.run_relation_pass(
                 input,
@@ -365,11 +370,124 @@ impl SolveRuntime {
             if pass.settled {
                 return Ok(changed_any);
             }
+            if !on_relation_surface(&mut history, window, input.y, input.p, input.tol) {
+                continue;
+            }
+            // A cycle cannot leave on its own; a consistent mode of the
+            // cycling relations, when one exists, is the event's answer.
+            let found = self.search_consistent_mode(
+                &history,
+                input,
+                root_relation_overrides,
+                project_algebraics,
+            )?;
+            if !found {
+                return Ok(changed_any);
+            }
+            history.clear();
+            changed_any = true;
         }
         Err(RuntimeSolveError::solve_ir(format!(
             "event condition equations did not converge with fixed pre at t={}",
             input.t
         )))
+    }
+
+    /// Search the modes of the relations a cycle alternates, together with
+    /// every relation reading a coordinate one of them reads, for one whose
+    /// projected coordinate gives each relation the side it was assigned
+    /// (ME-EVENT-008). The first such mode is pinned through the relation
+    /// overrides; the coordinate and parameters of a rejected mode are
+    /// restored.
+    fn search_consistent_mode(
+        &self,
+        history: &std::collections::VecDeque<(Vec<f64>, Vec<f64>)>,
+        input: &mut DiscreteRowsSettleInput<'_>,
+        root_relation_overrides: &mut Vec<(usize, f64)>,
+        project_algebraics: &mut ProjectAlgebraics<'_>,
+    ) -> Result<bool, RuntimeSolveError> {
+        let limit = self.event_schedule().mode_search_relations();
+        let candidates = self.mode_candidates(history, input.p)?;
+        if limit == 0 || candidates.is_empty() || candidates.len() > limit {
+            return Ok(false);
+        }
+        let (base_y, base_p) = (input.y.to_vec(), input.p.to_vec());
+        for mode in 0..(1usize << candidates.len()) {
+            let sides = (0..candidates.len())
+                .map(|bit| if mode >> bit & 1 == 1 { 1.0 } else { 0.0 })
+                .collect::<Vec<_>>();
+            if self.mode_is_consistent(&candidates, &sides, input, project_algebraics)? {
+                root_relation_overrides
+                    .retain(|(root, _)| !candidates.iter().any(|(c, _)| c == root));
+                root_relation_overrides.extend(candidates.iter().map(|(root, _)| *root).zip(sides));
+                return Ok(true);
+            }
+            input.y.copy_from_slice(&base_y);
+            input.p.copy_from_slice(&base_p);
+        }
+        Ok(false)
+    }
+
+    /// Roots whose relation memory differs across the cycle, and every root
+    /// with relation memory that reads a coordinate one of them reads, with
+    /// their memory parameters.
+    fn mode_candidates(
+        &self,
+        history: &std::collections::VecDeque<(Vec<f64>, Vec<f64>)>,
+        p: &[f64],
+    ) -> Result<Vec<(usize, usize)>, RuntimeSolveError> {
+        let events = &self.model.problem.events;
+        let targets = events
+            .root_relation_memory_targets
+            .iter()
+            .enumerate()
+            .filter_map(|(root, target)| match target {
+                Some(solve::ScalarSlot::P { index, .. }) => Some((root, *index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cycling = targets
+            .iter()
+            .filter(|(_, index)| history.iter().any(|(_, prior)| prior[*index] != p[*index]))
+            .map(|(root, _)| *root)
+            .collect::<Vec<_>>();
+        let neighborhoods = solve::root_neighborhoods(&events.root_conditions)
+            .map_err(|error| RuntimeSolveError::solve_ir(error.to_string()))?;
+        let joined = cycling
+            .iter()
+            .filter_map(|root| neighborhoods.get(*root))
+            .flatten()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok(targets
+            .into_iter()
+            .filter(|(root, _)| joined.contains(root))
+            .collect())
+    }
+
+    /// Project with `sides` assigned to `candidates` and report whether every
+    /// candidate relation then takes its assigned side. A mode whose
+    /// projection does not converge is not a solution.
+    fn mode_is_consistent(
+        &self,
+        candidates: &[(usize, usize)],
+        sides: &[f64],
+        input: &mut DiscreteRowsSettleInput<'_>,
+        project_algebraics: &mut ProjectAlgebraics<'_>,
+    ) -> Result<bool, RuntimeSolveError> {
+        for ((_, index), side) in candidates.iter().zip(sides) {
+            input.p[*index] = *side;
+        }
+        if project_algebraics(input.y, input.p).is_err() {
+            return Ok(false);
+        }
+        let roots = self.eval_root_conditions_from_solver_y(input.t, input.y, input.p)?;
+        let domains = &self.model.problem.events.root_zero_domains;
+        Ok(candidates.iter().zip(sides).all(|((root, _), side)| {
+            let value =
+                crate::runtime::solve_ops::orient_typed_root_zero(roots[*root], domains[*root]);
+            value == 0.0 || relation_memory_value_from_root(value) == *side
+        }))
     }
 
     /// Walk one relation pass, stopping where its relations settled.
@@ -1011,4 +1129,35 @@ impl SolveRuntime {
 struct RelationPassOutcome {
     changed: bool,
     settled: bool,
+}
+
+/// Whether an event or relation iteration has returned to a state of one of
+/// its last `window` passes: its discrete values and relation memory repeat
+/// exactly while the coordinate stays within the solve tolerance. Every state
+/// of such a cycle is a fixed point for the coordinate: its alternating
+/// relations sit on a surface where their expression is continuous, as a
+/// relation inside `smooth` does (ME-EVENT-008), so the current side is kept.
+/// A window of zero disables the rule.
+fn on_relation_surface(
+    history: &mut std::collections::VecDeque<(Vec<f64>, Vec<f64>)>,
+    window: usize,
+    y: &[f64],
+    p: &[f64],
+    tol: f64,
+) -> bool {
+    if window == 0 {
+        return false;
+    }
+    let repeats = history.iter().any(|(prior_y, prior_p)| {
+        prior_p
+            .iter()
+            .zip(p)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+            && !crate::runtime_values_changed(prior_y, y, tol)
+    });
+    history.push_back((y.to_vec(), p.to_vec()));
+    if history.len() > window {
+        history.pop_front();
+    }
+    repeats
 }
