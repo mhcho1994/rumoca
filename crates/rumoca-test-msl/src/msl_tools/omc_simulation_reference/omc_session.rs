@@ -23,14 +23,29 @@ use super::super::common::apply_omc_thread_env;
 /// Poll interval while waiting for the OMC ZeroMQ port file to appear.
 const PORT_FILE_POLL: Duration = Duration::from_millis(20);
 
-/// Per-model timing self-reported by OMC's `SimulationResult` record. These are
-/// OMC's own internal phase timers, so they are independent of scheduling jitter
-/// and directly comparable to rumoca's per-phase seconds. The report derives
-/// OMC compile time as `time_total - time_simulation`.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(super) struct OmcSimTiming {
-    pub(super) time_simulation: Option<f64>,
-    pub(super) time_total: Option<f64>,
+/// Per-model phase seconds self-reported by OMC's `SimulationResult` record
+/// (`timeFrontend` ... `timeTotal`). These are OMC's own internal phase timers,
+/// so the speed report can compare like with like: compiler work is frontend
+/// through templates, `compile` is the C toolchain, `simulation` the run.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(super) struct OmcPhaseSeconds {
+    pub(super) frontend: Option<f64>,
+    pub(super) backend: Option<f64>,
+    pub(super) sim_code: Option<f64>,
+    pub(super) templates: Option<f64>,
+    pub(super) compile: Option<f64>,
+    pub(super) simulation: Option<f64>,
+    pub(super) total: Option<f64>,
+}
+
+/// The integration settings OMC reports in `simulationOptions`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(super) struct OmcSimSettings {
+    pub(super) method: Option<String>,
+    pub(super) tolerance: Option<f64>,
+    pub(super) number_of_intervals: Option<u64>,
+    pub(super) start_time: Option<f64>,
+    pub(super) stop_time: Option<f64>,
 }
 
 /// Outcome of a single `simulate(...)` request inside a session.
@@ -39,7 +54,8 @@ pub(super) struct OmcSimOutcome {
     pub(super) result_file: Option<String>,
     pub(super) messages: String,
     pub(super) error: String,
-    pub(super) timing: OmcSimTiming,
+    pub(super) timing: OmcPhaseSeconds,
+    pub(super) settings: OmcSimSettings,
 }
 
 /// Why an evaluation did not return a usable reply.
@@ -297,11 +313,48 @@ fn parse_sim_record(record: &str, error: String) -> OmcSimOutcome {
         result_file: extract_record_string(record, "resultFile").filter(|value| !value.is_empty()),
         messages: extract_record_string(record, "messages").unwrap_or_default(),
         error,
-        timing: OmcSimTiming {
-            time_simulation: extract_record_f64(record, "timeSimulation"),
-            time_total: extract_record_f64(record, "timeTotal"),
+        timing: OmcPhaseSeconds {
+            frontend: extract_record_f64(record, "timeFrontend"),
+            backend: extract_record_f64(record, "timeBackend"),
+            sim_code: extract_record_f64(record, "timeSimCode"),
+            templates: extract_record_f64(record, "timeTemplates"),
+            compile: extract_record_f64(record, "timeCompile"),
+            simulation: extract_record_f64(record, "timeSimulation"),
+            total: extract_record_f64(record, "timeTotal"),
         },
+        settings: extract_record_string(record, "simulationOptions")
+            .map(|options| parse_simulation_options(&options))
+            .unwrap_or_default(),
     }
+}
+
+/// The settings in OMC's `simulationOptions` string, a comma-separated list of
+/// `key = value` pairs whose string values are single-quoted.
+fn parse_simulation_options(options: &str) -> OmcSimSettings {
+    let mut settings = OmcSimSettings::default();
+    let mut rest = options;
+    while let Some((key, after)) = rest.split_once('=') {
+        let after = after.trim_start();
+        let (value, next) = match after.strip_prefix('\'') {
+            Some(quoted) => {
+                let end = quoted.find('\'').unwrap_or(quoted.len());
+                let next = quoted[end..].split_once(',').map_or("", |(_, next)| next);
+                (&quoted[..end], next)
+            }
+            None => after.split_once(',').unwrap_or((after, "")),
+        };
+        let value = value.trim();
+        match key.trim() {
+            "method" => settings.method = Some(value.to_string()),
+            "tolerance" => settings.tolerance = value.parse().ok(),
+            "numberOfIntervals" => settings.number_of_intervals = value.parse().ok(),
+            "startTime" => settings.start_time = value.parse().ok(),
+            "stopTime" => settings.stop_time = value.parse().ok(),
+            _ => {}
+        }
+        rest = next;
+    }
+    settings
 }
 
 /// Extract `field = "<value>"` from an OMC record reply.
@@ -363,7 +416,7 @@ mod tests {
     fn parse_sim_record_extracts_fields() {
         let record = r#"record SimulationResult
     resultFile = "/tmp/work/First_res.csv",
-    simulationOptions = "startTime = 0.0, stopTime = 1.0",
+    simulationOptions = "startTime = 0.0, stopTime = 1.0, numberOfIntervals = 500, tolerance = 1e-06, method = 'dassl', fileNamePrefix = 'First', options = '', outputFormat = 'csv', variableFilter = '.*', cflags = '', simflags = '-s=a,b'",
     messages = "",
     timeFrontend = 0.012,
     timeBackend = 0.034,
@@ -378,8 +431,28 @@ end SimulationResult;"#;
             outcome.result_file.as_deref(),
             Some("/tmp/work/First_res.csv")
         );
-        assert_eq!(outcome.timing.time_total, Some(0.5739));
-        assert_eq!(outcome.timing.time_simulation, Some(0.0334));
+        assert_eq!(
+            outcome.timing,
+            OmcPhaseSeconds {
+                frontend: Some(0.012),
+                backend: Some(0.034),
+                sim_code: Some(0.001),
+                templates: Some(0.002),
+                compile: Some(0.433),
+                simulation: Some(0.0334),
+                total: Some(0.5739),
+            }
+        );
+        assert_eq!(
+            outcome.settings,
+            OmcSimSettings {
+                method: Some("dassl".to_string()),
+                tolerance: Some(1e-6),
+                number_of_intervals: Some(500),
+                start_time: Some(0.0),
+                stop_time: Some(1.0),
+            }
+        );
     }
 
     #[test]

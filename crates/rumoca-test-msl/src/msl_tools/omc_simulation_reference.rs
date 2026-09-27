@@ -65,6 +65,14 @@ pub struct Args {
     /// not OMC, owns parallelism.
     #[arg(long, default_value_t = OMC_THREADS_DEFAULT)]
     omc_threads: usize,
+    /// The simulation worker count of the rumoca run these references are
+    /// compared with, recorded beside OMC's own so a speed report can state
+    /// both tools' contention.
+    #[arg(long)]
+    rumoca_sim_workers: Option<usize>,
+    /// The compile-stage worker count of that rumoca run.
+    #[arg(long)]
+    rumoca_stage_workers: Option<usize>,
     /// Per-model wall timeout (seconds) for one OMC compile+simulate; on timeout
     /// the session is killed (with its process group) and respawned.
     #[arg(long = "model-timeout-seconds", value_name = "SECONDS", default_value_t = BATCH_TIMEOUT_SECONDS_DEFAULT)]
@@ -109,6 +117,12 @@ struct SimModelResult {
     total_system_seconds: Option<f64>,
     omc_wall_seconds: Option<f64>,
     result_file: Option<String>,
+    /// OMC's self-reported phase seconds (`timeFrontend` ... `timeTotal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    omc_phases: Option<omc_session::OmcPhaseSeconds>,
+    /// OMC's integration settings from `simulationOptions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    omc_settings: Option<omc_session::OmcSimSettings>,
     trace_file: Option<String>,
     trace_error: Option<String>,
     rumoca_status: Option<String>,
@@ -950,8 +964,10 @@ fn build_session_model_result(outcome: &OmcSimOutcome, elapsed: f64) -> SimModel
     SimModelResult {
         status: status.to_string(),
         error,
-        sim_system_seconds: outcome.timing.time_simulation,
-        total_system_seconds: outcome.timing.time_total,
+        sim_system_seconds: outcome.timing.simulation,
+        total_system_seconds: outcome.timing.total,
+        omc_phases: Some(outcome.timing.clone()),
+        omc_settings: Some(outcome.settings.clone()),
         omc_wall_seconds: Some(round3(elapsed)),
         result_file: outcome.result_file.clone(),
         ..empty_omc_result()
@@ -988,6 +1004,8 @@ fn empty_omc_result() -> SimModelResult {
         total_system_seconds: None,
         omc_wall_seconds: None,
         result_file: None,
+        omc_phases: None,
+        omc_settings: None,
         trace_file: None,
         trace_error: None,
         rumoca_status: None,
@@ -1365,6 +1383,12 @@ fn hydrate_omc_fields_from_cached(current: &mut SimModelResult, cached: &SimMode
     }
     if current.total_system_seconds.is_none() {
         current.total_system_seconds = cached.total_system_seconds;
+    }
+    if current.omc_phases.is_none() {
+        current.omc_phases = cached.omc_phases.clone();
+    }
+    if current.omc_settings.is_none() {
+        current.omc_settings = cached.omc_settings.clone();
     }
     if current.omc_wall_seconds.is_none() {
         current.omc_wall_seconds = cached.omc_wall_seconds;
