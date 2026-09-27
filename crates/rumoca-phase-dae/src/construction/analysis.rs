@@ -184,6 +184,8 @@ pub(super) struct Analysis {
     pub(super) evaluable_parameters: HashSet<VarName>,
     /// The owners whose folded guards fixed parameters at translation.
     pub(super) structural_selections: Vec<StructuralSelection>,
+    /// The one-based id of each native table handle, computed once.
+    pub(super) native_table_ids: HashMap<VarName, u64>,
     /// Discrete coordinates whose initialization-instant value an initial
     /// algorithm determines (MLS §8.6).
     pub(super) initial_discrete_values: HashMap<VarName, InitialDiscreteValue>,
@@ -614,6 +616,7 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         initial_parameters: initial.algorithms.parameters,
         evaluable_parameters: evaluable,
         structural_selections,
+        native_table_ids: super::native_tables::native_table_ids(flat),
         initial_discrete_values: initial.algorithms.discrete_values,
         initial_algorithm_assertions: initial.algorithms.assertions,
         function_plans,
