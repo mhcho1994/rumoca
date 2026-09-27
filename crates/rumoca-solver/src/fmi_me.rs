@@ -119,7 +119,7 @@ enum MeModelSourceInner<'a> {
 /// and the structural-configuration capability.
 type MeModelParts<'a> = (
     &'a rumoca_ir_solve::SolveModel,
-    Vec<rumoca_ir_solve::fmi::FmiEventIndicatorSource>,
+    rumoca_ir_solve::fmi::FmiIndicatorPlan,
     Option<u32>,
     lifecycle::MeConfigurationCapability,
 );
@@ -199,7 +199,7 @@ impl<'a> MeModelSource<'a> {
                 let (model, metadata, inventory) = view.into_parts();
                 Ok((
                     model,
-                    inventory.sources().to_vec(),
+                    inventory.plan().clone(),
                     metadata
                         .max_step_duration()
                         .map(rumoca_ir_solve::fmi::FmiVariable::value_reference_fmi3),
@@ -214,8 +214,8 @@ impl<'a> MeModelSource<'a> {
             } => Ok((
                 model,
                 rumoca_ir_solve::fmi::FmiEventIndicatorInventory::derive(model)?
-                    .sources()
-                    .to_vec(),
+                    .plan()
+                    .clone(),
                 max_step_duration_value_reference,
                 configuration,
             )),

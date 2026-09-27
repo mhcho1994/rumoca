@@ -1,8 +1,8 @@
 use rumoca_ir_solve::ScalarSlot;
 
 use super::event_boundary::event_boundary_horizon;
-use super::indicator_plan::{IndicatorPlanInputs, IndicatorReading, IndicatorZeroSide};
 use super::*;
+use rumoca_ir_solve::fmi::{FmiIndicatorPlan, IndicatorReading, IndicatorZeroSide};
 
 impl SolveMeKernel {
     pub(crate) fn continuous_state_derivatives_into(
@@ -518,10 +518,9 @@ impl SolveMeKernel {
         execution_backend: Option<Rc<dyn crate::SolveExecutionBackend>>,
     ) -> Result<Self, MeError> {
         let root_location = source.root_location();
-        let (model, event_indicator_sources, max_step_duration_value_reference, configuration) =
-            source
-                .into_parts()
-                .map_err(|error| contract(error.to_string()))?;
+        let (model, indicator_plan, max_step_duration_value_reference, configuration) = source
+            .into_parts()
+            .map_err(|error| contract(error.to_string()))?;
         let delay_bearing = !model.problem.events.delays.delay_time_rhs.is_empty();
         if max_step_duration_value_reference.is_some() != delay_bearing {
             return Err(contract(if delay_bearing {
@@ -549,18 +548,13 @@ impl SolveMeKernel {
         let stop_schedule =
             SolveStopSchedule::new(&runtime.model.problem, config.start_time, config.stop_time);
         let output_meta = convert_variable_meta(&runtime.model.variable_meta);
-        let events = &runtime.model.problem.events;
-        let indicator_plan = FmiIndicatorPlan::derive(
-            &event_indicator_sources,
-            IndicatorPlanInputs {
-                root_value_count: runtime.root_condition_count(),
-                model_root_count: events.root_conditions.output_count(),
-                deadline_count: events.dynamic_time_event_rhs.output_count(),
-                root_zero_domains: &events.root_zero_domains,
-                root_relation_memory_targets: &events.root_relation_memory_targets,
-            },
-        )
-        .map_err(|error| contract(error.to_string()))?;
+        // The Solve IR resolved the indicator table against the model's root
+        // and delay rows; this runtime's root vector must be that vector.
+        if runtime.root_condition_count() != indicator_plan.root_value_count() {
+            return Err(contract(
+                "the runtime root-condition vector differs from the resolved indicator table",
+            ));
+        }
         let scratch = reserve_indicator_scratch(&indicator_plan)?;
         let reduced_charts = dynamic_chart::build_reduced_charts(&runtime, state_count)
             .map_err(|error| contract(error.to_string()))?;

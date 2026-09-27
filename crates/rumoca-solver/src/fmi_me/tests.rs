@@ -1566,7 +1566,8 @@ fn refresh_owned(mut model: solve::SolveModel) -> solve::SolveModel {
 /// checked against the code that actually runs.
 const COMPONENT_SOURCE: &str = include_str!("kernel/component.rs");
 const KERNEL_SOURCE: &str = include_str!("kernel.rs");
-const INDICATOR_PLAN_SOURCE: &str = include_str!("kernel/indicator_plan.rs");
+const INDICATOR_PLAN_SOURCE: &str =
+    include_str!("../../../rumoca-ir-solve/src/fmi/indicator_plan.rs");
 const SOLVE_OPS_SOURCE: &str = include_str!("../runtime/solve_ops.rs");
 const SOLVE_RUNTIME_SOURCE: &str = include_str!("../runtime/solve_runtime.rs");
 const SOLVE_RUNTIME_PLANS_SOURCE: &str = include_str!("../runtime/solve_runtime/plans.rs");
@@ -1583,44 +1584,15 @@ fn method_body<'source>(source: &'source str, signature: &str) -> &'source str {
     &body[..end]
 }
 
-/// The name of the method one occurrence sits in.
-fn enclosing_method<'source>(source: &'source str, needle: &str) -> &'source str {
-    let position = source
-        .find(needle)
-        .unwrap_or_else(|| panic!("{needle} must exist"));
-    let header = source[..position]
-        .rfind("\n    fn ")
-        .into_iter()
-        .chain(source[..position].rfind("\n    pub(super) fn "))
-        .chain(source[..position].rfind("\n    pub(crate) fn "))
-        .max()
-        .expect("an occurrence sits inside a method");
-    let name = source[header..position]
-        .split("fn ")
-        .nth(1)
-        .expect("a method header names its function");
-    name.split(['(', '<', ' ']).next().unwrap_or_default()
-}
-
 #[test]
-fn the_indicator_inventory_has_one_constructor_the_step_path_cannot_reach() {
-    assert_eq!(
-        COMPONENT_SOURCE
-            .matches("FmiIndicatorPlan::derive(")
-            .count(),
-        1,
-        "the resolved indicator table is constructed exactly once"
-    );
-    assert_eq!(
-        KERNEL_SOURCE.matches("FmiIndicatorPlan::derive").count(),
-        0,
-        "no operation outside the constructor may build an indicator table"
-    );
-    assert_eq!(
-        enclosing_method(COMPONENT_SOURCE, "FmiIndicatorPlan::derive("),
-        "instantiate_inner",
-        "the only indicator table is the instantiated component's own"
-    );
+fn the_indicator_table_comes_from_solve_ir_and_is_never_rebuilt() {
+    for source in [COMPONENT_SOURCE, KERNEL_SOURCE] {
+        assert_eq!(
+            source.matches("FmiIndicatorPlan::derive").count(),
+            0,
+            "the component reads the Solve IR indicator table and never builds one"
+        );
+    }
     for source in [COMPONENT_SOURCE, KERNEL_SOURCE] {
         assert_eq!(
             source.matches(".indicator_plan =").count(),

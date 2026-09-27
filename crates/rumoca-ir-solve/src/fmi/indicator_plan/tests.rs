@@ -7,7 +7,7 @@
 
 use super::*;
 
-use rumoca_ir_solve::fmi::FmiEventIndicatorSource;
+use crate::fmi::FmiEventIndicatorSource;
 
 const NO_DOMAINS: &[solve::RootZeroDomain] = &[];
 const NO_TARGETS: &[Option<ScalarSlot>] = &[];

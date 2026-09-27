@@ -34,6 +34,7 @@
 
 mod c_codegen;
 mod event_free;
+mod indicator_plan;
 mod max_step_duration;
 mod metadata;
 mod parameter_updates;
@@ -44,6 +45,10 @@ mod tests;
 
 pub use c_codegen::{FmiCCodegenError, FmiCCodegenView};
 pub use event_free::{FmiEventFreeCodegenView, FmiEventFreeError};
+pub use indicator_plan::{
+    FmiIndicatorPlan, IndicatorEntry, IndicatorPlanError, IndicatorPlanInputs,
+    IndicatorPlanRejection, IndicatorReading, IndicatorZeroSide,
+};
 pub use max_step_duration::{
     MAX_STEP_DURATION_DESCRIPTION, MAX_STEP_DURATION_NAME, MAX_STEP_DURATION_UNCONSTRAINED,
     MAX_STEP_DURATION_UNIT,
@@ -168,14 +173,16 @@ enum TimeReadOwner {
 #[derive(Debug)]
 pub struct FmiEventIndicatorInventory {
     sources: Box<[FmiEventIndicatorSource]>,
+    /// The positional reading of `sources` every executor uses: where each
+    /// position reads its value, the side an exact zero takes, and the
+    /// relation memory a crossing reseeds (SPEC_0044 ME-EVENT-005).
+    plan: FmiIndicatorPlan,
 }
 
 impl FmiEventIndicatorInventory {
     pub fn derive(model: &SolveModel) -> Result<Self, FmiComponentError> {
         if static_assertions::validate(model).is_ok() {
-            return Ok(Self {
-                sources: Box::default(),
-            });
+            return Self::resolved(model, Vec::new());
         }
         let static_y = model
             .problem
@@ -212,9 +219,40 @@ impl FmiEventIndicatorInventory {
             (0..model.problem.events.delays.delay_time_rhs.output_count())
                 .map(|index| FmiEventIndicatorSource::DelayDiscontinuity { index }),
         );
+        Self::resolved(model, sources)
+    }
+
+    /// Resolve `sources` against the model's root, delay, and deadline rows.
+    fn resolved(
+        model: &SolveModel,
+        sources: Vec<FmiEventIndicatorSource>,
+    ) -> Result<Self, FmiComponentError> {
+        let events = &model.problem.events;
+        let model_root_count = events.root_conditions.output_count();
+        let plan = FmiIndicatorPlan::derive(
+            &sources,
+            IndicatorPlanInputs {
+                root_value_count: model_root_count + events.delays.delay_time_rhs.output_count(),
+                model_root_count,
+                deadline_count: events.dynamic_time_event_rhs.output_count(),
+                root_zero_domains: &events.root_zero_domains,
+                root_relation_memory_targets: &events.root_relation_memory_targets,
+            },
+        )
+        .map_err(|error| FmiComponentError::EventIndicatorInventory {
+            message: error.to_string(),
+            span: None,
+        })?;
         Ok(Self {
             sources: sources.into_boxed_slice(),
+            plan,
         })
+    }
+
+    /// The resolved positional reading of this inventory.
+    #[must_use]
+    pub const fn plan(&self) -> &FmiIndicatorPlan {
+        &self.plan
     }
 
     #[must_use]

@@ -4,7 +4,6 @@ mod chart_switch;
 mod component;
 mod dynamic_chart;
 mod event_boundary;
-mod indicator_plan;
 
 use super::lifecycle::{MeLifecycle, MeLifecycleCommand, MeLifecycleViolation, MeState};
 use super::{
@@ -31,7 +30,7 @@ use crate::runtime::solve_runtime::{
 use crate::runtime::time::time_match_with_tol;
 use crate::solver::{SimTermination, SimVariableMeta};
 use crate::timeline;
-use indicator_plan::FmiIndicatorPlan;
+use rumoca_ir_solve::fmi::FmiIndicatorPlan;
 
 /// Residual tolerance for the component's internal algebraic refresh.
 const ALGEBRAIC_REFRESH_TOL: f64 =
