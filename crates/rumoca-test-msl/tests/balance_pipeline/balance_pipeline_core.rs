@@ -507,6 +507,8 @@ fn worker_model_result_to_msl(result: WorkerModelResult) -> MslModelResult {
         typecheck_seconds: result.typecheck_seconds,
         flatten_seconds: result.flatten_seconds,
         dae_seconds: result.dae_seconds,
+        strict_plan_warm: result.strict_plan_warm,
+        worker_prepare_seconds: result.worker_prepare_seconds,
         compile_perf_profile_file: result.compile_perf_profile_file,
         ir_ast_file: result.ir_ast_file,
         ir_flat_file: result.ir_flat_file,

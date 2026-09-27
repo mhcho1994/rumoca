@@ -362,6 +362,12 @@ struct MslModelResult {
     flatten_seconds: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dae_seconds: Option<f64>,
+    /// Whether the compile started from the worker's prepared resolution plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strict_plan_warm: Option<bool>,
+    /// The compiling worker's one-time source-root load and plan cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_prepare_seconds: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compile_perf_profile_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

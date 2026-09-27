@@ -65,7 +65,7 @@ pub fn msl_sim_output_dt(
     (dt.is_finite() && dt > 0.0).then_some(dt)
 }
 
-pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 3;
+pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 4;
 pub const MODEL_WORKER_RESULT_FILE: &str = "result.json";
 pub const MODEL_WORKER_PARTIAL_RESULT_FILE: &str = "partial_result.json";
 /// Resident-plus-swap ceiling for one persistent MSL model worker.
@@ -794,6 +794,12 @@ pub struct WorkerModelResult {
     pub typecheck_seconds: Option<f64>,
     pub flatten_seconds: Option<f64>,
     pub dae_seconds: Option<f64>,
+    /// Whether this compile started from the source root's strict-compile
+    /// resolution plan already constructed in this worker.
+    pub strict_plan_warm: Option<bool>,
+    /// One-time source-root load and plan construction cost of the worker that
+    /// compiled this model, shared by all of that worker's models.
+    pub worker_prepare_seconds: Option<f64>,
     pub compile_perf_profile_file: Option<String>,
     pub ir_ast_file: Option<String>,
     pub ir_flat_file: Option<String>,
@@ -977,6 +983,8 @@ impl WorkerModelResult {
             typecheck_seconds: None,
             flatten_seconds: None,
             dae_seconds: None,
+            strict_plan_warm: None,
+            worker_prepare_seconds: None,
             compile_perf_profile_file: None,
             ir_ast_file: None,
             ir_flat_file: None,

@@ -104,8 +104,10 @@ impl Comparison {
                 "Rumoca = front end + Solve lowering (`compile_seconds + ir_solve_seconds`); \
                  OMC = `timeFrontend + timeBackend + timeSimCode + timeTemplates`. \
                  Neither side includes native code generation. OMC loads the library once per \
-                 session with `loadModel`, outside every per-model timer, while rumoca's \
-                 `compile_seconds` includes resolving the model's reachable library classes."
+                 session with `loadModel`, outside every per-model timer; rumoca loads the library and \
+                 builds its resolution plan once per worker (`worker_prepare_seconds`), outside \
+                 every per-model timer, and `compile_seconds` includes resolving the model's \
+                 reachable library classes."
             }
             Self::Runnable => {
                 "Rumoca = front end + Solve lowering + Cranelift JIT (`compile_seconds + \
@@ -526,9 +528,11 @@ fn render_methodology(
          {other_context} agreeing models are excluded because their OMC timing was taken under \
          another worker count, thread count, or host. Rumoca compiled and simulated every model \
          this run.\n\
-         - Front end scope: rumoca's `compile_seconds` covers resolving each model's reachable \
-         library classes again for that model; OMC's `timeFrontend` follows one `loadModel` per \
-         session, which no per-model OMC timer includes.\n\
+         - Front end scope: rumoca loads the library and builds its resolution plan once per \
+         worker (`worker_prepare_seconds`, recorded on each row with `strict_plan_warm`), and \
+         `compile_seconds` covers resolving each model's reachable library classes for that \
+         model; OMC's `timeFrontend` follows one `loadModel` per session. Neither one-time \
+         load is in a per-model timer.\n\
          - Parity gating: only models in the comparator's high or near band are timed; {} models.\
          \n\n</details>\n",
         host_field("image"),

@@ -354,12 +354,28 @@ impl WorkerErrorPhase {
     }
 }
 
-fn load_source_root(path: &Path) -> Result<Session, String> {
+/// A loaded source root and the one-time cost of preparing it, which every
+/// model this worker compiles shares.
+struct WorkerSourceRoot {
+    session: Session,
+    prepare_seconds: f64,
+}
+
+/// Load the source root and construct its strict-compile resolution plan once,
+/// so each model's `compile_seconds` covers only its own work, as OMC's
+/// per-model timings exclude its per-session `loadModel`. A plan that cannot
+/// be constructed is left to the first compile, whose row reports the failure.
+fn load_source_root(path: &Path) -> Result<WorkerSourceRoot, String> {
+    let started = Instant::now();
     let mut session = Session::new(SessionConfig::default());
     let report =
         session.load_source_root_tolerant("msl", SourceRootKind::DurableExternal, path, None);
     if report.diagnostics.is_empty() {
-        Ok(session)
+        let _ = session.prepare_strict_compile_plan();
+        Ok(WorkerSourceRoot {
+            session,
+            prepare_seconds: started.elapsed().as_secs_f64(),
+        })
     } else {
         Err(format!(
             "failed to load source root '{}': {}",
@@ -1474,10 +1490,16 @@ fn write_compile_artifacts(
     );
 }
 
-fn compile_request(session: &mut Session, request: ModelWorkerRequest) -> ModelWorkerResponse {
+fn compile_request(
+    root: &mut WorkerSourceRoot,
+    request: ModelWorkerRequest,
+) -> ModelWorkerResponse {
     rumoca_sim::nan_trace::set_nan_trace(request.nan_trace);
     let start = Instant::now();
-    let result = run_model_request(session, &request);
+    let strict_plan_warm = root.session.strict_compile_plan_ready();
+    let mut result = run_model_request(&mut root.session, &request);
+    result.strict_plan_warm = Some(strict_plan_warm);
+    result.worker_prepare_seconds = Some(root.prepare_seconds);
     let elapsed_secs = start.elapsed().as_secs_f64();
     ModelWorkerResponse {
         protocol_version: MODEL_WORKER_PROTOCOL_VERSION,
@@ -1523,12 +1545,12 @@ fn run_worker(args: Args) -> Result<(), String> {
         WorkerProgressPhase::SourceRootLoad,
         WorkerProgressEventKind::Started,
     );
-    let mut session = load_source_root(&request.source_root_path)?;
+    let mut root = load_source_root(&request.source_root_path)?;
     progress.event(
         WorkerProgressPhase::SourceRootLoad,
         WorkerProgressEventKind::Completed,
     );
-    let response = compile_request(&mut session, request.clone());
+    let response = compile_request(&mut root, request.clone());
     write_model_worker_response_file(
         &request.output_dir.join(MODEL_WORKER_RESULT_FILE),
         &response,
@@ -1592,7 +1614,7 @@ fn spawn_worker_command_reader() -> mpsc::Receiver<Result<ModelWorkerCommand, St
 }
 
 fn run_worker_daemon(source_root_path: &Path) -> Result<(), String> {
-    let mut session = load_source_root(source_root_path)?;
+    let mut root = load_source_root(source_root_path)?;
     write_control_message(&ModelWorkerControlMessage::Ready {
         protocol_version: MODEL_WORKER_PROTOCOL_VERSION,
     })?;
@@ -1613,7 +1635,7 @@ fn run_worker_daemon(source_root_path: &Path) -> Result<(), String> {
                 let _ = fs::remove_file(artifact_path(&request, "progress.jsonl"));
                 let _ = fs::remove_file(request.output_dir.join(MODEL_WORKER_RESULT_FILE));
                 let _ = fs::remove_file(request.output_dir.join(MODEL_WORKER_PARTIAL_RESULT_FILE));
-                let response = compile_request(&mut session, request.clone());
+                let response = compile_request(&mut root, request.clone());
                 write_model_worker_response_file(
                     &request.output_dir.join(MODEL_WORKER_RESULT_FILE),
                     &response,
