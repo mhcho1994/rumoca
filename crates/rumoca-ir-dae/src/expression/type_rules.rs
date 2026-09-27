@@ -33,10 +33,21 @@ pub(super) fn validate_static_quotient(
     }
 }
 
+/// Where a runtime quotient is evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuotientScope {
+    /// A model equation: its discontinuities are event roots (MLS §3.7.2).
+    Model,
+    /// A function body: MLS §3.7.2 generates no events inside a function, so
+    /// the quotient is plain arithmetic whatever its operands' variability.
+    FunctionBody,
+}
+
 pub(super) fn validate_runtime_quotient(
     storage: &Storage,
     builtin: PureBuiltin,
     arguments: &[ExprId<'_>],
+    scope: QuotientScope,
     at: DaeProvenance,
 ) -> Result<(), DaeConstructionError> {
     if !matches!(
@@ -58,6 +69,9 @@ pub(super) fn validate_runtime_quotient(
                 span: at.span(),
             });
         }
+        return Ok(());
+    }
+    if scope == QuotientScope::FunctionBody {
         return Ok(());
     }
     // A non-literal divisor is admitted when its constructor-derived

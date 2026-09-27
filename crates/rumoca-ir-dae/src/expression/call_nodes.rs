@@ -21,9 +21,10 @@ impl<'dae> ExpressionAt<'_, 'dae> {
         self,
         builtin: PureBuiltin,
         arguments: [ExprId<'dae>; 2],
+        scope: QuotientScope,
     ) -> Result<ExprId<'dae>, DaeConstructionError> {
         let result = builtin_result(self.storage, builtin, &arguments, self.provenance)?;
-        validate_runtime_quotient(self.storage, builtin, &arguments, self.provenance)?;
+        validate_runtime_quotient(self.storage, builtin, &arguments, scope, self.provenance)?;
         self.insert_builtin(builtin, arguments.into(), result)
     }
 

@@ -125,3 +125,46 @@ end Receivers;
     assert_eq!(last(&result, "x"), 23.0);
     assert_eq!(last(&result, "so[3]"), 187.0);
 }
+
+/// MLS §3.7.2: `div`, `rem`, and `mod` of Integer operands inside a function
+/// body are exact Integer quotients with truncating and flooring signs.
+#[test]
+fn function_integer_quotients_are_exact() {
+    let source = r#"
+model Quotients
+  function quotients
+    input Integer a;
+    input Integer sign;
+    output Integer d;
+    output Integer r;
+    output Integer m;
+  algorithm
+    d := div(a, 2 * sign);
+    r := rem(a, 2 * sign);
+    m := mod(a, 2 * sign);
+  end quotients;
+  Integer a = if time < 10 then -7 else 0;
+  Integer nd;
+  Integer nr;
+  Integer nm;
+  Integer pd;
+  Integer pr;
+  Integer pm;
+equation
+  (nd, nr, nm) = quotients(a, 1);
+  (pd, pr, pm) = quotients(-a, -1);
+end Quotients;
+"#;
+    let result = simulate(source, "Quotients").expect("quotient model simulates");
+    let expected = [
+        ("nd", -3.0),
+        ("nr", -1.0),
+        ("nm", 1.0),
+        ("pd", -3.0),
+        ("pr", 1.0),
+        ("pm", -1.0),
+    ];
+    for (name, value) in expected {
+        assert_eq!(last(&result, name), value, "{name}");
+    }
+}
