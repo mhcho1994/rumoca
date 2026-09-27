@@ -1,3 +1,4 @@
+use super::super::function_shapes::ProvenValue;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -530,9 +531,19 @@ impl ExpressionValidator<'_> {
                 span,
             ));
         }
+        // A structural selection (SPEC_0040 DAE-C22) is folded at translation:
+        // the arms it never selects are not part of the canonical DAE, so only
+        // the arms lowering can reach are validated.
+        let selection = self
+            .values
+            .filter(|values| values.is_structural_selection(span));
         for (condition, value) in branches {
             self.validate(condition)?;
-            self.validate(value)?;
+            match selection.and_then(|values| values.proven_value(condition)) {
+                Some(ProvenValue::Boolean(false)) => {}
+                Some(ProvenValue::Boolean(true)) => return self.validate(value),
+                _ => self.validate(value)?,
+            }
         }
         self.validate(else_branch)
     }

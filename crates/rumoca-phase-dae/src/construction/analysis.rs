@@ -549,7 +549,13 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         states,
         variables: mut roles,
         expressions: mut expression_roles,
-    } = analyze_model_roles(flat, &clocks.sampled_targets)?;
+        structural_selections: folded_conditionals,
+    } = analyze_model_roles(
+        flat,
+        &clocks.sampled_targets,
+        function_shapes.model_values(),
+    )?;
+    function_shapes.add_structural_selections(folded_conditionals);
     validate_runtime_coordinates(flat, &roles, &record_array_fields)?;
     let derived_parameters = analyze_derived_parameters(flat, &roles)?;
     apply_derived_parameter_roles(&derived_parameters.plans, &mut roles, &mut expression_roles);
