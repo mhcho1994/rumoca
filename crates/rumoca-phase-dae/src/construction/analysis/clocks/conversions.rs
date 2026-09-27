@@ -4,7 +4,6 @@
 
 use super::*;
 
-
 /// The MLS §16.5.2 relation one clock conversion states between its source and
 /// target partitions.
 #[derive(Clone, Copy)]
@@ -426,7 +425,8 @@ pub(super) fn clocked_binding_conversion_edges(
         incidence.insert(variable.instance_id, variable.source_span);
         let target_members = register_incidence(&incidence, ordinals, occurrences, domains);
         let binding_incidence = expression_clock_incidence(binding, flat, roles);
-        let binding_members = register_incidence(&binding_incidence, ordinals, occurrences, domains);
+        let binding_members =
+            register_incidence(&binding_incidence, ordinals, occurrences, domains);
         if let (Some(&target), Some(&member)) = (target_members.first(), binding_members.first()) {
             domains.union(target, member);
         }

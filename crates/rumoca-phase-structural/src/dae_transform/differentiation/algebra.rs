@@ -136,20 +136,19 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
         let scaled_power = |this: &mut Self, drop: f64| {
             let at = this.target.at(provenance);
             let drop = at.literal(dae::DaeLiteral::Real(drop))?;
-            let reduced = this
-                .target
-                .at(provenance)
-                .binary(dae::BinaryOperator::Subtract, v, drop)?;
+            let reduced =
+                this.target
+                    .at(provenance)
+                    .binary(dae::BinaryOperator::Subtract, v, drop)?;
             this.target
                 .at(provenance)
                 .binary(dae::BinaryOperator::Power, u, reduced)
         };
         let power_minus_one = scaled_power(self, 1.0)?;
-        let coefficient = self.target.at(provenance).binary(
-            dae::BinaryOperator::Multiply,
-            v,
-            power_minus_one,
-        )?;
+        let coefficient =
+            self.target
+                .at(provenance)
+                .binary(dae::BinaryOperator::Multiply, v, power_minus_one)?;
         if order == 1 {
             return self.derivative_product(
                 dae::BinaryOperator::Multiply,
@@ -165,25 +164,21 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             second,
             provenance,
         )?;
-        let square = self.derivative_product(
-            dae::BinaryOperator::Multiply,
-            first,
-            first,
-            provenance,
-        )?;
+        let square =
+            self.derivative_product(dae::BinaryOperator::Multiply, first, first, provenance)?;
         let power_minus_two = scaled_power(self, 2.0)?;
         let one = self
             .target
             .at(provenance)
             .literal(dae::DaeLiteral::Real(1.0))?;
-        let v_minus_one = self
-            .target
-            .at(provenance)
-            .binary(dae::BinaryOperator::Subtract, v, one)?;
-        let falling = self
-            .target
-            .at(provenance)
-            .binary(dae::BinaryOperator::Multiply, v, v_minus_one)?;
+        let v_minus_one =
+            self.target
+                .at(provenance)
+                .binary(dae::BinaryOperator::Subtract, v, one)?;
+        let falling =
+            self.target
+                .at(provenance)
+                .binary(dae::BinaryOperator::Multiply, v, v_minus_one)?;
         let curvature = self.target.at(provenance).binary(
             dae::BinaryOperator::Multiply,
             falling,

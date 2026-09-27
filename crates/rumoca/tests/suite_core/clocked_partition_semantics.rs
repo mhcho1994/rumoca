@@ -19,6 +19,10 @@ fn simulate(source: &str, model: &str, t_end: f64, dt: f64) -> SimResult {
             ..Default::default()
         },
     )
+    .map(|result| {
+        assert!(result.times.len() > 10, "{model} produced an output grid");
+        result
+    })
     .unwrap_or_else(|error| panic!("{model} simulates: {error:?}"))
 }
 
@@ -115,10 +119,12 @@ fn sampling_a_discrete_value_reads_its_left_limit() {
 model LeftLimit
   Clock c = Clock(1, 10);
   Integer y(start = 0);
+  Integer s;
   Integer h;
 equation
   h = hold(y);
-  y = sample(h, c) + 1;
+  s = sample(h, c);
+  y = s + 1;
 end LeftLimit;
 "#;
     let result = simulate(source, "LeftLimit", 0.35, 0.01);

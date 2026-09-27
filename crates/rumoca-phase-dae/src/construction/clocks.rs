@@ -32,7 +32,10 @@ impl<'dae> LoweredClocks<'dae> {
     }
 
     /// The exact lattice of the lowered periodic clock `id`.
-    pub(super) fn lattice(&self, id: dae::PeriodicClockId<'dae>) -> Option<rumoca_core::ClockLattice> {
+    pub(super) fn lattice(
+        &self,
+        id: dae::PeriodicClockId<'dae>,
+    ) -> Option<rumoca_core::ClockLattice> {
         self.by_plan
             .iter()
             .find_map(|(plan, owned)| (*owned == id).then_some(plan.lattice))

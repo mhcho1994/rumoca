@@ -1300,11 +1300,11 @@ fn lower_guarded_targets<'dae>(
     // proof at this single boundary prevents a new DAE owner route from
     // silently constructing a hold-only program with the default plan fields.
     plan_guarded_targets(view, targets);
-    // MLS §8.5: the equations of one event instant are simultaneous, so a
+    // SOLVE-C58 / MLS §8.5: the equations of one event instant are simultaneous, so a
     // producer is issued before every target that reads its current value, and
     // the runtime evaluates the issued programs in that order.
-    let order = SameTickExchange::derive(view, &rows.same_tick_definitions, targets)
-        .producer_order();
+    let order =
+        SameTickExchange::derive(view, &rows.same_tick_definitions, targets).producer_order();
     apply_permutation(targets, &order);
     let exchange = SameTickExchange::derive(view, &rows.same_tick_definitions, targets);
     let mut first = 0;

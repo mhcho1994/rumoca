@@ -1274,7 +1274,7 @@ impl SolveRuntime {
     ) -> Result<Vec<GuardedRowValues>, RuntimeSolveError> {
         let mut guarded_values = Vec::new();
         let ordered_clocked = self.clock_partition_owns_clocked_rows();
-        // MLS §8.5: the equations active at one event instant are solved
+        // SOLVE-C58 / MLS §8.5: the equations active at one event instant are solved
         // simultaneously. Solve lowering issues each guarded producer before
         // every program that reads its current value, so evaluating the
         // programs in issued order over a working state that carries each

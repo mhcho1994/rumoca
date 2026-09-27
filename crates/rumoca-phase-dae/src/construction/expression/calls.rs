@@ -459,9 +459,8 @@ pub(super) fn lower_value_sample<'dae>(
     if let Expression::VarRef {
         name, subscripts, ..
     } = value
-        && let Some(
-            coordinate @ (Coordinate::DiscreteReal(_) | Coordinate::DiscreteValue(_)),
-        ) = symbols.coordinates.get(name.var_name()).copied()
+        && let Some(coordinate @ (Coordinate::DiscreteReal(_) | Coordinate::DiscreteValue(_))) =
+            symbols.coordinates.get(name.var_name()).copied()
     {
         let left_limit = coordinate
             .previous(provenance.span())

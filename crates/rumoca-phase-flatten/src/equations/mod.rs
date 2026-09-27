@@ -1525,7 +1525,10 @@ fn expand_if_equation(
         };
 
     if all_same_count {
-        if_equation_alignment::align_branches_by_assigned_target(&mut expanded_branches, &mut else_simple_eqs);
+        if_equation_alignment::align_branches_by_assigned_target(
+            &mut expanded_branches,
+            &mut else_simple_eqs,
+        );
         let mut result = FlattenedEquations::default();
         let eq_context = ConditionalEquationContext {
             ctx,

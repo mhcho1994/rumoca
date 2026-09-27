@@ -53,7 +53,11 @@ pub(super) fn align_branches_by_assigned_target(
             .map(|target| targets.iter().position(|candidate| candidate == target))
             .collect::<Option<Vec<_>>>()
             .filter(|positions| {
-                positions.iter().collect::<std::collections::HashSet<_>>().len() == positions.len()
+                positions
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    == positions.len()
             })
     };
     let Some(permutations) = branches
@@ -74,14 +78,14 @@ pub(super) fn align_branches_by_assigned_target(
             .map(|&position| taken[position].take().expect("positions are distinct"))
             .collect();
     };
-    let (else_positions, branch_positions) =
-        permutations.split_last().expect("the else permutation is present");
+    let (else_positions, branch_positions) = permutations
+        .split_last()
+        .expect("the else permutation is present");
     for ((_, equations), positions) in branches.iter_mut().zip(branch_positions) {
         reorder(equations, positions);
     }
     reorder(else_equations, else_positions);
 }
-
 
 /// Row `eq_idx` of a run-time if-equation as one `v = if c1 then e1 elseif ...
 /// else eN` equation, when every branch's row assigns the same unsubscripted

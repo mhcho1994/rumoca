@@ -145,9 +145,8 @@ pub(super) fn lower_multi_output_equation<'dae>(
                             system.real_equation(owner, |equation| equation.residual(residual))
                         })?;
                     }
-                    (_, None) => {
-                        construction.initialization(|system| system.value_equation(owner, residual))?
-                    }
+                    (_, None) => construction
+                        .initialization(|system| system.value_equation(owner, residual))?,
                     (_, Some(_)) => {
                         construction.continuous(|system| system.value_equation(owner, residual))?
                     }

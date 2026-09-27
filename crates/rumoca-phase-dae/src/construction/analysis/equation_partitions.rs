@@ -4,13 +4,17 @@ use std::borrow::Cow;
 #[derive(Clone)]
 pub(in crate::construction) enum EquationPartition<'flat> {
     Continuous,
-    DiscreteReal { target: &'flat VarName },
+    DiscreteReal {
+        target: &'flat VarName,
+    },
     DiscreteValue(DiscreteValueAssignmentPlan<'flat>),
     ConsumedDiscreteValue,
     /// An MLS §12.4.3 multi-result equation `(a, b, ...) = f(...)` with at
     /// least one discrete receiver. Each receiver is defined by its own result
     /// ordinal and keeps the owner its role selects.
-    MultiOutput { receivers: Vec<&'flat VarName> },
+    MultiOutput {
+        receivers: Vec<&'flat VarName>,
+    },
 }
 
 /// The receivers of an MLS §12.4.3 multi-result equation `(a, b, ...) =

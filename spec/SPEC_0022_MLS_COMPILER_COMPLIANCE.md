@@ -845,6 +845,24 @@ areas.
   and `shiftSample`/`backSample` compositions over statically scheduled base
   clocks. `Clock(condition)` is preserved as a dynamic event clock; unresolved
   or unsupported constructor forms must report `ED009` before simulation.
+  A Clock defined by a parameter-selected `if` (equation or expression form)
+  takes the branch the parameter values select (§16.7).
+- Clock inference (§16.5.1, §16.5.2): `subSample(u)`/`superSample(u)` without
+  `factor` take the exact integer ratio of the source and target partitions'
+  clocks, proven per component instance; a `sample(u)` partition is owned
+  through the conversions it takes part in before any fallback to a unique
+  model clock; declaration bindings and clocked `when` bodies contribute
+  conversions like equations, and a `when`-body `if` whose arms state a
+  conversion is decided by its parameter values.
+- Clocked values: `sample(u)` of a discrete `u` reads its left limit (the pre
+  value); a vector `sample` defines clocked discrete Real elements; an MLS
+  §12.4.3 multi-result call equation may define discrete receivers (one pure
+  call per discrete owner); the condition of an `if` inside a clocked `when`
+  body is a clocked value of the partition.
+- Not yet supported: `firstTick()`; `Clock(c, solverMethod)` discretized
+  partitions (§16.8.1); Integer-valued `div`/`mod`/`rem` inside function bodies
+  (no exact typed integer quotient exists in Solve IR); element-wise
+  definitions of a discrete Real vector (`a = u[1]`, `b = u[2]`).
 - State-machine support currently covers library-style `Modelica.StateGraph`
   models that lower as ordinary discrete/event equations, with
   `Modelica.StateGraph.Examples.ExecutionPaths` as the OMC-backed
