@@ -39,6 +39,7 @@ mod max_step_duration;
 mod metadata;
 mod parameter_updates;
 mod root_location;
+mod scalar_events;
 mod static_assertions;
 #[cfg(test)]
 mod tests;
@@ -510,6 +511,7 @@ impl FmiComponent {
         FmiCodegenView {
             metadata: self.metadata,
             event_indicators: self.event_indicators,
+            root_location: self.root_location,
             model: self.model,
         }
     }
@@ -595,6 +597,7 @@ impl<'component> FmiRuntimeView<'component> {
 pub struct FmiCodegenView {
     metadata: FmiMetadata,
     event_indicators: FmiEventIndicatorInventory,
+    root_location: RootLocationPlan,
     model: Arc<SolveModel>,
 }
 

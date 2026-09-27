@@ -7,7 +7,7 @@
 
 /// Which crossing an accepted interval applies when several indicators change
 /// domain in it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum RootTieBreak {
     /// The crossing located at the least application coordinate; crossings
     /// located at the same coordinate apply together.
@@ -15,7 +15,7 @@ pub enum RootTieBreak {
 }
 
 /// The root-location rules of one FMI component.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct RootLocationPlan {
     /// Adjacent indicator samples are at most this fraction of the experiment
     /// width apart, independent of the output cadence (SPEC_0044 §6).
@@ -24,6 +24,9 @@ pub struct RootLocationPlan {
     fallback_scan_resolution: f64,
     /// Bisection steps a bracket may take before location fails typed.
     refinement_iteration_cap: usize,
+    /// Machine epsilons, scaled by the interval's time magnitude, that make
+    /// up the roundoff of one accepted interval.
+    roundoff_epsilons: f64,
     tie_break: RootTieBreak,
 }
 
@@ -33,6 +36,7 @@ impl RootLocationPlan {
         scan_fraction: 1.0 / 8.0,
         fallback_scan_resolution: 1.0e-3,
         refinement_iteration_cap: 128,
+        roundoff_epsilons: 100.0,
         tie_break: RootTieBreak::LeastApplicationCoordinate,
     };
 
@@ -45,6 +49,14 @@ impl RootLocationPlan {
         } else {
             self.fallback_scan_resolution
         }
+    }
+
+    /// The roundoff of an accepted interval starting at `current_time` and
+    /// lasting `duration`.
+    #[must_use]
+    pub fn interval_roundoff(&self, current_time: f64, duration: f64) -> f64 {
+        (self.roundoff_epsilons * f64::EPSILON * (current_time.abs() + duration.abs()))
+            .max(f64::MIN_POSITIVE)
     }
 
     /// The location tolerance: the host's roundoff at the start of a scan

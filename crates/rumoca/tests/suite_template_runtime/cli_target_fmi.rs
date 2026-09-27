@@ -15,6 +15,7 @@ mod lifecycle;
 mod projection;
 mod reported_models;
 mod residual_split_harness;
+mod state_events;
 mod tensor_algebra;
 mod torn_tangent_harness;
 mod typed_functions;

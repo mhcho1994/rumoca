@@ -64,30 +64,37 @@ template = "buildDescription.xml.jinja"
 [[files]]
 path = "sources/model.c"
 template = "model.c.jinja"
+shared_as = "fmi3-model.c.jinja"
 
 [[files]]
 path = "sources/model.h"
 template = "model.h.jinja"
+shared_as = "fmi3-model.h.jinja"
 
 [[files]]
 path = "sources/rmc_rows.c"
 template = "rmc_rows.c.jinja"
+shared_as = "fmi3-rmc_rows.c.jinja"
 
 [[files]]
 path = "sources/rmc_isolators.c"
 template = "rmc_isolators.c.jinja"
+shared_as = "fmi3-rmc_isolators.c.jinja"
 
 [[files]]
 path = "sources/rmc_functions.c"
 template = "rmc_functions.c.jinja"
+shared_as = "fmi3-rmc_functions.c.jinja"
 
 [[files]]
 path = "sources/rmc_assign.c"
 template = "rmc_assign.c.jinja"
+shared_as = "fmi3-rmc_assign.c.jinja"
 
 [[files]]
 path = "sources/rmc_jacobian.c"
 template = "rmc_jacobian.c.jinja"
+shared_as = "fmi3-rmc_jacobian.c.jinja"
 
 [[partials]]
 template = "scalar_kernel.jinja"
@@ -108,3 +115,7 @@ name = "fmi-typed-arithmetic.jinja"
 [[partials]]
 template = "typed_tensors.jinja"
 name = "fmi-typed-tensors.jinja"
+
+[[partials]]
+template = "scalar_events.jinja"
+name = "fmi-scalar-events.jinja"

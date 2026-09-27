@@ -12,6 +12,10 @@ pub struct FmiCCodegenError(&'static str);
 enum Profile {
     EventFree(FmiEventFreeCodegenView),
     StaticAssertions(FmiCodegenView),
+    ScalarEvents(
+        FmiCodegenView,
+        Box<super::scalar_events::ScalarEventProfile>,
+    ),
 }
 
 /// A correlated component admitted by a complete C event-profile check.
@@ -40,9 +44,13 @@ impl FmiCodegenView {
             super::parameter_updates::validate(&self.model.problem, &self.model.pure_calls)
                 .map_err(FmiCCodegenError)?;
         if !self.event_indicators.sources().is_empty() {
-            return Err(FmiCCodegenError(
-                "continuous event indicators require general event support; the C profile supports only event-free models and parameter-determined events",
-            ));
+            let events = super::scalar_events::validate(&self.model).map_err(FmiCCodegenError)?;
+            return Ok(FmiCCodegenView {
+                profile: Profile::ScalarEvents(self, Box::new(events)),
+                update_order,
+                update_levels,
+                discrete_order: super::static_assertions::DiscreteOrder::default(),
+            });
         }
         if crate::solve_event_class(&self.model.problem).is_none() {
             return self
@@ -123,24 +131,28 @@ impl FmiCCodegenView {
         match &self.profile {
             Profile::EventFree(v) => &v.model,
             Profile::StaticAssertions(v) => &v.model,
+            Profile::ScalarEvents(v, _) => &v.model,
         }
     }
     fn metadata(&self) -> &FmiMetadata {
         match &self.profile {
             Profile::EventFree(v) => &v.metadata,
             Profile::StaticAssertions(v) => &v.metadata,
+            Profile::ScalarEvents(v, _) => &v.metadata,
         }
     }
     pub fn problem(&self) -> &crate::SolveProblem {
         match &self.profile {
             Profile::EventFree(v) => v.problem(),
             Profile::StaticAssertions(v) => &v.model.problem,
+            Profile::ScalarEvents(v, _) => &v.model.problem,
         }
     }
     pub fn artifacts(&self) -> &crate::SolveArtifacts {
         match &self.profile {
             Profile::EventFree(v) => v.artifacts(),
             Profile::StaticAssertions(v) => &v.model.artifacts,
+            Profile::ScalarEvents(v, _) => &v.model.artifacts,
         }
     }
     /// The retained kernel's finite positive characteristic scale of one
@@ -152,6 +164,7 @@ impl FmiCCodegenView {
         match &self.profile {
             Profile::EventFree(v) => v.pure_calls(),
             Profile::StaticAssertions(v) => &v.model.pure_calls,
+            Profile::ScalarEvents(v, _) => &v.model.pure_calls,
         }
     }
     /// The retained kernel's instantiation point: its initial solver vector
@@ -166,7 +179,7 @@ impl FmiCCodegenView {
 impl Serialize for FmiCCodegenView {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let metadata = self.metadata();
-        let mut entries = serializer.serialize_map(Some(10))?;
+        let mut entries = serializer.serialize_map(Some(12))?;
         entries.serialize_entry("initial_y", &self.model().initial_y)?;
         entries.serialize_entry("initial_parameters", &self.model().parameters)?;
         entries.serialize_entry(
@@ -180,13 +193,49 @@ impl Serialize for FmiCCodegenView {
         )?;
         entries.serialize_entry(
             "assertions",
-            &matches!(self.profile, Profile::StaticAssertions(_)),
+            &matches!(
+                self.profile,
+                Profile::StaticAssertions(_) | Profile::ScalarEvents(..)
+            ),
         )?;
-        entries.serialize_entry("event_indicator_roots", &[] as &[usize])?;
+        entries.serialize_entry("event_indicator_roots", &self.event_indicator_roots())?;
+        entries.serialize_entry(
+            "root_location",
+            &match &self.profile {
+                Profile::ScalarEvents(view, _) => Some(&view.root_location),
+                _ => None,
+            },
+        )?;
+        entries.serialize_entry(
+            "scalar_events",
+            &match &self.profile {
+                Profile::ScalarEvents(_, events) => Some(events.as_ref()),
+                _ => None,
+            },
+        )?;
         entries.serialize_entry("update_order", &self.update_order)?;
         entries.serialize_entry("discrete_equations", &self.discrete_order.equations)?;
         entries.serialize_entry("discrete_memories", &self.discrete_order.memories)?;
         entries.end()
+    }
+}
+
+impl FmiCCodegenView {
+    /// The root output each FMI event-indicator position reads, in position
+    /// order (the Solve IR indicator table; ME-EVENT-005).
+    fn event_indicator_roots(&self) -> Vec<usize> {
+        let Profile::ScalarEvents(view, _) = &self.profile else {
+            return Vec::new();
+        };
+        view.event_indicators
+            .plan()
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.reading() {
+                super::IndicatorReading::RootValue { index } => Some(index),
+                super::IndicatorReading::DeadlineDistance { .. } => None,
+            })
+            .collect()
     }
 }
 

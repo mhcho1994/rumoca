@@ -4,7 +4,6 @@
 //! cursor, asks the same incremental [`MeSimulationSession`] to reach its
 //! defined end once, and publishes the trace the session owns.
 
-use super::integrator::accepted_step_roundoff;
 use super::session::{
     MeAdvanceOutcome, MeOutputCursor, MeSessionError, MeSessionOptions, MeSessionOptionsInput,
     MeSimulationSession,
@@ -19,7 +18,7 @@ fn root_location_tolerance(
     scan_resolution: f64,
 ) -> f64 {
     plan.location_tolerance(
-        accepted_step_roundoff(start_time, scan_resolution),
+        plan.interval_roundoff(start_time, scan_resolution),
         scan_resolution,
     )
 }

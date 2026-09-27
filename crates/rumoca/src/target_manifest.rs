@@ -1066,7 +1066,7 @@ end FmiDelayedDecay;
             .expect("delayed target demo should compile")
     }
 
-    /// A model whose state event the generated FMI C does not implement.
+    /// A model with one state event and its relation memory.
     #[cfg(feature = "fmi")]
     fn compile_switched_target_demo() -> CompilationResult {
         let source = r#"
@@ -1081,6 +1081,23 @@ end FmiSwitchedDecay;
             .model("FmiSwitchedDecay")
             .compile_str(source, "FmiSwitchedDecay.mo")
             .expect("switched target demo should compile")
+    }
+
+    /// A model whose time event lies outside the generated FMI C profile.
+    #[cfg(feature = "fmu-packaging")]
+    fn compile_time_event_target_demo() -> CompilationResult {
+        let source = r#"
+model FmiTimeEventDecay
+  Real x(start = 1.0);
+equation
+  der(x) = if time > 0.5 then -1.0 else 1.0;
+end FmiTimeEventDecay;
+"#;
+
+        Compiler::new()
+            .model("FmiTimeEventDecay")
+            .compile_str(source, "FmiTimeEventDecay.mo")
+            .expect("time-event target demo should compile")
     }
 
     #[cfg(feature = "fmi")]
@@ -1119,24 +1136,20 @@ end FmiUndelayedDecay;
         );
     }
 
-    /// ME-EVENT-003: assertion-capable targets prove their event profile before
-    /// constructing a renderer; state-event relation memory is not admitted.
+    /// ME-EVENT-002: a state event with relation memory is admitted to the
+    /// scalar event profile, and the component renders its indicator table.
     #[cfg(feature = "fmi")]
     #[test]
-    fn fmi_targets_reject_state_events_at_the_checked_c_profile() {
+    fn fmi_targets_render_state_events_in_the_scalar_event_profile() {
         let result = compile_switched_target_demo();
         for target in ["fmi2", "fmi3"] {
-            let error = render_target_files(&result, "FmiSwitchedDecay", target, None)
-                .expect_err("static assertion support must not admit state events");
-            let profile_error = error
-                .downcast_ref::<rumoca_ir_solve::fmi::FmiCCodegenError>()
-                .expect("state events must fail the checked C profile before rendering");
-            assert!(
-                profile_error
-                    .to_string()
-                    .contains("continuous event indicators require general event support"),
-                "{target}: {error:#}"
-            );
+            let files = render_target_files(&result, "FmiSwitchedDecay", target, None)
+                .unwrap_or_else(|error| panic!("{target}: {error:#}"));
+            let model = files
+                .iter()
+                .find(|file| file.path.ends_with("model.c"))
+                .unwrap_or_else(|| panic!("{target} renders model.c"));
+            assert!(model.content.contains("rmc_event_indicators"), "{target}");
         }
     }
 
@@ -1188,17 +1201,17 @@ end FmiUndelayedDecay;
 
     #[cfg(feature = "fmu-packaging")]
     #[test]
-    fn fmi_packaging_rejects_state_events_before_writing_any_output() {
-        let result = compile_switched_target_demo();
+    fn fmi_packaging_rejects_out_of_profile_events_before_writing_any_output() {
+        let result = compile_time_event_target_demo();
         for target in ["fmi2", "fmi3"] {
             let out_dir = tempfile::tempdir().expect("temp output dir");
             let error = compile_packaged_target(
                 &result,
-                "FmiSwitchedDecay",
+                "FmiTimeEventDecay",
                 target,
                 out_dir.path().to_path_buf(),
             )
-            .expect_err("an FMI package must reject state events");
+            .expect_err("an FMI package must reject events outside its C profile");
             assert!(
                 error
                     .downcast_ref::<rumoca_ir_solve::fmi::FmiCCodegenError>()
@@ -1210,7 +1223,7 @@ end FmiUndelayedDecay;
                     .expect("read temp output dir")
                     .count(),
                 0,
-                "{target} must reject state events before writing any artifact"
+                "{target} must reject an out-of-profile event before writing any artifact"
             );
         }
     }
