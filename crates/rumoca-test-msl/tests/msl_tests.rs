@@ -368,6 +368,9 @@ struct MslModelResult {
     /// The compiling worker's one-time source-root load and plan cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worker_prepare_seconds: Option<f64>,
+    /// Why the compiling worker could not build its resolution plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strict_plan_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compile_perf_profile_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

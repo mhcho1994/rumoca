@@ -800,6 +800,8 @@ pub struct WorkerModelResult {
     /// One-time source-root load and plan construction cost of the worker that
     /// compiled this model, shared by all of that worker's models.
     pub worker_prepare_seconds: Option<f64>,
+    /// Why the compiling worker could not build its resolution plan.
+    pub strict_plan_error: Option<String>,
     pub compile_perf_profile_file: Option<String>,
     pub ir_ast_file: Option<String>,
     pub ir_flat_file: Option<String>,
@@ -985,6 +987,7 @@ impl WorkerModelResult {
             dae_seconds: None,
             strict_plan_warm: None,
             worker_prepare_seconds: None,
+            strict_plan_error: None,
             compile_perf_profile_file: None,
             ir_ast_file: None,
             ir_flat_file: None,

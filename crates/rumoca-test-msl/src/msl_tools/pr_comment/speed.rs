@@ -67,6 +67,9 @@ struct SpeedRecord {
     omc: OmcSeconds,
     rumoca_settings: Option<Value>,
     omc_settings: Option<Value>,
+    /// Whether the compile started from the worker's prepared resolution
+    /// plan (`strict_plan_warm`), `None` when the row does not record it.
+    plan_warm: Option<bool>,
 }
 
 /// One compared quantity.
@@ -144,6 +147,12 @@ impl Comparison {
 
     /// `(rumoca, omc)` seconds when both are known and positive.
     fn pair(self, record: &SpeedRecord) -> Option<(f64, f64)> {
+        // A compile that built the library resolution plan itself carries a
+        // one-time cost no OMC per-model timer has; only a recorded warm
+        // plan makes compiler work per-model on both sides.
+        if matches!(self, Self::CompilerWork) && record.plan_warm != Some(true) {
+            return None;
+        }
         let rumoca = self.rumoca(record).filter(|seconds| *seconds > 0.0)?;
         let omc = self.omc(record).filter(|seconds| *seconds > 0.0)?;
         Some((rumoca, omc))
@@ -362,6 +371,7 @@ fn speed_record(name: &str, high: bool, rumoca: &Value, omc: &Value) -> Option<S
         omc: omc_seconds,
         rumoca_settings: rumoca.get("sim_settings").cloned(),
         omc_settings: omc.get("omc_settings").cloned(),
+        plan_warm: rumoca.get("strict_plan_warm").and_then(Value::as_bool),
     })
 }
 
@@ -531,8 +541,7 @@ fn render_methodology(
          - Front end scope: rumoca loads the library and builds its resolution plan once per \
          worker (`worker_prepare_seconds`, recorded on each row with `strict_plan_warm`), and \
          `compile_seconds` covers resolving each model's reachable library classes for that \
-         model; OMC's `timeFrontend` follows one `loadModel` per session. Neither one-time \
-         load is in a per-model timer.\n\
+         model; OMC's `timeFrontend` follows one `loadModel` per session. {}\n\
          - Parity gating: only models in the comparator's high or near band are timed; {} models.\
          \n\n</details>\n",
         host_field("image"),
@@ -559,6 +568,7 @@ fn render_methodology(
         density_flag(records),
         initialization_share(records),
         total.saturating_sub(ran),
+        plan_scope(records),
         records.len(),
     )
 }
@@ -694,3 +704,23 @@ fn median_value(values: impl IntoIterator<Item = f64>) -> f64 {
 
 #[cfg(test)]
 mod tests;
+
+/// What the rows record about the one-time resolution plan: a model whose
+/// compile built the plan itself, or whose row does not say, is left out of
+/// Compiler work.
+fn plan_scope(records: &[SpeedRecord]) -> String {
+    let cold = records
+        .iter()
+        .filter(|r| r.plan_warm == Some(false))
+        .count();
+    let unrecorded = records.iter().filter(|r| r.plan_warm.is_none()).count();
+    if cold == 0 && unrecorded == 0 {
+        return "Every timed rumoca compile started from the prepared plan, so neither one-time \
+                load is in a per-model timer."
+            .to_string();
+    }
+    format!(
+        "{cold} timed rumoca compile(s) built the plan themselves and {unrecorded} row(s) do not \
+         record it; those models are left out of Compiler work."
+    )
+}

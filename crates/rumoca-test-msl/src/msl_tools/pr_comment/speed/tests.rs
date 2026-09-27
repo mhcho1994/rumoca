@@ -20,6 +20,7 @@ fn write_inputs(results: &Path, omc_workers: u64, rumoca_workers: u64, stage_wor
                 "sim_build_seconds": build,
                 "ic_seconds": ic,
                 "sim_run_seconds": run,
+                "strict_plan_warm": true,
                 "sim_settings": {
                     "requested_solver": "auto", "integrator": "bdf", "rtol": 1e-6, "atol": 1e-6,
                     "output_intervals": 500, "output_points": 501, "steps": 40, "events": 2
@@ -188,4 +189,40 @@ fn missing_inputs_report_not_measured() {
     let temp = tempfile::tempdir().expect("tempdir");
     let rendered = render_speed_section(temp.path()).expect("render");
     assert!(rendered.contains("Speed vs OMC not measured"));
+}
+
+#[test]
+fn a_compile_that_built_the_plan_is_left_out_of_compiler_work_and_counted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_inputs(temp.path(), 2, 2, 2);
+    let path = temp.path().join("msl_results.json");
+    let mut msl: Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+    for row in msl["model_results"].as_array_mut().expect("rows") {
+        if row["model_name"] == "B" {
+            row["strict_plan_warm"] = Value::Bool(false);
+        }
+    }
+    fs::write(&path, msl.to_string()).expect("write");
+    let rendered = render_speed_section(temp.path()).expect("render");
+    // Compiler work: A alone, rumoca 1.2 against OMC 2.4.
+    assert!(
+        rendered.contains("| Compiler work | 1 | 1.2 | 2.4 | **2.00** |"),
+        "{rendered}"
+    );
+    assert!(rendered.contains(
+        "1 timed rumoca compile(s) built the plan themselves and 0 row(s) do not record it"
+    ));
+    assert!(!rendered.contains("Every timed rumoca compile started from the prepared plan"));
+    // The other comparisons still time both models.
+    assert!(rendered.contains("| Simulation | 2 |"));
+}
+
+#[test]
+fn warm_plans_are_stated_from_the_rows() {
+    let rendered = render_with(2, 2, 2);
+    assert!(rendered.contains(
+        "Every timed rumoca compile started from the prepared plan, so neither one-time load is \
+         in a per-model timer."
+    ));
 }

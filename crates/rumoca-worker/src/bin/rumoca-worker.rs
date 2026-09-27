@@ -359,22 +359,28 @@ impl WorkerErrorPhase {
 struct WorkerSourceRoot {
     session: Session,
     prepare_seconds: f64,
+    /// Why the resolution plan could not be built, recorded on every row.
+    plan_error: Option<String>,
 }
 
 /// Load the source root and construct its strict-compile resolution plan once,
 /// so each model's `compile_seconds` covers only its own work, as OMC's
 /// per-model timings exclude its per-session `loadModel`. A plan that cannot
-/// be constructed is left to the first compile, whose row reports the failure.
+/// be constructed is recorded on every row, and each compile then starts cold.
 fn load_source_root(path: &Path) -> Result<WorkerSourceRoot, String> {
     let started = Instant::now();
     let mut session = Session::new(SessionConfig::default());
     let report =
         session.load_source_root_tolerant("msl", SourceRootKind::DurableExternal, path, None);
     if report.diagnostics.is_empty() {
-        let _ = session.prepare_strict_compile_plan();
+        let plan_error = session
+            .prepare_strict_compile_plan()
+            .err()
+            .map(|error| error.to_string());
         Ok(WorkerSourceRoot {
             session,
             prepare_seconds: started.elapsed().as_secs_f64(),
+            plan_error,
         })
     } else {
         Err(format!(
@@ -1500,6 +1506,7 @@ fn compile_request(
     let mut result = run_model_request(&mut root.session, &request);
     result.strict_plan_warm = Some(strict_plan_warm);
     result.worker_prepare_seconds = Some(root.prepare_seconds);
+    result.strict_plan_error.clone_from(&root.plan_error);
     let elapsed_secs = start.elapsed().as_secs_f64();
     ModelWorkerResponse {
         protocol_version: MODEL_WORKER_PROTOCOL_VERSION,
