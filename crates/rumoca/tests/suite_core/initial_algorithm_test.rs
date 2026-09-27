@@ -20,12 +20,13 @@
 //! The equation section keeps its own owner for every later instant.
 //!
 //! A target is one declared coordinate; a component-array element such as
-//! `c[2].count` is addressed by its literal subscripts.
+//! `c[2].count` is addressed by its literal subscripts, or by a `for` index
+//! over a range fixed at translation, which unrolls into those literals.
 //!
 //! Rejected, each naming the owner that is absent rather than a consequence of
 //! it: a call statement that binds an output or whose body has any other
 //! effect, a state/algebraic/output/input target the initialization system
-//! solves from residual rows instead, a loop or `when` carrying implicit
+//! solves from residual rows instead, a `while` or `when` carrying implicit
 //! memory, and a value that reads a coordinate with no proven value where it is
 //! evaluated.
 
@@ -348,9 +349,9 @@ model InitialAlgorithmAssertThenLoop
   Real x(start = 0, fixed = true);
 initial algorithm
   assert(v0 > 0, "v0 must be positive");
-  for i in 1:2 loop
-    y[i] := v0;
-  end for;
+  while v0 < 0 loop
+    y[1] := v0;
+  end while;
 equation
   der(x) = y[1] + y[2];
 end InitialAlgorithmAssertThenLoop;
@@ -358,7 +359,7 @@ end InitialAlgorithmAssertThenLoop;
     let rendered = rejection(SOURCE, "InitialAlgorithmAssertThenLoop");
     assert!(
         rendered.contains("ED013") && rendered.contains("implicit memory"),
-        "a loop in an initial algorithm must name its missing owner, got: {rendered}"
+        "a `while` in an initial algorithm must name its missing owner, got: {rendered}"
     );
     assert!(
         !rendered.contains("unresolved Flat reference"),
@@ -494,6 +495,71 @@ fn a_component_array_element_target_names_its_own_coordinate() {
     assert_eq!(
         discrete_trace(&result, "c[2].count").first().copied(),
         Some(2.0)
+    );
+}
+
+const LOOPED_TARGETS: &str = r#"
+model Held
+  discrete Integer v;
+equation
+  when time > 10 then
+    v = 0;
+  end when;
+end Held;
+model LoopedTargets
+  parameter Integer n = 3 annotation(Evaluate = true);
+  parameter Integer first = 1;
+  Held h[n];
+initial algorithm
+  for i in 1:n loop
+    h[i].v := 10*i;
+  end for;
+end LoopedTargets;
+model SettableRange
+  parameter Integer n = 3 annotation(Evaluate = true);
+  parameter Integer first = 1;
+  Held h[n];
+initial algorithm
+  for i in first:n loop
+    h[i].v := 10*i;
+  end for;
+end SettableRange;
+"#;
+
+/// MLS 3.7 §11.2.2 evaluates a `for` range once. Over an evaluable range the
+/// loop is its unrolled sequence, so `h[i].v` names each element's own
+/// coordinate in turn.
+#[test]
+fn a_for_over_an_evaluable_range_unrolls_into_element_targets() {
+    let compiled = Compiler::new()
+        .model("LoopedTargets")
+        .compile_str(LOOPED_TARGETS, "initial_algorithm.mo")
+        .expect("an unrolled initial loop has checked owners");
+    let result = simulate_dae(
+        &compiled.dae,
+        &SimOptions {
+            t_end: 0.01,
+            ..SimOptions::default()
+        },
+    )
+    .expect("the unrolled initial values simulate");
+    for (name, expected) in [("h[1].v", 10.0), ("h[2].v", 20.0), ("h[3].v", 30.0)] {
+        assert_eq!(
+            discrete_trace(&result, name).first().copied(),
+            Some(expected),
+            "{name}"
+        );
+    }
+}
+
+/// A range bound that reads a settable parameter could change between runs,
+/// so its iterations are not fixed at translation and the loop is refused.
+#[test]
+fn a_for_over_a_settable_range_names_the_missing_owner() {
+    let rendered = rejection(LOOPED_TARGETS, "SettableRange");
+    assert!(
+        rendered.contains("ED013") && rendered.contains("evaluable parameters"),
+        "a settable range bound must name its missing owner, got: {rendered}"
     );
 }
 

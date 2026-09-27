@@ -41,6 +41,7 @@
 //! input coordinate from an algorithm, and inventing one would replace a
 //! missing capability with an unproven guess.
 mod checking_calls;
+mod loops;
 
 use super::*;
 use checking_calls::{checking_call, expand_checking_call, reject_unsupported_checking_call};
@@ -230,14 +231,17 @@ pub(super) fn reject_unsupported_initial_algorithm_statements(
 ) -> Result<(), ToDaeError> {
     for algorithm in &flat.initial_algorithms {
         require_span(algorithm.span, "initial algorithm")?;
-        reject_unsupported_statements(flat, &algorithm.statements)?;
+        reject_unsupported_statements(flat, &algorithm.statements, false)?;
     }
     Ok(())
 }
 
+/// `in_loop` defers the target check of an assignment inside a `for` body to
+/// the replay, which sees the target with its index bound.
 fn reject_unsupported_statements(
     flat: &flat::Model,
     statements: &[rumoca_core::Statement],
+    in_loop: bool,
 ) -> Result<(), ToDaeError> {
     for statement in statements {
         if let Some(assertion) = assertion_call(flat, statement) {
@@ -255,7 +259,7 @@ fn reject_unsupported_statements(
             rumoca_core::Statement::Empty { .. } => {}
             rumoca_core::Statement::Assignment { comp, span, .. } => {
                 require_span(*span, "initial algorithm assignment")?;
-                if assignment_target(flat, comp).is_none() {
+                if !in_loop && assignment_target(flat, comp).is_none() {
                     return Err(unsupported(
                         "an assignment target must be one whole declared coordinate, \
                          addressed by literal subscripts at most",
@@ -276,11 +280,19 @@ fn reject_unsupported_statements(
                     ));
                 }
                 for block in cond_blocks {
-                    reject_unsupported_statements(flat, &block.stmts)?;
+                    reject_unsupported_statements(flat, &block.stmts, in_loop)?;
                 }
                 if let Some(statements) = else_block {
-                    reject_unsupported_statements(flat, statements)?;
+                    reject_unsupported_statements(flat, statements, in_loop)?;
                 }
+            }
+            // A `for` unrolls over its evaluated range (see `loops`); its body
+            // obeys this same grammar.
+            rumoca_core::Statement::For {
+                equations, span, ..
+            } => {
+                require_span(*span, "initial algorithm for statement")?;
+                reject_unsupported_statements(flat, equations, true)?;
             }
             rumoca_core::Statement::FunctionCall {
                 comp,
@@ -307,8 +319,9 @@ fn reject_unsupported_statements(
                     required_statement_span(statement, "unsupported initial algorithm statement")?;
                 return Err(unsupported(
                     "an initial algorithm is accepted as sequential scalar assignments, `if` \
-                     conditionals, and `assert` statements; loops, `when`, and `reinit` carry \
-                     implicit memory with no checked initialization owner",
+                     conditionals, `for` loops over evaluable ranges, and `assert` statements; \
+                     `while`, `when`, and `reinit` carry implicit memory with no checked \
+                     initialization owner",
                     span,
                 ));
             }
@@ -323,6 +336,7 @@ pub(super) fn analyze_initial_algorithms(
     roles: &HashMap<VarName, PlannedRole>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
+    shapes: &ShapeEnvironment,
 ) -> Result<InitialAlgorithmAnalysis, ToDaeError> {
     let mut analysis = InitialAlgorithmAnalysis {
         parameters: HashMap::new(),
@@ -333,6 +347,7 @@ pub(super) fn analyze_initial_algorithms(
         let mut replay = Replay {
             flat,
             constants,
+            shapes,
             origin: flat::EquationOrigin::Algorithm {
                 component: algorithm.origin.clone(),
             },
@@ -664,6 +679,9 @@ struct Replay<'flat> {
     /// Parameter values and array shapes, so a checking call's loop bounds
     /// resolve to the iterations the model actually has.
     constants: &'flat EvalContext,
+    /// Evaluable model values, so a `for` range unrolls only when no
+    /// settable parameter bounds it.
+    shapes: &'flat ShapeEnvironment,
     origin: flat::EquationOrigin,
     assertions: Vec<flat::AssertEquation>,
 }
@@ -737,6 +755,11 @@ impl Replay<'_> {
                 else_block,
                 span,
             } => self.conditional(cond_blocks, else_block.as_deref(), guard, *span, values),
+            rumoca_core::Statement::For {
+                indices,
+                equations,
+                span,
+            } => self.unrolled(indices, equations, *span, guard, values),
             _ => unreachable!("the statement grammar is proven before analysis replays it"),
         }
     }

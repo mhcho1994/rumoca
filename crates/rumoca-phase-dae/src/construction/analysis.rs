@@ -594,6 +594,7 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         },
         &states,
         &constants,
+        function_shapes.model_values(),
         &mut sample_lattices,
     )?;
     let balance = analyze_source_balance(SourceBalanceAnalysisInput {
@@ -836,6 +837,7 @@ fn analyze_initial_owners(
     assertions: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
+    shapes: &ShapeEnvironment,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<InitialOwners, ToDaeError> {
     let mut algorithms = analyze_initial_algorithm_owners(
@@ -844,6 +846,7 @@ fn analyze_initial_owners(
         assertions,
         states,
         constants,
+        shapes,
         sample_lattices,
     )?;
     let discrete_equation_rows =
@@ -1184,9 +1187,10 @@ fn analyze_initial_algorithm_owners(
     assertion_scope: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
+    shapes: &ShapeEnvironment,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<InitialAlgorithmAnalysis, ToDaeError> {
-    let initial_algorithms = analyze_initial_algorithms(flat, roles, states, constants)?;
+    let initial_algorithms = analyze_initial_algorithms(flat, roles, states, constants, shapes)?;
     validate_assertions(
         flat.assert_equations
             .iter()
