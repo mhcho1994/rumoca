@@ -1,8 +1,15 @@
 # Writing an external pass
 
+An artifact carries two representations: **equation IR** (`RbcFile.model`,
+what must hold) and **execution IR** (`RbcFile.execution`, how it is evaluated
+and what the host does). Which one your pass should target, and the rules that
+keep them consistent, are in
+[SPEC_RUMOCA_BITCODE.md §2a](SPEC_RUMOCA_BITCODE.md#2a-two-irs-equation-and-execution).
+**This page focuses on equation IR.**
+
 For an end-to-end composition example and the distinction between equation
 passes, execution passes and explicit replay, see
-[Combining two models](combining-models.md). This page focuses on equation IR.
+[Combining two models](combining-models.md).
 
 A pass is a program that reads Rumoca Bitcode. That is the whole contract.
 

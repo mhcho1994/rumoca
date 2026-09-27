@@ -3,6 +3,11 @@
 This milestone implements the contract in `new_inst/STUDENT_INSTRUCTIONS.md`.
 The starting inventory is `new_inst/IMPLEMENTATION_INVENTORY.md`.
 
+This is the **execution IR** half of the two-IR design; the division of
+responsibility, and the rules that keep a derived program consistent with the
+equations it came from, are specified in
+[SPEC_RUMOCA_BITCODE.md §2a](../SPEC_RUMOCA_BITCODE.md#2a-two-irs-equation-and-execution).
+
 Equation RBC remains the canonical public model representation. The executable
 extension has its own version, derivation digest, lowering profile and revision.
 An equation edit invalidates all derived execution. Verification and execution

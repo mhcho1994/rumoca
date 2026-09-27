@@ -8,6 +8,7 @@
 | [Known-issue detection follow-up](evaluations/msl-upstream-open-issues-2026-09-24/detection-followup.md) | Five reproduced issues detected natively, six across explicit backends; behavioral contracts, controls and remaining coverage gaps. |
 | [findings/](findings/) | Bugs in **target programs** — Modelica models and libraries. The results. |
 | [bitcode-reference.md](bitcode-reference.md) | Every type in the artifact format, generated from `schema.rs` and checked for staleness. The narrative is in [SPEC_RUMOCA_BITCODE.md](SPEC_RUMOCA_BITCODE.md). |
+| [SPEC_RUMOCA_BITCODE.md §2a](SPEC_RUMOCA_BITCODE.md#2a-two-irs-equation-and-execution) | The two IRs an artifact carries -- equation IR (what must hold) and execution IR (how it runs) -- why there are two, and how they stay consistent. |
 | [bitcode-linking.md](bitcode-linking.md) | Combine independent artifacts with the native linker or Python SDK; wiring and execution safety rules. |
 | [combining-models.md](combining-models.md) | Start-to-finish tutorial: build two models, link and connect their ports, run equation/execution passes, then simulate. |
 | [modelsan-bitcode-integration.md](modelsan-bitcode-integration.md) | Current sanitizer integration: preserved executable passes, identity-based network analysis, supported overrides and regressions. |

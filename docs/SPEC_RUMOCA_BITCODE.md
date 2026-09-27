@@ -40,8 +40,12 @@ RbcFile
   magic            "RUMOCA-RBC"
   bitcode_version  2
   producer         e.g. "rumoca 0.10.0"   (informational only)
-  model            RbcModel
+  model            RbcModel                 -- equation IR, always present
+  execution        Option<ExecutionArtifact> -- execution IR, optional
 ```
+
+An artifact therefore carries **two** representations. They are described in
+[§2a](#2a-two-irs-equation-and-execution).
 
 A reader **must** reject a file whose `magic` differs, and **must** reject a
 `bitcode_version` it does not implement. Both checks happen before any other
@@ -71,6 +75,94 @@ lack the information needed for this proof. The bounded proof profile and its
 explicit refusal conditions are documented in [connector validation](connector-validation.md).
 
 `producer` is informational. A consumer must not change behaviour based on it.
+
+
+## 2a. Two IRs: equation and execution
+
+An artifact holds up to two representations of the same model, and they answer
+different questions:
+
+| | Equation IR | Execution IR |
+|---|---|---|
+| Field | `RbcFile.model` (`RbcModel`) | `RbcFile.execution` (`ExecutionArtifact`) |
+| Answers | *what must hold* | *how it is evaluated, and what the host does* |
+| Content | variables, typed expressions, residual equations, events, connection sets | ordered instructions: numerical `compute`, snapshots, CSV lifecycle, `assert` |
+| Presence | always | only after lowering |
+| Versioning | `bitcode_version` | its own `version`, plus `equation_digest`, `lowering`, `revision` |
+| Shape | declarative and unordered; equations are a set | imperative and ordered; instructions run in sequence |
+
+### Why two rather than one
+
+**They are not orderings of each other.** A residual equation states a relation
+that must hold at a solution. An instruction states a step that runs at a point
+in time. Deriving the second from the first requires choosing an evaluation
+order, a solver profile and a set of observation points -- choices the equations
+deliberately do not make, because a different solver makes them differently.
+Collapsing the two would bake one solver's choices into the model.
+
+**One is canonical, the other is derived.** Equation IR is the public model
+representation. Execution IR is a projection of it, and the projection is
+recorded rather than assumed: `equation_digest` names the equations it came
+from, `lowering` names the profile used, and `revision` counts edits to the
+projection itself.
+
+**They fail differently, and both failures matter.** An equation-level defect is
+a statement about the model -- an unmatched equation, a dimensional conflict, a
+connector with no source. An execution-level defect is a statement about a run
+-- a divisor that reaches zero, an assertion that fires, a trace that stops. A
+tool that had only one of these would report the other in the wrong vocabulary.
+
+**The execution IR is deliberately bounded.** It is a scalar, loop-free
+projection: the instruction set has no iteration and no recursion, and function
+bodies are not carried. That is what makes an externally-authored program safe
+to execute -- a program that cannot loop cannot fail to terminate, so a host
+needs no termination proof from a pass author. Equation IR is bounded for the
+same reason and by the same means (§9a).
+
+### How they interoperate
+
+```text
+Modelica source
+  -> equation IR            (RbcFile.model)          canonical
+  -> equation passes        (read/write RbcModel)
+  -> lowering               (execution.lower)        derivation, digest recorded
+  -> execution IR           (RbcFile.execution)      derived
+  -> execution passes       (read/write instructions)
+  -> native run
+```
+
+The rules a consumer must observe:
+
+1. **An equation edit invalidates every derived execution.** The
+   `equation_digest` is recomputed on verification and on run. A mismatch is an
+   error, not a re-lowering trigger: re-lowering is an explicit operation,
+   because it discards execution-level edits.
+2. **Linking is an equation-IR operation.** `rumoca bitcode link` must refuse an
+   input that carries an execution projection unless the caller explicitly
+   authorizes discarding it (§2). Equations can be combined; two lowerings
+   cannot.
+3. **Execution IR never rewrites equations.** An execution pass may reorder
+   instructions, add host effects such as CSV logging, or add observations. If a
+   change would alter what must hold, it belongs in an equation pass.
+4. **Observation targets are registered before lowering.** Lowering must be able
+   to reconstruct each one; a target it cannot map is an error rather than a
+   silently dropped request.
+5. **A reader that understands only equation IR is valid.** `execution` is
+   optional, and a consumer that ignores it still sees the whole model. A
+   consumer that reads *only* execution IR does not, and must not present itself
+   as having read the model.
+
+### Which one a pass should target
+
+Target equation IR to change what the model means: adding a component, wiring a
+port, rewriting a residual, constraining a declaration. Target execution IR to
+change what a run does without changing what it means: logging a signal,
+inserting an assertion, reordering independent effects.
+
+If a pass finds itself encoding an equation into instructions to work around a
+missing equation-level capability, that is a gap in the equation IR and should
+be reported as one. The derived representation is the wrong place to introduce a
+fact the canonical one does not hold.
 
 ## 3. Encodings
 

@@ -49,7 +49,7 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcFile`](#rbcfile) | struct | 5 |
 | [`RbcFlowBalance`](#rbcflowbalance) | struct | 2 |
 | [`RbcFlowTerm`](#rbcflowterm) | struct | 2 |
-| [`RbcFunction`](#rbcfunction) | struct | 7 |
+| [`RbcFunction`](#rbcfunction) | struct | 8 |
 | [`RbcFunctionBody`](#rbcfunctionbody) | enum | 2 |
 | [`RbcFunctionParameter`](#rbcfunctionparameter) | struct | 2 |
 | [`RbcGeneration`](#rbcgeneration) | enum | 25 |
@@ -589,6 +589,7 @@ One function declaration, without its body. The signature is what a *call site* 
 | `results` | `Vec<TypeId>` | required | Result types in declaration order; a call names one by ordinal. |
 | `inline` | `RbcInline` | required | The MLS §18.3 `Inline`/`LateInline` request the declaration wrote. |
 | `body` | `RbcFunctionBody` | required | — |
+| `calls` | `Vec<FunctionId>` | additive | Functions this one calls, in first-seen order. A call inside an *equation* is already visible: `RbcExprNode::Call` names its callee, so a consumer can read those edges off the expression arena. A call inside a *function body* is not, because the body is elided (`RbcFunctionBody::ElidedModelica`). Without this field the call graph stops at the first function, and every consumer that needs reachability over callables -- dead-code elimination, coverage, "is this function used" -- either rebuilds it wrongly or gives up. Carrying the edges rather than the bodies keeps the property the elision exists for: an edge list is a finite graph, not a program, so nothing here reintroduces recursion as something the IR can *execute*. A cycle in these edges is representable and is exactly what a recursion check would look for. |
 | `declaration` | `RbcProvenance` | required | — |
 
 ## RbcFunctionBody
