@@ -115,6 +115,32 @@ impl DemotionRowBounds {
         self.unknown_count
     }
 
+    /// Whether replacing holonomic `owner`, promoting `lifted` if any, provably
+    /// cannot sort a system with `n_eq` rows and `residue`.
+    ///
+    /// The replacement keeps its owner's shape and the promotion keeps its
+    /// variable's columns, so only the replaced owner's rows and the rows of
+    /// the promoted variable's readers change. Removing those `k` rows from a
+    /// perfect matching of the rebuilt system leaves a matching of unchanged
+    /// rows, at most the current matching `M`, so sorting needs `U <= M + k`.
+    pub(super) fn holonomic_cannot_sort(
+        &self,
+        owner: usize,
+        lifted: Option<u32>,
+        n_eq: usize,
+        residue: usize,
+    ) -> bool {
+        let readers = lifted.map_or(&[][..], |variable| self.owners(variable));
+        let changed = readers
+            .iter()
+            .filter(|&&reader| reader != owner)
+            .chain([&owner])
+            .map(|&changed| self.owner_rows.get(changed).copied().unwrap_or(usize::MAX))
+            .fold(0usize, usize::saturating_add);
+        // U - M = (residue + U - E) / 2 for M matched pairs.
+        (residue + self.unknown_count).saturating_sub(n_eq) > changed.saturating_mul(2)
+    }
+
     /// The continuous owners that reference `variable`, ascending.
     pub(super) fn owners(&self, variable: u32) -> &[usize] {
         self.variable_owners

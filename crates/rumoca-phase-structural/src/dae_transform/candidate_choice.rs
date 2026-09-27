@@ -108,6 +108,37 @@ pub(super) fn holonomic_analysis(
     }
 }
 
+/// Debug builds reconstruct every holonomic candidate skipped after a
+/// reduction and check the row-count proof: none of them may sort.
+#[cfg(debug_assertions)]
+pub(super) fn check_unsortable(
+    source: &ReductionSource<'_>,
+    (residue, prior_manifold, stated, reuse): (
+        usize,
+        &[ManifoldConstraint],
+        &[u32],
+        Option<&crate::incidence::ReusableIncidence>,
+    ),
+    skipped: Vec<HolonomicConstraint>,
+) -> Result<(), StructuralError> {
+    for constraint in skipped {
+        let attempt = super::holonomic_attempt::attempt_holonomic_candidate(
+            source,
+            residue,
+            prior_manifold,
+            stated,
+            constraint,
+            reuse,
+            &mut (),
+        )?;
+        assert!(
+            !matches!(attempt, super::HolonomicAttempt::Sorted { .. }),
+            "a holonomic candidate the row count excludes cannot sort"
+        );
+    }
+    Ok(())
+}
+
 /// Debug builds reconstruct every candidate the residue bound deferred and
 /// check the bound: none of them may reduce the residue.
 #[cfg(debug_assertions)]

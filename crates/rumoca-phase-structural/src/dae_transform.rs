@@ -1719,20 +1719,13 @@ fn manifold_scalar_is_state_only<'dae>(
     projected.is_ok() && valid && saw_state
 }
 
-/// Try every current certificate in deterministic owner order, preferring a
-/// strict residue reduction over a once-only owner-consuming held step.
-fn holonomic_pass_with_observer(
-    model: &dae::Dae,
-    residue: usize,
-    prior_manifold: &[ManifoldConstraint],
-    differentiated_owners: &mut BTreeSet<HolonomicOwnerKey>,
+/// The pass's holonomic certificates in deterministic owner order, without
+/// owners already differentiated or lifts outside the overdetermined blocks.
+fn holonomic_candidates(
+    source: &ReductionSource<'_>,
+    differentiated_owners: &BTreeSet<HolonomicOwnerKey>,
     perturb_enumeration: &mut impl FnMut(&mut Vec<HolonomicConstraint>),
-    observer: &mut impl ReductionObserver,
-) -> Result<HolonomicPass, StructuralError> {
-    let source = ReductionSource::new(model);
-    let stated = model.inspect(stated_initial_variables);
-    // The pass model's incidence, reused by every candidate's analysis.
-    let (_, base) = structural_analysis_capturing(model, None, None);
+) -> Result<Vec<HolonomicConstraint>, StructuralError> {
     let (mut candidates, incident) = source.inspect(|view, facts| {
         let candidates = index_reduction_constraints(view, facts);
         let incident = crate::overdetermined_block_variables(view)?;
@@ -1757,6 +1750,24 @@ fn holonomic_pass_with_observer(
                 .map(|component| component.scalar),
         )
     });
+    Ok(candidates)
+}
+
+/// Try every current certificate in deterministic owner order, preferring a
+/// strict residue reduction over a once-only owner-consuming held step.
+fn holonomic_pass_with_observer(
+    model: &dae::Dae,
+    residue: usize,
+    prior_manifold: &[ManifoldConstraint],
+    differentiated_owners: &mut BTreeSet<HolonomicOwnerKey>,
+    perturb_enumeration: &mut impl FnMut(&mut Vec<HolonomicConstraint>),
+    observer: &mut impl ReductionObserver,
+) -> Result<HolonomicPass, StructuralError> {
+    let source = ReductionSource::new(model);
+    let stated = model.inspect(stated_initial_variables);
+    // The pass model's incidence, reused by every candidate's analysis.
+    let (_, base) = structural_analysis_capturing(model, None, None);
+    let candidates = holonomic_candidates(&source, differentiated_owners, perturb_enumeration)?;
     observer.observe(ReductionEvent::Candidates {
         lane: Lane::Holonomic,
         group: CandidateGroup::Holonomic,
@@ -1765,7 +1776,22 @@ fn holonomic_pass_with_observer(
     let mut reduced: Option<(HolonomicConstraint, usize, HolonomicStep)> = None;
     let mut held: Option<(HolonomicConstraint, usize, HolonomicStep)> = None;
     let mut blocked = None;
+    // Once a candidate reduces, the pass returns it and drops every held or
+    // blocked candidate, so only a sorting one could still change the choice.
+    let mut unsortable = Vec::new();
     for constraint in candidates {
+        if reduced.is_some()
+            && let Some(base) = base.as_ref()
+            && source.demotion_rows.holonomic_cannot_sort(
+                constraint.owner_ordinal,
+                constraint.lifted_algebraic,
+                base.rows().len(),
+                residue,
+            )
+        {
+            unsortable.push(constraint);
+            continue;
+        }
         let attempt = attempt_holonomic_candidate(
             &source,
             residue,
@@ -1809,6 +1835,14 @@ fn holonomic_pass_with_observer(
             HolonomicAttempt::Rejected => {}
         }
     }
+    #[cfg(debug_assertions)]
+    candidate_choice::check_unsortable(
+        &source,
+        (residue, prior_manifold, &stated, base.as_ref()),
+        unsortable,
+    )?;
+    #[cfg(not(debug_assertions))]
+    drop(unsortable);
     match reduced {
         Some((constraint, residue_after, step)) => {
             differentiated_owners.insert(constraint.owner_key());
