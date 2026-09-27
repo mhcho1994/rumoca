@@ -65,7 +65,7 @@ fn compile(model: &str) -> std::sync::Arc<dae::Dae> {
     Compiler::new()
         .model(model)
         .compile_str(MODELS, "Structural.mo")
-        .unwrap_or_else(|error| panic!("{model} compiles: {error:?}"))
+        .expect("the model compiles")
         .dae
 }
 
@@ -107,7 +107,7 @@ fn a_structural_parameter_closes_over_its_binding_and_indexes_a_family() {
             .names
             .iter()
             .position(|candidate| candidate == name)
-            .unwrap_or_else(|| panic!("missing column {name}"));
+            .expect("the result records the column");
         *result.data[index].last().expect("a sample")
     };
     assert!((last("x[1]") - (-2.0f64).exp()).abs() < 1e-4);

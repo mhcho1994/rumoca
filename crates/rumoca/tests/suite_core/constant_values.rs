@@ -200,8 +200,8 @@ fn a_constant_call_in_a_tunable_parameter_binding_folds_and_keeps_the_binding_se
                 .unwrap_or_default(),
             ..SimOptions::default()
         };
-        let result = simulate_dae_with_diagnostics(&compiled.dae, &options)
-            .unwrap_or_else(|error| panic!("gain {gain:?}: {error:#}"));
+        let result =
+            simulate_dae_with_diagnostics(&compiled.dae, &options).expect("the binding simulates");
         let x = result
             .names
             .iter()

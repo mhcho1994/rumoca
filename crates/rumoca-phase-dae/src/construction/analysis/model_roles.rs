@@ -205,18 +205,16 @@ impl DerivativeTargets<'_> {
 
     fn derivative(&mut self, args: &[Expression], span: Span) -> Result<(), ToDaeError> {
         require_span(span, "derivative expression")?;
-        let unresolved = || {
-            ToDaeError::unsupported_flat(
+        let reference = match args {
+            [argument] => derivative_reference(argument),
+            _ => None,
+        };
+        let Some((name, _)) = reference else {
+            return Err(ToDaeError::unsupported_flat(
                 "derivative expression",
                 "der(...) must have exactly one resolved variable-reference operand",
                 span,
-            )
-        };
-        let [argument] = args else {
-            return Err(unresolved());
-        };
-        let Some((name, _)) = derivative_reference(argument) else {
-            return Err(unresolved());
+            ));
         };
         self.states.insert(name.var_name().clone());
         Ok(())

@@ -51,10 +51,13 @@ end EnumAssert;
 "#;
 
 fn simulate(model: &str) -> Result<rumoca_sim::SimResult, String> {
-    let compiled = Compiler::new()
+    let compiled = match Compiler::new()
         .model(model)
         .compile_str(MODELS, "EnumAssert.mo")
-        .map_err(|error| format!("{error:?}"))?;
+    {
+        Ok(compiled) => compiled,
+        Err(error) => return Err(format!("{error:?}")),
+    };
     simulate_dae_with_diagnostics(
         &compiled.dae,
         &SimOptions {

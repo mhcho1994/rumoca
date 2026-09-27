@@ -59,10 +59,13 @@ end Guards;
 "#;
 
 fn simulate(model: &str) -> Result<SimResult, String> {
-    let compiled = Compiler::new()
+    let compiled = match Compiler::new()
         .model(model)
         .compile_str(MODELS, "Guards.mo")
-        .map_err(|error| format!("{error:?}"))?;
+    {
+        Ok(compiled) => compiled,
+        Err(error) => return Err(format!("{error:?}")),
+    };
     simulate_dae_with_diagnostics(
         &compiled.dae,
         &SimOptions {
@@ -80,7 +83,7 @@ fn assert_derivative(result: &SimResult, expected: impl Fn(f64) -> f64, skip: f6
             .names
             .iter()
             .position(|candidate| candidate == name)
-            .unwrap_or_else(|| panic!("missing column {name}"));
+            .expect("the result records the column");
         &result.data[index]
     };
     let w = column("w");

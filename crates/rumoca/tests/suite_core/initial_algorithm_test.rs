@@ -512,7 +512,9 @@ model LoopedTargets
   Held h[n];
 initial algorithm
   for i in 1:n loop
-    h[i].v := 10*i;
+    for j in 1:1 loop
+      h[i].v := 10*i + j - 1;
+    end for;
   end for;
 end LoopedTargets;
 model SettableRange

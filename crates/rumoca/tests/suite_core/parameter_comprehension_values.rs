@@ -40,7 +40,7 @@ fn simulate(model: &str) -> SimResult {
     let compiled = Compiler::new()
         .model(model)
         .compile_str(MODELS, "ParameterComprehension.mo")
-        .unwrap_or_else(|error| panic!("{model} compiles: {error:?}"));
+        .expect("the model compiles");
     simulate_dae_with_diagnostics(
         &compiled.dae,
         &SimOptions {
@@ -48,7 +48,7 @@ fn simulate(model: &str) -> SimResult {
             ..SimOptions::default()
         },
     )
-    .unwrap_or_else(|error| panic!("{model} simulates: {error:?}"))
+    .expect("the model simulates")
 }
 
 fn first(result: &SimResult, name: &str) -> f64 {
@@ -56,7 +56,7 @@ fn first(result: &SimResult, name: &str) -> f64 {
         .names
         .iter()
         .position(|candidate| candidate == name)
-        .unwrap_or_else(|| panic!("simulation result missing column {name}"));
+        .expect("the result records the column");
     result.data[index][0]
 }
 

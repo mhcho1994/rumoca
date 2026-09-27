@@ -62,11 +62,32 @@ package While
       a := table[next, 2];
     end if;
   end branched;
+  function firstAbove "a branch writes the loop limit before the increment"
+    input Real x[:];
+    input Real v;
+    output Integer k;
+  protected
+    Integer n = size(x, 1);
+    Integer i;
+  algorithm
+    k := 0;
+    i := 1;
+    while i < n loop
+      if x[i] > v then
+        k := i;
+        i := n;
+      else
+        k := 0;
+      end if;
+      i := i + 1;
+    end while;
+  end firstAbove;
   model Functions
     parameter Real table[4, 2] = [0, 0; 0.25, 1; 0.5, 2; 0.75, 3];
     Real index = advance(table, time, 1);
     Real halved = halve(1 + time);
     Real selected = branched(table, time - 0.1);
+    Real above = firstAbove({0.1, 0.4, 0.7, 1.0}, time);
   end Functions;
   function coefficients "Blocks.Sources.TimeTable.getInterpolationCoefficients, reduced"
     input Real table[:, 2];
@@ -120,7 +141,7 @@ fn simulate(model: &str) -> SimResult {
     let compiled = Compiler::new()
         .model(model)
         .compile_str(MODELS, "While.mo")
-        .unwrap_or_else(|error| panic!("{model} compiles: {error:?}"));
+        .expect("the model compiles");
     simulate_dae_with_diagnostics(
         &compiled.dae,
         &SimOptions {
@@ -129,7 +150,7 @@ fn simulate(model: &str) -> SimResult {
             ..SimOptions::default()
         },
     )
-    .unwrap_or_else(|error| panic!("{model} simulates: {error:?}"))
+    .expect("the model simulates")
 }
 
 fn at(result: &SimResult, name: &str, time: f64) -> f64 {
@@ -137,12 +158,12 @@ fn at(result: &SimResult, name: &str, time: f64) -> f64 {
         .names
         .iter()
         .position(|candidate| candidate == name)
-        .unwrap_or_else(|| panic!("missing column {name}"));
+        .expect("the result records the column");
     let row = result
         .times
         .iter()
         .position(|sample| (sample - time).abs() < 1e-9)
-        .unwrap_or_else(|| panic!("no sample at {time}"));
+        .expect("the result has a sample at the time");
     result.data[column][row]
 }
 
@@ -158,6 +179,9 @@ fn bounded_while_loops_compute_their_iterated_values() {
     // time - 0.1 < 0 selects -1; at 0.4 the loop stops at row 3 (value 2).
     assert_eq!(at(&result, "selected", 0.0), -1.0);
     assert_eq!(at(&result, "selected", 0.4), 2.0);
+    // The first entry above 0.3 is the second; above 0.8 none within i < 4.
+    assert_eq!(at(&result, "above", 0.3), 2.0);
+    assert_eq!(at(&result, "above", 0.8), 0.0);
 }
 
 #[test]
@@ -168,5 +192,5 @@ fn an_event_algorithm_reads_its_target_entry_value_as_pre() {
     Compiler::new()
         .model("While.Table")
         .compile_str(MODELS, "While.mo")
-        .unwrap_or_else(|error| panic!("the event algorithm constructs: {error:?}"));
+        .expect("the event algorithm constructs");
 }

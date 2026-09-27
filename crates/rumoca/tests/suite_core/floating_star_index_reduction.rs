@@ -162,13 +162,13 @@ fn assert_balanced(model: &str) {
             ..SimOptions::default()
         },
     )
-    .unwrap_or_else(|error| panic!("{model} simulates: {error:#}"));
+    .expect("the model simulates");
     let last = |name: &str| {
         let index = result
             .names
             .iter()
             .position(|candidate| candidate == name)
-            .unwrap_or_else(|| panic!("missing column {name}"));
+            .expect("the result records the column");
         *result.data[index].last().expect("a sample")
     };
     let balance = last("l1.i") + last("l2.i") + last("l3.i");

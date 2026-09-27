@@ -43,7 +43,7 @@ fn a_comprehension_coefficient_is_selected_per_segment() {
             .names
             .iter()
             .position(|candidate| candidate == name)
-            .unwrap_or_else(|| panic!("missing column {name}"));
+            .expect("the result records the column");
         *result.data[index].last().expect("a sample")
     };
     // lm = {1/4, 1/2, 1/4}: x[k](t) = exp(-t/lm[k]).

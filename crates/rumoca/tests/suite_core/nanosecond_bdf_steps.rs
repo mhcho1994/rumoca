@@ -34,7 +34,7 @@ fn a_picosecond_junction_simulates_with_bdf() {
             ..SimOptions::default()
         },
     )
-    .unwrap_or_else(|error| panic!("the junction simulates: {error:#}"));
+    .expect("the junction simulates");
     let v = result
         .names
         .iter()

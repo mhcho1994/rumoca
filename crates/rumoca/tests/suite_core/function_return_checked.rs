@@ -41,7 +41,7 @@ fn a_trailing_top_level_return_ends_the_algorithm() {
             .names
             .iter()
             .position(|candidate| candidate == name)
-            .unwrap_or_else(|| panic!("missing column {name}"));
+            .expect("the result records the column");
         &simulation.data[index]
     };
     for (x, y) in column("x").iter().zip(column("y")) {

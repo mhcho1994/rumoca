@@ -44,7 +44,7 @@ fn last(model: &str, name: &str) -> f64 {
     let compiled = Compiler::new()
         .model(model)
         .compile_str(MODELS, "DeadArms.mo")
-        .unwrap_or_else(|error| panic!("{model} compiles: {error:?}"));
+        .expect("the model compiles");
     let result = simulate_dae_with_diagnostics(
         &compiled.dae,
         &SimOptions {
@@ -52,12 +52,12 @@ fn last(model: &str, name: &str) -> f64 {
             ..SimOptions::default()
         },
     )
-    .unwrap_or_else(|error| panic!("{model} simulates: {error:?}"));
+    .expect("the model simulates");
     let index = result
         .names
         .iter()
         .position(|candidate| candidate == name)
-        .unwrap_or_else(|| panic!("missing column {name}"));
+        .expect("the result records the column");
     *result.data[index].last().expect("a sample")
 }
 
