@@ -68,12 +68,13 @@ fresh = program.relower(replay={PASS_NAME: instrument})
 ```
 
 The default backend does **not** replay automatically. Explicitly constructing
-`RumocaBackend(..., replay={pass_name: implementation, ...})` authorizes a
-re-lower when mappings are missing, preserving existing observation targets and
-adding requested ones. Every recorded recipe needs an implementation. A stale
-program is still rejected. Raw numerical edits are not recipes and cannot be
-recovered by replay: register them as named passes first. The SDK also accepts
-`program.relower(replay=..., observe=[variable_id, ...])`.
+`RumocaBackend(..., replay={pass_id: implementation, ...})` authorizes a
+re-lower of a program whose referenced identities have changed. Every recorded
+receipt needs an implementation. A stale program is still rejected. Raw program
+edits are not recipes and cannot be recovered by replay: register them as named
+passes first. `relower` takes no `observe` argument — observations are demanded
+by the program, and `modelsan.observe-variables` registers the trace points it
+references.
 See [composition and pass management](combining-models.md).
 
 Saved executable fuzz cases now use native `bitcode run --param name=value`

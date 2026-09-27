@@ -22,6 +22,12 @@ impl Value {
             Self::Text(_) => Err("expected numeric value".into()),
         }
     }
+    fn text(&self) -> Result<&str, String> {
+        match self {
+            Self::Text(value) => Ok(value),
+            _ => Err("expected text value".into()),
+        }
+    }
     fn csv(&self) -> String {
         match self {
             Self::Number(n) => n.to_string(),
@@ -37,6 +43,10 @@ pub struct CsvExecution {
     files: BTreeMap<String, BufWriter<File>>,
     sequence: u64,
     finished: bool,
+    /// The derived numerical program. Not from the wire: the caller derives it
+    /// from the equation IR with the artifact's recorded profile and hands it
+    /// in, so no solver's choices are serialized (D1).
+    numerical: ir::NumericalProgram,
     time: f64,
     phase: String,
     y: Vec<f64>,
@@ -44,12 +54,17 @@ pub struct CsvExecution {
 }
 
 impl CsvExecution {
-    pub fn start(artifact: ir::ExecutionArtifact, root: &Path) -> Result<Self, String> {
+    pub fn start(
+        artifact: ir::ExecutionArtifact,
+        numerical: ir::NumericalProgram,
+        root: &Path,
+    ) -> Result<Self, String> {
         ir::validate(&artifact)?;
         std::fs::create_dir(root)
             .map_err(|e| format!("trace directory must be new: {}: {e}", root.display()))?;
         let mut state = Self {
             artifact,
+            numerical,
             root: root.into(),
             files: BTreeMap::new(),
             sequence: 0,
@@ -60,19 +75,25 @@ impl CsvExecution {
             p: vec![],
         };
         let count = state
-            .artifact
             .numerical
             .storage
             .iter()
             .filter(|v| v.role == "parameter")
             .count();
         state.p.resize(count, 0.0);
-        for v in &state.artifact.numerical.storage {
+        for v in &state.numerical.storage {
             if v.role == "parameter" {
                 *state.p.get_mut(v.index).ok_or("invalid parameter index")? = v.start;
             }
         }
-        let manifest = serde_json::json!({"schema_version": 1, "equation_digest": state.artifact.equation_digest, "execution_revision": state.artifact.revision, "sinks": state.artifact.sinks});
+        // The wire sink carries identity only; path/unit/kind are resolved
+        // here and written denormalized, which is what the manifest is for.
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "dependency_digest": state.artifact.dependency_digest,
+            "execution_revision": state.artifact.revision,
+            "sinks": resolved_sinks(&state)?,
+        });
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -84,22 +105,91 @@ impl CsvExecution {
     }
 
     fn function(&mut self, name: &str) -> Result<(), String> {
-        let body = self
+        let function = self
             .artifact
+            .program
             .functions
             .get(name)
             .ok_or("missing function")?
             .clone();
-        self.body(&body, &mut BTreeMap::new())
+        self.body(&function, &function.body.clone(), &mut BTreeMap::new())
+    }
+
+    /// Evaluate a program-local expression over declared locals.
+    ///
+    /// Leaves are locals and literals only -- the node type has no variable
+    /// reference -- so this cannot reach model state except through a value a
+    /// `snapshot.*` instruction already placed in `values`.
+    fn expression(
+        &mut self,
+        function: &ir::Function,
+        id: ir::ProgramExprId,
+        values: &BTreeMap<String, Value>,
+    ) -> Result<Value, String> {
+        let node = function
+            .expressions
+            .get(id.0 as usize)
+            .ok_or("program expression out of range")?;
+        let value = match node {
+            ir::ProgramExpr::Local { name } => get(values, name)?.clone(),
+            ir::ProgramExpr::Real { value } => Value::Number(*value),
+            ir::ProgramExpr::Integer { value } => {
+                Value::Integer(u64::try_from(*value).map_err(|_| "negative integer literal")?)
+            }
+            ir::ProgramExpr::Boolean { value } => Value::Integer(u64::from(*value)),
+            ir::ProgramExpr::Text { value } => Value::Text(value.clone()),
+            ir::ProgramExpr::Unary { op, operand } => {
+                let operand = self.expression(function, *operand, values)?.number()?;
+                Value::Number(match op {
+                    crate::UnaryOp::Neg => -operand,
+                    other => {
+                        return Err(format!("unary {other:?} is not admitted in a host program"));
+                    }
+                })
+            }
+            ir::ProgramExpr::Binary { op, lhs, rhs } => {
+                let l = self.expression(function, *lhs, values)?.number()?;
+                let r = self.expression(function, *rhs, values)?.number()?;
+                Value::Number(match op {
+                    crate::BinaryOp::Add => l + r,
+                    crate::BinaryOp::Sub => l - r,
+                    crate::BinaryOp::Mul => l * r,
+                    crate::BinaryOp::Div => l / r,
+                    other => {
+                        return Err(format!(
+                            "binary {other:?} is not admitted in a host program"
+                        ));
+                    }
+                })
+            }
+            ir::ProgramExpr::Compare { op, lhs, rhs } => {
+                let l = self.expression(function, *lhs, values)?.number()?;
+                let r = self.expression(function, *rhs, values)?.number()?;
+                let truth = match op {
+                    crate::CompareOp::Eq => l == r,
+                    crate::CompareOp::Ne => l != r,
+                    crate::CompareOp::Lt => l < r,
+                    crate::CompareOp::Le => l <= r,
+                    crate::CompareOp::Gt => l > r,
+                    crate::CompareOp::Ge => l >= r,
+                };
+                Value::Integer(u64::from(truth))
+            }
+        };
+        if let Value::Number(number) = value {
+            return self.finite(number);
+        }
+        Ok(value)
     }
 
     fn body(
         &mut self,
+        function: &ir::Function,
         body: &[ir::Instruction],
         values: &mut BTreeMap<String, Value>,
     ) -> Result<(), String> {
         for op in body {
-            if let Some((name, value)) = self.instruction(op, values)? {
+            if let Some((name, value)) = self.instruction(function, op, values)? {
                 values.insert(name.clone(), value);
             }
         }
@@ -108,6 +198,7 @@ impl CsvExecution {
 
     fn instruction<'a>(
         &mut self,
+        function: &ir::Function,
         op: &'a ir::Instruction,
         values: &mut BTreeMap<String, Value>,
     ) -> Result<Option<(&'a String, Value)>, String> {
@@ -118,33 +209,24 @@ impl CsvExecution {
             Phase { result } => Some((result, self::Value::Text(self.phase.clone()))),
             Value {
                 result,
-                variable_id,
+                trace_point,
             } => {
+                // The derived program's observation map is keyed by the trace
+                // point the program asked for (D2): one registration site.
                 let obs = self
-                    .artifact
                     .numerical
                     .observations
                     .iter()
-                    .find(|o| o.variable_id == *variable_id)
+                    .find(|o| o.trace_point == *trace_point)
                     .ok_or("missing observation")?;
                 let ops = ir::checked_scalar(&obs.instructions, self.y.len(), self.p.len())?;
                 let value = crate::eval_row(&ops, &self.y, &self.p, self.time, None)
                     .map_err(|e| e.to_string())?;
                 Some((result, self.finite(value)?))
             }
-            Compute {
-                result,
-                arguments,
-                instructions,
-            } => {
-                let args = arguments
-                    .iter()
-                    .map(|n| get(values, n)?.number())
-                    .collect::<Result<Vec<_>, _>>()?;
-                let ops = ir::checked_scalar(instructions, args.len(), 0)?;
-                let value =
-                    crate::eval_row(&ops, &args, &[], 0.0, None).map_err(|e| e.to_string())?;
-                Some((result, self.finite(value)?))
+            Compute { result, expr } => {
+                let value = self.expression(function, *expr, values)?;
+                Some((result, value))
             }
             Open { sink } => {
                 self.open_sink(sink)?;
@@ -177,7 +259,7 @@ impl CsvExecution {
                 } else {
                     else_body
                 };
-                self.body(selected, &mut values.clone())?;
+                self.body(function, selected, &mut values.clone())?;
                 None
             }
             Call { function } => {
@@ -186,7 +268,10 @@ impl CsvExecution {
             }
             Assert { condition, message } => {
                 if get(values, condition)?.number()? == 0.0 {
-                    return Err(format!("execution assertion: {message}"));
+                    // The message is a local holding text; report what it
+                    // says, not what it is called.
+                    let text = get(values, message)?.text()?;
+                    return Err(format!("execution assertion: {text}"));
                 }
                 None
             }
@@ -197,6 +282,7 @@ impl CsvExecution {
     fn open_sink(&mut self, sink: &String) -> Result<(), String> {
         let decl = self
             .artifact
+            .program
             .sinks
             .iter()
             .find(|s| &s.key == sink)
@@ -212,7 +298,7 @@ impl CsvExecution {
             "{}",
             decl.columns
                 .iter()
-                .map(|s| quote(s))
+                .map(|column| quote(&column.name))
                 .collect::<Vec<_>>()
                 .join(",")
         )
@@ -241,8 +327,8 @@ impl CsvExecution {
         self.time = time;
         self.phase = phase.into();
         self.y
-            .resize(self.artifact.numerical.storage.len() - self.p.len(), 0.0);
-        for v in &self.artifact.numerical.storage {
+            .resize(self.numerical.storage.len() - self.p.len(), 0.0);
+        for v in &self.numerical.storage {
             if v.role == "parameter" {
                 continue;
             }
@@ -297,5 +383,85 @@ fn quote(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.into()
+    }
+}
+
+/// Resolve each wire sink against the derived program.
+///
+/// The wire form names identities only (SEV-014); a reader of the emitted
+/// trace needs paths and units, and this is the one place that has both the
+/// sink and the derived observations to join them.
+fn resolved_sinks(state: &CsvExecution) -> Result<serde_json::Value, String> {
+    let mut sinks = Vec::new();
+    for sink in &state.artifact.program.sinks {
+        let mut members = Vec::new();
+        let mut path: Option<String> = None;
+        for member in &sink.metadata.members {
+            let observation = state
+                .numerical
+                .observations
+                .iter()
+                .find(|o| o.trace_point == member.trace_point)
+                .ok_or_else(|| {
+                    format!(
+                        "sink {} names unobserved trace point {}",
+                        sink.key, member.trace_point
+                    )
+                })?;
+            // Structure, not text: the connector instance says what owns the
+            // member and what the member is called.
+            let owner = observation
+                .owner
+                .as_deref()
+                .filter(|_| sink.metadata.connector.is_some());
+            path = same_connector(path, owner, &sink.key)?;
+            // A sink that is not connector instrumentation labels its column
+            // with the observation's own name.
+            let name = observation
+                .member
+                .clone()
+                .unwrap_or_else(|| observation.name.clone());
+            let unit = state
+                .numerical
+                .storage
+                .iter()
+                .find(|v| v.variable_id == Some(observation.variable_id))
+                .and_then(|v| v.unit.clone());
+            members.push(serde_json::json!({
+                "trace_point": member.trace_point,
+                "name": name,
+                "unit": unit,
+                "kind": observation.quantity,
+            }));
+        }
+        sinks.push(serde_json::json!({
+            "key": sink.key,
+            "filename": sink.filename,
+            "columns": sink.columns,
+            "metadata": {
+                "connector": sink.metadata.connector,
+                "connector_path": path,
+                "orientation": sink.metadata.orientation,
+                "members": members,
+            },
+        }));
+    }
+    Ok(serde_json::Value::Array(sinks))
+}
+
+/// One connector per sink, when the sink names a connector at all.
+///
+/// Split out so the resolution loop stays flat: a sink that mixes two
+/// connectors is a pass defect, and saying so needs its own two lines.
+fn same_connector(
+    seen: Option<String>,
+    owner: Option<&str>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match (seen, owner) {
+        (seen, None) => Ok(seen),
+        (None, Some(owner)) => Ok(Some(owner.to_string())),
+        (Some(seen), Some(owner)) if seen == owner => Ok(Some(seen)),
+        (Some(seen), Some(owner)) => Err(format!("sink {key} mixes members of {seen} and {owner}")),
     }
 }

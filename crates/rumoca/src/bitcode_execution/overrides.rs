@@ -1,15 +1,24 @@
 //! Run-local configuration of checked saved programs; never re-lowers equations.
 use anyhow::{Context, Result, ensure};
-use rumoca_bitcode::RbcFile;
 use rumoca_bitcode::schema::{ExprId, RbcExprNode, RbcModel, RbcRole, VariableId};
 use rumoca_ir_solve::execution::NumericalProgram;
 use std::collections::BTreeSet;
 
-pub(super) fn apply(file: &mut RbcFile, parameters: &[String], initials: &[String]) -> Result<()> {
-    let execution = file.execution.as_mut().context("missing executable")?;
+/// Apply run-local overrides to the **derived** program.
+///
+/// v2 serializes no numerical program, so an override is a run-local edit to
+/// the program derived moments earlier and is never persisted. Resolution goes
+/// `name -> VariableId -> slot` through `Storage::variable_id`: the v1 path
+/// matched storage by name, which is the post-resolution identity rule's exact
+/// prohibition.
+pub(super) fn apply(
+    model: &RbcModel,
+    numerical: &mut NumericalProgram,
+    parameters: &[String],
+    initials: &[String],
+) -> Result<()> {
     for (name, value) in parse(parameters)? {
-        let variable = file
-            .model
+        let variable = model
             .variables
             .iter()
             .find(|v| v.name == name)
@@ -18,17 +27,16 @@ pub(super) fn apply(file: &mut RbcFile, parameters: &[String], initials: &[Strin
             variable.tunable,
             "parameter is structural or constant, not tunable: {name}"
         );
-        check_frozen_dependencies(&file.model, variable.id)?;
-        let storage = execution
-            .numerical
+        check_frozen_dependencies(model, variable.id)?;
+        let storage = numerical
             .storage
             .iter_mut()
-            .find(|v| v.name == name && v.role == "parameter")
+            .find(|v| v.variable_id == Some(variable.id.0) && v.role == "parameter")
             .with_context(|| format!("parameter has no retained runtime storage: {name}"))?;
         storage.start = value;
     }
     for (name, value) in parse(initials)? {
-        set_initial(&mut execution.numerical, &name, value)?;
+        set_initial(numerical, &name, value)?;
     }
     Ok(())
 }

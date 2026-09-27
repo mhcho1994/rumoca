@@ -17,48 +17,85 @@ PASS_NAME = "modelsan.observe-variables"
 FILENAME = "modelsan-observations.csv"
 
 
+def observe(model, variable_ids):
+    """Register one trace point per requested variable; return `{id: point}`.
+
+    ModelSan is the producer of its own observation requests (execution IR v2
+    D2): lowering takes no observation list, so a pass that wants a value
+    registers the trace point that demands it. Idempotent by `(label,
+    variable)`, so a replay reuses the points it made the first time.
+    """
+    variables = {v.id: v for v in model.variables}
+    existing = {(p.label, p.variable.id): p.id for p in model.trace_points}
+    points = {}
+    for identifier in variable_ids:
+        target = variables.get(identifier)
+        if target is None:
+            raise ValueError(f"no such variable to observe: {identifier}")
+        label = f"{PASS_NAME}:{target.name}"
+        known = existing.get((label, identifier))
+        points[identifier] = known if known is not None else model.add_trace_point(
+            target, label=label, added_by=PASS_NAME).id
+    model.refresh()
+    return points
+
+
 def instrument(program, model, *, variable_ids):
-    """Replayable execution pass: append observations without changing equations."""
+    """Replayable execution pass: append observations without changing equations.
+
+    `variable_ids` arrives as a list when a caller builds the pass and as the
+    recorded text when replay supplies it: pass options are typed scalars, so
+    a list of ids travels as one `text` option rather than as an untyped blob.
+    """
+    if isinstance(variable_ids, str):
+        variable_ids = [int(part) for part in variable_ids.split(",") if part]
+    variable_ids = list(variable_ids)
     if len(variable_ids) != len(set(variable_ids)):
         raise ValueError("duplicate observation variable ID")
-    variables = {v.id: v for v in model.variables}
-    observed = {o["variable_id"]: o for o in program.numerical["observations"]}
-    for identifier in variable_ids:
-        target, observation = variables.get(identifier), observed.get(identifier)
-        if target is None or observation is None or observation["name"] != target.name:
-            raise ValueError(f"missing/stale observation {identifier}; explicitly lower with "
-                             "complete observations and replay compatible passes")
-    b = program.builder(PASS_NAME, options={"variable_ids": list(variable_ids)})
-    sink = b.declare_csv_sink(
-        key=PASS_NAME, filename=FILENAME,
-        columns=["time_s", "publish_id", "phase", *[f"v{i}" for i in variable_ids]],
-        metadata={"variables": [{"id": i, "name": variables[i].name} for i in variable_ids]},
-    )
-    with b.before_return(program.function("run_start")) as ir:
-        ir.emit("csv.open", sink=sink)
-    with b.before_return(program.function("publish")) as ir:
-        values = [ir.emit("snapshot.time"), ir.emit("snapshot.sequence"), ir.emit("snapshot.phase")]
-        values += [ir.emit("snapshot.value", variable_id=i) for i in variable_ids]
-        ir.emit("csv.write_row", sink=sink, values=values)
-    with b.before_return(program.function("run_finish")) as ir:
-        ir.emit("csv.close", sink=sink)
+    with program.builder(PASS_NAME, options={"variable_ids": ",".join(
+            str(i) for i in variable_ids)}) as b:
+        points = observe(model, variable_ids)
+        sink = b.declare_csv_sink(
+            key=PASS_NAME, filename=FILENAME,
+            columns=[{"name": "time_s", "ty": "real"},
+                     {"name": "publish_id", "ty": "integer"},
+                     {"name": "phase", "ty": "text"},
+                     *[{"name": f"v{i}", "ty": "real"} for i in variable_ids]],
+            # Identity only: this sink is not connector instrumentation, so it
+            # names no connector, and the runtime resolves names and units
+            # from the equation IR when it writes the manifest.
+            metadata={"members": [{"trace_point": points[i]} for i in variable_ids]},
+        )
+        with b.before_return("run_start") as ir:
+            ir.emit("csv.open", sink=sink)
+        with b.before_return("publish") as ir:
+            values = [ir.emit("snapshot.time"), ir.emit("snapshot.sequence"),
+                      ir.emit("snapshot.phase")]
+            values += [ir.emit("snapshot.value", trace_point=points[i])
+                       for i in variable_ids]
+            ir.emit("csv.write_row", sink=sink, values=values)
+        with b.before_return("run_finish") as ir:
+            ir.emit("csv.close", sink=sink)
 
 
 def prepare(source: Path, destination: Path, *, executable: str, timeout: float,
             replay=None):
-    program = Program.load(source)
-    program.validate(executable=executable, timeout=timeout)
-    if any(sink["filename"] == "domain-diagnostics.json" for sink in program.raw["sinks"]):
+    program = Program.load(source, executable=executable, timeout=timeout)
+    program.validate()
+    if any(sink["filename"] == "domain-diagnostics.json"
+           for sink in program.raw["program"]["sinks"]):
         raise ValueError("domain-diagnostics.json is reserved by ModelSan")
     targets = [v for v in program.model.variables if not v.is_parameter]
     if not targets:
         raise ValueError("no traceable variables")
-    observed = {o["variable_id"] for o in program.numerical["observations"]}
-    if replay is not None and not {v.id for v in targets} <= observed:
-        program = program.relower(replay=replay, observe=[v.id for v in targets],
-                                  executable=executable, timeout=timeout)
-    instrument(program, program.model, variable_ids=[v.id for v in targets])
-    program.save(destination, executable=executable, timeout=timeout)
+    # No re-lower for coverage: nothing was observed at lowering, because the
+    # program is what demands observations. Replay is still explicit, for a
+    # program whose referenced identities have changed.
+    if replay is not None and any(p["id"] == PASS_NAME for p in program.raw["passes"]):
+        program = program.relower(replay=replay)
+    else:
+        instrument(program, program.model, variable_ids=[v.id for v in targets])
+    program.save(destination)
     return targets
 
 

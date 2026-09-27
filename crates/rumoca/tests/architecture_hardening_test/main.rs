@@ -6,6 +6,7 @@ mod crate_tier_edges;
 mod dae_ownership;
 mod diagnostic_codes;
 mod env_var_registry;
+mod execution_wire_boundary;
 mod fmi_component_boundary;
 mod fmi_me_boundary;
 mod instantiate_value_fabrication;

@@ -30,8 +30,10 @@ See [saved native runs and CSV index](results/README.md) for both scales.
 | Construct/rewrite equations | `Model.empty`, `model.builder`, `add_derivative_equation`, `rewrite_equation` |
 | Remove scalar states/equations atomically | `builder.remove(variables=..., equations=..., initial_equations=...)` |
 | Construct semantic connectors and n-ary equations | `add_component`, `add_connector_type`, `add_connector`, `add_connection_set` |
-| Lower and preserve requested observations | `rumoca_bitcode.execution.lower(model, observe=[variable_ids])` |
-| Inspect/edit numerical instructions | `program.numerical`, `program.builder(...).at/replace/remove` |
+| Record a lowering profile | `rumoca_bitcode.execution.lower(model)` — no observation list |
+| Register observations | `rumoca_bitcode.execution.observe_connector_members(model)`, `model.add_trace_point` |
+| Edit instructions | `program.builder(...)` as a context manager; `.at/replace/remove` |
+| Build program expressions | `program.expressions(function).local/real/binary/compare` |
 | Edit lifecycle regions | `program.function`, `add_function`, `builder.before_return/at` |
 | Check/save/load | `program.validate`, `program.save`, `Program.load` |
 | Explicit re-lowering and pass replay | `program.relower(replay={pass_name: implementation})` |
@@ -45,27 +47,33 @@ historical starting gaps, not the final implementation state.
 ## Insert a computation/check with the same builder
 
 ```python
-b = program.builder("my.time-check", options={})
-helper = program.add_function("publish:check-time")
-with b.before_return(helper) as ir:
-    t = ir.emit("snapshot.time")
-    ok = ir.emit("compute", arguments=[t], instructions=[
-        {"op": "load_y", "dst": 0, "index": 0},  # explicit argument 0
-        {"op": "const", "dst": 1, "value": 0.0},
-        {"op": "compare", "dst": 2, "operator": "Ge", "lhs": 0, "rhs": 1},
-        {"op": "store_output", "src": 2},
-    ])
-    ir.emit("assert", condition=ok, message="negative publication time")
-with b.before_return(program.function("publish")) as ir:
-    ir.emit("call", function="publish:check-time")
+with program.builder("my.time-check") as b:
+    helper = program.add_function("publish:check-time")
+    arena = program.expressions(helper)
+    with b.before_return(helper) as ir:
+        t = ir.emit("snapshot.time")
+        ok = ir.emit("compute", ty="boolean",
+                     expr=arena.compare("Ge", arena.local(t), arena.real(0.0)))
+        message = ir.emit("snapshot.phase")
+        ir.emit("assert", condition=ok, message=message)
+    with b.before_return("publish") as ir:
+        ir.emit("call", function="publish:check-time")
 program.validate()
 ```
 
-`builder.at(region, index)` inserts anywhere; `replace`/`remove` modify existing
-instructions. Those helpers also accept numerical instruction lists under
-`program.numerical`. Rust, not Python, checks operation types and effect order.
-Register the transformation as a replay implementation if it must survive
-equation changes. Do not merely copy old register or variable IDs to a new model.
+`compute` evaluates a node of the function's own expression arena, whose only
+non-literal leaf is a declared local — a program cannot read a model variable
+except through `snapshot.value`. `emit` declares each result, so an undeclared
+local is not something a pass can leave behind; `compute` must state its `ty`
+because only the pass knows what it computed.
+
+`builder.at(function, index)` inserts anywhere; `replace`/`remove` modify
+existing instructions. Rust, not Python, checks operation types and effect
+order. There is no numerical program to edit: it is derived at load from the
+equations and the recorded profile. Leaving the `with` block is the pass
+boundary, and that is where the dependency digest is recomputed. Register the
+transformation as a replay implementation if it must survive equation
+changes.
 
 ## Bitcode linking
 

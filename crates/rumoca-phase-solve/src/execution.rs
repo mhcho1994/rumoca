@@ -38,21 +38,30 @@ fn scalar_rows(
 }
 
 /// Export a bounded profile, rejecting every unsupported numerical owner.
+/// Derive the numerical program from a Solve model.
+///
+/// `requested` is `(trace point id, variable id, name)`. v1 keyed observations
+/// by variable; v2 keys them by the trace point that asked for them, so the
+/// host resolves a `snapshot.value` through the single registration site (D2).
 pub fn export(
     model: &s::SolveModel,
-    requested: &[(u32, String)],
+    requested: &[(u32, u32, String)],
 ) -> Result<public::NumericalProgram> {
     model.validate().map_err(|e| e.to_string())?;
     let p = &model.problem;
     check_profile(model)?;
     let storage = export_storage(model)?;
     let mut observations = Vec::new();
-    for (id, name) in requested {
+    for (trace_point, variable_id, name) in requested {
         let instructions = observation(model, name)
-            .map_err(|e| format!("requested observation {id} ({name}): {e}"))?;
+            .map_err(|e| format!("trace point {trace_point} ({name}): {e}"))?;
         observations.push(public::Observation {
-            variable_id: *id,
+            trace_point: *trace_point,
+            variable_id: *variable_id,
             name: name.clone(),
+            quantity: None,
+            owner: None,
+            member: None,
             instructions,
         });
     }
@@ -565,6 +574,7 @@ fn export_storage(model: &s::SolveModel) -> Result<Vec<public::Storage>> {
             .find(|m| m.name == name)
             .and_then(|m| m.unit.clone());
         storage.push(public::Storage {
+            variable_id: None,
             name,
             role: role.into(),
             causality: if role == "parameter" {

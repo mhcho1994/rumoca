@@ -102,10 +102,12 @@ rumoca bitcode link a=instrumented.rbc b=other.rbc \
 ```
 
 The SDK equivalent is `Model.link(..., discard_execution=True)`. This discards
-**all** saved numerical-program edits, sinks, lifecycle instructions and
-execution-pass metadata. Equation-level trace points remain. The result has no
-execution projection; lower it again and reapply instrumentation against the
-new variable IDs. Never reuse input solver/storage IDs or execution programs.
+**all** authored host instructions, sinks and pass receipts. Equation-level
+trace points remain, but linking renumbers ids, so a discarded program's
+`TracePointId` references would not survive anyway. The result has no
+execution section; lower it again and reapply instrumentation, letting the
+logging helper register trace points against the linked model. Never reuse
+input solver/storage ids or execution programs.
 
 The linker handles the known public RBC v2 equation schema, not internal DAE or
 Solve serialization. Opaque unsupported expressions/conditions are rejected.

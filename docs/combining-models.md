@@ -14,8 +14,8 @@ Python numerical solver. No Modelica source or MSL download is needed.
 |---|---|---|
 | Linker: `Model.link` / `rumoca bitcode link` | Combine equation artifacts; prefix namespaces and relocate IDs/references | Choose connections, remove boundaries, or merge solver programs |
 | Equation IR builder: `model.builder(...)` | Author variables, expressions, residual equations, ports and connection sets | Solve the model or establish arbitrary physical correctness |
-| Native lowering: `execution.lower(...)` | Reconstruct/check the equations and derive executable numerical programs and observation mappings | Preserve an old program's edits automatically |
-| Execution IR builder: `program.builder(...)` | Edit numerical instructions and ordered lifecycle effects such as CSV logging | Run Python callbacks during simulation |
+| Native lowering: `execution.lower(...)` | Record a lowering profile and seed the lifecycle functions | Take an observation list, or serialize a numerical program |
+| Execution IR builder: `program.builder(...)` | Author host instructions and ordered lifecycle effects such as CSV logging | Edit the derived numerical program, or run Python callbacks during simulation |
 | Pass management | Explicit equation-pass ordering, plus named execution-pass recipes and explicit replay | Automatic dependency scheduling or LLVM-style cached-analysis invalidation |
 
 The two builders operate at different levels. Equation IR describes **what must
@@ -53,7 +53,7 @@ existing directory. Omit `--run` to author/check the artifacts without simulatio
 | `01-linked-open.rbc` | Namespaced union; not yet a closed simulation problem |
 | `02-connected.rbc` | Ports connected and native connection contracts checked |
 | `03-equation-pass.rbc` | Added heat-integral monitor |
-| `04-executable.rbc` | Lowered numerical programs plus serialized CSV instructions |
+| `04-executable.rbc` | Recorded lowering profile plus the authored CSV instructions |
 | `traces/manifest.json`, `traces/connector-*.csv` | Native runtime metadata and one CSV per port |
 | `result.json` | Native simulation result, including both body temperatures and heat integral |
 
@@ -200,23 +200,24 @@ ID-compacting removal, use the returned remapping or resolve targets again.
 
 ## 6. Lower, then run an execution-IR pass
 
-The example registers states and every port member for observation **before**
-lowering, so values remain reconstructible after alias elimination:
+Lowering takes no observation list. It records a lowering profile; the
+*program* says what it needs, and the logging pass registers the trace points
+it references:
 
 ```python
 from rumoca_bitcode.execution import lower
 from synthesize_connector_csv import instrument_all_connectors
 
-observed = [v.id for v in combined.states]
-observed += [m.variable_id for p in combined.connectors for m in p.members]
-program = lower(combined, observe=observed)
+program = lower(combined)
 instrument_all_connectors(program, combined)
 program.save("build/connected-executable.rbc")
 ```
 
 `synthesize_connector_csv` is the repository example module in `new_inst`, not
-an SDK built-in. Its logger calls `program.builder("example.connector-csv")`,
-declares CSV sinks, then inserts these serialized lifecycle operations:
+an SDK built-in. Its logger runs inside `with program.builder(...)`, calls
+`observe_connector_members(model)` to register one trace point per connector
+member, declares CSV sinks, then inserts these serialized lifecycle
+operations:
 
 | Region | Inserted work |
 |---|---|
@@ -241,19 +242,23 @@ There is **no public standalone `PassManager` class** in the bitcode SDK today.
 The implemented execution-pass mechanism is `Program.builder` plus
 `Program.relower`:
 
-- `program.builder(name, options=...)` records a named recipe and its options
-  in the executable artifact's ordered `passes` list; duplicate names fail.
+- `program.builder(id, version=..., options=...)` records a receipt — id,
+  version and typed options — in the artifact's ordered `passes` list;
+  duplicate ids fail. Used as a context manager, leaving it is the pass
+  boundary, and that is where the `dependency_digest` is recomputed.
 - The authoring script chooses invocation order. There is no automatic
   dependency resolver, optimization scheduling, or cached analysis manager.
-- Changing equation IR makes the derived program stale; checking/running it
-  rejects the mismatch instead of silently regenerating and dropping edits.
+- Changing an identity the program *references* makes it stale;
+  checking/running it rejects the mismatch instead of silently regenerating and
+  dropping edits. Rewriting a residual the program does not observe does not
+  make it stale, because the digest does not cover the equations.
 - Explicit re-lowering uses a caller-supplied implementation for **every**
   recorded execution pass, in recorded order, with its saved options.
 
 For the example's logger:
 
 ```python
-# After an equation edit that preserves the observed variable identities:
+# After an edit that changed an identity the program references:
 fresh = program.relower(replay={
     "example.connector-csv": instrument_all_connectors,
 })
@@ -261,9 +266,10 @@ fresh.save("build/replayed-executable.rbc")
 ```
 
 Each callback has the shape `pass_fn(fresh_program, model, **saved_options)`.
-Missing recipes or changed observation ID/name identities fail. Recipes store
-names/options, **not Python implementations**. Manual numerical edits are not
-automatically replayable; express them in a named pass if they must survive
+Missing recipes, or a referenced trace point the model no longer declares,
+fail. Receipts store ids, versions and typed options, **not Python
+implementations**. Replay rebuilds the program from its passes; raw program
+edits are not replayable, so express them in a named pass if they must survive
 re-lowering. General pass mutations are not automatically transactional like
 `add_connection_set`; validate after each pass and keep a known-good artifact.
 

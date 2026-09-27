@@ -321,6 +321,8 @@ fn binary(op: RbcBinaryOp) -> &'static str {
     }
 }
 
+mod execution;
+
 pub fn run_disasm(path: &Path, options: DisasmOptions) -> Result<()> {
     let (file, encoding) = rumoca_bitcode::read_file(path).map_err(anyhow::Error::from)?;
     let model = &file.model;
@@ -520,6 +522,10 @@ pub fn run_disasm(path: &Path, options: DisasmOptions) -> Result<()> {
                 listing.expression(expression.id)
             );
         }
+    }
+
+    if let Some(artifact) = &file.execution {
+        execution::print(artifact);
     }
 
     Ok(())

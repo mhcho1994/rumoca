@@ -22,9 +22,22 @@ class NativeDomain(unittest.TestCase):
         self.backend = RumocaBackend(RUMOCA, t_end=.2)
         self.addCleanup(self.backend.close)
 
-    def run_program(self, instructions, case=NOMINAL):
+    def run_program(self, rhs, case=NOMINAL):
+        """Build `der(x) = rhs(b, x, k)` and run it through the native backend.
+
+        The derivative is expressed as an *equation*: execution IR v2 derives
+        the numerical program at load, so there is no serialized register
+        program to edit. The native domain diagnostics are the same either way
+        — that is the point of the test.
+        """
+        from rumoca_bitcode import Model
+        self.model = Model.empty("Domain")
+        b = self.model.builder("test")
+        x, k = b.add_state("x", 2.), b.add_parameter("k", 1.)
+        self.model.raw_model["variables"][k]["tunable"] = True
+        b.add_derivative_equation(x, rhs(b, x, k))
+        b.finish()
         program = lower(self.model)
-        program.numerical["derivatives"][0]["instructions"] = instructions
         program.save(self.path)
         original = self.path.read_bytes()
         self.assertIsNone(self.backend.prepare_from_artifact(self.path))
@@ -34,14 +47,13 @@ class NativeDomain(unittest.TestCase):
                                        AnalysisContext(self.model), case)
         return result, findings
 
-    def reciprocal(self):
-        return [{"op": "const", "dst": 0, "value": 1.},
-                {"op": "load_p", "dst": 1, "index": 0},
-                {"op": "binary", "dst": 2, "operator": "Div", "lhs": 0, "rhs": 1}]
+    @staticmethod
+    def reciprocal(b, k):
+        return b.divide(b.real(1.), b.ref(k))
 
     def test_zero_denominator_is_recorded_before_first_physical_sample(self):
-        result, findings = self.run_program(self.reciprocal() + [{"op": "store_output", "src": 2}],
-                                            Case(parameters={"k": 0.}))
+        result, findings = self.run_program(
+            lambda b, x, k: self.reciprocal(b, k), Case(parameters={"k": 0.}))
         self.assertFalse(result.ok)
         self.assertIsNone(result.trace)
         self.assertEqual([f.kind for f in findings], ["division-out-of-domain"])
@@ -51,36 +63,34 @@ class NativeDomain(unittest.TestCase):
         self.assertEqual(findings[0].evidence["coordinates"], "internal-evaluation")
 
     def test_zero_on_an_inactive_branch_is_not_a_violation(self):
-        code = self.reciprocal() + [
-            {"op": "const", "dst": 3, "value": 0.},
-            {"op": "compare", "dst": 4, "operator": "Ne", "lhs": 1, "rhs": 3},
-            {"op": "select", "dst": 5, "cond": 4, "if_true": 2, "if_false": 3},
-            {"op": "store_output", "src": 5}]
-        result, findings = self.run_program(code, Case(parameters={"k": 0.}))
+        def guarded(b, x, k):
+            live = b.binary("not_equal", b.ref(k), b.real(0.), value_type=b.scalar_type("boolean"))
+            return b.conditional([(live, self.reciprocal(b, k))], b.real(0.))
+        result, findings = self.run_program(guarded, Case(parameters={"k": 0.}))
         self.assertTrue(result.ok, result.failure)
         self.assertEqual(findings, [])
         self.assertEqual(result.trace.final_state["x"], 2.)
         self.assertEqual(result.backend_metadata["domain_diagnostics"]["faults"], [])
 
     def test_nonzero_denominator_is_not_a_violation(self):
-        result, findings = self.run_program(self.reciprocal() + [{"op": "store_output", "src": 2}])
+        result, findings = self.run_program(lambda b, x, k: self.reciprocal(b, k))
         self.assertTrue(result.ok, result.failure)
         self.assertAlmostEqual(result.trace.final_state["x"], 2.2)
         self.assertEqual(findings, [])
 
     def test_recovered_internal_evaluation_is_informational(self):
-        code = self.reciprocal() + [
-            {"op": "compare", "dst": 3, "operator": "Gt", "lhs": 2, "rhs": 0},
-            {"op": "select", "dst": 4, "cond": 3, "if_true": 0, "if_false": 1},
-            {"op": "store_output", "src": 4}]
-        result, findings = self.run_program(code, Case(parameters={"k": 0.}))
+        def recovered(b, x, k):
+            quotient = self.reciprocal(b, k)
+            big = b.binary("greater", quotient, b.real(1.), value_type=b.scalar_type("boolean"))
+            return b.conditional([(big, b.real(1.))], b.ref(k))
+        result, findings = self.run_program(recovered, Case(parameters={"k": 0.}))
         self.assertTrue(result.ok, result.failure)
         self.assertEqual([f.kind for f in findings], ["division-domain-trial"])
         self.assertEqual(findings[0].severity, Severity.INFO)
 
     def test_scope_is_reset_between_failed_and_successful_runs(self):
-        code = self.reciprocal() + [{"op": "store_output", "src": 2}]
-        result, _ = self.run_program(code, Case(parameters={"k": 0.}))
+        result, _ = self.run_program(
+            lambda b, x, k: self.reciprocal(b, k), Case(parameters={"k": 0.}))
         self.assertFalse(result.ok)
         result = self.backend.run(NOMINAL)
         self.assertTrue(result.ok, result.failure)
@@ -88,10 +98,8 @@ class NativeDomain(unittest.TestCase):
         self.assertEqual(result.backend_metadata["domain_diagnostics"]["faults"], [])
 
     def test_sqrt_negative_argument_is_reported(self):
-        result, findings = self.run_program([
-            {"op": "const", "dst": 0, "value": -1.},
-            {"op": "unary", "dst": 1, "operator": "Sqrt", "src": 0},
-            {"op": "store_output", "src": 1}])
+        result, findings = self.run_program(
+            lambda b, x, k: b.builtin("sqrt", [b.real(-1.)]))
         self.assertFalse(result.ok)
         self.assertEqual([f.kind for f in findings], ["sqrt-out-of-domain"])
 
@@ -113,7 +121,7 @@ class NativeDomain(unittest.TestCase):
     def test_diagnostics_preserve_ordinary_native_trajectory(self):
         import json
         from rumoca_bitcode.compiler import invoke
-        program = lower(self.model)
+        program = lower(decay())
         program.save(self.path)
         ordinary = Path(self.tmp.name) / "ordinary.json"
         invoke("bitcode", "run", self.path, "--stop", ".2",

@@ -8,28 +8,37 @@ use std::path::Path;
 
 pub fn lower(
     model: &rumoca_ir_solve::SolveModel,
-    observed: &[(u32, String)],
+    observed: &[(u32, u32, String)],
 ) -> Result<ir::NumericalProgram, String> {
     rumoca_phase_solve::execution::export(model, observed)
 }
 
-pub fn check(artifact: &ir::ExecutionArtifact) -> Result<(), String> {
+/// Check an artifact against the program derived for it.
+///
+/// The derived program is a parameter, not a field: v2 does not serialize one
+/// (D1), so the caller derives it and hands it in.
+pub fn check(
+    artifact: &ir::ExecutionArtifact,
+    numerical: &ir::NumericalProgram,
+) -> Result<(), String> {
     ir::validate(artifact)?;
-    rumoca_phase_solve::execution::reconstruct(&artifact.numerical)?;
+    rumoca_phase_solve::execution::reconstruct(numerical)?;
     Ok(())
 }
 
-/// Executes saved numerical instructions, never lowers their equation source.
+/// Executes the authored host program against a derived numerical program.
 #[cfg(feature = "solver-rk45")]
 pub fn run(
     artifact: &ir::ExecutionArtifact,
+    numerical: &ir::NumericalProgram,
     options: &crate::SimOptions,
     root: &Path,
 ) -> Result<crate::SimResult, String> {
-    check(artifact)?;
-    let component = rumoca_phase_solve::execution::reconstruct(&artifact.numerical)?;
+    check(artifact, numerical)?;
+    let component = rumoca_phase_solve::execution::reconstruct(numerical)?;
     let observer = NativePublication(rumoca_eval_solve::execution::CsvExecution::start(
         artifact.clone(),
+        numerical.clone(),
         root,
     )?);
     let artifact = MeModelArtifact::new(component);
@@ -68,11 +77,13 @@ pub fn run(
 #[cfg(feature = "solver-rk45")]
 pub fn run_with_domain_diagnostics(
     artifact: &ir::ExecutionArtifact,
+    numerical: &ir::NumericalProgram,
     options: &crate::SimOptions,
     root: &Path,
 ) -> Result<crate::SimResult, String> {
     if root.exists()
         || artifact
+            .program
             .sinks
             .iter()
             .any(|sink| sink.filename == "domain-diagnostics.json")
@@ -85,7 +96,7 @@ pub fn run_with_domain_diagnostics(
     let solver_scope = rumoca_solver::diagnostics::Scope::start()?;
     let mut options = options.clone();
     options.execution_policy = rumoca_solver::SimExecutionPolicy::Interpreter;
-    let result = run(artifact, &options, root);
+    let result = run(artifact, numerical, &options, root);
     let mut evidence = scope.finish();
     evidence["solver"] = solver_scope.finish();
     // An invalid destination/program may fail before a trace directory exists.

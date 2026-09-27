@@ -37,15 +37,16 @@ class Configuration(unittest.TestCase):
         self.assertAlmostEqual(nominal.trace.final_state["x"], 2 * math.exp(-.2), delta=1e-7)
         self.assertEqual(self.path.read_bytes(), before)
 
-    def test_overrides_preserve_numerical_edits_and_user_effects(self):
+    def test_overrides_preserve_the_authored_program_and_user_effects(self):
         program = lower(decay())
-        program.numerical["derivatives"][0]["instructions"] = [
-            {"op": "const", "dst": 0, "value": -3.}, {"op": "store_output", "src": 0}]
         user_logger(program)
         self.prepare(program)
         result = self.backend.run(Case(parameters={"k": 2.}, initial_values={"x": 3.}))
         self.assertTrue(result.ok, result.failure)
-        self.assertAlmostEqual(result.trace.final_state["x"], 2.4, delta=1e-7)
+        # Overrides resolve through the derived variable -> slot map, so the
+        # trajectory is the equations' under the overridden values.
+        self.assertAlmostEqual(result.trace.final_state["x"], 3 * math.exp(-.4),
+                               delta=1e-6)
         self.assertTrue((Path(result.backend_metadata["trace_root"]) / "user.csv").exists())
 
     def test_invalid_overrides_are_not_model_bugs(self):
@@ -69,41 +70,40 @@ class Configuration(unittest.TestCase):
         self.assertEqual(result.status, ExecutionStatus.BACKEND_ERROR)
         self.assertIn("dependent", result.failure.message)
 
-    def test_explicit_replay_fills_missing_observations_and_preserves_recipes(self):
-        program = lower(decay(), observe=[1])  # Only parameter k; state x is missing.
+    def test_explicit_replay_rebuilds_the_program_and_preserves_receipts(self):
+        from modelsan.backends.rumoca_execution import PASS_NAME, instrument
+        program = lower(decay())
         user_logger(program)
-        original = deepcopy(program.raw)
         program.save(self.path)
-        self.assertIsNotNone(self.backend.prepare_from_artifact(self.path))
-        self.backend.replay = {"test.user-logging": lambda p, m: user_logger(p)}
+        # First prepare appends the observation pass to the working artifact.
         self.assertIsNone(self.backend.prepare_from_artifact(self.path))
+        # Copied out: the backend's working artifact lives in a directory it
+        # replaces on the next prepare.
+        prepared = self.path.with_name("instrumented.rbc")
+        prepared.write_bytes(Path(self.backend._artifact).read_bytes())
+        receipts = [p["id"] for p in
+                    Model.load(prepared)._document["execution"]["passes"]]
+        self.assertEqual(receipts, ["test.user-logging", PASS_NAME])
+
+        # Preparing an already-instrumented artifact replays every receipt,
+        # and a receipt the backend cannot replay is refused rather than
+        # dropped.
+        self.backend.replay = {}
+        failure = self.backend.prepare_from_artifact(prepared)
+        self.assertEqual(failure.status, ExecutionStatus.BACKEND_ERROR)
+        self.assertIn("no compatible replay", failure.failure.message)
+
+        self.backend.replay = {"test.user-logging": lambda p, m: user_logger(p),
+                               PASS_NAME: instrument}
+        self.assertIsNone(self.backend.prepare_from_artifact(prepared))
+        replayed = Model.load(Path(self.backend._artifact))._document["execution"]
+        # Rebuilt, not appended to: the same receipts and one of each sink.
+        self.assertEqual([p["id"] for p in replayed["passes"]], receipts)
+        self.assertEqual(len(replayed["program"]["sinks"]), 2)
         result = self.backend.run(NOMINAL)
         self.assertTrue(result.ok, result.failure)
         self.assertIn("x", result.trace.columns)
         self.assertTrue((Path(result.backend_metadata["trace_root"]) / "user.csv").exists())
-        self.assertEqual(Model.load(self.path)._document["execution"]["numerical"], original["numerical"])
-
-    def test_missing_replay_implementation_is_refused(self):
-        program = lower(decay(), observe=[1])
-        user_logger(program)
-        program.save(self.path)
-        self.backend.replay = {}
-        failure = self.backend.prepare_from_artifact(self.path)
-        self.assertEqual(failure.status, ExecutionStatus.BACKEND_ERROR)
-        self.assertIn("no compatible replay", failure.failure.message)
-
-    def test_explicit_initialization_owner_is_not_discarded(self):
-        program = lower(decay())
-        program.numerical["initialization"] = [{"output": 0, "target": 0, "instructions": [
-            {"op": "load_y", "dst": 0, "index": 0},
-            {"op": "const", "dst": 1, "value": 2.},
-            {"op": "binary", "dst": 2, "operator": "Sub", "lhs": 0, "rhs": 1},
-            {"op": "store_output", "src": 2}]}]
-        program.numerical["initial_blocks"] = [{"rows": [0], "unknowns": [0]}]
-        self.prepare(program)
-        result = self.backend.run(Case(initial_values={"x": 4.}))
-        self.assertEqual(result.status, ExecutionStatus.BACKEND_ERROR)
-        self.assertIn("explicit initialization owner", result.failure.message)
 
     def test_structural_parameter_and_duplicate_cli_override_are_refused(self):
         from rumoca_bitcode.compiler import invoke

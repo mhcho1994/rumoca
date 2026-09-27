@@ -9,7 +9,7 @@
 //! This is the first of two gates. It checks references, identity, and
 //! acyclicity. It deliberately does **not** re-check DAE semantics: type
 //! agreement, role legality, event ownership and the rest are enforced by the
-//! DAE's own checked constructors during [`crate::import`], which is the same
+//! DAE's own checked constructors during [`crate::import()`], which is the same
 //! machinery production compilation uses. Duplicating those rules here would
 //! create a second, weaker answer.
 
@@ -23,6 +23,11 @@ pub enum ValidationError {
     Clock(String),
     #[error("invalid semantic connector metadata: {0}")]
     Connector(String),
+    /// A host program names something the model does not declare. Separate
+    /// from `Connector` because the program, not the connector metadata, is
+    /// what has to change.
+    #[error("{0}")]
+    ExecutionReference(String),
     #[error(
         "{collection} entry at position {position} declares id {declared}, expected {expected}"
     )]
@@ -102,6 +107,60 @@ pub fn validate_connection_contracts(
         )]);
     }
     Ok(())
+}
+
+/// Resolve a host program's references against the model it was derived from.
+///
+/// This is analysis 5 of the execution validator. It lives here rather than in
+/// `rumoca-ir-solve` because it is the only one that needs the equation IR,
+/// and an evaluation crate reaching up to the public model would invert the
+/// tier. It reports through `rumoca_ir_solve::execution::code`, so a caller
+/// matches one table of codes regardless of which crate raised it.
+pub fn validate_execution_references(
+    model: &RbcModel,
+    execution: &rumoca_ir_solve::execution::ExecutionArtifact,
+) -> Result<(), Vec<ValidationError>> {
+    use rumoca_ir_solve::execution::{Instruction, code};
+    let known: std::collections::BTreeSet<u32> =
+        model.trace_points.iter().map(|point| point.id.0).collect();
+    let mut errors = Vec::new();
+    let mut check = |id: u32, where_: &str| {
+        if !known.contains(&id) {
+            errors.push(ValidationError::ExecutionReference(format!(
+                "{}: trace point {id} referenced by {where_} is not declared by the model",
+                code::UNKNOWN_TRACE_POINT
+            )));
+        }
+    };
+    for (name, function) in &execution.program.functions {
+        let mut pending: Vec<&Instruction> = function.body.iter().collect();
+        while let Some(instruction) = pending.pop() {
+            match instruction {
+                Instruction::Value { trace_point, .. } => {
+                    check(*trace_point, &format!("`{name}`"));
+                }
+                Instruction::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    pending.extend(then_body.iter());
+                    pending.extend(else_body.iter());
+                }
+                _ => {}
+            }
+        }
+    }
+    for sink in &execution.program.sinks {
+        for member in &sink.metadata.members {
+            check(member.trace_point, &format!("sink `{}`", sink.key));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// Validate an artifact's internal consistency. Returns every problem found,

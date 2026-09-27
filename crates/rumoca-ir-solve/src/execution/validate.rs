@@ -1,14 +1,67 @@
-//! Single authoritative lifecycle operation/type/effect checker.
+//! Single authoritative checker for a v2 host program.
+//!
+//! The analyses run in a fixed order, each assuming the previous one passed:
+//! name resolution, type, effect ordering, termination, then reference
+//! resolution against the model. The order is the same discipline
+//! `rumoca-ir-galec::validate` uses for a bounded block language; the
+//! arithmetic semantics are Solve's, not GALEC's.
 use super::*;
 use std::collections::BTreeSet;
 
+/// Stable diagnostic codes. A caller matches on these, not on message text.
+pub mod code {
+    /// Artifact declares a version this reader does not implement.
+    pub const UNSUPPORTED_VERSION: &str = "EX2-001";
+    /// A `csv.*` effect names a sink the program does not declare.
+    pub const UNRESOLVED_SINK: &str = "EX2-010";
+    /// The target cannot perform file effects at all.
+    pub const MISSING_FILE_CAPABILITY: &str = "EX2-011";
+    /// An effect appears in a lifecycle phase that cannot perform it, or
+    /// names a resource that is not open in that phase.
+    pub const EFFECT_LIFECYCLE: &str = "EX2-012";
+    /// A written row does not have one value per declared column.
+    pub const ROW_WIDTH: &str = "EX2-013";
+    /// Read of a local that is not declared, or not yet assigned.
+    pub const UNDECLARED_LOCAL: &str = "EX2-020";
+    /// Value of the wrong type for its position.
+    pub const TYPE_MISMATCH: &str = "EX2-021";
+    /// `Text` used outside a CSV column or an assert message.
+    pub const TEXT_MISUSE: &str = "EX2-022";
+    // EX2-023 was reserved for "assignment from outside to a local declared
+    // in an inner scope". It is unused on purpose: `Local` declarations are
+    // function-scoped, and `If` carries no declarations of its own, so an
+    // inner declaration is unrepresentable. What a branch *can* do is assign
+    // a local that only one arm assigns; a read after the join is then
+    // EX2-020, which is the accurate diagnosis.
+    //
+    // EX2-024 was reserved for "a program expression names a model variable".
+    // It is unused on purpose: `ProgramExpr` has no `VariableId` variant, so
+    // the shape is unrepresentable rather than rejected.
+    //
+    // Both codes stay documented and unallocated so they are not reused.
+    /// The call graph contains a cycle.
+    pub const RECURSIVE_CALL: &str = "EX2-030";
+    /// An instruction references a trace point the model does not declare.
+    pub const UNKNOWN_TRACE_POINT: &str = "EX2-040";
+}
+
+fn err(code: &str, detail: impl std::fmt::Display) -> String {
+    format!("{code}: {detail}")
+}
+
 pub fn validate(a: &ExecutionArtifact) -> Result<(), String> {
-    if a.version != 1 || a.lowering != "solve-scalar-v1" {
-        return Err("unsupported execution version/lowering configuration".into());
+    if a.version != EXECUTION_VERSION {
+        return Err(err(
+            code::UNSUPPORTED_VERSION,
+            format_args!(
+                "execution version {} is not supported; this reader implements {} and carries no adapter for earlier versions",
+                a.version, EXECUTION_VERSION
+            ),
+        ));
     }
     let mut keys = BTreeSet::new();
     let mut files = BTreeSet::new();
-    for s in &a.sinks {
+    for s in &a.program.sinks {
         if !keys.insert(s.key.clone()) || !files.insert(s.filename.clone()) {
             return Err("duplicate CSV sink key or filename".into());
         }
@@ -20,13 +73,8 @@ pub fn validate(a: &ExecutionArtifact) -> Result<(), String> {
         {
             return Err("CSV filename must be one relative, non-reserved path component".into());
         }
-        if s.columns.len() != s.column_types.len() || s.columns.is_empty() {
-            return Err("CSV sink requires one type per column".into());
-        }
-        for t in &s.column_types {
-            if !matches!(t.as_str(), "real" | "integer" | "string") {
-                return Err(format!("unsupported CSV column type {t}"));
-            }
+        if s.columns.is_empty() {
+            return Err("CSV sink declares no columns".into());
         }
     }
     for phase in ["run_start", "publish", "run_finish"] {
@@ -35,7 +83,7 @@ pub fn validate(a: &ExecutionArtifact) -> Result<(), String> {
         } else {
             keys.clone()
         };
-        function(a, phase, phase, &mut resources, &mut Vec::new())?;
+        function_check(a, phase, phase, &mut resources, &mut Vec::new())?;
         let expected = if phase == "run_finish" {
             BTreeSet::new()
         } else {
@@ -49,6 +97,7 @@ pub fn validate(a: &ExecutionArtifact) -> Result<(), String> {
     }
     // Even unused functions must be well-formed, under their declared lifecycle.
     for name in a
+        .program
         .functions
         .keys()
         .filter(|n| !matches!(n.as_str(), "run_start" | "publish" | "run_finish"))
@@ -65,12 +114,12 @@ pub fn validate(a: &ExecutionArtifact) -> Result<(), String> {
         } else {
             keys.clone()
         };
-        function(a, name, phase, &mut resources, &mut Vec::new())?;
+        function_check(a, name, phase, &mut resources, &mut Vec::new())?;
     }
     Ok(())
 }
 
-fn function(
+fn function_check(
     a: &ExecutionArtifact,
     name: &str,
     phase: &str,
@@ -78,76 +127,85 @@ fn function(
     stack: &mut Vec<String>,
 ) -> Result<(), String> {
     if stack.iter().any(|n| n == name) || stack.len() >= 64 {
-        return Err("recursive/deep execution call graph".into());
+        return Err(err(
+            code::RECURSIVE_CALL,
+            format_args!("`{name}` is reachable from itself, or the call graph is deeper than 64"),
+        ));
     }
     if name != phase && !name.starts_with(&format!("{phase}:")) {
         return Err("call crosses lifecycle boundary".into());
     }
-    let body = a
+    let function = a
+        .program
         .functions
         .get(name)
         .ok_or_else(|| format!("undefined execution function {name}"))?;
+    // Declared locals are the whole namespace: a read of anything else is a
+    // name-resolution error before any type is considered.
+    let mut declared: BTreeMap<String, LocalState> = BTreeMap::new();
+    for local in &function.locals {
+        if declared
+            .insert(local.name.clone(), LocalState::declared(local.ty))
+            .is_some()
+        {
+            return Err(err(
+                code::UNDECLARED_LOCAL,
+                format_args!("duplicate local `{}`", local.name),
+            ));
+        }
+    }
     stack.push(name.into());
-    body_check(a, body, phase, &mut BTreeMap::new(), resources, stack)?;
+    body_check(
+        a,
+        function,
+        &function.body,
+        phase,
+        &mut declared,
+        resources,
+        stack,
+    )?;
     stack.pop();
     Ok(())
 }
 
+/// A declared local and whether the analysis has seen it assigned yet.
+#[derive(Clone, Copy)]
+struct LocalState {
+    ty: ValueType,
+    assigned: bool,
+}
+
+impl LocalState {
+    const fn declared(ty: ValueType) -> Self {
+        Self {
+            ty,
+            assigned: false,
+        }
+    }
+}
+
 fn body_check(
     a: &ExecutionArtifact,
+    function: &Function,
     body: &[Instruction],
     phase: &str,
-    values: &mut BTreeMap<String, String>,
+    locals: &mut BTreeMap<String, LocalState>,
     resources: &mut BTreeSet<String>,
     stack: &mut Vec<String>,
 ) -> Result<(), String> {
     use Instruction::*;
     for op in body {
-        let produced = match op {
-            Time { result } | Sequence { result } | Phase { result } | Value { result, .. } => {
-                if phase != "publish" {
-                    return Err("snapshot operation outside publish lifecycle".into());
-                }
-                if let Value { variable_id, .. } = op
-                    && !a
-                        .numerical
-                        .observations
-                        .iter()
-                        .any(|o| o.variable_id == *variable_id)
-                {
-                    return Err(format!(
-                        "missing checked observation for variable {variable_id}"
-                    ));
-                }
-                Some((
-                    result,
-                    match op {
-                        Phase { .. } => "string",
-                        Sequence { .. } => "integer",
-                        _ => "real",
-                    },
-                ))
-            }
-            Compute {
-                result,
-                arguments,
-                instructions,
-            } => {
-                for arg in arguments {
-                    numeric(values, arg)?;
-                }
-                checked_scalar(instructions, arguments.len(), 0)?;
-                // Lifecycle time is explicit snapshot.time, never an ambient RHS time.
-                if instructions
-                    .iter()
-                    .any(|i| matches!(i, ScalarOp::LoadTime { .. }))
-                {
-                    return Err("compute must receive time as an explicit argument".into());
-                }
-                Some((result, "real"))
+        let produced: Option<(&String, ValueType)> = match op {
+            Time { result } => snapshot(phase, result, ValueType::Real)?,
+            Sequence { result } => snapshot(phase, result, ValueType::Integer)?,
+            Phase { result } => snapshot(phase, result, ValueType::Text)?,
+            Value { result, .. } => snapshot(phase, result, ValueType::Real)?,
+            Compute { result, expr } => {
+                let ty = expression_type(function, *expr, locals)?;
+                Some((result, ty))
             }
             Open { sink } | Close { sink } | Write { sink, .. } => {
-                effect_check(a, CsvEffect::of(op), sink, phase, values, resources)?;
+                effect_check(a, CsvEffect::of(op), sink, phase, locals, resources)?;
                 None
             }
             If {
@@ -155,40 +213,208 @@ fn body_check(
                 then_body,
                 else_body,
             } => {
-                numeric(values, condition)?;
-                let mut left = resources.clone();
-                let mut right = resources.clone();
-                body_check(a, then_body, phase, &mut values.clone(), &mut left, stack)?;
-                body_check(a, else_body, phase, &mut values.clone(), &mut right, stack)?;
-                if left != right {
+                require(locals, condition, ValueType::Boolean)?;
+                // Lexical scope: a local declared outside may be assigned
+                // inside; one declared inside is not visible outside. Both
+                // branches are checked against a copy, and only assignments
+                // to locals that already existed survive the join.
+                let mut left = locals.clone();
+                let mut right = locals.clone();
+                let mut left_resources = resources.clone();
+                let mut right_resources = resources.clone();
+                body_check(
+                    a,
+                    function,
+                    then_body,
+                    phase,
+                    &mut left,
+                    &mut left_resources,
+                    stack,
+                )?;
+                body_check(
+                    a,
+                    function,
+                    else_body,
+                    phase,
+                    &mut right,
+                    &mut right_resources,
+                    stack,
+                )?;
+                if left_resources != right_resources {
                     return Err("branch resource states disagree".into());
                 }
-                *resources = left;
+                *resources = left_resources;
+                for (name, state) in locals.iter_mut() {
+                    let in_both = left.get(name).is_some_and(|l| l.assigned)
+                        && right.get(name).is_some_and(|r| r.assigned);
+                    state.assigned |= in_both;
+                }
                 None
             }
-            Call { function: name } => {
-                function(a, name, phase, resources, stack)?;
+            Call { function: callee } => {
+                function_check(a, callee, phase, resources, stack)?;
                 None
             }
-            Assert { condition, .. } => {
-                numeric(values, condition)?;
+            Assert { condition, message } => {
+                require(locals, condition, ValueType::Boolean)?;
+                // `Text` is admissible here and as a CSV column, nowhere else.
+                match locals.get(message) {
+                    Some(state) if state.assigned => Ok(()),
+                    Some(_) => Err(err(
+                        code::UNDECLARED_LOCAL,
+                        format_args!("`{message}` is read before assignment"),
+                    )),
+                    None => Err(err(
+                        code::UNDECLARED_LOCAL,
+                        format_args!("`{message}` is not declared"),
+                    )),
+                }?;
                 None
             }
         };
-        if let Some((name, ty)) = produced
-            && (name.is_empty() || values.insert(name.clone(), ty.into()).is_some())
-        {
-            return Err("empty or multiply-defined execution value".into());
+        if let Some((name, ty)) = produced {
+            let Some(state) = locals.get_mut(name) else {
+                return Err(err(
+                    code::UNDECLARED_LOCAL,
+                    format_args!("`{name}` is assigned but never declared"),
+                ));
+            };
+            if state.ty != ty {
+                return Err(err(
+                    code::TYPE_MISMATCH,
+                    format_args!("`{name}` is declared {:?} but assigned {:?}", state.ty, ty),
+                ));
+            }
+            state.assigned = true;
         }
     }
     Ok(())
 }
 
-fn numeric(values: &BTreeMap<String, String>, name: &str) -> Result<(), String> {
-    match values.get(name).map(String::as_str) {
-        Some("real" | "integer") => Ok(()),
-        _ => Err(format!("{name} is undefined or not numeric")),
+fn snapshot<'a>(
+    phase: &str,
+    result: &'a String,
+    ty: ValueType,
+) -> Result<Option<(&'a String, ValueType)>, String> {
+    if phase != "publish" {
+        return Err("snapshot operation outside publish lifecycle".into());
     }
+    Ok(Some((result, ty)))
+}
+
+/// Read a local, requiring it declared, assigned, and of the wanted type.
+fn require(
+    locals: &BTreeMap<String, LocalState>,
+    name: &str,
+    want: ValueType,
+) -> Result<(), String> {
+    let Some(state) = locals.get(name) else {
+        return Err(err(
+            code::UNDECLARED_LOCAL,
+            format_args!("`{name}` is not declared"),
+        ));
+    };
+    if !state.assigned {
+        return Err(err(
+            code::UNDECLARED_LOCAL,
+            format_args!("`{name}` is read before assignment"),
+        ));
+    }
+    if state.ty != want {
+        return Err(err(
+            code::TYPE_MISMATCH,
+            format_args!("`{name}` is {:?} where {want:?} is required", state.ty),
+        ));
+    }
+    Ok(())
+}
+
+/// Type of a program-local expression, checking its leaves as it goes.
+fn expression_type(
+    function: &Function,
+    id: ProgramExprId,
+    locals: &BTreeMap<String, LocalState>,
+) -> Result<ValueType, String> {
+    let node = function.expressions.get(id.0 as usize).ok_or_else(|| {
+        err(
+            code::TYPE_MISMATCH,
+            format_args!("expression {} is out of range", id.0),
+        )
+    })?;
+    let ty = match node {
+        ProgramExpr::Local { name } => {
+            let Some(state) = locals.get(name) else {
+                return Err(err(
+                    code::UNDECLARED_LOCAL,
+                    format_args!("`{name}` is not declared"),
+                ));
+            };
+            if !state.assigned {
+                return Err(err(
+                    code::UNDECLARED_LOCAL,
+                    format_args!("`{name}` is read before assignment"),
+                ));
+            }
+            state.ty
+        }
+        ProgramExpr::Real { .. } => ValueType::Real,
+        ProgramExpr::Integer { .. } => ValueType::Integer,
+        ProgramExpr::Boolean { .. } => ValueType::Boolean,
+        ProgramExpr::Text { .. } => ValueType::Text,
+        ProgramExpr::Unary { operand, .. } => {
+            let ty = expression_type(function, *operand, locals)?;
+            reject_text(ty, "a unary operator")?;
+            ty
+        }
+        ProgramExpr::Binary { lhs, rhs, .. } => {
+            let (l, r) = (
+                expression_type(function, *lhs, locals)?,
+                expression_type(function, *rhs, locals)?,
+            );
+            reject_text(l, "arithmetic")?;
+            reject_text(r, "arithmetic")?;
+            if l != r {
+                return Err(err(
+                    code::TYPE_MISMATCH,
+                    format_args!("binary operands are {l:?} and {r:?}"),
+                ));
+            }
+            l
+        }
+        ProgramExpr::Compare { lhs, rhs, op } => {
+            let (l, r) = (
+                expression_type(function, *lhs, locals)?,
+                expression_type(function, *rhs, locals)?,
+            );
+            if l != r {
+                return Err(err(
+                    code::TYPE_MISMATCH,
+                    format_args!("comparison operands are {l:?} and {r:?}"),
+                ));
+            }
+            // Text compares only for equality; ordering it is meaningless here.
+            if l == ValueType::Text && !matches!(op, crate::CompareOp::Eq | crate::CompareOp::Ne) {
+                return Err(err(
+                    code::TEXT_MISUSE,
+                    "Text supports only equality comparison",
+                ));
+            }
+            ValueType::Boolean
+        }
+    };
+    Ok(ty)
+}
+
+fn reject_text(ty: ValueType, position: &str) -> Result<(), String> {
+    if ty == ValueType::Text {
+        return Err(err(
+            code::TEXT_MISUSE,
+            format_args!(
+                "Text is not admissible in {position}; it is valid only as a CSV column or an assert message"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The three CSV effect instructions, as a type.
@@ -223,38 +449,74 @@ fn effect_check(
     effect: CsvEffect<'_>,
     sink: &String,
     phase: &str,
-    values: &BTreeMap<String, String>,
+    locals: &BTreeMap<String, LocalState>,
     resources: &mut BTreeSet<String>,
 ) -> Result<(), String> {
+    // Two distinct failures, never merged: the sink id is not declared, or
+    // the program declares no sinks at all and so has no file-effect
+    // capability. They have different fixes.
+    if a.program.sinks.is_empty() {
+        return Err(err(
+            code::MISSING_FILE_CAPABILITY,
+            format_args!("`{sink}` is a file effect but the program declares no CSV sink"),
+        ));
+    }
     let decl = a
+        .program
         .sinks
         .iter()
         .find(|s| &s.key == sink)
-        .ok_or("undefined CSV resource")?;
+        .ok_or_else(|| {
+            err(
+                code::UNRESOLVED_SINK,
+                format_args!("`{sink}` is not a declared CSV sink"),
+            )
+        })?;
     match effect {
         CsvEffect::Open => {
             if phase != "run_start" || !resources.insert(sink.clone()) {
-                return Err("csv.open must establish a unique run_start resource".into());
+                return Err(err(
+                    code::EFFECT_LIFECYCLE,
+                    format_args!(
+                        "csv.open on `{sink}` must open a not-yet-open sink in run_start, not {phase}"
+                    ),
+                ));
             }
         }
         CsvEffect::Close => {
             if phase != "run_finish" || !resources.remove(sink) {
-                return Err("csv.close must consume an open run_finish resource".into());
+                return Err(err(
+                    code::EFFECT_LIFECYCLE,
+                    format_args!(
+                        "csv.close on `{sink}` must close an open sink in run_finish, not {phase}"
+                    ),
+                ));
             }
         }
         CsvEffect::Write { arguments: args } => {
-            if phase != "publish" || !resources.contains(sink) || args.len() != decl.columns.len() {
-                return Err("invalid csv.write_row lifecycle/resource/width".into());
+            // Three separate failures with three separate fixes.
+            if phase != "publish" || !resources.contains(sink) {
+                return Err(err(
+                    code::EFFECT_LIFECYCLE,
+                    format_args!(
+                        "csv.write_row on `{sink}` must write an open sink in publish, not {phase}"
+                    ),
+                ));
             }
-            for (arg, expected) in args.iter().zip(&decl.column_types) {
-                let actual = values
-                    .get(arg)
-                    .ok_or_else(|| format!("undefined value {arg}"))?;
-                if actual != expected {
-                    return Err(format!(
-                        "CSV type mismatch: {arg} is {actual}, expected {expected}"
-                    ));
-                }
+            if args.len() != decl.columns.len() {
+                return Err(err(
+                    code::ROW_WIDTH,
+                    format_args!(
+                        "`{sink}` declares {} columns but the row has {} values",
+                        decl.columns.len(),
+                        args.len()
+                    ),
+                ));
+            }
+            // Column order is owned here: the order of `values` is the order
+            // of columns in the row. Nothing downstream may reorder them.
+            for (arg, column) in args.iter().zip(&decl.columns) {
+                require(locals, arg, column.ty)?;
             }
         }
     }

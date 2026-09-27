@@ -85,79 +85,146 @@ different questions:
 | | Equation IR | Execution IR |
 |---|---|---|
 | Field | `RbcFile.model` (`RbcModel`) | `RbcFile.execution` (`ExecutionArtifact`) |
-| Answers | *what must hold* | *how it is evaluated, and what the host does* |
-| Content | variables, typed expressions, residual equations, events, connection sets | ordered instructions: numerical `compute`, snapshots, CSV lifecycle, `assert` |
+| Answers | *what must hold* | *what the host does, and when* |
+| Content | variables, typed expressions, residual equations, events, connection sets | ordered instructions: snapshots, typed `compute`, CSV lifecycle, `call`, `if`, `assert` |
 | Presence | always | only after lowering |
-| Versioning | `bitcode_version` | its own `version`, plus `equation_digest`, `lowering`, `revision` |
+| Versioning | `bitcode_version` | its own `version`, plus `dependency_digest`, `lowering`, `revision` |
 | Shape | declarative and unordered; equations are a set | imperative and ordered; instructions run in sequence |
+
+### What the execution IR is *not*
+
+It is **not** a numerical program. Storage slots, residual rows, derivative
+rows, projection blocks and observation instruction lists are **derived**: they
+are rebuilt from the equation IR and the recorded `lowering` profile every time
+an artifact is loaded, and none of them is on the wire.
+
+This is the v2 correction. v1 serialized the derived program beside the
+authored one, which put one lowering's output, for one backend, into a public
+artifact — and let a caller edit a register program that the equations no
+longer implied. v2 carries only what a pass author wrote:
+
+```text
+ExecutionArtifact
+  version             wire version of this section
+  lowering            a compiler-known named profile, not a free-text string
+  dependency_digest   over the identities the program references
+  revision            counts edits to the program
+  passes              one receipt per pass that edited it
+  program             HostProgram: functions and the sinks their effects name
+```
+
+Everything else a run needs is a cache, and is treated as one.
 
 ### Why two rather than one
 
 **They are not orderings of each other.** A residual equation states a relation
 that must hold at a solution. An instruction states a step that runs at a point
 in time. Deriving the second from the first requires choosing an evaluation
-order, a solver profile and a set of observation points -- choices the equations
-deliberately do not make, because a different solver makes them differently.
-Collapsing the two would bake one solver's choices into the model.
+order and a solver profile — choices the equations deliberately do not make,
+because a different solver makes them differently. Collapsing the two would
+bake one solver's choices into the model.
 
-**One is canonical, the other is derived.** Equation IR is the public model
-representation. Execution IR is a projection of it, and the projection is
-recorded rather than assumed: `equation_digest` names the equations it came
-from, `lowering` names the profile used, and `revision` counts edits to the
-projection itself.
+**One is authored, the other is derived.** Equation IR is the public model
+representation. The host program is authored on top of it by passes. The
+numerical program is derived from both and stored nowhere.
 
 **They fail differently, and both failures matter.** An equation-level defect is
-a statement about the model -- an unmatched equation, a dimensional conflict, a
+a statement about the model — an unmatched equation, a dimensional conflict, a
 connector with no source. An execution-level defect is a statement about a run
--- a divisor that reaches zero, an assertion that fires, a trace that stops. A
+— a divisor that reaches zero, an assertion that fires, a trace that stops. A
 tool that had only one of these would report the other in the wrong vocabulary.
 
-**The execution IR is deliberately bounded.** It is a scalar, loop-free
-projection: the instruction set has no iteration and no recursion, and function
-bodies are not carried. That is what makes an externally-authored program safe
-to execute -- a program that cannot loop cannot fail to terminate, so a host
-needs no termination proof from a pass author. Equation IR is bounded for the
-same reason and by the same means (§9a).
+**The execution IR is statically bounded.** Not "loop-free" as a slogan: the
+instruction set has no iteration, and `call` targets a call graph the validator
+proves acyclic (`EX2-030`), so every program halts in a number of steps bounded
+by its own text. That is what makes an externally-authored program safe to
+execute — a host needs no termination proof from a pass author. Equation IR is
+bounded for the same reason and by the same means (§9a).
 
 ### How they interoperate
 
 ```text
 Modelica source
-  -> equation IR            (RbcFile.model)          canonical
+  -> equation IR            (RbcFile.model)          authored, canonical
   -> equation passes        (read/write RbcModel)
-  -> lowering               (execution.lower)        derivation, digest recorded
-  -> execution IR           (RbcFile.execution)      derived
+  -> lowering               (bitcode lower-execution) records a profile
+  -> execution IR           (RbcFile.execution)      authored by passes
   -> execution passes       (read/write instructions)
+  -> derivation             (at load, every load)    numerical program
   -> native run
 ```
 
 The rules a consumer must observe:
 
-1. **An equation edit invalidates every derived execution.** The
-   `equation_digest` is recomputed on verification and on run. A mismatch is an
-   error, not a re-lowering trigger: re-lowering is an explicit operation,
-   because it discards execution-level edits.
+1. **Staleness is about referenced identity, not about the equations.** The
+   `dependency_digest` covers the wire and execution versions, the expanded
+   lowering profile, and — for each trace point the program *references* — its
+   id, component path, value type, causality and unit. Rewriting a residual the
+   program does not observe leaves the program runnable; retyping or removing a
+   variable it does observe does not. A mismatch is an error, not a re-lowering
+   trigger: re-lowering is explicit, because replay discards execution-level
+   edits that no pass reproduces.
 2. **Linking is an equation-IR operation.** `rumoca bitcode link` must refuse an
-   input that carries an execution projection unless the caller explicitly
-   authorizes discarding it (§2). Equations can be combined; two lowerings
-   cannot.
-3. **Execution IR never rewrites equations.** An execution pass may reorder
-   instructions, add host effects such as CSV logging, or add observations. If a
-   change would alter what must hold, it belongs in an equation pass.
-4. **Observation targets are registered before lowering.** Lowering must be able
-   to reconstruct each one; a target it cannot map is an error rather than a
-   silently dropped request.
+   input that carries an execution program unless the caller explicitly
+   authorizes discarding it (§2). Equations can be combined; two authored
+   programs cannot.
+3. **Execution IR never rewrites equations.** An execution pass may add host
+   effects such as CSV logging, add instructions, or reference trace points. If
+   a change would alter what must hold, it belongs in an equation pass. The two
+   expression arenas are separate for this reason: `RbcModel.expressions` is the
+   equation IR's, `Function.expressions` is one program function's, and a
+   program expression's only non-literal leaf is a **declared local**. There is
+   no `VariableId` leaf, so a program cannot read a model variable except
+   through `snapshot.value`.
+4. **Observations are demanded by the program, not requested at lowering.**
+   `lower-execution` takes no observation list. A `snapshot.value` instruction
+   names a `TracePointId`, and the numerical program is derived from exactly
+   the trace points the program references. A model with no trace points and a
+   program with no instructions is a **valid** artifact with zero observations.
+   Registering a trace point is an equation-IR edit, so the logging helper that
+   needs one creates it.
 5. **A reader that understands only equation IR is valid.** `execution` is
    optional, and a consumer that ignores it still sees the whole model. A
    consumer that reads *only* execution IR does not, and must not present itself
    as having read the model.
+6. **The wire names identities; the emitted trace resolves them.** A `CsvSink`
+   is an opaque capability handle: it carries its member trace points, its
+   connector id and orientation when it is connector instrumentation, and no
+   paths, units or roles. Those are the equation IR's to state, and the runtime
+   joins them in when it writes `manifest.json`. A second copy on the wire
+   could diverge from the first.
+7. **Structure, never flattened text.** A consumer that needs a component path
+   or a member name takes it from `RbcConnectorInstance` and `RbcComponent`,
+   not by splitting a variable's display name on `.`: a component named `a.b`
+   and a component `a` owning `b` flatten to the same text. The digest encodes
+   the path as two length-prefixed records for the same reason.
+
+### Scoping and ordering
+
+**Locals are function-scoped.** A `Function` declares every local it uses;
+`if` carries no declarations of its own. A branch may assign a local declared
+by its function, but a local assigned on only one arm is not assigned after the
+join, and reading it there is `EX2-020`. Because an inner declaration is
+unrepresentable, a write from outside to an inner-scoped local cannot occur;
+the code reserved for it is documented and left unallocated rather than
+checked.
+
+**The program owns order, and nothing normalizes it.**
+
+| Ordering | Owned by |
+|---|---|
+| CSV column order within a row | the value order of the `csv.write_row` that writes it |
+| CSV row order within a file | publication sequence |
+| Effect order within a function | instruction order, as written |
+
+No validator, optimizer or writer may permute any of these.
 
 ### Which one a pass should target
 
 Target equation IR to change what the model means: adding a component, wiring a
 port, rewriting a residual, constraining a declaration. Target execution IR to
 change what a run does without changing what it means: logging a signal,
-inserting an assertion, reordering independent effects.
+inserting an assertion, computing a derived column from observed values.
 
 If a pass finds itself encoding an equation into instructions to work around a
 missing equation-level capability, that is a gap in the equation IR and should
@@ -455,6 +522,11 @@ trip count is known before evaluation starts.
 
 Every artifact therefore denotes a finite system of equations over a finite
 index space, and every quantity it can express is computable in bounded steps.
+
+The **execution IR** is bounded separately and by a fourth means: it has no
+iteration at all, and its `call` graph is checked acyclic (`EX2-030`). So a
+host program halts in a number of steps bounded by its own text, and a host
+needs no termination proof from the pass author who wrote it (§2a).
 
 ### The system it denotes is another matter
 

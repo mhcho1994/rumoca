@@ -8,12 +8,20 @@ directory after implementing the target API in synthesize_connector_csv.py.
 Required runtime manifest shape:
 {
   "schema_version": 1,
+  "dependency_digest": "sha1:...",
+  "execution_revision": 2,
   "sinks": [{"filename": "connector-0000.csv", "metadata": {
-      "connector_id": "...", "connector_path": "hot.port",
-      "members": [{"name": "T", "unit": "K", "kind": "potential"},
-                  {"name": "Q_flow", "unit": "W", "kind": "flow"}]
+      "connector": 0, "connector_path": "hot.port", "orientation": "outside",
+      "members": [{"trace_point": 0, "name": "T", "unit": "K",
+                   "kind": "potential"},
+                  {"trace_point": 1, "name": "Q_flow", "unit": "W",
+                   "kind": "flow"}]
   }}]
 }
+
+The wire artifact names identities only; the runtime resolves them against the
+equation IR when it writes this manifest. That split is why the oracle can stay
+Rumoca-free.
 """
 from __future__ import annotations
 

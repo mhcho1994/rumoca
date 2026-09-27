@@ -1,8 +1,9 @@
 # Writing an external pass
 
 An artifact carries two representations: **equation IR** (`RbcFile.model`,
-what must hold) and **execution IR** (`RbcFile.execution`, how it is evaluated
-and what the host does). Which one your pass should target, and the rules that
+what must hold) and **execution IR** (`RbcFile.execution`, what the host does
+and when). The numerical program a run needs is derived from both at load and
+is not in the file. Which one your pass should target, and the rules that
 keep them consistent, are in
 [SPEC_RUMOCA_BITCODE.md §2a](SPEC_RUMOCA_BITCODE.md#2a-two-irs-equation-and-execution).
 **This page focuses on equation IR.**
@@ -388,6 +389,51 @@ Validation reports every problem it finds, not just the first.
 Prefer trace points to equation edits when you only need to observe something:
 a trace point cannot change what the model computes, so it cannot introduce a
 physics bug.
+
+### Observing a value from an execution pass
+
+`lower-execution` has no `--observe` option, and the SDK's `lower(model)` takes
+no observation list. Observations are *demanded* by the program: a
+`snapshot.value` instruction names a `TracePointId`, and the numerical program
+is derived from exactly the trace points the program references. A model with
+no trace points and a program with no instructions is a valid artifact with
+zero observations, not an error.
+
+Registering a trace point is an equation-IR edit, so the helper that needs one
+creates it. `rumoca_bitcode.execution.observe_connector_members(model)`
+registers one per connector member and returns `{path: trace_point_id}`; it is
+idempotent by `(label, variable)`, so replaying a logging pass reuses the
+points it registered the first time. If you observe something else, call
+`model.add_trace_point(variable, label=...)` yourself and reference the id it
+returns.
+
+Run the pass inside its builder context:
+
+```python
+with program.builder("my.logger") as b:
+    points = observe_connector_members(model)
+    sink = b.declare_csv_sink(
+        key="my-sink", filename="trace.csv",
+        columns=[{"name": "t", "ty": "real"}, {"name": "T", "ty": "real"}],
+        # `members` is always present; `connector`/`orientation` only when the
+        # sink really is connector instrumentation.
+        metadata={"connector": 0, "orientation": "outside",
+                  "members": [{"trace_point": points["hot.port.T"]}]})
+    with b.before_return("run_start") as ir:
+        ir.emit("csv.open", sink=sink)
+    with b.before_return("publish") as ir:
+        ir.emit("csv.write_row", sink=sink, values=[
+            ir.emit("snapshot.time"),
+            ir.emit("snapshot.value", trace_point=points["hot.port.T"])])
+    with b.before_return("run_finish") as ir:
+        ir.emit("csv.close", sink=sink)
+```
+
+`with` matters: leaving the builder is the pass boundary, and that is where the
+`dependency_digest` is recomputed against the identities the program now names.
+`emit` declares each result it produces, so a pass cannot leave an undeclared
+local behind; `compute` is the exception and must state its `ty`, because only
+the pass knows what it computed.
 
 ## Worked examples
 

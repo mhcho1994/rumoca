@@ -36,15 +36,16 @@ def decay():
 
 
 def user_logger(program):
-    b = program.builder("test.user-logging")
-    sink = b.declare_csv_sink(key="user", filename="user.csv", columns=["time"],
-                              column_types=["real"], metadata={})
-    with b.before_return(program.function("run_start")) as ir:
-        ir.emit("csv.open", sink=sink)
-    with b.before_return(program.function("publish")) as ir:
-        ir.emit("csv.write_row", sink=sink, values=[ir.emit("snapshot.time")])
-    with b.before_return(program.function("run_finish")) as ir:
-        ir.emit("csv.close", sink=sink)
+    with program.builder("test.user-logging") as b:
+        sink = b.declare_csv_sink(
+            key="user", filename="user.csv",
+            columns=[{"name": "time", "ty": "real"}], metadata={"members": []})
+        with b.before_return("run_start") as ir:
+            ir.emit("csv.open", sink=sink)
+        with b.before_return("publish") as ir:
+            ir.emit("csv.write_row", sink=sink, values=[ir.emit("snapshot.time")])
+        with b.before_return("run_finish") as ir:
+            ir.emit("csv.close", sink=sink)
 
 
 class CurrentBitcode(unittest.TestCase):
@@ -55,13 +56,8 @@ class CurrentBitcode(unittest.TestCase):
         self.backend = RumocaBackend(RUMOCA, t_end=0.2, timeout=10)
         self.addCleanup(self.backend.close)
 
-    def test_saved_execution_is_run_without_relowering(self):
+    def test_saved_program_is_run_without_relowering(self):
         program = lower(decay())
-        # Change the *execution* derivative, not the equations: der(x) = -3.
-        program.numerical["derivatives"][0]["instructions"] = [
-            {"op": "const", "dst": 0, "value": -3.0},
-            {"op": "store_output", "src": 0},
-        ]
         user_logger(program)
         original = deepcopy(program.raw)
         artifact = self.root / "program.rbc"
@@ -69,14 +65,20 @@ class CurrentBitcode(unittest.TestCase):
         before = artifact.read_bytes()
         self.assertIsNone(self.backend.prepare_from_artifact(artifact))
         prepared = Model.load(self.backend._artifact)._document["execution"]
-        self.assertEqual(prepared["numerical"], original["numerical"])
+        # The derived program is not on the wire, so there is nothing to
+        # compare there; what must survive is the authored program.
+        self.assertNotIn("numerical", prepared)
         self.assertEqual(prepared["passes"][:-1], original["passes"])
-        self.assertEqual(prepared["sinks"][:-1], original["sinks"])
-        for name, body in original["functions"].items():
-            self.assertEqual(prepared["functions"][name][:len(body)], body)
+        self.assertEqual(prepared["program"]["sinks"][:-1],
+                         original["program"]["sinks"])
+        for name, function in original["program"]["functions"].items():
+            body = function["body"]
+            self.assertEqual(
+                prepared["program"]["functions"][name]["body"][:len(body)], body)
         result = self.backend.run(NOMINAL)
         self.assertEqual(result.status, ExecutionStatus.SUCCESS, result.failure)
-        self.assertAlmostEqual(result.trace.final_state["x"], 1.4, delta=1e-7)
+        self.assertAlmostEqual(result.trace.final_state["x"], 2 * math.exp(-0.2),
+                               delta=1e-5)
         self.assertEqual(artifact.read_bytes(), before)
         self.assertTrue((Path(result.backend_metadata["trace_root"]) / "user.csv").exists())
         second = self.backend.run(NOMINAL)
@@ -119,15 +121,25 @@ class CurrentBitcode(unittest.TestCase):
             self.assertFalse(result.informative)
 
     def test_stale_missing_or_unsupported_program_is_not_a_model_failure(self):
-        for corruption in ("stale", "missing-observation", "unsupported"):
+        for corruption in ("stale", "unknown-trace-point", "unsupported"):
             with self.subTest(corruption=corruption):
                 program = lower(decay())
+                user_logger(program)
                 if corruption == "stale":
-                    b = program.model.builder("change")
-                    b.add_parameter("extra", 1)
-                    b.finish()
-                elif corruption == "missing-observation":
-                    program.numerical["observations"].clear()
+                    observed = program.model.variable("x")
+                    point = program.model.add_trace_point(observed, label="x")
+                    program.function("publish").append(
+                        {"op": "snapshot.value", "result": "zz",
+                         "trace_point": point.id})
+                    program.declare("publish", "zz", "real")
+                    program.refresh_digest()
+                    program.model.raw_model["variables"][observed.id][
+                        "causality"] = "output"
+                elif corruption == "unknown-trace-point":
+                    program.function("publish").append(
+                        {"op": "snapshot.value", "result": "zz",
+                         "trace_point": 999999})
+                    program.declare("publish", "zz", "real")
                 else:
                     program.function("publish").append({"op": "no-such-operation"})
                 path = self.root / f"{corruption}.rbc"
@@ -146,15 +158,14 @@ class CurrentBitcode(unittest.TestCase):
 
     def test_native_assertion_failure_is_still_a_legitimate_runtime_failure(self):
         program = lower(decay())
-        b = program.builder("test.assertion")
-        with b.before_return(program.function("publish")) as ir:
-            ok = ir.emit("compute", arguments=[], instructions=[
-                {"op": "const", "dst": 0, "value": 0.0},
-                {"op": "const", "dst": 1, "value": 1.0},
-                {"op": "compare", "dst": 2, "operator": "Gt", "lhs": 0, "rhs": 1},
-                {"op": "store_output", "src": 2},
-            ])
-            ir.emit("assert", condition=ok, message="intentional runtime failure")
+        with program.builder("test.assertion") as b:
+            arena = program.expressions("publish")
+            with b.before_return("publish") as ir:
+                ok = ir.emit("compute", ty="boolean", expr=arena.compare(
+                    "Gt", arena.real(0.0), arena.real(1.0)))
+                message = ir.emit("compute", ty="text",
+                                  expr=arena.text("intentional runtime failure"))
+                ir.emit("assert", condition=ok, message=message)
         path = self.root / "assert.rbc"
         program.save(path)
         self.assertIsNone(self.backend.prepare_from_artifact(path))
@@ -180,7 +191,8 @@ class CurrentBitcode(unittest.TestCase):
         program = lower(decay())
         instrument(program, program.model, variable_ids=[0])
         fresh = program.relower(replay={PASS_NAME: instrument})
-        self.assertEqual(fresh.raw["sinks"], program.raw["sinks"])
+        self.assertEqual(fresh.raw["program"]["sinks"],
+                         program.raw["program"]["sinks"])
 
     def test_no_silent_missing_trace_or_stale_run(self):
         path = self.root / "program.rbc"
@@ -191,8 +203,12 @@ class CurrentBitcode(unittest.TestCase):
             run.return_value.stdout = ""
             run.return_value.stderr = ""
             self.assertEqual(self.backend.run(NOMINAL).status, ExecutionStatus.BACKEND_ERROR)
+        # Change an identity the prepared program references. The v2 digest
+        # covers those, not the whole model, so renaming the model would
+        # correctly leave the program runnable.
         artifact = Model.load(self.backend._artifact)
-        artifact.raw_model["name"] = "ChangedAfterPrepare"
+        observed = artifact.raw_model["trace_points"][0]["variable"]
+        artifact.raw_model["variables"][observed]["causality"] = "output"
         artifact.save(self.backend._artifact)
         result = self.backend.run(NOMINAL)
         self.assertEqual(result.status, ExecutionStatus.BACKEND_ERROR)
@@ -367,7 +383,7 @@ class CurrentBitcode(unittest.TestCase):
         from modelsan.backends.rumoca_execution import FILENAME
         program = lower(decay())
         user_logger(program)
-        program.raw["sinks"][0]["filename"] = FILENAME
+        program.raw["program"]["sinks"][0]["filename"] = FILENAME
         path = self.root / "collision.rbc"
         program.save(path)
         before = path.read_bytes()

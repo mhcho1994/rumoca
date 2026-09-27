@@ -30,8 +30,12 @@ fn executable_publication_deduplicates_a_real_scheduled_event() {
     let rows = Rc::new(RefCell::new(Vec::new()));
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("trace");
-    let effects =
-        rumoca_eval_solve::execution::CsvExecution::start(publication_program(), &root).unwrap();
+    let effects = rumoca_eval_solve::execution::CsvExecution::start(
+        publication_program(),
+        publication_numerical(),
+        &root,
+    )
+    .unwrap();
     let mut model = solve::SolveModel::default();
     model.problem.events.scheduled_time_events = vec![0.5];
     let model = refresh_owned(model);
@@ -65,13 +69,64 @@ fn executable_publication_deduplicates_a_real_scheduled_event() {
 
 fn publication_program() -> solve::execution::ExecutionArtifact {
     serde_json::from_value(serde_json::json!({
-        "version": 1, "equation_digest": "test-event-host", "lowering": "solve-scalar-v1", "revision": 1, "passes": [],
-        "numerical": {"source_name": "event-publication-test", "storage": [], "residual": [], "derivatives": [], "initialization": [], "algebraic_blocks": [], "initial_blocks": [], "observations": []},
-        "sinks": [{"key": "event", "filename": "event.csv", "columns": ["time", "id", "phase"], "column_types": ["real", "integer", "string"], "metadata": {}}],
-        "functions": {
-            "run_start": [{"op": "csv.open", "sink": "event"}],
-            "publish": [{"op": "snapshot.time", "result": "t"}, {"op": "snapshot.sequence", "result": "id"}, {"op": "snapshot.phase", "result": "phase"}, {"op": "csv.write_row", "sink": "event", "values": ["t", "id", "phase"]}],
-            "run_finish": [{"op": "csv.close", "sink": "event"}]
+        "version": 2,
+        "lowering": "solve-scalar-v1",
+        "dependency_digest": "test-event-host",
+        "revision": 1,
+        "passes": [],
+        "program": {
+            "sinks": [{
+                "key": "event",
+                "filename": "event.csv",
+                "columns": [
+                    {"name": "time", "ty": "real"},
+                    {"name": "id", "ty": "integer"},
+                    {"name": "phase", "ty": "text"}
+                ],
+                "metadata": {"connector": 0, "orientation": "outside", "members": []}
+            }],
+            "functions": {
+                "run_start": {
+                    "locals": [],
+                    "body": [{"op": "csv.open", "sink": "event"}]
+                },
+                "publish": {
+                    "locals": [
+                        {"name": "t", "ty": "real"},
+                        {"name": "id", "ty": "integer"},
+                        {"name": "phase", "ty": "text"}
+                    ],
+                    "body": [
+                        {"op": "snapshot.time", "result": "t"},
+                        {"op": "snapshot.sequence", "result": "id"},
+                        {"op": "snapshot.phase", "result": "phase"},
+                        {"op": "csv.write_row", "sink": "event", "values": ["t", "id", "phase"]}
+                    ]
+                },
+                "run_finish": {
+                    "locals": [],
+                    "body": [{"op": "csv.close", "sink": "event"}]
+                }
+            }
         }
-    })).unwrap()
+    }))
+    .unwrap()
+}
+
+/// An empty derived program.
+///
+/// v2 does not serialize one, so this test builds it directly rather than
+/// decoding it from the fixture -- which is what the execution-IR v2 design
+/// note said this test should do once the wire stopped carrying it.
+fn publication_numerical() -> solve::execution::NumericalProgram {
+    solve::execution::NumericalProgram {
+        source_name: "event-publication-test".into(),
+        storage: vec![],
+        residual: vec![],
+        derivatives: vec![],
+        initialization: vec![],
+        algebraic_blocks: vec![],
+        initial_blocks: vec![],
+        observations: vec![],
+    }
 }

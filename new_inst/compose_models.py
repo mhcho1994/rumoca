@@ -70,9 +70,9 @@ def build_example(out: Path):
     model.save(out / "02-connected.rbc")
     add_heat_integral(model)
     model.save(out / "03-equation-pass.rbc")
-    observed = [v.id for v in model.states]
-    observed += [m.variable_id for p in model.connectors for m in p.members]
-    program = lower(model, observe=observed)
+    # No observation list: the program demands what it needs, and
+    # instrument_all_connectors is the producer of the trace points.
+    program = lower(model)
     instrument_all_connectors(program, model)
     program.save(out / "04-executable.rbc")
     return model, program

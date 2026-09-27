@@ -19,7 +19,7 @@ class CompositionTutorial(unittest.TestCase):
             self.assertEqual(len(model.connectors), 2)
             self.assertEqual(len(model.raw_model["connection_sets"]), 1)
             replayed = program.relower(replay={"example.connector-csv": instrument_all_connectors})
-            self.assertEqual(replayed.raw["sinks"], program.raw["sinks"])
+            self.assertEqual(replayed.raw["program"]["sinks"], program.raw["program"]["sinks"])
             invoke("bitcode", "run", out / "04-executable.rbc", "--execution", "require",
                    "--trace-root", out / "traces", "--stop", "5", "--publish-interval", "0.1",
                    "--rtol", "1e-9", "--atol", "1e-11", "--result", out / "result.json")

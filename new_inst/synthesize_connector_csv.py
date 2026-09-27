@@ -26,6 +26,13 @@ if TYPE_CHECKING:
     from rumoca_bitcode.execution import Program
 
 
+#: Connector member scalar type -> the program's value type. `string` is
+#: spelled `text` in the program vocabulary; the two names are not a synonym
+#: pair to guess between, so the map is written out.
+COLUMN_TYPES = {"real": "real", "integer": "integer",
+                "boolean": "boolean", "string": "text"}
+
+
 def positive_finite(text: str) -> float:
     value = float(text)
     if not math.isfinite(value) or value <= 0:
@@ -116,69 +123,85 @@ def scale_conductor_equation(model: Model, handles: dict[str, Any],
 
 
 def instrument_all_connectors(program: Program, model: Model) -> None:
-    """Execution-IR pass. No connector names or physics appear in this logger."""
-    b = program.builder("example.connector-csv")
-    prepared: list[tuple[Any, tuple[Any, ...]]] = []
-    connectors = sorted(model.connectors, key=lambda c: str(c.id))
-    if not connectors:
-        raise ValueError("the example must contain observable connectors")
+    """Execution-IR pass. No connector names or physics appear in this logger.
 
-    for index, connector in enumerate(connectors):
-        members = tuple(connector.members)  # Stable declaration order.
-        if not members:
-            raise ValueError(f"connector {connector.id} has no members")
-        for member in members:
-            if member.shape or member.scalar_type not in {
-                "real", "integer", "boolean", "string"
-            }:
-                raise ValueError(
-                    f"unsupported CSV member {connector.id}/{member.name}; "
-                    "must not silently omit it"
-                )
-            if member.kind == "stream":
-                raise ValueError("stream observation semantics are not in this demo")
+    The pass registers a trace point per connector member on the *model* and
+    references it from the instructions: the trace point is the observation
+    request, and the program is what demands it.
+    """
+    from rumoca_bitcode.execution import observe_connector_members
 
-        sink = b.declare_csv_sink(
-            key=f"connector-csv:{connector.id}",  # Unique, duplicate pass => reject.
-            filename=f"connector-{index:04d}.csv",  # Relative, collision-free.
-            columns=["time_s", "publish_id", "phase"] + [m.name for m in members],
-            metadata={
-                "connector_id": str(connector.id),
-                "connector_path": connector.path,
-                "owner": connector.owner,
-                "orientation": connector.orientation,
-                "members": [
-                    {"name": m.name, "variable_id": str(m.variable_id),
-                     "unit": m.unit, "kind": m.kind}
-                    for m in members
-                ],
-            },
-        )
-        prepared.append((sink, members))
+    with program.builder("example.connector-csv") as b:
+        points = observe_connector_members(model)
+        prepared: list[tuple[Any, tuple[Any, ...]]] = []
+        sink_paths: dict[Any, str] = {}
+        connectors = sorted(model.connectors, key=lambda c: str(c.id))
+        if not connectors:
+            raise ValueError("the example must contain observable connectors")
 
-    # These are ordinary serializable functions/blocks, not Python callbacks.
-    # before_return is convenience for the single-exit lifecycle functions.
-    with b.before_return(program.function("run_start")) as ir:
-        for sink, _ in prepared:
-            ir.emit("csv.open", sink=sink)
+        for index, connector in enumerate(connectors):
+            members = tuple(connector.members)  # Stable declaration order.
+            if not members:
+                raise ValueError(f"connector {connector.id} has no members")
+            for member in members:
+                if member.shape or member.scalar_type not in {
+                    "real", "integer", "boolean", "string"
+                }:
+                    raise ValueError(
+                        f"unsupported CSV member {connector.id}/{member.name}; "
+                        "must not silently omit it"
+                    )
+                if member.kind == "stream":
+                    raise ValueError("stream observation semantics are not in this demo")
 
-    with b.before_return(program.function("publish")) as ir:
-        snapshot = ir.argument("snapshot")
-        time = ir.emit("snapshot.time", snapshot=snapshot)
-        sequence = ir.emit("snapshot.sequence", snapshot=snapshot)
-        phase = ir.emit("snapshot.phase", snapshot=snapshot)
-        for sink, members in prepared:
-            values = [
-                ir.emit("snapshot.value", snapshot=snapshot,
-                        variable_id=m.variable_id)
-                for m in members
-            ]
-            ir.emit("csv.write_row", sink=sink,
-                    values=[time, sequence, phase, *values])
+            sink = b.declare_csv_sink(
+                key=f"connector-csv:{connector.id}",  # Unique, duplicate pass => reject.
+                filename=f"connector-{index:04d}.csv",  # Relative, collision-free.
+                columns=[{"name": "time_s", "ty": "real"},
+                         {"name": "publish_id", "ty": "integer"},
+                         {"name": "phase", "ty": "text"},
+                         *[{"name": m.name, "ty": COLUMN_TYPES[m.scalar_type]}
+                           for m in members]],
+                # Identity only. unit/kind/variable are reachable from the trace
+                # point, and the runtime denormalizes them into manifest.json.
+                metadata={
+                    "connector": int(connector.id),
+                    "orientation": connector.orientation,
+                    "members": [
+                        {"trace_point": points[f"{connector.path}.{m.name}"]}
+                        for m in members
+                    ],
+                },
+            )
+            prepared.append((sink, members))
+            sink_paths[sink] = connector.path
 
-    with b.before_return(program.function("run_finish")) as ir:
-        for sink, _ in prepared:
-            ir.emit("csv.close", sink=sink)
+        # These are ordinary serializable functions/blocks, not Python callbacks.
+        # before_return is convenience for the single-exit lifecycle functions.
+        with b.before_return("run_start") as ir:
+            for sink, _ in prepared:
+                ir.emit("csv.open", sink=sink)
+
+        with b.before_return("publish") as ir:
+            snapshot = ir.argument("snapshot")
+            time = ir.emit("snapshot.time", snapshot=snapshot)
+            sequence = ir.emit("snapshot.sequence", snapshot=snapshot)
+            phase = ir.emit("snapshot.phase", snapshot=snapshot)
+            for sink, members in prepared:
+                values = []
+                for member in members:
+                    values.append(ir.emit(
+                        "snapshot.value",
+                        snapshot=snapshot,
+                        trace_point=points[f"{sink_paths[sink]}.{member.name}"],
+                    ))
+                # Column order is owned here: this list is the row.
+                ir.emit("csv.write_row", sink=sink,
+                        values=[time, sequence, phase, *values])
+
+        with b.before_return("run_finish") as ir:
+            for sink, _ in prepared:
+                ir.emit("csv.close", sink=sink)
 
     # Includes effect, reference, type, lifecycle and derivation validation.
     program.validate(strict=True)
@@ -199,17 +222,16 @@ def main() -> int:
         parser.error(f"output directory is not empty: {out}")
     out.mkdir(parents=True, exist_ok=True)
 
-    from rumoca_bitcode.execution import lower
+    from rumoca_bitcode.execution import lower, observe_connector_members
 
     model, handles = synthesize()
     model.save(out / "01-original.rbc")
     scale_conductor_equation(model, handles, args.conductance_scale)
     model.save(out / "02-equation-rewritten.rbc")
 
-    # Register observations before alias elimination / dead-value elimination.
-    # Lowering must preserve a reconstruction mapping for every requested member.
-    observed = [m.variable_id for c in model.connectors for m in c.members]
-    program = lower(model, observe=observed)
+    # Trace points are registered by the logging pass below, which is the
+    # producer of observation requests; lowering takes no observation list.
+    program = lower(model)
     program.validate(strict=True)
     program.save(out / "03-executable.rbc", include_equations=True)
     instrument_all_connectors(program, model)
