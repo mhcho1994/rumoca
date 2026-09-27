@@ -6,17 +6,21 @@ use std::cell::Cell;
 pub struct HotpathStatsSnapshot {
     pub solver_steps: u64,
     pub root_hits: u64,
+    /// The integration method the most recent simulation ran.
+    pub integrator: Option<&'static str>,
 }
 
 thread_local! {
     static SOLVER_STEPS: Cell<u64> = const { Cell::new(0) };
     static ROOT_HITS: Cell<u64> = const { Cell::new(0) };
+    static INTEGRATOR: Cell<Option<&'static str>> = const { Cell::new(None) };
 }
 
 /// Zero this thread's step and root counts.
 pub fn reset() {
     SOLVER_STEPS.set(0);
     ROOT_HITS.set(0);
+    INTEGRATOR.set(None);
 }
 
 /// This thread's step and root counts since [`reset`].
@@ -25,6 +29,7 @@ pub fn snapshot() -> HotpathStatsSnapshot {
     HotpathStatsSnapshot {
         solver_steps: SOLVER_STEPS.get(),
         root_hits: ROOT_HITS.get(),
+        integrator: INTEGRATOR.get(),
     }
 }
 
@@ -45,6 +50,11 @@ pub fn reset_torn_declines() {
     super::fallbacks::reset_projection_fallbacks();
 }
 
+/// Record the integration method a simulation on this thread is about to run.
+pub fn note_integrator(method: &'static str) {
+    INTEGRATOR.set(Some(method));
+}
+
 pub(crate) fn inc_solver_step() {
     SOLVER_STEPS.set(SOLVER_STEPS.get() + 1);
 }
@@ -63,6 +73,9 @@ mod tests {
         inc_solver_step();
         inc_solver_step();
         inc_root_hit();
+        note_integrator("bdf");
+        assert_eq!(snapshot().integrator, Some("bdf"));
+        INTEGRATOR.set(None);
         let other = std::thread::spawn(snapshot).join().expect("thread");
         assert_eq!(other, HotpathStatsSnapshot::default());
         assert_eq!(
@@ -70,6 +83,7 @@ mod tests {
             HotpathStatsSnapshot {
                 solver_steps: 2,
                 root_hits: 1,
+                integrator: None,
             }
         );
         reset();

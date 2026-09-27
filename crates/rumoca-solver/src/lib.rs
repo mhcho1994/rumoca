@@ -33,7 +33,7 @@ pub use runtime::fallbacks::{
 };
 #[cfg(not(kani))]
 pub use runtime::hotpath_stats::{
-    HotpathStatsSnapshot, reset as reset_step_counts, snapshot as step_counts,
+    HotpathStatsSnapshot, note_integrator, reset as reset_step_counts, snapshot as step_counts,
 };
 #[cfg(not(kani))]
 pub use runtime::jacobian::{

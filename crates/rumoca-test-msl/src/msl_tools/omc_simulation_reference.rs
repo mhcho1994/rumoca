@@ -123,6 +123,10 @@ struct SimModelResult {
     /// OMC's integration settings from `simulationOptions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     omc_settings: Option<omc_session::OmcSimSettings>,
+    /// The worker count, OMC threads, and host this model's timing was taken
+    /// under; a cached timing keeps the context of its own run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    omc_timing_context: Option<serde_json::Value>,
     trace_file: Option<String>,
     trace_error: Option<String>,
     rumoca_status: Option<String>,
@@ -811,6 +815,13 @@ fn run_session_pending(
     }
     drop(tx);
 
+    // Each timing collected here carries the context it was taken under, so a
+    // cached timing from another worker count or host is recognisable later.
+    let context = serde_json::json!({
+        "workers": workers,
+        "omc_threads": args.omc_threads,
+        "host": output::host_description(),
+    });
     let mut completed = 0usize;
     for outcome in rx {
         completed += 1;
@@ -823,6 +834,7 @@ fn run_session_pending(
             skipped: false,
         });
         let mut result = outcome.result;
+        result.omc_timing_context = Some(context.clone());
         carry_failed_attempts(&mut result, state.all_results.get(&outcome.model));
         state.all_results.insert(outcome.model, result);
         if completed.is_multiple_of(25) || completed == total {
@@ -968,6 +980,7 @@ fn build_session_model_result(outcome: &OmcSimOutcome, elapsed: f64) -> SimModel
         total_system_seconds: outcome.timing.total,
         omc_phases: Some(outcome.timing.clone()),
         omc_settings: Some(outcome.settings.clone()),
+        omc_timing_context: None,
         omc_wall_seconds: Some(round3(elapsed)),
         result_file: outcome.result_file.clone(),
         ..empty_omc_result()
@@ -1006,6 +1019,7 @@ fn empty_omc_result() -> SimModelResult {
         result_file: None,
         omc_phases: None,
         omc_settings: None,
+        omc_timing_context: None,
         trace_file: None,
         trace_error: None,
         rumoca_status: None,
@@ -1389,6 +1403,9 @@ fn hydrate_omc_fields_from_cached(current: &mut SimModelResult, cached: &SimMode
     }
     if current.omc_settings.is_none() {
         current.omc_settings = cached.omc_settings.clone();
+    }
+    if current.omc_timing_context.is_none() {
+        current.omc_timing_context = cached.omc_timing_context.clone();
     }
     if current.omc_wall_seconds.is_none() {
         current.omc_wall_seconds = cached.omc_wall_seconds;

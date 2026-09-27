@@ -77,6 +77,7 @@ fn skipped_omc_result() -> SimModelResult {
         omc_wall_seconds: None,
         omc_phases: None,
         omc_settings: None,
+        omc_timing_context: None,
         result_file: None,
         trace_file: None,
         trace_error: None,

@@ -1126,15 +1126,16 @@ jobs:
         run: |
           # One bounded attempt; 20 s covers the certified strict-high tail on
           # hosted runners without retries, exclusions, or looser trace checks.
-          # Simulations run two at a time, one per physical core of the hosted
-          # runner, and the OMC reference collection uses the same count, so the
-          # speed report compares the two tools under equal contention.
+          # Compilation and simulations run two at a time, one per physical core
+          # of the hosted runner, and the OMC reference collection (which compiles
+          # and simulates in each worker) uses the same count, so the speed
+          # report compares the two tools under equal contention.
           cargo xtask verify msl-parity \
             --shard ${{ matrix.shard }}/4 \
             --prebuilt-test-binary "$PWD/result-msl-artifacts/bin/msl_tests" \
             --prebuilt-model-worker "$PWD/result-msl-artifacts/bin/rumoca-worker" \
             --prebuilt-sim-worker "$PWD/result-msl-artifacts/bin/rumoca-sim-worker" \
-            --stage-parallelism 3 \
+            --stage-parallelism 2 \
             --sim-parallelism 2 \
             --sim-worker-memory-mb 2048 \
             --sim-total-memory-mb 6144 \

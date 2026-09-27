@@ -1669,6 +1669,47 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// Compile and simulate `source` as the MSL worker does, returning the
+    /// recorded settings and the number of output points.
+    fn simulate_like_msl(name: &str, source: &str) -> (WorkerSimSettings, usize) {
+        let mut session = Session::default();
+        session
+            .add_document(&format!("{name}.mo"), source)
+            .expect("parse the grid model");
+        let result = session
+            .compile_model_dae_strict_reachable_uncached_with_recovery(name)
+            .expect("compile the grid model");
+        let settings = simulation_settings(&result);
+        let opts = sim_options(&settings, MSL_SIM_OUTPUT_INTERVALS, 30.0);
+        rumoca_sim::reset_step_counts();
+        let sim = rumoca_sim::simulate_dae(result.dae.as_ref(), &opts).expect("simulate");
+        let points = sim.times.len();
+        (
+            WorkerSimSettings::recorded(&opts, &sim, rumoca_sim::step_counts()),
+            points,
+        )
+    }
+
+    /// Output density is equal to OMC's by construction: an annotated model
+    /// divides its span by the `Interval` (1 / 0.01 = 100 intervals), an
+    /// unannotated one takes OMC's default 500, and N intervals give N + 1
+    /// points on a model without events.
+    #[test]
+    fn msl_output_points_follow_omcs_interval_rule() {
+        let annotated = "model Annotated\n  Real x(start = 1, fixed = true);\nequation\n  der(x) = -x;\n  annotation(experiment(StopTime = 1, Interval = 0.01));\nend Annotated;\n";
+        let unannotated = "model Unannotated\n  Real x(start = 1, fixed = true);\nequation\n  der(x) = -x;\n  annotation(experiment(StopTime = 0.7));\nend Unannotated;\n";
+        for (name, source, omc_intervals) in [
+            ("Annotated", annotated, 100),
+            ("Unannotated", unannotated, 500),
+        ] {
+            let (settings, points) = simulate_like_msl(name, source);
+            assert_eq!(settings.output_intervals, Some(omc_intervals), "{name}");
+            assert_eq!(settings.output_points, omc_intervals + 1, "{name}");
+            assert_eq!(points, omc_intervals + 1, "{name}");
+            assert_ne!(settings.integrator, "not recorded", "{name}");
+        }
+    }
+
     fn compile_zero_sized_standalone_model() -> Box<DaeCompilationResult> {
         let mut session = Session::default();
         session
@@ -1840,7 +1881,10 @@ mod tests {
             solver: "auto".to_string(),
         };
 
-        assert_eq!(sim_options(&settings, 100, 10.0).dt, settings.dt);
+        let dt = sim_options(&settings, 100, 10.0)
+            .dt
+            .expect("annotated output grid");
+        assert!((dt - 2.5e-10).abs() <= 4.0 * f64::EPSILON * 2.5e-10);
     }
 
     #[test]

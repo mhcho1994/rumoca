@@ -759,7 +759,7 @@ fn print_omc_assertion_snapshot(state: &SimRunState) {
 
 /// The host these references were timed on: its CPU counts and, on a CI
 /// runner, the runner image and environment.
-fn host_description() -> Value {
+pub(super) fn host_description() -> Value {
     json!({
         "logical_cpus": std::thread::available_parallelism().map(usize::from).ok(),
         "physical_cores": rumoca_worker::physical_cpu_core_count(),

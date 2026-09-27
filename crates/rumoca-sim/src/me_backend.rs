@@ -16,7 +16,12 @@ use rumoca_solver::{SimResult, fmi_me::driver::batch_output_cursor};
 
 use crate::SimError;
 
-pub(crate) type IntegratorFactory = fn(MeNumericalSetup) -> Box<dyn MeIntegratorBackend + 'static>;
+/// An integrator plugin factory with the method name a run records.
+#[derive(Clone, Copy)]
+pub(crate) struct IntegratorFactory {
+    pub(crate) method: &'static str,
+    pub(crate) build: fn(MeNumericalSetup) -> Box<dyn MeIntegratorBackend + 'static>,
+}
 
 pub(crate) struct BackendSimulationSession {
     session: MeSimulationSession<'static, 'static>,
@@ -148,10 +153,12 @@ pub(crate) fn plugin_for_host(
     integrator: IntegratorFactory,
 ) -> Result<Option<Box<dyn MeIntegratorBackend>>, SimError> {
     if host.state_count() == 0 {
+        rumoca_solver::note_integrator("none (no continuous states)");
         return Ok(None);
     }
     let setup = host.numerical_setup(Some(default_step_size(opts)))?;
-    Ok(Some(integrator(setup)))
+    rumoca_solver::note_integrator(integrator.method);
+    Ok(Some((integrator.build)(setup)))
 }
 
 pub(crate) fn instance_config(

@@ -32,26 +32,37 @@ pub const MSL_SIM_TIMEOUT_SECS: f64 = 12.0;
 /// intervals. Solver event instants remain additional output points.
 pub const MSL_SIM_OUTPUT_INTERVALS: usize = 500;
 
-/// Select the observation interval for an MSL simulation.
-///
-/// A valid Modelica experiment interval owns the grid. Otherwise the grid is
-/// scale invariant and uses the caller-provided uniform interval count.
+/// The number of output intervals of an MSL simulation, by the rule OMC's
+/// `simulate` applies: a valid experiment `Interval` gives the span divided
+/// by it, rounded to the nearest count, and a model without one takes
+/// `default_intervals`. N intervals are N + 1 grid points; event instants are
+/// additional points on both tools.
+pub fn msl_output_intervals(
+    t_start: f64,
+    t_end: f64,
+    experiment_interval: Option<f64>,
+    default_intervals: usize,
+) -> Option<usize> {
+    let span = (t_end - t_start).abs();
+    let intervals = match experiment_interval.filter(|value| value.is_finite() && *value > 0.0) {
+        Some(interval) => (span / interval).round(),
+        None => default_intervals as f64,
+    };
+    (intervals.is_finite() && intervals >= 1.0 && span > 0.0).then_some(intervals as usize)
+}
+
+/// Select the observation interval for an MSL simulation: the span divided
+/// into [`msl_output_intervals`] equal intervals, as OMC divides it, so the
+/// grid is scale invariant and matches OMC's point for point.
 pub fn msl_sim_output_dt(
     t_start: f64,
     t_end: f64,
     experiment_interval: Option<f64>,
-    output_intervals: usize,
+    default_intervals: usize,
 ) -> Option<f64> {
-    experiment_interval
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .or_else(|| {
-            if output_intervals == 0 {
-                return None;
-            }
-            let span = (t_end - t_start).abs();
-            let dt = span / output_intervals as f64;
-            (dt.is_finite() && dt > 0.0).then_some(dt)
-        })
+    let intervals = msl_output_intervals(t_start, t_end, experiment_interval, default_intervals)?;
+    let dt = (t_end - t_start).abs() / intervals as f64;
+    (dt.is_finite() && dt > 0.0).then_some(dt)
 }
 
 pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 3;
@@ -874,9 +885,15 @@ pub struct WorkerModelResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerSimSettings {
     /// The requested solver family (`auto`, `bdf`, or `rk`).
-    pub solver: String,
+    pub requested_solver: String,
+    /// The integration method that actually ran (`bdf`, `rk45`, or none for
+    /// a model without continuous states).
+    pub integrator: String,
     pub rtol: f64,
     pub atol: f64,
+    /// Output grid intervals by the OMC rule ([`msl_output_intervals`]); the
+    /// grid has one more point.
+    pub output_intervals: Option<usize>,
     /// Recorded output points, including both end points.
     pub output_points: usize,
     /// Accepted integration steps.
@@ -899,8 +916,11 @@ impl WorkerSimSettings {
             rumoca_sim::SimSolverMode::Bdf => "bdf",
             rumoca_sim::SimSolverMode::RkLike => "rk",
         };
+        let span = (options.t_end - options.t_start).abs();
         Self {
-            solver: solver.to_string(),
+            requested_solver: solver.to_string(),
+            integrator: counts.integrator.unwrap_or("not recorded").to_string(),
+            output_intervals: options.dt.map(|dt| (span / dt).round() as usize),
             rtol: options.rtol,
             atol: options.atol,
             output_points: result.times.len(),
@@ -1144,9 +1164,21 @@ mod tests {
     #[test]
     fn explicit_experiment_interval_owns_the_msl_output_grid() {
         assert_eq!(
-            msl_sim_output_dt(0.0, 1.0e-7, Some(2.5e-10), 500),
-            Some(2.5e-10)
+            msl_output_intervals(0.0, 1.0e-7, Some(2.5e-10), 500),
+            Some(400)
         );
+        let dt = msl_sim_output_dt(0.0, 1.0e-7, Some(2.5e-10), 500).expect("grid");
+        assert!((dt - 2.5e-10).abs() <= 4.0 * f64::EPSILON * 2.5e-10);
+    }
+
+    /// OMC's rule: an annotated `Interval` divides the span into the nearest
+    /// count (a span that is not a float multiple of it still rounds), and an
+    /// unannotated model takes 500 intervals, whatever its span.
+    #[test]
+    fn msl_output_intervals_follow_the_omc_rule() {
+        assert_eq!(msl_output_intervals(0.0, 1.5, Some(0.001), 500), Some(1500));
+        assert_eq!(msl_output_intervals(0.0, 1.5, None, 500), Some(500));
+        assert_eq!(msl_output_intervals(0.0, 0.0, None, 500), None);
     }
 
     #[test]

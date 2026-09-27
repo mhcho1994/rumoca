@@ -12,6 +12,11 @@ use crate::me_backend::{
     BackendSimulationSession, batch_options, instance_config, plugin_for_host,
 };
 use crate::simulation_session::SessionState;
+
+const BDF_INTEGRATOR: crate::me_backend::IntegratorFactory = crate::me_backend::IntegratorFactory {
+    method: "bdf",
+    build: rumoca_solver_diffsol::model_exchange_integrator,
+};
 use crate::solve_lowering::{
     SimulationDiagnosticError, apply_correlated_simulation_overrides, finish_runtime_fmi_artifact,
     lower_correlated_for_simulation_with_stage_timing_and_param_overrides, tunable_param_overrides,
@@ -248,11 +253,7 @@ fn simulate_prepared(prepared: &PreparedSimulation) -> Result<rumoca_solver::Sim
     if host.is_terminated() {
         return Ok(host.finish());
     }
-    let plugin = plugin_for_host(
-        &host,
-        &prepared.opts,
-        rumoca_solver_diffsol::model_exchange_integrator,
-    )?;
+    let plugin = plugin_for_host(&host, &prepared.opts, BDF_INTEGRATOR)?;
     let mut session = host.into_session(plugin)?;
     session.run_to_stop(&mut cursor)?;
     Ok(session.finish())
@@ -272,11 +273,7 @@ fn check_prepared_component(prepared: &PreparedSimulation) -> Result<(), SimErro
     if host.is_terminated() {
         return Ok(());
     }
-    let plugin = plugin_for_host(
-        &host,
-        &prepared.opts,
-        rumoca_solver_diffsol::model_exchange_integrator,
-    )?;
+    let plugin = plugin_for_host(&host, &prepared.opts, BDF_INTEGRATOR)?;
     drop(host.into_session(plugin)?);
     Ok(())
 }
@@ -333,7 +330,7 @@ impl SimulationSession {
             &opts,
             execution_backend,
             "diffsol",
-            rumoca_solver_diffsol::model_exchange_integrator,
+            BDF_INTEGRATOR,
         )
         .map_err(|err| SimulationDiagnosticError::Solver(err.to_string()))?;
         Ok(Self { inner })
