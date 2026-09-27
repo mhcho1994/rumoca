@@ -59,6 +59,7 @@ mod constraint_fold_charts;
 mod coupled_refresh_schedule;
 mod derivative_alias_initial_acceleration;
 mod derivative_kinks;
+mod derivative_reads_in_derivative_rows;
 mod differential_structure;
 mod enumeration_compact_range_test;
 mod enumeration_literal_assertions;

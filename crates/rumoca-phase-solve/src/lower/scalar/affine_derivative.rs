@@ -198,7 +198,9 @@ impl<'dae> AffineProof<'dae> {
             });
         }
         let view = self.selector.view();
-        if !expression_contains_derivative(view, expression) {
+        // A read of another state's derivative is a value this row consumes:
+        // the compiler substitutes that state's own definition.
+        if !expression_contains_state_derivative(view, expression, self.state) {
             return Ok(Form {
                 coefficient: None,
                 offset: self.push(Term::Source(expression, scalar)),

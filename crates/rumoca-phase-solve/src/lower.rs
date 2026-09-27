@@ -1224,7 +1224,8 @@ fn lower_derivative_scalar_outputs<'dae>(
                     })
         });
     let compiler = ScalarCompiler::new(context.view, context.layout, None)
-        .with_function_conditional_owners(context.function_conditional_owners);
+        .with_function_conditional_owners(context.function_conditional_owners)
+        .with_derivative_definitions(context.derivatives);
     let program = if let Some(expression) = complete_expression {
         compiler.aggregate_program([expression])?
     } else {
@@ -1341,10 +1342,12 @@ fn lower_continuous_row<'dae>(
             let program = match rhs {
                 DerivativeRhs::Affine(proof) => ScalarCompiler::new(view, layout, domain_point)
                     .with_function_conditional_owners(function_conditional_owners)
+                    .with_derivative_definitions(derivatives)
                     .affine_derivative_program(&proof)?,
                 DerivativeRhs::Explicit { expression, scalar } => {
                     ScalarCompiler::new(view, layout, domain_point)
                         .with_function_conditional_owners(function_conditional_owners)
+                        .with_derivative_definitions(derivatives)
                         .program(expression, scalar)?
                 }
                 DerivativeRhs::Scaled {
@@ -1355,6 +1358,7 @@ fn lower_continuous_row<'dae>(
                     span,
                 } => ScalarCompiler::new(view, layout, domain_point)
                     .with_function_conditional_owners(function_conditional_owners)
+                    .with_derivative_definitions(derivatives)
                     .scaled_derivative_program(ScaledDerivativeProgram {
                         numerator,
                         numerator_scalar,
@@ -1627,14 +1631,33 @@ fn expression_contains_derivative<'dae>(
     view: dae::DaeView<'dae>,
     expression: dae::ExprId<'dae>,
 ) -> bool {
+    expression_contains_derivative_where(view, expression, |_| true)
+}
+
+/// Whether `expression` reads the derivative of `state` (any scalar).
+fn expression_contains_state_derivative<'dae>(
+    view: dae::DaeView<'dae>,
+    expression: dae::ExprId<'dae>,
+    state: dae::StateId<'dae>,
+) -> bool {
+    expression_contains_derivative_where(view, expression, |found| found == state)
+}
+
+fn expression_contains_derivative_where<'dae>(
+    view: dae::DaeView<'dae>,
+    expression: dae::ExprId<'dae>,
+    matches: impl Fn(dae::StateId<'dae>) -> bool,
+) -> bool {
     let mut pending = vec![expression];
     while let Some(expression) = pending.pop() {
         let node = view
             .expression(expression)
             .expect("branded expression resolves");
         match node.operation() {
-            dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(_)) => {
-                return true;
+            dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(state)) => {
+                if matches(state) {
+                    return true;
+                }
             }
             dae::ExpressionOperation::Literal(_)
             | dae::ExpressionOperation::Coordinate(_)
@@ -1774,13 +1797,13 @@ fn derivative_rhs<'dae>(
     let rhs = selector.structural_branch(rhs, scalar)?;
     let lhs_direct = is_target_derivative(&selector, lhs, scalar, state, state_scalar)?;
     let rhs_direct = is_target_derivative(&selector, rhs, scalar, state, state_scalar)?;
-    if lhs_direct && !expression_contains_derivative(view, rhs) {
+    if lhs_direct && !expression_contains_state_derivative(view, rhs, state) {
         return Ok(DerivativeRhs::Explicit {
             expression: rhs,
             scalar,
         });
     }
-    if rhs_direct && !expression_contains_derivative(view, lhs) {
+    if rhs_direct && !expression_contains_state_derivative(view, lhs, state) {
         return Ok(DerivativeRhs::Explicit {
             expression: lhs,
             scalar,
@@ -1790,7 +1813,7 @@ fn derivative_rhs<'dae>(
     let rhs_scaled = scaled_derivative_factor(&selector, rhs, scalar, state, state_scalar)?;
     match (lhs_scaled, rhs_scaled) {
         (Some((coefficient, coefficient_scalar)), None)
-            if !expression_contains_derivative(view, rhs) =>
+            if !expression_contains_state_derivative(view, rhs, state) =>
         {
             Ok(DerivativeRhs::Scaled {
                 numerator: rhs,
@@ -1801,7 +1824,7 @@ fn derivative_rhs<'dae>(
             })
         }
         (None, Some((coefficient, coefficient_scalar)))
-            if !expression_contains_derivative(view, lhs) =>
+            if !expression_contains_state_derivative(view, lhs, state) =>
         {
             Ok(DerivativeRhs::Scaled {
                 numerator: lhs,
