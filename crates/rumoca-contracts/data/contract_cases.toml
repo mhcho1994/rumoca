@@ -3801,3 +3801,17 @@ case_id = 'eqn_039_differentiated_branches_fix_the_parameter'
 test_file = 'tests/eqn_contracts.rs'
 kind = 'Compile'
 outcome = 'Accept'
+
+[[cases]]
+contract_id = 'EQN-009'
+case_id = 'eqn_009_binder_derivative_subscripts_are_static'
+test_file = 'tests/eqn_contracts.rs'
+kind = 'Compile'
+outcome = 'Accept'
+
+[[cases]]
+contract_id = 'EQN-009'
+case_id = 'eqn_009_variable_derivative_subscripts_stay_dynamic'
+test_file = 'tests/eqn_contracts.rs'
+kind = 'Compile'
+outcome = 'Reject'
