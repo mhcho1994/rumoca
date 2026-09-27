@@ -9,7 +9,11 @@
 //! are unchanged too. Every other owner keeps its exact rows, which the
 //! incremental incidence already relies on.
 //!
-//! The derivative of `rhs` reads only coordinates `rhs` reads and the
+//! The bound applies only when `rhs` reads no algebraic coordinate and no
+//! record field or constructor: the differentiator reads an algebraic's
+//! equality anchor, causal definition, auxiliary block, or record component
+//! definitions, whose columns `rhs` does not show. Without those, the
+//! derivative of `rhs` reads only coordinates `rhs` reads and the
 //! derivatives of the states among them; a function body reads no model
 //! coordinate. So a touched row after the demotion is contained in its prior
 //! row without `x`'s columns, plus `x`'s columns, plus, when it read
@@ -47,7 +51,8 @@ impl<'a> DemotionScreen<'a> {
 
     /// The residue lower bound of demoting `candidate`, when the bound
     /// applies: an exact expression definition whose coordinates are values
-    /// (never a derivative) and a state with unknown columns.
+    /// (never a derivative or an algebraic, and no record field or constructor)
+    /// and a state with unknown columns.
     pub(super) fn residue_bound(
         &self,
         view: dae::DaeView<'_>,
@@ -59,13 +64,16 @@ impl<'a> DemotionScreen<'a> {
         let state_columns = self.bounds.columns(candidate.state)?;
         let rhs = view.expression_id(rhs as usize)?;
         let mut derivative_columns = Vec::new();
-        let mut reads_derivative = false;
+        let mut unbounded = false;
         dae::ExpressionTraversal::new().visit_pruned(view, [rhs], |_, node| {
             if matches!(
                 node.operation(),
-                dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(_))
+                dae::ExpressionOperation::Coordinate(
+                    dae::CoordinateView::Derivative(_) | dae::CoordinateView::Algebraic(_)
+                ) | dae::ExpressionOperation::Field { .. }
+                    | dae::ExpressionOperation::Record(_)
             ) {
-                reads_derivative = true;
+                unbounded = true;
             }
             if let Some(columns) = node
                 .variable_coordinate()
@@ -75,7 +83,7 @@ impl<'a> DemotionScreen<'a> {
             }
             true
         });
-        if reads_derivative {
+        if unbounded {
             return None;
         }
         let touched = self.bounds.owners(candidate.state);
