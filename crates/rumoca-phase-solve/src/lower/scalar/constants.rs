@@ -64,6 +64,41 @@ impl<'dae> ScalarSelector<'dae> {
                     self.constant_conditional_branch(operands, scalar, reach, span, active)?;
                 self.constant_real_inner(selected, scalar, reach, active)
             }
+            // Aggregates select the one scalar this read names, through the
+            // same projections the runtime program uses (a per-segment line
+            // inductance `lm[k]` of a comprehension binding, for one).
+            dae::ExpressionOperation::Index { base, subscripts } => {
+                let selected = self.indexed_base_scalar(
+                    base,
+                    subscripts,
+                    node.value_type().dimensions(),
+                    scalar,
+                )?;
+                self.constant_real_inner(base, selected, reach, active)
+            }
+            dae::ExpressionOperation::Array(_) => {
+                let (element, selected) = self.select_array_element(expression, scalar)?;
+                self.constant_real_inner(element, selected, reach, active)
+            }
+            dae::ExpressionOperation::Comprehension { domain, body } => {
+                let body_count = scalar_count(self.view, body);
+                let point = self
+                    .view
+                    .domain(domain)
+                    .expect("checked comprehension domain resolves")
+                    .structured()
+                    .index_tuple_at(scalar / body_count)
+                    .map_err(|_| LowerError::contract("checked domain remains valid", span))?
+                    .ok_or_else(|| {
+                        LowerError::contract("checked scalar selects a domain point", span)
+                    })?;
+                let mut nested = self.clone();
+                nested.domain_points.push((domain, point));
+                nested.constant_real_inner(body, scalar % body_count, reach, active)
+            }
+            dae::ExpressionOperation::Coordinate(dae::CoordinateView::Binder(_)) => {
+                self.integer(expression, scalar).map(|value| value as f64)
+            }
             _ => Err(LowerError::non_computable(
                 "affine derivative coefficient is not compile-time numeric",
                 span,

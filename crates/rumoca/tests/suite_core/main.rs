@@ -28,6 +28,7 @@ mod history_operator_checked;
 mod initial_boolean_parameter;
 
 mod additive_torque;
+mod affine_coefficient_aggregates;
 mod affine_switching_circuit;
 mod algebraic_observation_accuracy;
 mod algorithm_parameter_range;
