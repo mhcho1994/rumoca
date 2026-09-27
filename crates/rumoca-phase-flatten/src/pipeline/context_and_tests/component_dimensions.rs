@@ -214,7 +214,7 @@ fn record_structural_dimension_parameters(
     };
     if !dimensions
         .iter()
-        .any(|dimension| crate::boolean_eval::reads_tunable_parameter(ctx, dimension, &scope))
+        .any(|dimension| crate::boolean_eval::reads_parameter(ctx, dimension, &scope))
     {
         return;
     }

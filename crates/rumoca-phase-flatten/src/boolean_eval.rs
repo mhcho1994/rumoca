@@ -229,6 +229,22 @@ pub(crate) fn non_evaluable_parameter_read(
         .find(|name| scoped_set_contains(&ctx.non_evaluable_params, name, prefix))
 }
 
+/// Whether `expr` reads any parameter, `final` and `Evaluate = true` ones
+/// included: a `final` parameter bound to an ordinary one still carries that
+/// parameter's value into a structural use (SPEC_0022 DECL-037), and DAE
+/// construction closes the recorded reads over their bindings.
+pub(crate) fn reads_parameter(
+    ctx: &Context,
+    expr: &ast::Expression,
+    prefix: &ast::QualifiedName,
+) -> bool {
+    ast::collect_component_refs(expr).iter().any(|reference| {
+        let name = reference.to_string();
+        scoped_set_contains(&ctx.structural_params, &name, prefix)
+            || scoped_set_contains(&ctx.non_structural_params, &name, prefix)
+    })
+}
+
 /// Whether `name` denotes a parameter or a constant from `prefix`.
 pub(crate) fn names_parameter_or_constant(
     ctx: &Context,

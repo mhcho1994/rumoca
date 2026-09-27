@@ -168,6 +168,53 @@ fn constant_calls_fold_and_literal_bindings_are_read_as_literals() {
     }
 }
 
+const TUNABLE_BINDING: &str = "
+model TunableBinding
+  function bases
+    input Integer m;
+    output Integer n;
+  algorithm
+    n := if m > 2 and mod(m, 2) == 0 then 2*bases(div(m, 2)) else 1;
+  end bases;
+  parameter Integer m = 12 annotation(Evaluate = true);
+  parameter Real gain = 0.5;
+  parameter Real rate = bases(m)*gain;
+  Real x(start = 0, fixed = true);
+equation
+  der(x) = rate;
+end TunableBinding;";
+
+#[test]
+fn a_constant_call_in_a_tunable_parameter_binding_folds_and_keeps_the_binding_settable() {
+    let compiled = Compiler::new()
+        .model("TunableBinding")
+        .compile_str(TUNABLE_BINDING, "TunableBinding.mo")
+        .expect("the model is well formed");
+    // `bases(12)` is a recursive constant call: it folds to 4, so the update
+    // row of `rate` reads only `gain`, which stays settable.
+    for (gain, expected) in [(None, 2.0), (Some(2.0), 8.0)] {
+        let options = SimOptions {
+            t_end: 1.0,
+            param_overrides: gain
+                .map(|gain| vec![("gain".to_string(), gain)])
+                .unwrap_or_default(),
+            ..SimOptions::default()
+        };
+        let result = simulate_dae_with_diagnostics(&compiled.dae, &options)
+            .unwrap_or_else(|error| panic!("gain {gain:?}: {error:#}"));
+        let x = result
+            .names
+            .iter()
+            .position(|name| name == "x")
+            .expect("x is recorded");
+        let last = *result.data[x].last().expect("a sample");
+        assert!(
+            (last - expected).abs() < 1e-6,
+            "gain {gain:?}: x(1) = {last}"
+        );
+    }
+}
+
 #[test]
 fn a_constant_call_that_fails_is_a_compile_error_naming_the_call() {
     let compiled = Compiler::new()

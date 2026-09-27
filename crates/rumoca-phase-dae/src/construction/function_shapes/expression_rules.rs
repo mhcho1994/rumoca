@@ -501,7 +501,9 @@ fn builtin_shape(
         // MLS §3.7.4.5 `semiLinear` returns `if x >= 0 then positiveSlope*x else
         // negativeSlope*x`, so its shape is the common shape of its operands.
         BuiltinFunction::Atan2
+        | BuiltinFunction::Div
         | BuiltinFunction::Mod
+        | BuiltinFunction::Rem
         | BuiltinFunction::Min
         | BuiltinFunction::Max
         | BuiltinFunction::SemiLinear => {

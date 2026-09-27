@@ -45,6 +45,19 @@ package Structural
       der(x[nr + i]) = -x[nr + i];
     end for;
   end DependentBinding;
+  function half
+    input Integer m;
+    output Integer n;
+  algorithm
+    n := if m > 2 then 2*half(div(m, 2)) else 1;
+  end half;
+  model FinalBinding
+    parameter Integer m = 8;
+    final parameter Integer n = half(m);
+    Real x[n](each start = 1, each fixed = true);
+  equation
+    der(x) = -x;
+  end FinalBinding;
 end Structural;
 "#;
 
@@ -99,4 +112,19 @@ fn a_structural_parameter_closes_over_its_binding_and_indexes_a_family() {
     };
     assert!((last("x[1]") - (-2.0f64).exp()).abs() < 1e-4);
     assert!((last("x[3]") - (-1.0f64).exp()).abs() < 1e-4);
+}
+
+#[test]
+fn a_final_binding_carries_an_ordinary_parameter_into_an_extent() {
+    // `n` is final, but its recursive binding reads the ordinary `m`, so the
+    // dimension makes both structural rather than leaving the call to run.
+    let dae = compile("Structural.FinalBinding");
+    assert_eq!(evaluable(&dae), ["m", "n"]);
+    let states = dae.inspect(|view| {
+        view.variables()
+            .filter(|(_, variable)| variable.role() == dae::VariableRole::State)
+            .map(|(_, variable)| variable.scalar_count())
+            .sum::<usize>()
+    });
+    assert_eq!(states, 4);
 }

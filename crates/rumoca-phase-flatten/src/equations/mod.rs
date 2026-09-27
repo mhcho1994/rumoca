@@ -1048,7 +1048,7 @@ fn record_structural_range(
 ) -> FlattenedEquations {
     if indices
         .iter()
-        .any(|index| reads_tunable_parameter(ctx, &index.range, prefix))
+        .any(|index| crate::boolean_eval::reads_parameter(ctx, &index.range, prefix))
     {
         flattened
             .parameter_branch_selections
