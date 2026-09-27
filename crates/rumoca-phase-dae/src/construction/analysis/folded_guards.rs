@@ -4,11 +4,11 @@
 //! An equation conditional whose guard reads an ordinary parameter stays a
 //! run-time branch when its arms are structurally equal; otherwise equation
 //! lowering folds it as a structural selection. A variable's attribute or
-//! binding value folds such a guard only when an arm calls a user function. A
-//! folded guard freezes the parameter at its translation-time value, so a
-//! later set of it could not take effect. Each such parameter, and every
-//! parameter its binding reads, is therefore evaluable: fixed at translation
-//! and exported non-settable.
+//! binding value folds such a guard when an arm calls a user function or its
+//! arms are not proven to share one shape. A folded guard freezes the
+//! parameter at its translation-time value, so a later set of it could not
+//! take effect. Each such parameter, and every parameter its binding reads,
+//! is therefore evaluable: fixed at translation and exported non-settable.
 
 use std::collections::HashSet;
 
