@@ -18,12 +18,14 @@
 //! * a top-level conjunct of `c` is `k < N`, `k <= N`, `N > k`, or `N >= k`,
 //!   with `N` settled at translation (a literal, a shape extent, an evaluable
 //!   parameter) and not written by `S`;
-//! * `S` writes `k` exactly once, as the top-level statement `k := k + d` with
-//!   a positive Integer literal `d`, and contains no `break` or `return`;
+//! * `S` has no `break` or `return`, writes `k` once at top level as
+//!   `k := k + d` with a positive Integer literal `d`, writes `k` after that
+//!   statement nowhere, and before it only as `k := N` (the `isEqual` early
+//!   exit), which cannot lower `k` while `c` holds;
 //! * `k` is at least 1 whenever `c` is evaluated: either `c` reads an array
 //!   element with `k` as a subscript (MLS §10.5 makes an index below 1 an
-//!   error), or the statement just before the loop assigns `k` a literal
-//!   `k0 >= 1`.
+//!   error), or `k` enters the loop holding a literal of at least 1 (its last
+//!   dominating assignment, or its declaration binding when nothing wrote it).
 //!
 //! Then every iteration raises `k` by at least 1 from at least 1 while `k`
 //! stays at most `N`, so `B = N` iterations suffice. A loop without such a
@@ -32,33 +34,87 @@
 use super::*;
 use rumoca_core::{ForIndex, Literal, OpBinary, StatementBlock};
 
+/// Literal Integer values each name is proven to hold at the current point.
+pub(super) type EntryValues = HashMap<VarName, i64>;
+
+/// The literal Integer defaults of a function's locals, which hold at entry.
+pub(super) fn entry_values(function: &rumoca_core::Function) -> EntryValues {
+    function
+        .locals
+        .iter()
+        .filter_map(|local| match local.default.as_ref()? {
+            Expression::Literal {
+                value: Literal::Integer(value),
+                ..
+            } => Some((VarName::new(&local.name), *value)),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn bound_while_loops(
     statements: &[rumoca_core::Statement],
     shapes: &ShapeEnvironment,
+    entry: &EntryValues,
 ) -> Vec<rumoca_core::Statement> {
+    let mut known = entry.clone();
     let mut bounded = Vec::with_capacity(statements.len());
-    for (ordinal, statement) in statements.iter().enumerate() {
-        let previous = ordinal
-            .checked_sub(1)
-            .and_then(|previous| statements.get(previous));
-        bounded.push(bound_statement(statement, previous, shapes));
+    for statement in statements {
+        bounded.push(bound_statement(statement, shapes, &known));
+        advance_known(&mut known, statement);
     }
     bounded
 }
 
+/// The values still proven after `statement` runs.
+fn advance_known(known: &mut EntryValues, statement: &rumoca_core::Statement) {
+    if let rumoca_core::Statement::Assignment {
+        comp,
+        value:
+            Expression::Literal {
+                value: Literal::Integer(value),
+                ..
+            },
+        ..
+    } = statement
+        && comp.parts().iter().all(|part| part.subs.is_empty())
+    {
+        known.insert(
+            rumoca_core::component_ref_to_base_reference(comp)
+                .var_name()
+                .clone(),
+            *value,
+        );
+        return;
+    }
+    for name in statements_written_names(std::slice::from_ref(statement)) {
+        known.remove(&name);
+    }
+}
+
+/// The values a loop body may rely on in every iteration: none it writes.
+fn loop_entry(known: &EntryValues, body: &[rumoca_core::Statement]) -> EntryValues {
+    let written = statements_written_names(body);
+    known
+        .iter()
+        .filter(|(name, _)| !written.contains(*name))
+        .map(|(name, value)| (name.clone(), *value))
+        .collect()
+}
+
 fn bound_statement(
     statement: &rumoca_core::Statement,
-    previous: Option<&rumoca_core::Statement>,
     shapes: &ShapeEnvironment,
+    known: &EntryValues,
 ) -> rumoca_core::Statement {
     match statement {
         rumoca_core::Statement::While { block, span } => {
-            let body = bound_while_loops(&block.stmts, shapes);
+            let body = bound_while_loops(&block.stmts, shapes, &loop_entry(known, &block.stmts));
             let block = StatementBlock {
                 cond: block.cond.clone(),
                 stmts: body,
             };
-            iteration_bound(&block, previous, shapes).map_or_else(
+            iteration_bound(&block, known, shapes).map_or_else(
                 || rumoca_core::Statement::While {
                     block: block.clone(),
                     span: *span,
@@ -72,7 +128,7 @@ fn bound_statement(
             span,
         } => rumoca_core::Statement::For {
             indices: indices.clone(),
-            equations: bound_while_loops(equations, shapes),
+            equations: bound_while_loops(equations, shapes, &loop_entry(known, equations)),
             span: *span,
         },
         rumoca_core::Statement::If {
@@ -84,12 +140,12 @@ fn bound_statement(
                 .iter()
                 .map(|block| StatementBlock {
                     cond: block.cond.clone(),
-                    stmts: bound_while_loops(&block.stmts, shapes),
+                    stmts: bound_while_loops(&block.stmts, shapes, known),
                 })
                 .collect(),
             else_block: else_block
                 .as_ref()
-                .map(|statements| bound_while_loops(statements, shapes)),
+                .map(|statements| bound_while_loops(statements, shapes, known)),
             span: *span,
         },
         _ => statement.clone(),
@@ -123,7 +179,7 @@ fn guarded_for(block: StatementBlock, bound: i64, span: Span) -> rumoca_core::St
 /// The proven iteration bound of one `while` loop (see the module note).
 fn iteration_bound(
     block: &StatementBlock,
-    previous: Option<&rumoca_core::Statement>,
+    known: &EntryValues,
     shapes: &ShapeEnvironment,
 ) -> Option<i64> {
     if statements_exit_early(&block.stmts) {
@@ -140,11 +196,12 @@ fn iteration_bound(
             limit.collect_var_refs(&mut reads);
             reads.iter().all(|name| !written.contains(name))
         };
+        let starts_positive = known.get(counter).is_some_and(|start| *start >= 1);
         (bound >= 0
             && limit_invariant
-            && increments_once(&block.stmts, counter)
-            && (indexes_with(&block.cond, counter) || starts_at_least_one(previous, counter)))
-        .then_some(bound)
+            && advances_each_iteration(&block.stmts, counter, bound, shapes)
+            && (indexes_with(&block.cond, counter) || starts_positive))
+            .then_some(bound)
     })
 }
 
@@ -185,29 +242,61 @@ fn plain_reference(expression: &Expression) -> Option<&VarName> {
     }
 }
 
-/// The body writes `counter` exactly once, as a top-level `k := k + d` with a
-/// positive Integer literal `d`.
-fn increments_once(statements: &[rumoca_core::Statement], counter: &VarName) -> bool {
-    let mut increments = 0;
-    for statement in statements {
-        match statement {
-            rumoca_core::Statement::Assignment { comp, value, .. }
-                if rumoca_core::component_ref_to_base_reference(comp).var_name() == counter =>
-            {
-                if !comp.parts().iter().all(|part| part.subs.is_empty())
-                    || !is_positive_increment(value, counter)
-                {
-                    return false;
-                }
-                increments += 1;
-            }
-            _ if statements_written_names(std::slice::from_ref(statement)).contains(counter) => {
-                return false;
-            }
-            _ => {}
+/// The body raises `counter` by a positive literal once per iteration: one
+/// top-level `k := k + d`, no write of `k` after it, and before it only
+/// `k := N` (the limit itself), anywhere.
+fn advances_each_iteration(
+    statements: &[rumoca_core::Statement],
+    counter: &VarName,
+    limit: i64,
+    shapes: &ShapeEnvironment,
+) -> bool {
+    let Some(increment) = statements.iter().position(|statement| {
+        matches!(statement, rumoca_core::Statement::Assignment { comp, value, .. }
+            if comp.parts().iter().all(|part| part.subs.is_empty())
+                && rumoca_core::component_ref_to_base_reference(comp).var_name() == counter
+                && is_positive_increment(value, counter))
+    }) else {
+        return false;
+    };
+    !statements_written_names(&statements[increment + 1..]).contains(counter)
+        && writes_only_limit(&statements[..increment], counter, limit, shapes)
+}
+
+/// Every write of `counter` in `statements` assigns exactly `limit`.
+fn writes_only_limit(
+    statements: &[rumoca_core::Statement],
+    counter: &VarName,
+    limit: i64,
+    shapes: &ShapeEnvironment,
+) -> bool {
+    statements.iter().all(|statement| match statement {
+        rumoca_core::Statement::Assignment { comp, value, .. }
+            if rumoca_core::component_ref_to_base_reference(comp).var_name() == counter =>
+        {
+            comp.parts().iter().all(|part| part.subs.is_empty())
+                && shapes.proven_extent(value) == Some(limit)
         }
-    }
-    increments == 1
+        rumoca_core::Statement::For { equations, .. } => {
+            writes_only_limit(equations, counter, limit, shapes)
+        }
+        rumoca_core::Statement::While { block, .. } => {
+            writes_only_limit(&block.stmts, counter, limit, shapes)
+        }
+        rumoca_core::Statement::If {
+            cond_blocks,
+            else_block,
+            ..
+        } => {
+            cond_blocks
+                .iter()
+                .all(|block| writes_only_limit(&block.stmts, counter, limit, shapes))
+                && else_block
+                    .as_ref()
+                    .is_none_or(|statements| writes_only_limit(statements, counter, limit, shapes))
+        }
+        other => !statements_written_names(std::slice::from_ref(other)).contains(counter),
+    })
 }
 
 fn is_positive_increment(value: &Expression, counter: &VarName) -> bool {
@@ -263,20 +352,6 @@ fn indexes_with(expression: &Expression, counter: &VarName) -> bool {
     };
     rumoca_core::ExpressionVisitor::visit_expression(&mut search, expression);
     search.found
-}
-
-/// The statement just before the loop assigns `counter` a literal of at
-/// least 1.
-fn starts_at_least_one(previous: Option<&rumoca_core::Statement>, counter: &VarName) -> bool {
-    matches!(
-        previous,
-        Some(rumoca_core::Statement::Assignment { comp, value: Expression::Literal {
-            value: Literal::Integer(start),
-            ..
-        }, .. }) if comp.parts().iter().all(|part| part.subs.is_empty())
-            && rumoca_core::component_ref_to_base_reference(comp).var_name() == counter
-            && *start >= 1
-    )
 }
 
 fn statements_exit_early(statements: &[rumoca_core::Statement]) -> bool {

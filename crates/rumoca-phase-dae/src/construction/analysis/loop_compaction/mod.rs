@@ -108,7 +108,8 @@ pub(super) fn compact_function_loops(
         function,
         flat,
     )?;
-    let settled = bounded_while::bound_while_loops(&settled, shapes);
+    let settled =
+        bounded_while::bound_while_loops(&settled, shapes, &bounded_while::entry_values(function));
     let mut bounded_shapes = shapes.clone();
     infer_function_integer_bounds(&settled, &mut bounded_shapes);
     let settled = rectangularize_bounded_slice_assignments(&settled, &bounded_shapes);
