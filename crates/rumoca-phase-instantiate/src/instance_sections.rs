@@ -227,7 +227,11 @@ fn select_structural_if_branch<'a>(
         return None;
     };
     let eval_ctx = eval_ctx?;
-    if !if_selection_is_grounded(cond_blocks, else_block.as_deref()) {
+    if !if_selection_is_grounded(cond_blocks, else_block.as_deref())
+        || cond_blocks
+            .iter()
+            .any(|block| names_possibly_non_evaluable(eval_ctx, &block.cond))
+    {
         return None;
     }
     for block in cond_blocks {
@@ -238,6 +242,35 @@ fn select_structural_if_branch<'a>(
         }
     }
     Some(else_block.as_deref().unwrap_or_default())
+}
+
+/// Whether `condition` names a component that may be a non-evaluable parameter
+/// (MLS 3.7 section 4.5): one that writes `Evaluate = false` or modifies
+/// `fixed`. Such a selection is left to flatten, which evaluates `fixed` and
+/// selects on evaluable parameters only.
+fn names_possibly_non_evaluable(
+    eval_ctx: &InstantiateEvalCtx<'_>,
+    condition: &ast::Expression,
+) -> bool {
+    ast::collect_component_refs(condition)
+        .iter()
+        .any(|reference| {
+            let Some(first) = reference.parts.first() else {
+                return false;
+            };
+            let name = first.ident.text.as_ref();
+            eval_ctx
+                .effective_components
+                .get(name)
+                .is_some_and(|component| {
+                    super::evaluate_annotation(component) == Some(false)
+                        || component.modifications.contains_key("fixed")
+                        || eval_ctx
+                            .mod_env
+                            .get(&ast::QualifiedName::from_ident(name).child("fixed"))
+                            .is_some()
+                })
+        })
 }
 
 /// True when an if-equation may be decided at instantiation time: either every

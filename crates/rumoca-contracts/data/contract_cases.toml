@@ -3815,3 +3815,17 @@ case_id = 'eqn_009_variable_derivative_subscripts_stay_dynamic'
 test_file = 'tests/eqn_contracts.rs'
 kind = 'Compile'
 outcome = 'Reject'
+
+[[cases]]
+contract_id = 'EQN-039'
+case_id = 'eqn_039_evaluate_false_guard_with_unequal_counts_rejected'
+test_file = 'tests/eqn_contracts.rs'
+kind = 'Compile'
+outcome = 'Reject'
+
+[[cases]]
+contract_id = 'EQN-039'
+case_id = 'eqn_039_fixed_false_guard_with_unequal_counts_rejected'
+test_file = 'tests/eqn_contracts.rs'
+kind = 'Compile'
+outcome = 'Reject'

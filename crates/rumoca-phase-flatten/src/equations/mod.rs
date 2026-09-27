@@ -19,8 +19,8 @@ use rumoca_ir_flat as flat;
 use tracing::{debug, warn};
 
 use crate::boolean_eval::{
-    is_structural_expression, reads_tunable_parameter, try_eval_boolean_with_ctx_inner,
-    try_eval_structural_boolean, try_resolve_enum_value,
+    is_structural_expression, non_evaluable_parameter_read, reads_tunable_parameter,
+    try_eval_boolean_with_ctx_inner, try_eval_structural_boolean, try_resolve_enum_value,
 };
 use crate::errors::FlattenError;
 use crate::static_subscripts::try_constant_integer;
@@ -1628,6 +1628,21 @@ fn try_select_branch_for_mismatched_if(
     origin: &rumoca_ir_flat::EquationOrigin,
     def_map: Option<&crate::ResolveDefMap>,
 ) -> Result<FlattenedEquations, FlattenError> {
+    // MLS 3.7 section 8.3.4: branches with different equation counts are legal
+    // only under evaluable conditions.
+    if let Some(parameter) = cond_blocks
+        .iter()
+        .find_map(|block| non_evaluable_parameter_read(ctx, &block.cond, prefix))
+    {
+        return Err(FlattenError::unsupported_equation(
+            format!(
+                "if-equation branches have different equation counts, but the condition reads \
+                 non-evaluable parameter `{parameter}` (fixed = false or Evaluate = false); MLS \
+                 3.7 section 8.3.4 requires evaluable conditions for such an if-equation"
+            ),
+            span,
+        ));
+    }
     let mut selected = None;
     for block in cond_blocks {
         match try_eval_boolean_with_ctx_inner(&block.cond, Some(ctx), prefix) {

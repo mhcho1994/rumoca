@@ -1536,3 +1536,53 @@ fn eqn_009_variable_derivative_subscripts_stay_dynamic() {
         "Test",
     ));
 }
+
+#[test]
+fn eqn_039_evaluate_false_guard_with_unequal_counts_rejected() {
+    // MLS 3.7 section 4.5: `Evaluate = false` makes the parameter
+    // non-evaluable, so branches with different equation counts are illegal.
+    expect_failure_in_phase_with_code(
+        r#"
+        model Test
+            parameter Boolean two = true annotation(Evaluate = false);
+            Real a;
+            Real b;
+        equation
+            if two then
+                a = 1;
+                b = 2;
+            else
+                a = 1;
+            end if;
+        end Test;
+    "#,
+        "Test",
+        FailedPhase::Flatten,
+        "EF004",
+    );
+}
+
+#[test]
+fn eqn_039_fixed_false_guard_with_unequal_counts_rejected() {
+    expect_failure_in_phase_with_code(
+        r#"
+        model Test
+            parameter Boolean two(fixed = false, start = true);
+            Real a;
+            Real b;
+        initial equation
+            two = true;
+        equation
+            if two then
+                a = 1;
+                b = 2;
+            else
+                a = 1;
+            end if;
+        end Test;
+    "#,
+        "Test",
+        FailedPhase::Flatten,
+        "EF004",
+    );
+}
