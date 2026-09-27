@@ -98,9 +98,20 @@ pub(super) struct GeneratedBooleanDefinition {
     pub(super) span: Span,
 }
 
+/// MLS 3.7 §11.2.6: a top-level `return` ends the algorithm, so the statements
+/// before it are exactly the sequence that runs (a trailing `return;` in
+/// `Basic.OpAmpDetailed`'s limiters).
+fn reachable_prefix(statements: &[rumoca_core::Statement]) -> &[rumoca_core::Statement] {
+    statements
+        .iter()
+        .position(|statement| matches!(statement, rumoca_core::Statement::Return { .. }))
+        .map_or(statements, |end| &statements[..end])
+}
+
 pub(super) fn normalize_function_returns(
     statements: &[rumoca_core::Statement],
 ) -> Result<NormalizedFunctionReturns, ToDaeError> {
+    let statements = reachable_prefix(statements);
     let has_returns = contains_return(statements);
     let mut normalized = Vec::new();
     let mut guards = Vec::new();

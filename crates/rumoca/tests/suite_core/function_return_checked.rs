@@ -2,6 +2,53 @@ use rumoca::Compiler;
 use rumoca_ir_dae as dae;
 use rumoca_sim::{SimOptions, simulate_dae};
 
+/// MLS 3.7 §11.2.6: a top-level `return` ends the algorithm, so a trailing one
+/// (`Electrical.Analog.Basic.OpAmpDetailed`'s limiters) leaves the function
+/// its preceding statements; statements after it never run.
+const TRAILING_RETURN: &str = r#"
+function limit
+  input Real x;
+  output Real y;
+algorithm
+  if x > 1 then
+    y := 1;
+  else
+    y := x;
+  end if;
+  return;
+  y := -100;
+end limit;
+
+model TrailingReturn
+  Real x(start = 0, fixed = true);
+  Real y;
+equation
+  der(x) = 2;
+  y = limit(x);
+end TrailingReturn;
+"#;
+
+#[test]
+fn a_trailing_top_level_return_ends_the_algorithm() {
+    let compiled = Compiler::new()
+        .model("TrailingReturn")
+        .compile_str(TRAILING_RETURN, "trailing_return.mo")
+        .expect("a trailing return constructs checked DAE");
+    let simulation =
+        simulate_dae(&compiled.dae, &SimOptions::default()).expect("the limiter simulates");
+    let column = |name: &str| {
+        let index = simulation
+            .names
+            .iter()
+            .position(|candidate| candidate == name)
+            .unwrap_or_else(|| panic!("missing column {name}"));
+        &simulation.data[index]
+    };
+    for (x, y) in column("x").iter().zip(column("y")) {
+        assert!((y - x.min(1.0)).abs() <= 1.0e-8, "limit({x}) = {y}");
+    }
+}
+
 const GUARDED_RETURN: &str = r#"
 function magnitude
   input Real x;
