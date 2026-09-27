@@ -517,6 +517,7 @@ impl SolveMeKernel {
         config: &MeInstanceConfig,
         execution_backend: Option<Rc<dyn crate::SolveExecutionBackend>>,
     ) -> Result<Self, MeError> {
+        let root_location = source.root_location();
         let (model, event_indicator_sources, max_step_duration_value_reference, configuration) =
             source
                 .into_parts()
@@ -577,6 +578,7 @@ impl SolveMeKernel {
             delay_solver_y_scratch: RefCell::new(runtime.model.initial_y.clone()),
             runtime,
             indicator_plan,
+            root_location,
             instance_brand: Rc::new(()),
             instance_name: config.instance_name,
             lifecycle: MeLifecycle::instantiated(configuration),

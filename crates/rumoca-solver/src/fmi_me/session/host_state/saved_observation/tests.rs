@@ -29,7 +29,7 @@ fn host_with_input() -> MeHostState {
     let retained =
         me::MeRetainedComponent::instantiate(me::MeModelSource::fixture(&model), &config, None)
             .unwrap();
-    let options = me::driver::live_session_options(0.0, 1e-8, 1e-8, 1e-10, None).unwrap();
+    let options = me::driver::live_session_options(&rumoca_ir_solve::fmi::RootLocationPlan::STANDARD, 0.0, 1e-8, 1e-8, 1e-10, None).unwrap();
     retained.into_lease(options).unwrap().host
 }
 

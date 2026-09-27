@@ -37,11 +37,13 @@ mod event_free;
 mod max_step_duration;
 mod metadata;
 mod parameter_updates;
+mod root_location;
 mod static_assertions;
 #[cfg(test)]
 mod tests;
 
 pub use c_codegen::{FmiCCodegenError, FmiCCodegenView};
+pub use root_location::{RootLocationPlan, RootTieBreak};
 pub use event_free::{FmiEventFreeCodegenView, FmiEventFreeError};
 pub use max_step_duration::{
     MAX_STEP_DURATION_DESCRIPTION, MAX_STEP_DURATION_NAME, MAX_STEP_DURATION_UNCONSTRAINED,
@@ -376,6 +378,7 @@ impl FmiMetadata {
 pub struct FmiComponent {
     metadata: FmiMetadata,
     event_indicators: FmiEventIndicatorInventory,
+    root_location: RootLocationPlan,
     model: Arc<SolveModel>,
 }
 
@@ -398,6 +401,7 @@ impl FmiComponent {
         Ok(Self {
             metadata,
             event_indicators,
+            root_location: RootLocationPlan::STANDARD,
             model: Arc::new(model),
         })
     }
@@ -410,6 +414,13 @@ impl FmiComponent {
     #[must_use]
     pub const fn event_indicators(&self) -> &FmiEventIndicatorInventory {
         &self.event_indicators
+    }
+
+    /// The root-location rules every executor of this component reads
+    /// (SPEC_0044 ME-EVENT-004).
+    #[must_use]
+    pub const fn root_location(&self) -> &RootLocationPlan {
+        &self.root_location
     }
 
     #[must_use]
@@ -477,6 +488,7 @@ impl FmiComponent {
             model: &self.model,
             metadata: &self.metadata,
             event_indicators: &self.event_indicators,
+            root_location: &self.root_location,
         }
     }
 
@@ -504,6 +516,7 @@ pub struct FmiRuntimeView<'component> {
     model: &'component SolveModel,
     metadata: &'component FmiMetadata,
     event_indicators: &'component FmiEventIndicatorInventory,
+    root_location: &'component RootLocationPlan,
 }
 
 impl<'component> FmiRuntimeView<'component> {
@@ -525,6 +538,12 @@ impl<'component> FmiRuntimeView<'component> {
     #[must_use]
     pub fn event_indicators(&self) -> &'component FmiEventIndicatorInventory {
         self.event_indicators
+    }
+
+    /// The component's root-location rules (SPEC_0044 ME-EVENT-004).
+    #[must_use]
+    pub fn root_location(&self) -> &'component RootLocationPlan {
+        self.root_location
     }
 
     /// The checked maximum-step-duration entry, when the component is

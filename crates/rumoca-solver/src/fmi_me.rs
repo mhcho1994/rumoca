@@ -170,6 +170,16 @@ impl<'a> MeModelSource<'a> {
         })
     }
 
+    /// The root-location rules the component was constructed with; a test
+    /// fixture has no component and takes the standard plan.
+    pub(crate) fn root_location(&self) -> rumoca_ir_solve::fmi::RootLocationPlan {
+        match &self.0 {
+            MeModelSourceInner::Correlated(view) => *view.root_location(),
+            #[cfg(test)]
+            MeModelSourceInner::Fixture { .. } => rumoca_ir_solve::fmi::RootLocationPlan::STANDARD,
+        }
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> Result<MeModelParts<'a>, rumoca_ir_solve::fmi::FmiComponentError> {
@@ -299,6 +309,13 @@ pub fn admit_execution_backend(
 pub struct MeModelArtifact(rumoca_ir_solve::fmi::FmiComponent);
 
 impl MeModelArtifact {
+    /// The root-location rules of the artifact's component (SPEC_0044
+    /// ME-EVENT-004), which a driver derives its session options from.
+    #[must_use]
+    pub fn root_location(&self) -> rumoca_ir_solve::fmi::RootLocationPlan {
+        *self.0.root_location()
+    }
+
     #[must_use]
     pub fn new(component: rumoca_ir_solve::fmi::FmiComponent) -> Self {
         Self(component)

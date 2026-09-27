@@ -141,6 +141,8 @@ pub struct SolveMeKernel {
     pending_basis_change: Option<dynamic_chart::PendingBasisChange>,
     /// The FMI event-indicator table, resolved once at instantiation.
     indicator_plan: FmiIndicatorPlan,
+    /// The component's root-location rules (SPEC_0044 ME-EVENT-004).
+    root_location: rumoca_ir_solve::fmi::RootLocationPlan,
     instance_brand: Rc<()>,
     instance_name: &'static str,
     lifecycle: MeLifecycle,
@@ -269,6 +271,11 @@ pub(super) fn event_right_limit_state_derivatives(
 }
 
 impl SolveMeKernel {
+    /// The component's root-location rules.
+    pub(crate) const fn root_location(&self) -> &rumoca_ir_solve::fmi::RootLocationPlan {
+        &self.root_location
+    }
+
     pub(crate) fn model_description(&self) -> MeModelDescription<'_> {
         MeModelDescription {
             continuous_state_count: self.state_count,

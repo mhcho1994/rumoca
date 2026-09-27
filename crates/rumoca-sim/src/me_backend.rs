@@ -47,6 +47,7 @@ impl BackendSimulationSession {
             execution_backend,
         )?;
         let options = live_session_options(
+            &artifact.root_location(),
             opts.t_start,
             opts.rtol,
             opts.atol,
@@ -123,7 +124,7 @@ pub(crate) fn simulate_artifact(
 ) -> Result<SimResult, SimError> {
     let execution_backend =
         rumoca_solver::fmi_me::admit_execution_backend(opts.execution_policy, execution_backend)?;
-    let options = batch_options(opts)?;
+    let options = batch_options(&artifact.root_location(), opts)?;
     let mut cursor = batch_output_cursor(&options)?;
     let retained = MeRetainedComponent::instantiate(
         artifact.source(),
@@ -175,9 +176,11 @@ fn default_output_dt(opts: &SimOptions) -> f64 {
 }
 
 pub(crate) fn batch_options(
+    plan: &rumoca_ir_solve::fmi::RootLocationPlan,
     opts: &SimOptions,
 ) -> Result<rumoca_solver::fmi_me::session::MeSessionOptions, SimError> {
     batch_session_options(
+        plan,
         opts.t_start,
         opts.t_end,
         opts.rtol,

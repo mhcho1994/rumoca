@@ -162,7 +162,8 @@ fn build_host_state(
     let mut trace = MeTraceRecorder::new(names, meta, state_count, capacity)?;
     let outcome =
         run_fmi_initialization(&mut kernel.borrow_mut(), &options, options.records_trace())?;
-    let policy = build_policy(&options, &outcome, state_count)?;
+    let root_location = *kernel.borrow().root_location();
+    let policy = build_policy(&options, &outcome, state_count, &root_location)?;
     if let Some(values) = &outcome.initial_values {
         trace.record_slice(
             TraceObservationRole::Initialization,
@@ -204,6 +205,7 @@ fn build_policy(
     options: &MeSessionOptions,
     outcome: &InitializationOutcome,
     state_count: usize,
+    root_location: &rumoca_ir_solve::fmi::RootLocationPlan,
 ) -> Result<Option<MeRootSearchPolicy>, MeSessionError> {
     if outcome.termination.is_some() {
         // A session that terminated during initialization never scans, so it
@@ -217,6 +219,7 @@ fn build_policy(
         options.relative_tolerance(),
         outcome.nominals.clone(),
         state_count,
+        root_location.refinement_iteration_cap(),
     )
     .map(Some)
 }
@@ -434,7 +437,13 @@ impl MeSimulationSession<'_, '_> {
             &self.host.options,
             self.host.options.records_trace(),
         )?;
-        self.host.policy = build_policy(&self.host.options, &outcome, self.host.state_count)?;
+        let root_location = *self.host.kernel.borrow().root_location();
+        self.host.policy = build_policy(
+            &self.host.options,
+            &outcome,
+            self.host.state_count,
+            &root_location,
+        )?;
         if let Some(values) = &outcome.initial_values {
             self.host
                 .record_initialization(self.host.options.start_time(), values)?;

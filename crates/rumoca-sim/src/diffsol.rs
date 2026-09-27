@@ -33,6 +33,7 @@ use crate::{SimError, SimFailureStage};
 
 pub struct PreparedSimulation {
     opts: rumoca_solver::SimOptions,
+    root_location: rumoca_ir_solve::fmi::RootLocationPlan,
     retained: RefCell<rumoca_solver::fmi_me::session::MeRetainedComponent>,
 }
 
@@ -66,6 +67,7 @@ pub(crate) fn assess_bdf_capability(
     )?;
     let prepared = PreparedSimulation {
         opts: opts.clone(),
+        root_location: artifact.root_location(),
         retained: RefCell::new(retained),
     };
     classify_bdf_capability(check_prepared_component(&prepared))
@@ -222,6 +224,7 @@ fn build_simulation_artifact(
     )?;
     let prepared = PreparedSimulation {
         opts: opts.clone(),
+        root_location: artifact.root_location(),
         retained: RefCell::new(retained),
     };
     drop(check_prepared_component(&prepared));
@@ -239,7 +242,7 @@ pub(crate) fn simulate_artifact(
 }
 
 fn simulate_prepared(prepared: &PreparedSimulation) -> Result<rumoca_solver::SimResult, SimError> {
-    let options = batch_options(&prepared.opts)?;
+    let options = batch_options(&prepared.root_location, &prepared.opts)?;
     let mut cursor = rumoca_solver::fmi_me::driver::batch_output_cursor(&options)?;
     let mut retained =
         prepared
@@ -260,7 +263,7 @@ fn simulate_prepared(prepared: &PreparedSimulation) -> Result<rumoca_solver::Sim
 }
 
 fn check_prepared_component(prepared: &PreparedSimulation) -> Result<(), SimError> {
-    let options = batch_options(&prepared.opts)?;
+    let options = batch_options(&prepared.root_location, &prepared.opts)?;
     let mut retained =
         prepared
             .retained
