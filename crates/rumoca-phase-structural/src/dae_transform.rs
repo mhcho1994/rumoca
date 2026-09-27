@@ -1210,10 +1210,9 @@ fn demotion_pass_with_observer(
         {
             continue;
         }
-        if let Some(bound) = screen
-            .as_ref()
-            .and_then(|screen| source.inspect(|view, _| screen.cannot_reduce(view, candidate)))
-        {
+        if let Some(bound) = screen.as_ref().and_then(|screen| {
+            source.inspect(|view, facts| screen.cannot_reduce(view, facts, candidate))
+        }) {
             observer.observe(ReductionEvent::Attempt {
                 lane: Lane::Direct,
                 identity: Identity::Direct(DirectIdentity::from(candidate)),

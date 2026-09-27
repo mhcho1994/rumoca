@@ -10,7 +10,8 @@
 //! incremental incidence already relies on.
 //!
 //! The bound applies only when `rhs` reads no algebraic coordinate and no
-//! record field or constructor: the differentiator reads an algebraic's
+//! record field or constructor, and no state with an explicit derivative
+//! definition: the differentiator reads an algebraic's
 //! equality anchor, causal definition, auxiliary block, or record component
 //! definitions, whose columns `rhs` does not show. Without those, the
 //! derivative of `rhs` reads only coordinates `rhs` reads and the
@@ -56,6 +57,7 @@ impl<'a> DemotionScreen<'a> {
     pub(super) fn residue_bound(
         &self,
         view: dae::DaeView<'_>,
+        facts: &super::constraints::DifferentiationFacts,
         candidate: &DirectStateConstraint,
     ) -> Option<usize> {
         let StateDefinition::Expression(rhs) = candidate.rhs else {
@@ -73,6 +75,14 @@ impl<'a> DemotionScreen<'a> {
                 ) | dae::ExpressionOperation::Field { .. }
                     | dae::ExpressionOperation::Record(_)
             ) {
+                unbounded = true;
+            }
+            // A state with an explicit derivative definition differentiates into
+            // that definition, whose columns this read does not show.
+            if let dae::ExpressionOperation::Coordinate(dae::CoordinateView::State(state)) =
+                node.operation()
+                && facts.derivative_definitions[state.index() as usize].is_some()
+            {
                 unbounded = true;
             }
             if let Some(columns) = node
@@ -133,9 +143,10 @@ impl<'a> DemotionScreen<'a> {
     pub(super) fn cannot_reduce(
         &self,
         view: dae::DaeView<'_>,
+        facts: &super::constraints::DifferentiationFacts,
         candidate: &DirectStateConstraint,
     ) -> Option<usize> {
-        self.residue_bound(view, candidate)
+        self.residue_bound(view, facts, candidate)
             .filter(|bound| *bound >= self.residue)
     }
 }

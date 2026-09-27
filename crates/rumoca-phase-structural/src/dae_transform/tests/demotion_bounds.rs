@@ -236,7 +236,8 @@ fn demotion_residue_bound_is_a_lower_bound_on_the_rebuilt_residue() {
         let screen =
             demotion_screen::DemotionScreen::new(&reusable, &source.demotion_rows, residue);
         for candidate in candidates.admissible.iter().chain(&candidates.conditional) {
-            let Some(bound) = source.inspect(|view, _| screen.residue_bound(view, candidate))
+            let Some(bound) =
+                source.inspect(|view, facts| screen.residue_bound(view, facts, candidate))
             else {
                 continue;
             };
@@ -325,8 +326,75 @@ fn a_definition_reading_an_algebraic_is_not_bounded() {
     );
     let screen = demotion_screen::DemotionScreen::new(&reusable, &source.demotion_rows, 1);
     assert_eq!(
-        source.inspect(|view, _| screen.residue_bound(view, &candidate)),
+        source.inspect(|view, facts| screen.residue_bound(view, facts, &candidate)),
         None,
         "a bound here would undercount the rebuilt residue"
+    );
+}
+
+/// `x = s; der(s) = w; w = p*s; der(x) = 1`, demoting `x` by `x = s`: the
+/// derivative of `s` is its explicit definition `w`, whose column `s` does
+/// not show, so the screen must not bound a definition reading such a state.
+#[test]
+fn a_definition_reading_a_defined_state_is_not_bounded() {
+    let text = "parameter Real p; Real x; Real s; Real w; equation x=s; der(s)=w; w=p*s; der(x)=1;";
+    let mut sources = SourceMap::new();
+    let source = sources.add("defined_state.mo", text);
+    let at = source_provenance(source, text, text);
+    let mut defined = None;
+    let model = dae::Dae::construct(sources, |model| {
+        let scalar = model
+            .types(|types| types.derived(dae::ValueType::scalar(dae::ScalarType::Real), at))?;
+        let (p, x, s, w) = model.variables(|variables| {
+            Ok((
+                variables.parameter(VarName::new("p"), scalar, at, Default::default())?,
+                variables.state(VarName::new("x"), scalar, at, Default::default())?,
+                variables.state(VarName::new("s"), scalar, at, Default::default())?,
+                variables.algebraic(VarName::new("w"), scalar, at, Default::default())?,
+            ))
+        })?;
+        let residuals = model.expressions(|e| {
+            let pv = e.at(at).coordinate(dae::CoordinateInput::Parameter(p))?;
+            let xv = e.at(at).coordinate(dae::CoordinateInput::State(x))?;
+            let sv = e.at(at).coordinate(dae::CoordinateInput::State(s))?;
+            let wv = e.at(at).coordinate(dae::CoordinateInput::Algebraic(w))?;
+            let dx = e.at(at).coordinate(dae::CoordinateInput::Derivative(x))?;
+            let ds = e.at(at).coordinate(dae::CoordinateInput::Derivative(s))?;
+            let one = e.at(at).literal(dae::DaeLiteral::Real(1.0))?;
+            defined = Some(DirectStateConstraint {
+                state: x.index(),
+                rhs: StateDefinition::Expression(sv.index()),
+                rhs_sign: super::super::equalities::EqualitySign::Same,
+                owner: at,
+            });
+            let product = e.at(at).binary(dae::BinaryOperator::Multiply, pv, sv)?;
+            Ok([
+                e.at(at).binary(dae::BinaryOperator::Subtract, xv, sv)?,
+                e.at(at).binary(dae::BinaryOperator::Subtract, ds, wv)?,
+                e.at(at)
+                    .binary(dae::BinaryOperator::Subtract, wv, product)?,
+                e.at(at).binary(dae::BinaryOperator::Subtract, dx, one)?,
+            ])
+        })?;
+        model.continuous(|continuous| {
+            for residual in residuals {
+                continuous.value_equation(at, residual)?;
+            }
+            Ok(())
+        })
+    })
+    .unwrap();
+    let (_, reusable) = structural_analysis_capturing(&model, None, None);
+    let reusable = reusable.expect("the fixture builds its incidence");
+    let source = ReductionSource::new(&model);
+    let candidate = defined.expect("the fixture defines x by s");
+    assert!(
+        source.inspect(|_, facts| facts.derivative_definitions.iter().any(Option::is_some)),
+        "der(s) = w is an explicit derivative definition"
+    );
+    let screen = demotion_screen::DemotionScreen::new(&reusable, &source.demotion_rows, 1);
+    assert_eq!(
+        source.inspect(|view, facts| screen.residue_bound(view, facts, &candidate)),
+        None
     );
 }
