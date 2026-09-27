@@ -336,6 +336,18 @@ fn a_definition_reading_an_anchored_algebraic_is_bounded_soundly() {
 /// to `der(s)`, and the bound never exceeds the rebuilt residue.
 #[test]
 fn a_definition_reading_a_causally_defined_algebraic_is_bounded_soundly() {
+    causal_definition_bound_is_sound(dae::BinaryOperator::Add);
+}
+
+/// `x = w * u` with the same definitions: the product rule keeps the values
+/// of `w` and `u` as coefficients, so the closure adds their columns, and the
+/// bound never exceeds the rebuilt residue.
+#[test]
+fn a_definition_reading_algebraics_as_coefficients_is_bounded_soundly() {
+    causal_definition_bound_is_sound(dae::BinaryOperator::Multiply);
+}
+
+fn causal_definition_bound_is_sound(operator: dae::BinaryOperator) {
     let text = "Real x; Real s; Real w; Real u; equation x=w+u; w=s*s; u=s; der(s)=-s; der(x)=1;";
     let mut sources = SourceMap::new();
     let source = sources.add("causal_definition.mo", text);
@@ -360,7 +372,7 @@ fn a_definition_reading_a_causally_defined_algebraic_is_bounded_soundly() {
             let dx = e.at(at).coordinate(dae::CoordinateInput::Derivative(x))?;
             let ds = e.at(at).coordinate(dae::CoordinateInput::Derivative(s))?;
             let one = e.at(at).literal(dae::DaeLiteral::Real(1.0))?;
-            let sum = e.at(at).binary(dae::BinaryOperator::Add, wv, uv)?;
+            let sum = e.at(at).binary(operator, wv, uv)?;
             defined = Some(DirectStateConstraint {
                 state: x.index(),
                 rhs: StateDefinition::Expression(sum.index()),
@@ -405,9 +417,10 @@ fn a_definition_reading_a_causally_defined_algebraic_is_bounded_soundly() {
 
 /// `x = s; der(s) = w; w = p*s; der(x) = 1`, demoting `x` by `x = s`: the
 /// derivative of `s` is its explicit definition `w`, whose column `s` does
-/// not show, so the screen must not bound a definition reading such a state.
+/// not show. The closure reads the definition's own columns, so the bound
+/// includes `w` and never exceeds the rebuilt residue.
 #[test]
-fn a_definition_reading_a_defined_state_is_not_bounded() {
+fn a_definition_reading_a_defined_state_is_bounded_soundly() {
     let text = "parameter Real p; Real x; Real s; Real w; equation x=s; der(s)=w; w=p*s; der(x)=1;";
     let mut sources = SourceMap::new();
     let source = sources.add("defined_state.mo", text);
@@ -464,9 +477,17 @@ fn a_definition_reading_a_defined_state_is_not_bounded() {
         "der(s) = w is an explicit derivative definition"
     );
     let screen = demotion_screen::DemotionScreen::new(&reusable, &source.demotion_rows, 1);
-    assert_eq!(
-        source.inspect(|view, facts| screen.residue_bound(view, facts, &candidate)),
-        None
+    let bound = source
+        .inspect(|view, facts| screen.residue_bound(view, facts, &candidate))
+        .expect("the closure reads the definition's own columns");
+    let (rebuilt, _) = rebuild_with_state_demotion_and_manifold(&source, candidate, &[]).unwrap();
+    let actual = structural_analysis(&rebuilt)
+        .err()
+        .and_then(|error| unmatched_residue(&error))
+        .unwrap_or(0);
+    assert!(
+        bound <= actual,
+        "bound {bound} exceeds rebuilt residue {actual}"
     );
 }
 
