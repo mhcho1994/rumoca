@@ -169,6 +169,33 @@ fn relation_guards_differentiate_branch_wise_between_events() {
     }
 }
 
+/// A relation that owns no event is not fixed between events, so its branch
+/// derivatives carry no proof and index reduction keeps refusing them: a
+/// `noEvent` guard, a relation inside a `noEvent` conditional, and a relation
+/// inside `smooth` that owns no root.
+#[test]
+fn relation_guards_without_an_owned_event_keep_the_refusal() {
+    for replacement in [
+        "if noEvent(q > 0) then q else -q",
+        "noEvent(if q > 0 then q else -q)",
+        "smooth(0, if q > 0 then q else -q)",
+        "smooth(2, if q > 0 then q else -q)",
+    ] {
+        let source = SOURCE.replace("if positive then q else -q", replacement);
+        let compiled = Compiler::new()
+            .model("ParameterBranchKinematics")
+            .compile_str(&source, "no_event_guard.mo")
+            .unwrap();
+        let error = rumoca_phase_structural::prepare_for_solve(&compiled.dae)
+            .err()
+            .unwrap_or_else(|| panic!("{replacement}: an eventless guard needs a refusal"));
+        assert!(
+            error.to_string().contains("structurally singular"),
+            "{replacement}: {error}"
+        );
+    }
+}
+
 fn check_motion(source: &str, start: f64, sign: f64) {
     check_motion_shape(source, start, sign, false);
 }

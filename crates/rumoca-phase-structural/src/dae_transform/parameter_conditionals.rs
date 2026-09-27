@@ -74,9 +74,27 @@ fn piecewise_constant_guard<'dae>(
                 | dae::BinaryOperator::Greater
                 | dae::BinaryOperator::GreaterEqual,
             ..
-        } => context.is_empty(),
+        } => context.is_empty() && relation_owns_event(view, expression, node.provenance()),
         _ => false,
     }
+}
+
+/// MLS §8.5 fixes a relation between its events only when the relation owns
+/// one: a scalar or structured root, or a time event. A relation under
+/// `noEvent`, or inside `smooth` without an owned root, owns none.
+fn relation_owns_event<'dae>(
+    view: dae::DaeView<'dae>,
+    expression: dae::ExprId<'dae>,
+    provenance: dae::DaeProvenance,
+) -> bool {
+    view.relations()
+        .any(|(_, relation)| relation.expression() == expression)
+        || view
+            .structured_roots()
+            .any(|(_, root)| root.expression() == expression)
+        || view
+            .time_events()
+            .any(|(_, event)| event.provenance().span() == provenance.span())
 }
 
 fn invariant_guard<'dae>(

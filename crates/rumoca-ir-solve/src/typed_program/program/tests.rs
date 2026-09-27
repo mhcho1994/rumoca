@@ -643,6 +643,33 @@ fn integer_divide_cannot_bypass_an_explicit_real_conversion() {
 }
 
 #[test]
+fn integer_quotient_is_integer_only() {
+    let arithmetic = profile();
+    TypedProgram::construct(arithmetic, |builder| {
+        let integer = builder.constant(
+            SolveValue::integer(arithmetic, 7).expect("integer belongs to profile"),
+            span(0),
+        )?;
+        let real = builder.constant(SolveValue::real(arithmetic, 2.0), span(1))?;
+        assert_eq!(
+            builder.binary(SolveBinaryOperator::IntegerQuotient, real, real, span(2)),
+            Err(SolveProgramConstructionError::TypeMismatch {
+                provenance: span(2)
+            })
+        );
+        builder.binary(
+            SolveBinaryOperator::IntegerQuotient,
+            integer,
+            integer,
+            span(3),
+        )?;
+        assert_eq!(builder.operations.len(), 3);
+        Ok(())
+    })
+    .expect("an Integer quotient of Integer operands constructs");
+}
+
+#[test]
 fn dummy_provenance_never_commits_a_typed_owner() {
     let arithmetic = profile();
     let error = TypedProgram::construct(arithmetic, |builder| {

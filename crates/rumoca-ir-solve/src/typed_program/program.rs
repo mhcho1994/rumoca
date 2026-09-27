@@ -152,6 +152,11 @@ pub enum SolveBinaryOperator {
     Subtract,
     Multiply,
     Divide,
+    /// The exact Integer quotient truncated toward zero (MLS §3.7.2 `div`).
+    /// A zero divisor or an unrepresentable quotient is an evaluation
+    /// failure, never a wrapped or defaulted value. `Divide` stays Real-only,
+    /// so an Integer `/` cannot bypass its explicit conversion to Real.
+    IntegerQuotient,
     Power,
     And,
     Or,
@@ -1892,18 +1897,15 @@ fn require_provenance(provenance: Span) -> Result<(), SolveProgramConstructionEr
     Ok(())
 }
 
-/// `Divide` on Integer operands is the exact quotient truncated toward zero
-/// (MLS §3.7.2 `div`); a zero divisor or an unrepresentable quotient is an
-/// evaluation failure, never a wrapped or defaulted value.
 fn binary_operator_accepts(operator: SolveBinaryOperator, scalar: SolveScalarType) -> bool {
     match operator {
         SolveBinaryOperator::Add
         | SolveBinaryOperator::Subtract
         | SolveBinaryOperator::Multiply
-        | SolveBinaryOperator::Divide
         | SolveBinaryOperator::Min
         | SolveBinaryOperator::Max => scalar.is_numeric(),
-        SolveBinaryOperator::Power | SolveBinaryOperator::Atan2 => {
+        SolveBinaryOperator::IntegerQuotient => matches!(scalar, SolveScalarType::Integer(_)),
+        SolveBinaryOperator::Divide | SolveBinaryOperator::Power | SolveBinaryOperator::Atan2 => {
             matches!(scalar, SolveScalarType::Real { .. })
         }
         SolveBinaryOperator::And | SolveBinaryOperator::Or => scalar == SolveScalarType::Boolean,

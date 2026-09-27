@@ -680,9 +680,9 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
     ) -> Result<LoweredValue<'program, 'dae>, solve::SolveProgramConstructionError> {
         let lhs = self.expression(dividend)?.only_register(at)?;
         let rhs = self.expression(divisor)?.only_register(at)?;
-        let quotient = self
-            .builder
-            .binary(solve::SolveBinaryOperator::Divide, lhs, rhs, at)?;
+        let quotient =
+            self.builder
+                .binary(solve::SolveBinaryOperator::IntegerQuotient, lhs, rhs, at)?;
         if builtin == dae::PureBuiltin::Div {
             return Ok(LoweredValue::scalar(value_type, quotient));
         }
