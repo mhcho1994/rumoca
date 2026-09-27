@@ -47,12 +47,16 @@ end ImplicitAlgebraic;
         )
         .expect("the compiler accepts the implicit algebraic model");
 
-    for target in ["fmi2", "fmi3"] {
+    for (target, model_c_path) in [
+        ("fmi2", "sources/model.c"),
+        ("fmi3", "sources/model.c"),
+        ("fmi-ls-wasm", "csrc/model.c"),
+    ] {
         let files = rumoca::render_target_files(&compiled, "ImplicitAlgebraic", target, None)
             .expect("FMI projects the implicit algebraic block with the shared ME kernel");
         let model_c = files
             .iter()
-            .find(|file| file.path == "sources/model.c")
+            .find(|file| file.path == model_c_path)
             .expect("FMI emits its C kernel");
         assert!(
             model_c.content.contains("rmc_project_stage"),
@@ -61,7 +65,6 @@ end ImplicitAlgebraic;
     }
     for target in [
         "c-ode",
-        "fmi-ls-wasm",
         "rust-ode",
         "rust-fixed-ode",
         "casadi-ode",
@@ -118,6 +121,18 @@ end ExactAlgebraic;
         execute_emitted_algebraic_refresh(&model_c, &assign_c, target);
     }
 
+    // fmi-ls-wasm renders the same C kernel as fmi3, so it consumes the exact
+    // schedule through the identical translation units under csrc/.
+    {
+        let files = rumoca::render_target_files(&compiled, "ExactAlgebraic", "fmi-ls-wasm", None)
+            .expect("fmi-ls-wasm consumes the checked exact-assignment schedule");
+        let model_c = source_unit(&files, "csrc/model.c");
+        let assign_c = source_unit(&files, "csrc/rmc_assign.c");
+        assert!(model_c.contains("refresh_algebraics"));
+        assert!(assign_c.contains("m->y[1] = r["));
+        assert!(assign_c.contains("if (!isfinite(m->y[1]))"));
+    }
+
     for target in [
         "c-ode",
         "rust-ode",
@@ -126,7 +141,6 @@ end ExactAlgebraic;
         "jax-ode",
         "cuda-ode",
         "wgsl-ode",
-        "fmi-ls-wasm",
     ] {
         let error = rumoca::render_target_files(&compiled, "ExactAlgebraic", target, None)
             .expect_err("a target without an exact-assignment consumer must fail closed");
