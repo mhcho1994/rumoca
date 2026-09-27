@@ -316,3 +316,44 @@ end InferThroughConversion;
     assert!((value_at(&result, "held", 0.25) - 0.2).abs() < 1.0e-12);
     assert!((value_at(&result, "held", 0.19) - 0.1).abs() < 1.0e-12);
 }
+
+/// MLS §16.9: `firstTick()` is true exactly at the first tick of the clock of
+/// the partition it is read in, in an equation or a clocked `when` body.
+#[test]
+fn first_tick_is_true_only_at_the_first_tick() {
+    let source = r#"
+model FirstTick
+  block Change
+    input Boolean u;
+    output Boolean y;
+  equation
+    if firstTick() then
+      y = false;
+    else
+      y = not (u == previous(u));
+    end if;
+  end Change;
+  Clock c = Clock(1, 10);
+  Boolean s;
+  Change change;
+  Integer k(start = 0);
+  Boolean changed;
+  Integer count;
+equation
+  s = sample(time > 0.25, c);
+  change.u = s;
+  changed = hold(change.y);
+  when c then
+    k = if firstTick() then 100 else previous(k) + 1;
+  end when;
+  count = hold(k);
+end FirstTick;
+"#;
+    let result = simulate(source, "FirstTick", 0.45, 0.01);
+    for (tick, expected) in [100.0, 101.0, 102.0, 103.0, 104.0].iter().enumerate() {
+        let time = tick as f64 / 10.0 + 0.05;
+        assert_eq!(value_at(&result, "count", time), *expected, "count at {time}");
+        let changed = if tick == 3 { 1.0 } else { 0.0 };
+        assert_eq!(value_at(&result, "changed", time), changed, "changed at {time}");
+    }
+}

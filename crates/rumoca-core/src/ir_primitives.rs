@@ -1021,6 +1021,8 @@ pub enum BuiltinFunction {
     Previous,
     /// Interval of the owning clock: interval(u)
     Interval,
+    /// First tick of the owning clock: firstTick(u)
+    FirstTick,
     /// Integer sub-clock conversion: subSample(u, factor)
     SubSample,
     /// Integer super-clock conversion: superSample(u, factor)
@@ -1102,6 +1104,7 @@ impl BuiltinFunction {
         Self::Hold,
         Self::Previous,
         Self::Interval,
+        Self::FirstTick,
         Self::SubSample,
         Self::SuperSample,
         Self::ShiftSample,
@@ -1146,6 +1149,7 @@ impl BuiltinFunction {
         Self::Hold,
         Self::Previous,
         Self::Interval,
+        Self::FirstTick,
         Self::SubSample,
         Self::SuperSample,
         Self::ShiftSample,
@@ -1190,6 +1194,7 @@ impl BuiltinFunction {
                 | Self::Hold
                 | Self::Previous
                 | Self::Interval
+                | Self::FirstTick
                 | Self::SubSample
                 | Self::SuperSample
                 | Self::ShiftSample
@@ -1306,6 +1311,7 @@ impl BuiltinFunction {
             Self::Hold => "hold",
             Self::Previous => "previous",
             Self::Interval => "interval",
+            Self::FirstTick => "firstTick",
             Self::SubSample => "subSample",
             Self::SuperSample => "superSample",
             Self::ShiftSample => "shiftSample",

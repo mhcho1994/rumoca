@@ -495,7 +495,9 @@ fn builtin_shape(
                 )
             })
             .and_then(|value| expression_shape(value, values, function_result)),
-        BuiltinFunction::Interval => scalar_interval_shape(arguments, span),
+        BuiltinFunction::Interval | BuiltinFunction::FirstTick => {
+            scalar_interval_shape(arguments, span)
+        }
         // MLS §3.7.4.5 `semiLinear` returns `if x >= 0 then positiveSlope*x else
         // negativeSlope*x`, so its shape is the common shape of its operands.
         BuiltinFunction::Atan2

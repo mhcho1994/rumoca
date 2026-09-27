@@ -554,6 +554,30 @@ fn lower_builtin_expression<'dae>(
                     .coordinate(dae::CoordinateInput::ClockInterval(owner_clock))
             })
         }
+        BuiltinFunction::FirstTick => {
+            if arguments.len() > 1 {
+                return Err(dae::DaeConstructionError::InvalidArity {
+                    expected: 1,
+                    found: arguments.len(),
+                    span,
+                });
+            }
+            let owner_clock = symbols
+                .owner_clock
+                .ok_or(dae::DaeConstructionError::MissingClockDomainOwner { span })?;
+            let previous = symbols.functions.clocks.first_tick(owner_clock, span)?;
+            construction.expressions(|expressions| {
+                let indicator = expressions
+                    .at(provenance)
+                    .coordinate(dae::CoordinateInput::Previous(previous))?;
+                let half = expressions
+                    .at(provenance)
+                    .literal(dae::DaeLiteral::Real(0.5))?;
+                expressions
+                    .at(provenance)
+                    .binary(dae::BinaryOperator::Greater, indicator, half)
+            })
+        }
         BuiltinFunction::Clock | BuiltinFunction::NoClock => {
             Err(dae::DaeConstructionError::InvalidExpressionForm { span })
         }

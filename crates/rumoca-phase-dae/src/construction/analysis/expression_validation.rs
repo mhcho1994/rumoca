@@ -605,7 +605,7 @@ impl ExpressionValidator<'_> {
                 ))
             };
         }
-        if function == BuiltinFunction::Interval {
+        if matches!(function, BuiltinFunction::Interval | BuiltinFunction::FirstTick) {
             if arguments.len() > 1 {
                 return Err(ToDaeError::unsupported_runtime_operator(
                     function.name(),
@@ -878,6 +878,7 @@ fn is_supported_builtin(function: BuiltinFunction) -> bool {
             | BuiltinFunction::Hold
             | BuiltinFunction::Previous
             | BuiltinFunction::Interval
+            | BuiltinFunction::FirstTick
             | BuiltinFunction::SubSample
             | BuiltinFunction::SuperSample
             | BuiltinFunction::ShiftSample

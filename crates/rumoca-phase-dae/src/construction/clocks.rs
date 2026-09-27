@@ -17,6 +17,9 @@ pub(super) struct LoweredClocks<'dae> {
     /// Flat expression occurrence names. `Reference::instance_id` carries the
     /// enclosing class occurrence, so it cannot select a referenced coordinate.
     pub(super) by_coordinate: HashMap<VarName, dae::PeriodicClockId<'dae>>,
+    /// MLS §16.9 `firstTick()`: per clock, the `previous` of a generated
+    /// clocked indicator that starts at one and is zero after every tick.
+    first_ticks: HashMap<dae::PeriodicClockId<'dae>, dae::PreviousId<'dae>>,
 }
 
 impl<'dae> LoweredClocks<'dae> {
@@ -39,6 +42,18 @@ impl<'dae> LoweredClocks<'dae> {
         self.by_plan
             .iter()
             .find_map(|(plan, owned)| (*owned == id).then_some(plan.lattice))
+    }
+
+    /// The `previous` coordinate whose value is `firstTick()` of `clock`.
+    pub(super) fn first_tick(
+        &self,
+        clock: dae::PeriodicClockId<'dae>,
+        span: Span,
+    ) -> Result<dae::PreviousId<'dae>, dae::DaeConstructionError> {
+        self.first_ticks
+            .get(&clock)
+            .copied()
+            .ok_or(dae::DaeConstructionError::MissingClockDomainOwner { span })
     }
 
     pub(super) fn sample_id(
@@ -98,6 +113,85 @@ pub(super) fn lower_clocks<'dae>(
         by_plan: plan_ids,
         by_sample_schedule: sample_ids,
         by_coordinate: coordinate_ids,
+        first_ticks: HashMap::new(),
+    })
+}
+
+impl<'dae> LoweredClocks<'dae> {
+    /// Issue the `firstTick()` indicator of every clock whose partition reads
+    /// it (MLS §16.9: true at the first tick of the clock, false afterwards).
+    ///
+    /// The indicator is a generated clocked discrete Real `f` with `start =
+    /// 1` and the partition equation `f = 0`, so `previous(f)` is one exactly
+    /// at the first tick; `firstTick()` lowers to `previous(f) > 0.5`.
+    pub(super) fn issue_first_ticks(
+        &mut self,
+        construction: &mut dae::DaeConstruction<'dae>,
+        hosts: impl IntoIterator<Item = (ClockPlan, Span)>,
+    ) -> Result<(), dae::DaeConstructionError> {
+        let mut clocks = hosts
+            .into_iter()
+            .map(|(plan, span)| self.id(&plan, span).map(|clock| (clock, span)))
+            .collect::<Result<Vec<_>, _>>()?;
+        clocks.sort_by_key(|(clock, _)| clock.index());
+        clocks.dedup_by_key(|(clock, _)| *clock);
+        for (clock, span) in clocks {
+            let previous = issue_first_tick(construction, clock, span)?;
+            self.first_ticks.insert(clock, previous);
+        }
+        Ok(())
+    }
+}
+
+fn issue_first_tick<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    clock: dae::PeriodicClockId<'dae>,
+    span: Span,
+) -> Result<dae::PreviousId<'dae>, dae::DaeConstructionError> {
+    let provenance = dae::DaeProvenance::generated(dae::DaeGeneration::ClockLowering, span)?;
+    let value_type = construction.types(|types| {
+        types.derived(dae::ValueType::scalar(dae::ScalarType::Real), provenance)
+    })?;
+    let (one, zero) = construction.expressions(|expressions| {
+        Ok((
+            expressions
+                .at(provenance)
+                .literal(dae::DaeLiteral::Real(1.0))?,
+            expressions
+                .at(provenance)
+                .literal(dae::DaeLiteral::Real(0.0))?,
+        ))
+    })?;
+    let variable = construction.variables(|variables| {
+        variables.discrete_real(
+            VarName::new(format!("firstTick(clock {})", clock.index())),
+            value_type,
+            provenance,
+            dae::VariableAttributes {
+                start: Some(one),
+                fixed: Some(vec![true]),
+                origin: dae::VariableOrigin::Generated,
+                ..Default::default()
+            },
+        )
+    })?;
+    construction.clocks(|clocks| {
+        clocks.own_discrete_real(clock.into(), variable, provenance)?;
+        Ok(())
+    })?;
+    let residual = construction.expressions(|expressions| {
+        let current = expressions
+            .at(provenance)
+            .coordinate(dae::CoordinateInput::DiscreteReal(variable))?;
+        expressions
+            .at(provenance)
+            .binary(dae::BinaryOperator::Subtract, current, zero)
+    })?;
+    construction.discrete(|system| {
+        system.real_equation(provenance, |equation| equation.residual(residual))
+    })?;
+    construction.temporal(|temporal| {
+        temporal.previous_discrete_real(clock.into(), variable, provenance)
     })
 }
 

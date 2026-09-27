@@ -1120,7 +1120,8 @@ fn required_clock_owner_span(
 ) -> Option<Span> {
     match expression {
         Expression::BuiltinCall {
-            function: BuiltinFunction::Previous | BuiltinFunction::Interval,
+            function:
+                BuiltinFunction::Previous | BuiltinFunction::Interval | BuiltinFunction::FirstTick,
             span,
             ..
         } => Some(*span),
