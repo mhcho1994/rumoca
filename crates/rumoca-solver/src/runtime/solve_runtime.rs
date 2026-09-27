@@ -762,7 +762,7 @@ impl SolveRuntime {
         }
         trace_reverse_projection_coverage(model, &implicit_scalar_rhs);
         let visible_value_plan = visible_value_plan(model);
-        let root_condition_plan = root_condition_plan(model, &root_refresh);
+        let root_condition_plan = root_condition_plan(model);
         let compiled_root_conditions = BlockReuse::of(
             primary.map(|primary| &primary.root_condition_rows),
             &model.problem.events.root_conditions,
@@ -1780,7 +1780,6 @@ impl SolveRuntime {
         self.validate_root_plan_output_len(plan, out)?;
         for (slot, entry) in out.iter_mut().zip(plan.entries.iter().copied()) {
             *slot = match entry {
-                RootConditionPlanEntry::ConstantNonZero(value) => value,
                 RootConditionPlanEntry::DirectTime(root) => {
                     direct_time_root_value(root, params, t)?
                 }
@@ -1813,9 +1812,7 @@ impl SolveRuntime {
         self.validate_root_plan_output_len(plan, out)?;
         for (slot, entry) in out.iter_mut().zip(plan.entries.iter().copied()) {
             *slot = match entry {
-                RootConditionPlanEntry::ConstantNonZero(_)
-                | RootConditionPlanEntry::ContinuousStatic
-                | RootConditionPlanEntry::Dynamic => 1.0,
+                RootConditionPlanEntry::ContinuousStatic | RootConditionPlanEntry::Dynamic => 1.0,
                 RootConditionPlanEntry::DirectTime(root) => {
                     direct_time_root_search_default(root, params, t)?
                 }

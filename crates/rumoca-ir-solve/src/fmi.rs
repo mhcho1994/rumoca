@@ -154,22 +154,6 @@ impl FmiEventIndicatorSource {
     }
 }
 
-/// How a row that reads `time` but no live continuous state is owned.
-///
-/// Solver-`Y` dependencies do not describe `time`, so the two blocks below
-/// need different readings of an empty dependency set. A root condition *is*
-/// its own indicator, so one that reads `time` sweeps continuously between
-/// events and has to be monitored. A dynamic-time deadline is reported
-/// relative to the evaluation time and its event is owned by the time
-/// schedule, which announces a state-independent deadline exactly.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TimeReadOwner {
-    /// Reading `time` makes the row vary during integration: monitor it.
-    Monitored,
-    /// The time schedule announces this row exactly: do not monitor it.
-    Announced,
-}
-
 #[derive(Debug)]
 pub struct FmiEventIndicatorInventory {
     sources: Box<[FmiEventIndicatorSource]>,
@@ -200,19 +184,26 @@ impl FmiEventIndicatorInventory {
             .iter()
             .map(|root| root.root_index)
             .collect::<BTreeSet<_>>();
-        let mut sources = dependency_backed_indicator_sources(
-            &model.problem.events.root_conditions,
-            &static_y,
-            TimeReadOwner::Monitored,
-            |index| {
-                (!scheduled.contains(&index))
-                    .then_some(FmiEventIndicatorSource::RootCondition { index })
-            },
-        )?;
+        // The searched roots are the Solve IR's own classification, the one
+        // every executor evaluates during integration (ME-EVENT-005).
+        let roots = &model.problem.events.root_conditions;
+        let mut sources = Vec::new();
+        for ordinal in crate::RootSearchPlan::derive(&model.problem).searched() {
+            let index = roots
+                .output_indices()
+                .get(ordinal)
+                .copied()
+                .ok_or_else(|| FmiComponentError::EventIndicatorInventory {
+                    message: "a searched root has no checked output identity".to_string(),
+                    span: roots.first_source_span(),
+                })?;
+            if !scheduled.contains(&index) {
+                sources.push(FmiEventIndicatorSource::RootCondition { index });
+            }
+        }
         sources.extend(dependency_backed_indicator_sources(
             &model.problem.events.dynamic_time_event_rhs,
             &static_y,
-            TimeReadOwner::Announced,
             |index| Some(FmiEventIndicatorSource::DynamicTimeEvent { index }),
         )?);
         sources.extend(
@@ -274,16 +265,13 @@ impl FmiEventIndicatorInventory {
 /// Select the rows of `block` that can change value during continuous
 /// integration, in checked output order.
 ///
-/// A row varies between events when it reads a solver-`Y` coordinate the
-/// static causality does not fix, and, for a [`TimeReadOwner::Monitored`]
-/// block, when it reads `time`. The `time` half is not redundant: a `time`
-/// relation whose instant the schedule cannot own, such as `time > 0` at the
-/// start of the interval, reads no `Y` at all, so a `Y`-only reading would
-/// call it invariant and drop the only surface its event has.
+/// A dynamic-time deadline varies between events when it reads a solver-`Y`
+/// coordinate the static causality does not fix. It is reported relative to
+/// the evaluation time and the time schedule owns a state-independent
+/// deadline exactly, so reading `time` alone does not make it an indicator.
 fn dependency_backed_indicator_sources(
     block: &crate::ScalarProgramBlock,
     static_y: &BTreeSet<usize>,
-    time_reads: TimeReadOwner,
     mut source: impl FnMut(usize) -> Option<FmiEventIndicatorSource>,
 ) -> Result<Vec<FmiEventIndicatorSource>, FmiComponentError> {
     let mut sources = Vec::new();
@@ -295,24 +283,7 @@ fn dependency_backed_indicator_sources(
                 message: error.to_string(),
                 span,
             })?;
-        let time_dependencies = match time_reads {
-            TimeReadOwner::Monitored => crate::StructuralPattern::derive_output_time_dependencies(
-                program, span,
-            )
-            .map_err(|error| FmiComponentError::EventIndicatorInventory {
-                message: error.to_string(),
-                span,
-            })?,
-            TimeReadOwner::Announced => vec![false; dependencies.len()],
-        };
-        if time_dependencies.len() != dependencies.len() {
-            return Err(FmiComponentError::EventIndicatorInventory {
-                message: "indicator solver-Y and time dependencies disagree on output count"
-                    .to_string(),
-                span,
-            });
-        }
-        for (dependencies, reads_time) in dependencies.into_iter().zip(time_dependencies) {
+        for dependencies in dependencies {
             let output_index = block
                 .output_indices()
                 .get(output_ordinal)
@@ -321,7 +292,7 @@ fn dependency_backed_indicator_sources(
                     message: "indicator output has no checked scalar identity".to_string(),
                     span,
                 })?;
-            if (!dependencies.is_subset(static_y) || reads_time)
+            if !dependencies.is_subset(static_y)
                 && let Some(source) = source(output_index)
             {
                 sources.push(source);

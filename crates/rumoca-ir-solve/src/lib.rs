@@ -22,6 +22,7 @@ mod linear_op;
 mod model;
 mod parameter_reads;
 mod refresh;
+mod root_search;
 mod scalar_program_outputs;
 #[cfg(test)]
 mod scalar_program_tests;
@@ -70,6 +71,7 @@ pub use linear_op::{
 pub use model::*;
 pub use parameter_reads::read_parameter_slots;
 pub use refresh::*;
+pub use root_search::{RootSearchPlan, RootSearchRole, TimeRootSign};
 pub use shape_error::{AffineTensorNodeKind, SolveProblemShapeContractError};
 pub use tangent_lanes::{
     ColoredLaneCall, ColoredTangentPlan, TangentLaneError, TangentLaneProgram, TangentRowSource,
