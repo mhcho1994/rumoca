@@ -107,3 +107,36 @@ pub(super) fn holonomic_analysis(
         None => structural_analysis(rebuilt),
     }
 }
+
+/// Debug builds reconstruct every candidate the residue bound deferred and
+/// check the bound: none of them may reduce the residue.
+#[cfg(debug_assertions)]
+pub(super) fn check_deferred(
+    source: &ReductionSource<'_>,
+    (residue, stated, prior_manifold, reuse): (
+        usize,
+        &[u32],
+        &[ManifoldConstraint],
+        Option<&crate::incidence::ReusableIncidence>,
+    ),
+    candidates: &[DirectStateConstraint],
+    deferred: &[usize],
+) -> Result<(), StructuralError> {
+    for &index in deferred {
+        let attempt = attempt_direct_candidate(
+            source,
+            residue,
+            stated,
+            &candidates[index],
+            prior_manifold,
+            reuse,
+            &mut (),
+        )?;
+        assert!(
+            !matches!(attempt, DirectAttempt::Sorted { .. })
+                && !matches!(&attempt, DirectAttempt::Accepted { residue: next, .. } if *next < residue),
+            "a candidate the residue bound excludes cannot reduce"
+        );
+    }
+    Ok(())
+}

@@ -1234,6 +1234,13 @@ fn demotion_pass_with_observer(
             return Ok(sorted);
         }
     }
+    #[cfg(debug_assertions)]
+    candidate_choice::check_deferred(
+        source,
+        (residue, stated, prior_manifold, policy.reuse),
+        candidates,
+        &deferred,
+    )?;
     if choice.reduced.is_none() {
         // With a held fallback allowed, the last holding candidate in order is
         // the choice and a refusal is reported only when none holds, so the
@@ -1255,11 +1262,6 @@ fn demotion_pass_with_observer(
                 policy.reuse,
                 observer,
             )?;
-            debug_assert!(
-                !matches!(attempt, DirectAttempt::Sorted { .. })
-                    && !matches!(&attempt, DirectAttempt::Accepted { residue: next, .. } if *next < residue),
-                "a candidate the residue bound excludes cannot reduce"
-            );
             if let Some(sorted) = choice.record(index, residue, attempt) {
                 return Ok(sorted);
             }

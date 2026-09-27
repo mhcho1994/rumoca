@@ -10,8 +10,8 @@
 //! incremental incidence already relies on.
 //!
 //! The bound applies only when `rhs` reads no algebraic coordinate and no
-//! record field or constructor, and no state with an explicit derivative
-//! definition: the differentiator reads an algebraic's
+//! record field or constructor, and reads no state whose explicit derivative
+//! definition reads one either: the differentiator reads an algebraic's
 //! equality anchor, causal definition, auxiliary block, or record component
 //! definitions, whose columns `rhs` does not show. Without those, the
 //! derivative of `rhs` reads only coordinates `rhs` reads and the
@@ -67,23 +67,16 @@ impl<'a> DemotionScreen<'a> {
         let rhs = view.expression_id(rhs as usize)?;
         let mut derivative_columns = Vec::new();
         let mut unbounded = false;
+        let mut definitions = Vec::new();
         dae::ExpressionTraversal::new().visit_pruned(view, [rhs], |_, node| {
-            if matches!(
-                node.operation(),
-                dae::ExpressionOperation::Coordinate(
-                    dae::CoordinateView::Derivative(_) | dae::CoordinateView::Algebraic(_)
-                ) | dae::ExpressionOperation::Field { .. }
-                    | dae::ExpressionOperation::Record(_)
-            ) {
-                unbounded = true;
-            }
+            unbounded |= reads_hidden_columns(node);
             // A state with an explicit derivative definition differentiates into
-            // that definition, whose columns this read does not show.
+            // that definition, rebuilt as values; it is checked below.
             if let dae::ExpressionOperation::Coordinate(dae::CoordinateView::State(state)) =
                 node.operation()
-                && facts.derivative_definitions[state.index() as usize].is_some()
+                && let Some(definition) = facts.derivative_definitions[state.index() as usize]
             {
-                unbounded = true;
+                definitions.extend(view.expression_id(definition.expression as usize));
             }
             if let Some(columns) = node
                 .variable_coordinate()
@@ -91,6 +84,14 @@ impl<'a> DemotionScreen<'a> {
             {
                 derivative_columns.extend(columns);
             }
+            true
+        });
+        // A derivative definition is rebuilt as values: a state or parameter read
+        // there is known and a read of the demoted state lands in its own
+        // columns, which every touched row carries, so the definition adds no
+        // column unless it reads one the bound cannot see.
+        dae::ExpressionTraversal::new().visit_pruned(view, definitions, |_, node| {
+            unbounded |= reads_hidden_columns(node);
             true
         });
         if unbounded {
@@ -149,4 +150,18 @@ impl<'a> DemotionScreen<'a> {
         self.residue_bound(view, facts, candidate)
             .filter(|bound| *bound >= self.residue)
     }
+}
+
+/// Whether differentiating or materializing `node` can read columns its own
+/// coordinates do not show: a derivative, an algebraic (whose equality anchor,
+/// causal definition, or auxiliary block is followed), or a record field or
+/// constructor (whose component definitions are followed).
+fn reads_hidden_columns(node: dae::ExpressionView<'_>) -> bool {
+    matches!(
+        node.operation(),
+        dae::ExpressionOperation::Coordinate(
+            dae::CoordinateView::Derivative(_) | dae::CoordinateView::Algebraic(_)
+        ) | dae::ExpressionOperation::Field { .. }
+            | dae::ExpressionOperation::Record(_)
+    )
 }

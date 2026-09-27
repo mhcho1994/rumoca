@@ -398,3 +398,71 @@ fn a_definition_reading_a_defined_state_is_not_bounded() {
         None
     );
 }
+
+/// `x = s; der(s) = q; der(q) = -s; der(x) = 1`, demoting `x` by `x = s`:
+/// `der(s)` is the state `q`, a known value, so the bound applies and never
+/// exceeds the rebuilt residue.
+#[test]
+fn a_definition_reading_a_state_defined_by_a_state_is_bounded_soundly() {
+    let text = "Real x; Real s; Real q; equation x=s; der(s)=q; der(q)=-s; der(x)=1;";
+    let mut sources = SourceMap::new();
+    let source = sources.add("state_defined_state.mo", text);
+    let at = source_provenance(source, text, text);
+    let mut defined = None;
+    let model = dae::Dae::construct(sources, |model| {
+        let scalar = model
+            .types(|types| types.derived(dae::ValueType::scalar(dae::ScalarType::Real), at))?;
+        let (x, s, q) = model.variables(|variables| {
+            Ok((
+                variables.state(VarName::new("x"), scalar, at, Default::default())?,
+                variables.state(VarName::new("s"), scalar, at, Default::default())?,
+                variables.state(VarName::new("q"), scalar, at, Default::default())?,
+            ))
+        })?;
+        let residuals = model.expressions(|e| {
+            let xv = e.at(at).coordinate(dae::CoordinateInput::State(x))?;
+            let sv = e.at(at).coordinate(dae::CoordinateInput::State(s))?;
+            let qv = e.at(at).coordinate(dae::CoordinateInput::State(q))?;
+            let dx = e.at(at).coordinate(dae::CoordinateInput::Derivative(x))?;
+            let ds = e.at(at).coordinate(dae::CoordinateInput::Derivative(s))?;
+            let dq = e.at(at).coordinate(dae::CoordinateInput::Derivative(q))?;
+            let one = e.at(at).literal(dae::DaeLiteral::Real(1.0))?;
+            defined = Some(DirectStateConstraint {
+                state: x.index(),
+                rhs: StateDefinition::Expression(sv.index()),
+                rhs_sign: super::super::equalities::EqualitySign::Same,
+                owner: at,
+            });
+            Ok([
+                e.at(at).binary(dae::BinaryOperator::Subtract, xv, sv)?,
+                e.at(at).binary(dae::BinaryOperator::Subtract, ds, qv)?,
+                e.at(at).binary(dae::BinaryOperator::Add, dq, sv)?,
+                e.at(at).binary(dae::BinaryOperator::Subtract, dx, one)?,
+            ])
+        })?;
+        model.continuous(|continuous| {
+            for residual in residuals {
+                continuous.value_equation(at, residual)?;
+            }
+            Ok(())
+        })
+    })
+    .unwrap();
+    let (_, reusable) = structural_analysis_capturing(&model, None, None);
+    let reusable = reusable.expect("the fixture builds its incidence");
+    let source = ReductionSource::new(&model);
+    let candidate = defined.expect("the fixture defines x by s");
+    let screen = demotion_screen::DemotionScreen::new(&reusable, &source.demotion_rows, 1);
+    let bound = source
+        .inspect(|view, facts| screen.residue_bound(view, facts, &candidate))
+        .expect("a definition read through a state-valued rate is bounded");
+    let (rebuilt, _) = rebuild_with_state_demotion_and_manifold(&source, candidate, &[]).unwrap();
+    let actual = structural_analysis(&rebuilt)
+        .err()
+        .and_then(|error| unmatched_residue(&error))
+        .unwrap_or(0);
+    assert!(
+        bound <= actual,
+        "bound {bound} exceeds rebuilt residue {actual}"
+    );
+}
