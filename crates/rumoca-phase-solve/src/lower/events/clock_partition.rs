@@ -352,12 +352,8 @@ impl SameTickExchange {
         let mut placed = vec![false; count];
         let mut order = Vec::with_capacity(count);
         while order.len() < count {
-            let ready = (0..count).find(|&member| {
-                !placed[member]
-                    && self.observes[member].iter().all(|&observed| {
-                        placed[observed] || self.observes[observed].contains(&member)
-                    })
-            });
+            let ready = (0..count)
+                .find(|&member| !placed[member] && self.producers_placed(member, &placed));
             let next = ready.unwrap_or_else(|| {
                 (0..count)
                     .find(|&member| !placed[member])
@@ -367,6 +363,13 @@ impl SameTickExchange {
             order.push(next);
         }
         order
+    }
+
+    /// Whether every member `member` observes is placed or observes it back.
+    fn producers_placed(&self, member: usize, placed: &[bool]) -> bool {
+        self.observes[member]
+            .iter()
+            .all(|&observed| placed[observed] || self.observes[observed].contains(&member))
     }
 
     /// Whether every member of the set may share one program.

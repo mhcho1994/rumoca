@@ -22,9 +22,8 @@ fn simulate(source: &str, model: &str) -> Result<SimResult, String> {
             ..Default::default()
         },
     )
-    .map(|result| {
+    .inspect(|result| {
         assert!(result.times.len() > 5, "{model} produced an output grid");
-        result
     })
     .map_err(|error| format!("{error:?}"))
 }

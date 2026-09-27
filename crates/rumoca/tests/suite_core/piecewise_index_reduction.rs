@@ -22,9 +22,8 @@ fn simulate(source: &str, model: &str) -> SimResult {
             ..Default::default()
         },
     )
-    .map(|result| {
+    .inspect(|result| {
         assert!(result.times.len() > 10, "{model} produced an output grid");
-        result
     })
     .unwrap_or_else(|error| panic!("{model} simulates: {error:?}"))
 }
