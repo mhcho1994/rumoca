@@ -498,6 +498,9 @@ pub(crate) struct Storage {
     flat_type_lookup: rustc_hash::FxHashMap<TypeId, u32>,
     structural_type_lookup: rustc_hash::FxHashMap<ValueType, u32>,
     pub(crate) variables: Vec<VariableEntry>,
+    /// Arena index of each reserved variable by name, so the duplicate-name
+    /// check of a reservation is one lookup; internal only, never iterated.
+    variable_by_name: rustc_hash::FxHashMap<VarName, u32>,
     pub(crate) functions: Vec<FunctionEntry>,
     pub(crate) function_folds: Vec<FunctionFoldEntry>,
     domains: Vec<DomainEntry>,
@@ -1047,12 +1050,7 @@ impl<'dae> Variables<'_, 'dae> {
         capability: VariableTypeCapability<'dae>,
         declaration: DaeProvenance,
     ) -> Result<VariableId<'dae>, DaeConstructionError> {
-        if self
-            .storage
-            .variables
-            .iter()
-            .any(|entry| entry.name == name)
-        {
+        if self.storage.variable_by_name.contains_key(&name) {
             return Err(DaeConstructionError::DuplicateKey {
                 kind: "variable",
                 key: name.to_string(),
@@ -1060,6 +1058,7 @@ impl<'dae> Variables<'_, 'dae> {
             });
         }
         let raw = checked_u32(self.storage.variables.len(), "variable arena", declaration)?;
+        self.storage.variable_by_name.insert(name.clone(), raw);
         self.storage.variables.push(VariableEntry {
             name,
             role: capability.role(),
