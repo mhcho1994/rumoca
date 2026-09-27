@@ -187,7 +187,7 @@ fn build_event_iteration_plan<'dae>(
         });
     }
     runs.sort_by_key(|run| run.pre_binding_start);
-    Ok(solve::EventIterationPlan { runs })
+    Ok(solve::EventIterationPlan::new(runs))
 }
 
 fn lower_delays<'dae>(

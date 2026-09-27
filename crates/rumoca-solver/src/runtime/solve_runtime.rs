@@ -34,6 +34,11 @@ use rumoca_eval_solve::{
     to_scalar_program_block,
 };
 
+/// The algebraic projection an event walk runs between its steps, reporting
+/// whether it changed the coordinate.
+pub(super) type ProjectAlgebraics<'a> =
+    dyn FnMut(&mut [f64], &mut [f64]) -> Result<bool, RuntimeSolveError> + 'a;
+
 mod block_residual_split;
 pub use block_residual_split::{
     BlockResidualSplitCounts, block_residual_split_counts, reset_block_residual_split_counts,

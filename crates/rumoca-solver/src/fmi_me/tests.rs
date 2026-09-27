@@ -36,8 +36,15 @@ fn zero_state_event_continuation_is_independent_of_value_tolerance() {
             None,
         )
         .expect("zero-state component should instantiate");
-        let options = live_session_options(&rumoca_ir_solve::fmi::RootLocationPlan::STANDARD, 0.0, atol, atol, 1.0e-10, None)
-            .expect("zero-state session options should construct");
+        let options = live_session_options(
+            &rumoca_ir_solve::fmi::RootLocationPlan::STANDARD,
+            0.0,
+            atol,
+            atol,
+            1.0e-10,
+            None,
+        )
+        .expect("zero-state session options should construct");
         let host = retained
             .into_lease(options)
             .expect("zero-state component should initialize");

@@ -43,7 +43,6 @@ mod static_assertions;
 mod tests;
 
 pub use c_codegen::{FmiCCodegenError, FmiCCodegenView};
-pub use root_location::{RootLocationPlan, RootTieBreak};
 pub use event_free::{FmiEventFreeCodegenView, FmiEventFreeError};
 pub use max_step_duration::{
     MAX_STEP_DURATION_DESCRIPTION, MAX_STEP_DURATION_NAME, MAX_STEP_DURATION_UNCONSTRAINED,
@@ -53,6 +52,7 @@ pub use metadata::{
     FmiCausality, FmiInitial, FmiStorageColumn, FmiStorageRun, FmiValueBacking, FmiVariability,
     FmiVariable, FmiVariableInput,
 };
+pub use root_location::{RootLocationPlan, RootTieBreak};
 
 /// Configuration-Mode capability declared by the checked FMI component.
 ///

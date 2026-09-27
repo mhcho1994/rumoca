@@ -2,8 +2,6 @@ use nalgebra::{DMatrix, DVector};
 
 use super::solve_ops::RuntimeSolveError;
 
-const NEWTON_LINE_SEARCH_STEPS: usize = 16;
-
 /// Backend-neutral residual interface for a discrete-frozen event solve.
 ///
 /// The adapter owns the mapping between this dense unknown vector and its
@@ -42,14 +40,14 @@ pub fn solve_coupled_event_newton<M: CoupledEventNewtonModel>(
     model: &M,
     unknowns: &mut [f64],
     tolerance: f64,
-    max_iters: usize,
+    policy: &rumoca_ir_solve::CoupledNewtonPolicy,
 ) -> Result<(), RuntimeSolveError> {
     if unknowns.is_empty() {
         return Ok(());
     }
-    validate_newton_options(tolerance, max_iters)?;
+    validate_newton_options(tolerance)?;
     let incoming = unknowns.to_vec();
-    let result = solve_coupled_event_newton_inner(model, unknowns, tolerance, max_iters);
+    let result = solve_coupled_event_newton_inner(model, unknowns, tolerance, policy);
     if result.is_err() {
         unknowns.copy_from_slice(&incoming);
     }
@@ -60,8 +58,9 @@ fn solve_coupled_event_newton_inner<M: CoupledEventNewtonModel>(
     model: &M,
     unknowns: &mut [f64],
     tolerance: f64,
-    max_iters: usize,
+    policy: &rumoca_ir_solve::CoupledNewtonPolicy,
 ) -> Result<(), RuntimeSolveError> {
+    let max_iters = policy.iteration_cap();
     let count = unknowns.len();
     let variable_scales = (0..count)
         .map(|index| valid_scale(model.variable_scale(index)))
@@ -90,7 +89,14 @@ fn solve_coupled_event_newton_inner<M: CoupledEventNewtonModel>(
             tolerance,
         )
         .ok_or_else(|| coupled_event_error("Jacobian is singular"))?;
-        if !accept_newton_delta(model, unknowns, delta.as_slice(), &row_scales, tolerance)? {
+        if !accept_newton_delta(
+            model,
+            unknowns,
+            delta.as_slice(),
+            &row_scales,
+            tolerance,
+            policy.line_search_halvings(),
+        )? {
             return Err(coupled_event_error(
                 "line search could not reduce the residual",
             ));
@@ -111,13 +117,11 @@ fn solve_coupled_event_newton_inner<M: CoupledEventNewtonModel>(
     )))
 }
 
-fn validate_newton_options(tolerance: f64, max_iters: usize) -> Result<(), RuntimeSolveError> {
-    if tolerance.is_finite() && tolerance > 0.0 && max_iters > 0 {
+fn validate_newton_options(tolerance: f64) -> Result<(), RuntimeSolveError> {
+    if tolerance.is_finite() && tolerance > 0.0 {
         return Ok(());
     }
-    Err(coupled_event_error(
-        "tolerance must be finite and positive and max_iters must be nonzero",
-    ))
+    Err(coupled_event_error("tolerance must be finite and positive"))
 }
 
 fn eval_finite_residual<M: CoupledEventNewtonModel>(
@@ -220,6 +224,7 @@ fn accept_newton_delta<M: CoupledEventNewtonModel>(
     delta: &[f64],
     row_scales: &[f64],
     tolerance: f64,
+    line_search_halvings: usize,
 ) -> Result<bool, RuntimeSolveError> {
     let incoming = unknowns.to_vec();
     let mut before_residual = vec![0.0; unknowns.len()];
@@ -227,7 +232,7 @@ fn accept_newton_delta<M: CoupledEventNewtonModel>(
     let before_norm = scaled_residual_norm(&before_residual, row_scales);
     let mut trial_residual = vec![0.0; unknowns.len()];
     let mut fraction = 1.0;
-    for _ in 0..NEWTON_LINE_SEARCH_STEPS {
+    for _ in 0..line_search_halvings {
         for ((slot, base), update) in unknowns.iter_mut().zip(&incoming).zip(delta) {
             *slot = base + fraction * update;
         }
@@ -269,6 +274,10 @@ fn coupled_event_error(reason: &str) -> RuntimeSolveError {
 mod tests {
     use super::*;
 
+    fn policy(iteration_cap: usize) -> rumoca_ir_solve::CoupledNewtonPolicy {
+        rumoca_ir_solve::CoupledNewtonPolicy::new(iteration_cap, 16).expect("a positive cap")
+    }
+
     struct OscillatingEventModel;
 
     impl CoupledEventNewtonModel for OscillatingEventModel {
@@ -300,7 +309,7 @@ mod tests {
     fn coupled_event_newton_recovers_oscillating_fixed_point() {
         let mut unknowns = [0.0, 0.0];
 
-        solve_coupled_event_newton(&OscillatingEventModel, &mut unknowns, 1.0e-12, 1)
+        solve_coupled_event_newton(&OscillatingEventModel, &mut unknowns, 1.0e-12, &policy(1))
             .expect("the square coupled system should converge");
 
         assert!((unknowns[0] - 1.0).abs() < 1.0e-10);
@@ -334,8 +343,9 @@ mod tests {
     fn coupled_event_newton_restores_unknowns_on_failure() {
         let mut unknowns = [3.0, 4.0];
 
-        let error = solve_coupled_event_newton(&SingularEventModel, &mut unknowns, 1.0e-12, 4)
-            .expect_err("a singular residual system must fail loudly");
+        let error =
+            solve_coupled_event_newton(&SingularEventModel, &mut unknowns, 1.0e-12, &policy(4))
+                .expect_err("a singular residual system must fail loudly");
 
         assert!(
             error

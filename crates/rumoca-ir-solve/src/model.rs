@@ -3,10 +3,15 @@ use std::sync::Arc;
 
 mod affine_elimination;
 mod clock_partition;
+mod event_schedule;
 mod event_transaction;
 mod jacobian_outputs;
 
 pub use affine_elimination::AffineEliminationLayout;
+pub use event_schedule::{
+    CoupledNewtonPolicy, EventIterationSchedule, EventPassStep, EventScheduleError,
+    RelationPassStep, SettleStep,
+};
 pub use event_transaction::*;
 pub use jacobian_outputs::*;
 
@@ -676,6 +681,19 @@ pub struct EventIterationRun {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct EventIterationPlan {
     pub runs: Vec<EventIterationRun>,
+    /// How every executor walks the iteration (SPEC_0044 ME-EVENT-006).
+    #[serde(default)]
+    pub schedule: EventIterationSchedule,
+}
+
+impl EventIterationPlan {
+    /// A plan over `runs` walked by the standard schedule.
+    pub fn new(runs: Vec<EventIterationRun>) -> Self {
+        Self {
+            runs,
+            schedule: EventIterationSchedule::standard(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

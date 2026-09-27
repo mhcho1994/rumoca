@@ -215,7 +215,7 @@ impl SolveRuntime {
         // view before any row evaluates; row-wide clock owners are only an
         // execution filter and cannot stand in for these expression leaves.
         write_clock_activation_params(&self.model, p, t);
-        for event_iteration in 0..max_iters {
+        for event_iteration in 0..self.event_schedule().fixed_point_cap() {
             // Appendix B fixes `pre` for one complete equation pass, then
             // advances ordinary event history atomically from that pass before
             // starting the next one.  Capture the source before any runtime
@@ -240,24 +240,7 @@ impl SolveRuntime {
                     p,
                 )?
             };
-            changed |=
-                self.apply_root_relation_memory_overrides(root_relation_overrides, y, p, tol)?;
-            changed |= self.apply_runtime_assignments_until_stable(y, p, t, tol, max_iters)?;
-            changed |= project_algebraics(y, p)?;
-            changed |= self.apply_runtime_assignments_until_stable(y, p, t, tol, max_iters)?;
-            // Relation memory is an input to discrete equations and algorithm
-            // transactions at this same event instant.  Refresh it from the
-            // just-projected coordinate before those consumers take their one
-            // whole-event pass; updating it only afterward lets fixed/clocked
-            // owners consume the stale side and they are not permitted to run
-            // again merely because relation memory changed later in the pass.
-            let relation_changed_before_discrete =
-                self.refresh_event_relation_memory(t, y, p, tol, root_relation_overrides)?;
-            changed |= relation_changed_before_discrete;
-            if relation_changed_before_discrete {
-                changed |= self.apply_runtime_assignments_until_stable(y, p, t, tol, max_iters)?;
-            }
-            changed |= self.settle_event_equations_with_fixed_pre(
+            changed |= self.run_event_pass(
                 &mut DiscreteRowsSettleInput {
                     y,
                     p,
@@ -279,53 +262,188 @@ impl SolveRuntime {
         )))
     }
 
-    fn settle_event_equations_with_fixed_pre<P>(
+    /// The event iteration schedule this model's Solve IR carries
+    /// (SPEC_0044 ME-EVENT-006).
+    pub(super) fn event_schedule(&self) -> &solve::EventIterationSchedule {
+        &self.model.problem.discrete.event_iteration_plan.schedule
+    }
+
+    /// Walk one event pass of the schedule under this pass's fixed `pre`.
+    fn run_event_pass(
         &self,
         input: &mut DiscreteRowsSettleInput<'_>,
         row_filter: EventUpdateRowFilter,
         event_iteration: usize,
         root_relation_overrides: &mut Vec<(usize, f64)>,
-        project_algebraics: &mut P,
-    ) -> Result<bool, RuntimeSolveError>
-    where
-        P: FnMut(&mut [f64], &mut [f64]) -> Result<bool, RuntimeSolveError>,
-    {
-        let mut changed_any = false;
-        for relation_iteration in 0..input.max_iters {
-            let snapshot = DiscretePreSnapshot {
-                row_filter,
-                root_relation_overrides,
-                event_iteration: event_iteration.max(relation_iteration),
+        project_algebraics: &mut ProjectAlgebraics<'_>,
+    ) -> Result<bool, RuntimeSolveError> {
+        let mut changed = false;
+        for step in self.event_schedule().event_pass() {
+            changed |= match step {
+                solve::EventPassStep::RelationOverrides => self
+                    .apply_root_relation_memory_overrides(
+                        root_relation_overrides,
+                        input.y,
+                        input.p,
+                        input.tol,
+                    )?,
+                solve::EventPassStep::RuntimeAssignments => self.run_runtime_assignments(input)?,
+                solve::EventPassStep::AlgebraicProjection => project_algebraics(input.y, input.p)?,
+                // Relation memory is an input to discrete equations and
+                // algorithm transactions at this same event instant. Refresh
+                // it from the just-projected coordinate before those consumers
+                // take their one whole-event pass; updating it only afterward
+                // lets fixed/clocked owners consume the stale side, and they
+                // may not run again merely because relation memory changed.
+                solve::EventPassStep::RelationRefresh => {
+                    self.refresh_relations_then_assign(input, root_relation_overrides)?
+                }
+                solve::EventPassStep::RelationSettle => self
+                    .settle_event_equations_with_fixed_pre(
+                        input,
+                        row_filter,
+                        event_iteration,
+                        root_relation_overrides,
+                        project_algebraics,
+                    )?,
             };
-            changed_any |=
-                self.settle_discrete_rows_for_pre_snapshot(&snapshot, input, project_algebraics)?;
-            // MLS Appendix B: condition equations belong to the same solve as
-            // current discrete values. Advancing pre before these relations
-            // settle would preserve a transient latch value in event history.
-            let relation_changed = self.refresh_event_relation_memory(
-                input.t,
-                input.y,
-                input.p,
-                input.tol,
+        }
+        Ok(changed)
+    }
+
+    /// Refresh relation memory; when it changed, rerun the runtime
+    /// assignments so discrete consumers read the refreshed side.
+    fn refresh_relations_then_assign(
+        &self,
+        input: &mut DiscreteRowsSettleInput<'_>,
+        root_relation_overrides: &mut Vec<(usize, f64)>,
+    ) -> Result<bool, RuntimeSolveError> {
+        let refreshed = self.refresh_event_relation_memory(
+            input.t,
+            input.y,
+            input.p,
+            input.tol,
+            root_relation_overrides,
+        )?;
+        if refreshed {
+            self.run_runtime_assignments(input)?;
+        }
+        Ok(refreshed)
+    }
+
+    fn run_runtime_assignments(
+        &self,
+        input: &mut DiscreteRowsSettleInput<'_>,
+    ) -> Result<bool, RuntimeSolveError> {
+        self.apply_runtime_assignments_until_stable(
+            input.y,
+            input.p,
+            input.t,
+            input.tol,
+            input.max_iters,
+        )
+    }
+
+    fn settle_event_equations_with_fixed_pre(
+        &self,
+        input: &mut DiscreteRowsSettleInput<'_>,
+        row_filter: EventUpdateRowFilter,
+        event_iteration: usize,
+        root_relation_overrides: &mut Vec<(usize, f64)>,
+        project_algebraics: &mut ProjectAlgebraics<'_>,
+    ) -> Result<bool, RuntimeSolveError> {
+        let mut changed_any = false;
+        for relation_iteration in 0..self.event_schedule().fixed_point_cap() {
+            let pass = self.run_relation_pass(
+                input,
+                row_filter,
+                event_iteration.max(relation_iteration),
                 root_relation_overrides,
+                project_algebraics,
             )?;
-            if !relation_changed {
+            changed_any |= pass.changed;
+            if pass.settled {
                 return Ok(changed_any);
             }
-            changed_any = true;
-            project_algebraics(input.y, input.p)?;
-            self.apply_runtime_assignments_until_stable(
-                input.y,
-                input.p,
-                input.t,
-                input.tol,
-                input.max_iters,
-            )?;
         }
         Err(RuntimeSolveError::solve_ir(format!(
             "event condition equations did not converge with fixed pre at t={}",
             input.t
         )))
+    }
+
+    /// Walk one relation pass, stopping where its relations settled.
+    fn run_relation_pass(
+        &self,
+        input: &mut DiscreteRowsSettleInput<'_>,
+        row_filter: EventUpdateRowFilter,
+        event_iteration: usize,
+        root_relation_overrides: &mut Vec<(usize, f64)>,
+        project_algebraics: &mut ProjectAlgebraics<'_>,
+    ) -> Result<RelationPassOutcome, RuntimeSolveError> {
+        let mut changed_any = false;
+        for step in self.event_schedule().relation_pass() {
+            let Some(changed) = self.run_relation_step(
+                *step,
+                input,
+                row_filter,
+                event_iteration,
+                root_relation_overrides,
+                project_algebraics,
+            )?
+            else {
+                return Ok(RelationPassOutcome {
+                    changed: changed_any,
+                    settled: true,
+                });
+            };
+            changed_any |= changed;
+        }
+        Ok(RelationPassOutcome {
+            changed: changed_any,
+            settled: false,
+        })
+    }
+
+    /// Run one relation-pass step; `None` when the pass has settled.
+    fn run_relation_step(
+        &self,
+        step: solve::RelationPassStep,
+        input: &mut DiscreteRowsSettleInput<'_>,
+        row_filter: EventUpdateRowFilter,
+        event_iteration: usize,
+        root_relation_overrides: &mut Vec<(usize, f64)>,
+        project_algebraics: &mut ProjectAlgebraics<'_>,
+    ) -> Result<Option<bool>, RuntimeSolveError> {
+        let changed = match step {
+            solve::RelationPassStep::DiscreteSettle => {
+                let snapshot = DiscretePreSnapshot {
+                    row_filter,
+                    root_relation_overrides,
+                    event_iteration,
+                };
+                self.settle_discrete_rows_for_pre_snapshot(&snapshot, input, project_algebraics)?
+            }
+            // MLS Appendix B: condition equations belong to the same solve as
+            // current discrete values. Advancing pre before these relations
+            // settle would preserve a transient latch value in event history.
+            solve::RelationPassStep::SettledIfRelationsUnchanged => {
+                let refreshed = self.refresh_event_relation_memory(
+                    input.t,
+                    input.y,
+                    input.p,
+                    input.tol,
+                    root_relation_overrides,
+                )?;
+                if !refreshed {
+                    return Ok(None);
+                }
+                true
+            }
+            solve::RelationPassStep::AlgebraicProjection => project_algebraics(input.y, input.p)?,
+            solve::RelationPassStep::RuntimeAssignments => self.run_runtime_assignments(input)?,
+        };
+        Ok(Some(changed))
     }
 
     pub(super) fn validate_discrete_event_rows(&self) -> Result<(), RuntimeSolveError> {
@@ -886,4 +1004,11 @@ impl SolveRuntime {
         }
         Ok(())
     }
+}
+
+/// What one relation pass did: whether it changed the coordinate, and whether
+/// it stopped because its relations settled.
+struct RelationPassOutcome {
+    changed: bool,
+    settled: bool,
 }

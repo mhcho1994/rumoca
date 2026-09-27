@@ -58,13 +58,11 @@ fn event_iteration_contract_fixture() -> SolveProblem {
             ..SolveLayout::default()
         },
         discrete: DiscreteSolveSystem {
-            event_iteration_plan: EventIterationPlan {
-                runs: vec![EventIterationRun {
-                    variable: 0,
-                    pre_binding_start: 0,
-                    owner: EventIterationOwner::ScalarRows { start_row: 0 },
-                }],
-            },
+            event_iteration_plan: EventIterationPlan::new(vec![EventIterationRun {
+                variable: 0,
+                pre_binding_start: 0,
+                owner: EventIterationOwner::ScalarRows { start_row: 0 },
+            }]),
             rhs: ScalarProgramBlock::with_source_span(
                 vec![vec![
                     LinearOp::Const { dst: 0, value: 1.0 },
@@ -1034,16 +1032,14 @@ fn solve_model_wire_rejects_a_forged_event_transaction_call_owner() {
         observation_refresh: vec![false; 2],
         integrator_history_effects: vec![IntegratorHistoryEffect::Preserve; 2],
         clock_owners: vec![None; 2],
-        event_iteration_plan: EventIterationPlan {
-            runs: vec![EventIterationRun {
-                variable: 0,
-                pre_binding_start: 0,
-                owner: EventIterationOwner::EventTransaction {
-                    program_index: 0,
-                    target_index: 0,
-                },
-            }],
-        },
+        event_iteration_plan: EventIterationPlan::new(vec![EventIterationRun {
+            variable: 0,
+            pre_binding_start: 0,
+            owner: EventIterationOwner::EventTransaction {
+                program_index: 0,
+                target_index: 0,
+            },
+        }]),
         event_transactions: vec![transaction.clone()],
         ..DiscreteSolveSystem::default()
     };

@@ -471,13 +471,11 @@ fn whole_event_solve_layout() -> solve::SolveLayout {
 
 fn whole_event_discrete_system(relation_row: Vec<solve::LinearOp>) -> solve::DiscreteSolveSystem {
     solve::DiscreteSolveSystem {
-        event_iteration_plan: solve::EventIterationPlan {
-            runs: vec![solve::EventIterationRun {
-                variable: 0,
-                pre_binding_start: 0,
-                owner: solve::EventIterationOwner::ScalarRows { start_row: 0 },
-            }],
-        },
+        event_iteration_plan: solve::EventIterationPlan::new(vec![solve::EventIterationRun {
+            variable: 0,
+            pre_binding_start: 0,
+            owner: solve::EventIterationOwner::ScalarRows { start_row: 0 },
+        }]),
         runtime_assignment_rhs: spanned_block(
             vec![relation_row.clone()],
             "whole_event_pass_runtime.mo",
@@ -602,20 +600,18 @@ fn event_iteration_mixes_advanced_discrete_pre_with_event_entry_continuous_pre()
             layout: solve::VarLayout::from_parts(IndexMap::new(), 1, 5),
             solve_layout: mixed_pre_solve_layout(),
             discrete: solve::DiscreteSolveSystem {
-                event_iteration_plan: solve::EventIterationPlan {
-                    runs: vec![
-                        solve::EventIterationRun {
-                            variable: 0,
-                            pre_binding_start: 0,
-                            owner: solve::EventIterationOwner::ScalarRows { start_row: 0 },
-                        },
-                        solve::EventIterationRun {
-                            variable: 1,
-                            pre_binding_start: 1,
-                            owner: solve::EventIterationOwner::ScalarRows { start_row: 1 },
-                        },
-                    ],
-                },
+                event_iteration_plan: solve::EventIterationPlan::new(vec![
+                    solve::EventIterationRun {
+                        variable: 0,
+                        pre_binding_start: 0,
+                        owner: solve::EventIterationOwner::ScalarRows { start_row: 0 },
+                    },
+                    solve::EventIterationRun {
+                        variable: 1,
+                        pre_binding_start: 1,
+                        owner: solve::EventIterationOwner::ScalarRows { start_row: 1 },
+                    },
+                ]),
                 rhs: spanned_block(
                     vec![
                         vec![
@@ -743,20 +739,18 @@ fn clock_owned_equation_executes_only_on_the_first_whole_event_pass() {
             solve_layout: clock_first_pass_solve_layout(),
             clocks,
             discrete: solve::DiscreteSolveSystem {
-                event_iteration_plan: solve::EventIterationPlan {
-                    runs: vec![
-                        solve::EventIterationRun {
-                            variable: 0,
-                            pre_binding_start: 0,
-                            owner: solve::EventIterationOwner::ScalarRows { start_row: 0 },
-                        },
-                        solve::EventIterationRun {
-                            variable: 1,
-                            pre_binding_start: 1,
-                            owner: solve::EventIterationOwner::ScalarRows { start_row: 1 },
-                        },
-                    ],
-                },
+                event_iteration_plan: solve::EventIterationPlan::new(vec![
+                    solve::EventIterationRun {
+                        variable: 0,
+                        pre_binding_start: 0,
+                        owner: solve::EventIterationOwner::ScalarRows { start_row: 0 },
+                    },
+                    solve::EventIterationRun {
+                        variable: 1,
+                        pre_binding_start: 1,
+                        owner: solve::EventIterationOwner::ScalarRows { start_row: 1 },
+                    },
+                ]),
                 rhs: spanned_block(
                     vec![
                         vec![
@@ -894,13 +888,13 @@ fn clock_owner_observes_projected_relation_memory_on_its_only_event_pass() {
                 ..Default::default()
             },
             discrete: solve::DiscreteSolveSystem {
-                event_iteration_plan: solve::EventIterationPlan {
-                    runs: vec![solve::EventIterationRun {
+                event_iteration_plan: solve::EventIterationPlan::new(vec![
+                    solve::EventIterationRun {
                         variable: 0,
                         pre_binding_start: 0,
                         owner: solve::EventIterationOwner::ScalarRows { start_row: 0 },
-                    }],
-                },
+                    },
+                ]),
                 rhs: spanned_block(
                     vec![vec![
                         solve::LinearOp::LoadP { dst: 0, index: 0 },

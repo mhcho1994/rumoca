@@ -838,10 +838,13 @@ mod tests {
     fn the_policy_rejects_a_non_positive_or_incomplete_nominal_vector() {
         assert!(MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![0.0], 1, 128).is_err());
         assert!(
-            MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![f64::INFINITY], 1, 128).is_err()
+            MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![f64::INFINITY], 1, 128)
+                .is_err()
         );
         assert!(MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, Vec::new(), 1, 128).is_err());
-        assert!(MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![1.0, 1.0], 1, 128).is_err());
+        assert!(
+            MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![1.0, 1.0], 1, 128).is_err()
+        );
     }
 
     #[test]
