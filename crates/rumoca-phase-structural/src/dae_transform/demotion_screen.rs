@@ -37,6 +37,8 @@ pub(super) struct DemotionScreen<'a> {
     base: &'a ReusableIncidence,
     bounds: &'a DemotionRowBounds,
     residue: usize,
+    /// A maximum matching of the base rows, built on the first bound.
+    base_matching: std::cell::OnceCell<Vec<Option<usize>>>,
 }
 
 impl<'a> DemotionScreen<'a> {
@@ -49,6 +51,7 @@ impl<'a> DemotionScreen<'a> {
             base,
             bounds,
             residue,
+            base_matching: std::cell::OnceCell::new(),
         }
     }
 
@@ -66,7 +69,7 @@ impl<'a> DemotionScreen<'a> {
         };
         let state_columns = self.bounds.columns(candidate.state)?;
         let rhs = view.expression_id(rhs as usize)?;
-        let derivative_columns = DerivativeClosure {
+        let mut derivative_columns = DerivativeClosure {
             view,
             facts,
             bounds: self.bounds,
@@ -77,8 +80,32 @@ impl<'a> DemotionScreen<'a> {
             rates: Vec::new(),
         }
         .collect()?;
+        derivative_columns.sort_unstable();
+        derivative_columns.dedup();
         let touched = self.bounds.owners(candidate.state);
         let n_eq = self.base.rows().len();
+        // An array coordinate adds its whole column range to every
+        // derivative row, so a wide closure over a wide state could make the
+        // superset quadratic in the array extent. The bound is then skipped
+        // (the candidate is simply rebuilt), keeping it linear in the base
+        // incidence.
+        let derivative_rows = touched
+            .iter()
+            .filter_map(|&owner| self.base.owner_rows(owner))
+            .flatten()
+            .filter(|&row| {
+                self.base
+                    .rows()
+                    .row(row)
+                    .iter()
+                    .any(|column| state_columns.contains(column))
+            })
+            .count();
+        if derivative_rows.saturating_mul(derivative_columns.len())
+            > self.base.rows().entry_count().max(n_eq)
+        {
+            return None;
+        }
         let mut rows = IncidenceRowsBuilder::with_row_capacity(n_eq);
         let mut owner = 0;
         let mut owner_end = self.base.owner_rows(0).map_or(n_eq, |range| range.end);
@@ -109,14 +136,12 @@ impl<'a> DemotionScreen<'a> {
         }
         let rows = rows.finish();
         let n_var = self.bounds.unknown_count();
-        let (matched, _) = crate::matching::maximum_matching_with_structured(
-            n_eq,
-            n_var,
-            &rows,
-            &vec![None; n_eq],
-            &[],
-        );
-        let matched = matched.iter().filter(|column| column.is_some()).count();
+        // Every superset row contains its base row, so the base system's
+        // maximum matching stays valid and only grows by augmentation.
+        let seed = self.base_matching.get_or_init(|| {
+            crate::matching::grow_maximum_matching(n_var, self.base.rows(), vec![None; n_eq]).0
+        });
+        let (_, matched) = crate::matching::grow_maximum_matching(n_var, &rows, seed.clone());
         Some((n_eq - matched) + (n_var - matched))
     }
 
