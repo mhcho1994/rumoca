@@ -195,4 +195,5 @@ mod variability_classes;
 mod verification_surface_wiring;
 
 mod structural_binding_functions;
+mod structural_parameters;
 mod zero_coefficient_incidence;

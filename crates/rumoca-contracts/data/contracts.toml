@@ -1460,6 +1460,15 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'DECL-037'
+category = 'Declaration'
+name = 'Structural parameters'
+mls_ref = '§10.1, §8.3.3'
+requirement = 'The number of dimensions and the dimension sizes are fixed at translation; a for-equation range is evaluated at translation'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'EQN-001'
 category = 'Equation'
 name = 'Local balance'

@@ -597,28 +597,49 @@ fn build_model_diagnostics_for_typed_model(
     }
 }
 
-/// One WD001 warning per equation or declaration whose parameter guard selects
-/// between structurally different branches, so its parameters are fixed at
-/// translation and cannot be set (SPEC_0040 DAE-C22, MLS 3.7 §8.3.4).
+/// One WD001 warning per structural use of ordinary parameters: a guard
+/// selecting between structurally different branches (MLS 3.7 §8.3.4), an
+/// array dimension (§10.1), or a for-equation range (§8.3.3). Each fixes its
+/// parameters at translation, so they cannot be set (SPEC_0040 DAE-C22).
 fn structural_selection_warnings(
     selections: &[rumoca_phase_dae::StructuralSelection],
 ) -> Vec<CommonDiagnostic> {
     selections
         .iter()
         .map(|selection| {
+            let plural = if selection.parameters.len() == 1 {
+                ""
+            } else {
+                "s"
+            };
+            let parameters = selection.parameters.join(", ");
+            let (message, label) = match selection.kind {
+                rumoca_ir_flat::StructuralParameterUse::BranchSelection => (
+                    format!(
+                        "the branch of this equation is selected at translation, so parameter{plural} \
+                         {parameters} cannot be set: its branches differ in structure (MLS 3.7 §8.3.4)"
+                    ),
+                    "branch fixed at translation",
+                ),
+                rumoca_ir_flat::StructuralParameterUse::ArrayDimension => (
+                    format!(
+                        "this array dimension is fixed at translation, so parameter{plural} \
+                         {parameters} cannot be set (MLS 3.7 §10.1)"
+                    ),
+                    "dimension fixed at translation",
+                ),
+                rumoca_ir_flat::StructuralParameterUse::ForRange => (
+                    format!(
+                        "this for-equation range is fixed at translation, so parameter{plural} \
+                         {parameters} cannot be set (MLS 3.7 §8.3.3)"
+                    ),
+                    "range fixed at translation",
+                ),
+            };
             CommonDiagnostic::warning(
                 "WD001",
-                format!(
-                    "the branch of this equation is selected at translation, so parameter{} {} \
-                     cannot be set: its branches differ in structure (MLS 3.7 §8.3.4)",
-                    if selection.parameters.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    },
-                    selection.parameters.join(", ")
-                ),
-                PrimaryLabel::new(selection.span).with_message("branch fixed at translation"),
+                message,
+                PrimaryLabel::new(selection.span).with_message(label),
             )
         })
         .collect()

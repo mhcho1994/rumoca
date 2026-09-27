@@ -562,6 +562,13 @@ kind = 'Compile'
 outcome = 'Accept'
 
 [[cases]]
+contract_id = 'DECL-037'
+case_id = 'decl_037_structural_parameters'
+test_file = 'tests/decl_contracts.rs'
+kind = 'Compile'
+outcome = 'Accept'
+
+[[cases]]
 contract_id = 'EQN-001'
 case_id = 'eqn_001_ode_balanced'
 test_file = 'tests/eqn_contracts.rs'

@@ -64,6 +64,7 @@ fn process_class_instance_body(
     for selection in &class_data.parameter_branch_selections {
         flat.parameter_branch_selections
             .push(equations::parameter_branch_selection(
+                flat::StructuralParameterUse::BranchSelection,
                 &selection.conditions,
                 prefix,
                 selection.span,

@@ -515,7 +515,11 @@ pub(crate) fn flatten_equation_with_def_map(
         ast::Equation::For { indices, equations } => {
             // Expand for-equations by iterating over indices (MLS §8.3.3)
             // This now also handles when-equations inside for-loops (MLS §8.3.5)
-            expand_for_equation(ctx, indices, equations, prefix, span, &origin, def_map)
+            let flattened =
+                expand_for_equation(ctx, indices, equations, prefix, span, &origin, def_map)?;
+            Ok(record_structural_range(
+                ctx, indices, prefix, span, flattened,
+            ))
         }
 
         ast::Equation::When(_blocks) => {
@@ -1033,6 +1037,31 @@ fn find_array_refs_recursive(
 /// Expand a for-equation by iterating over all index combinations.
 ///
 /// MLS §8.3.3: "The for-equation construct allows iteration over a set of equations."
+/// MLS §8.3.3 evaluates a for-equation range at translation: a parameter it
+/// reads is structural, fixed like a SPEC_0040 DAE-C22 selection guard.
+fn record_structural_range(
+    ctx: &Context,
+    indices: &[ast::ForIndex],
+    prefix: &ast::QualifiedName,
+    span: rumoca_core::Span,
+    mut flattened: FlattenedEquations,
+) -> FlattenedEquations {
+    if indices
+        .iter()
+        .any(|index| reads_tunable_parameter(ctx, &index.range, prefix))
+    {
+        flattened
+            .parameter_branch_selections
+            .push(parameter_branch_selection(
+                flat::StructuralParameterUse::ForRange,
+                indices.iter().map(|index| &index.range),
+                prefix,
+                span,
+            ));
+    }
+    flattened
+}
+
 fn expand_for_equation(
     ctx: &Context,
     indices: &[ast::ForIndex],
@@ -1472,6 +1501,7 @@ fn expand_if_equation(
         flattened
             .parameter_branch_selections
             .push(parameter_branch_selection(
+                flat::StructuralParameterUse::BranchSelection,
                 evaluated_conditions(ctx, cond_blocks, prefix),
                 prefix,
                 span,
@@ -1492,6 +1522,7 @@ fn expand_if_equation(
         flattened
             .parameter_branch_selections
             .push(parameter_branch_selection(
+                flat::StructuralParameterUse::BranchSelection,
                 evaluated_conditions(ctx, cond_blocks, prefix),
                 prefix,
                 span,
@@ -1668,6 +1699,7 @@ fn try_select_branch_for_mismatched_if(
     flattened
         .parameter_branch_selections
         .push(parameter_branch_selection(
+            flat::StructuralParameterUse::BranchSelection,
             evaluated_conditions(ctx, cond_blocks, prefix),
             prefix,
             span,

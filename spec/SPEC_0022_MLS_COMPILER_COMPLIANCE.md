@@ -20,7 +20,7 @@ This document catalogs the implicit and explicit contracts from the Modelica Lan
 | §2. Compilation Pipeline | 58–73 | Source → Class Tree → Instance Tree → Flat → DAE → Simulation |
 | §3. Data Structures | 74–325 | Class tree, instance tree, modification env, connection set, DAE, type attributes, variability, class types, prefixes, arrays, state machines |
 | §4.1 LEX contracts | 326–345 | Contract catalog heading + lexical rules (13 contracts) |
-| §4.2 DECL contracts | 346–386 | Declaration rules (36 contracts) |
+| §4.2 DECL contracts | 346–386 | Declaration rules (37 contracts) |
 | §4.3 INST contracts | 387–444 | Instantiation rules (53 contracts) |
 | §4.4 EXPR contracts | 445–489 | Expression/operator rules (41 contracts) |
 | §4.5 EQN contracts | 490–532 | Equation rules (38 contracts) |
@@ -389,6 +389,7 @@ Defines state-to-state transitions with priority and timing control.
 | DECL-034 | Array class extends | §4.6.2 | "Not legal to combine equations/algorithms/components with extends from array class or simple type" |
 | DECL-035 | Local class flattenable | §4.6.3 | "Local class should be statically flattenable with partially flattened enclosing class" |
 | DECL-036 | Type class contents | §4.7 | "type – May only be predefined types, enumerations, array of type, or classes extending from type"
+| DECL-037 | Structural parameters | §10.1, §8.3.3 | "The number of dimensions and the dimension sizes are fixed at translation"; a for-equation range is evaluated at translation. Rumoca: an ordinary parameter read by a declared array dimension or a for-equation range (a `size`/`ndims` operand contributes only its fixed shape) is structural: flatten records the use (`flat::ParameterBranchSelection` with `ArrayDimension`/`ForRange`), DAE construction marks it evaluable with every parameter its binding reads (SPEC_0040 DAE-C22), WD001 names it at the use, and it exports as `calculatedParameter`; an ordinary parameter no structure reads stays settable. Tested in `suite_core/structural_parameters.rs` |
 
 ### 4.3 Instantiation Contracts (INST)
 
@@ -956,7 +957,7 @@ areas.
 | Category | Prefix | Count |
 |----------|--------|-------|
 | Lexical | LEX | 13 |
-| Declarations | DECL | 36 |
+| Declarations | DECL | 37 |
 | Instantiation | INST | 54 |
 | Expressions | EXPR | 41 |
 | Equations | EQN | 39 |
@@ -973,7 +974,7 @@ areas.
 | State Machines | SM | 8 |
 | Annotations | ANN | 17 |
 | Unit Expressions | UNIT | 9 |
-| **Total** | | **444** |
+| **Total** | | **445** |
 
 ---
 

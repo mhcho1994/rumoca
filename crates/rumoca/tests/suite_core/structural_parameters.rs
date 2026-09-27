@@ -1,0 +1,102 @@
+//! Structural parameters (MLS 3.7 §10.1, §8.3.3; SPEC_0022 VAR-STRUCT).
+//!
+//! An array dimension and a for-equation range are fixed at translation, so an
+//! ordinary parameter either reads is structural: DAE construction records it
+//! evaluable, with every parameter its binding reads, and warns (WD001) at the
+//! use. `Blocks.Continuous.Filter` indexes `x[nr + 2*i - 1]` with such a
+//! parameter. An ordinary parameter no structure reads stays settable.
+
+use rumoca::Compiler;
+use rumoca_ir_dae as dae;
+use rumoca_sim::{SimOptions, simulate_dae_with_diagnostics};
+
+const MODELS: &str = r#"
+package Structural
+  model Dimension
+    parameter Integer n = 2;
+    parameter Real k = 3;
+    Real x[n](each start = 1, each fixed = true);
+  equation
+    der(x) = -k*x;
+  end Dimension;
+  model Range
+    parameter Integer m = 2;
+    parameter Integer n = 3;
+    Real x[3](each start = 1, each fixed = true);
+  equation
+    for i in 1:m loop
+      der(x[i]) = -x[i];
+    end for;
+    for i in m + 1:n loop
+      der(x[i]) = 0;
+    end for;
+  end Range;
+  model DependentBinding
+    parameter Integer order = 3;
+    parameter Integer nr = if order > 2 then 1 else 0;
+    parameter Integer na = order - nr;
+    Real x[order](each start = 1, each fixed = true);
+    parameter Real r[nr] = fill(2.0, nr);
+  equation
+    for i in 1:nr loop
+      der(x[i]) = -r[i]*x[i];
+    end for;
+    for i in 1:na loop
+      der(x[nr + i]) = -x[nr + i];
+    end for;
+  end DependentBinding;
+end Structural;
+"#;
+
+fn compile(model: &str) -> std::sync::Arc<dae::Dae> {
+    Compiler::new()
+        .model(model)
+        .compile_str(MODELS, "Structural.mo")
+        .unwrap_or_else(|error| panic!("{model} compiles: {error:?}"))
+        .dae
+}
+
+fn evaluable(model: &dae::Dae) -> Vec<String> {
+    let mut names = model.inspect(|view| {
+        view.variables()
+            .filter(|(_, variable)| variable.is_evaluable())
+            .map(|(_, variable)| variable.name().to_string())
+            .collect::<Vec<_>>()
+    });
+    names.sort();
+    names
+}
+
+#[test]
+fn a_dimension_parameter_is_structural_and_an_unrelated_one_stays_settable() {
+    assert_eq!(evaluable(&compile("Structural.Dimension")), ["n"]);
+}
+
+#[test]
+fn a_for_range_parameter_is_structural() {
+    assert_eq!(evaluable(&compile("Structural.Range")), ["m", "n"]);
+}
+
+#[test]
+fn a_structural_parameter_closes_over_its_binding_and_indexes_a_family() {
+    let dae = compile("Structural.DependentBinding");
+    assert_eq!(evaluable(&dae), ["na", "nr", "order"]);
+    let result = simulate_dae_with_diagnostics(
+        &dae,
+        &SimOptions {
+            t_end: 1.0,
+            ..SimOptions::default()
+        },
+    )
+    .expect("the indexed families simulate");
+    let last = |name: &str| {
+        let index = result
+            .names
+            .iter()
+            .position(|candidate| candidate == name)
+            .unwrap_or_else(|| panic!("missing column {name}"));
+        *result.data[index].last().expect("a sample")
+    };
+    assert!((last("x[1]") - (-2.0f64).exp()).abs() < 1e-4);
+    assert!((last("x[3]") - (-1.0f64).exp()).abs() < 1e-4);
+}

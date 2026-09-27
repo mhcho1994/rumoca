@@ -27,6 +27,7 @@ use super::{ValueReads, VarName, Variability, flat};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructuralSelection {
     pub span: rumoca_core::Span,
+    pub kind: flat::StructuralParameterUse,
     pub parameters: Vec<String>,
 }
 
@@ -78,7 +79,7 @@ pub(super) fn folded_guard_parameters(
         let read = flatten_selection_parameters(flat, evaluable, selection);
         if !read.is_empty() {
             scan.owner = Some(selection.span);
-            scan.record(read);
+            scan.record_use(selection.kind, read);
         }
     }
     let selections = scan.selections;
@@ -146,12 +147,25 @@ impl GuardScan<'_> {
 
     /// Record parameters a folded guard of the current owner reads.
     fn record(&mut self, read: Vec<VarName>) {
+        self.record_use(flat::StructuralParameterUse::BranchSelection, read);
+    }
+
+    /// Record parameters one structural use of the current owner reads, once
+    /// per owner, use, and parameter set (a nested for-equation reports its
+    /// range once, not once per enclosing iteration).
+    fn record_use(&mut self, kind: flat::StructuralParameterUse, read: Vec<VarName>) {
         let mut parameters = read.iter().map(ToString::to_string).collect::<Vec<_>>();
         parameters.sort();
         parameters.dedup();
         if let Some(span) = self.owner {
-            self.selections
-                .push(StructuralSelection { span, parameters });
+            let selection = StructuralSelection {
+                span,
+                kind,
+                parameters,
+            };
+            if !self.selections.contains(&selection) {
+                self.selections.push(selection);
+            }
         }
         self.found.extend(read);
     }
