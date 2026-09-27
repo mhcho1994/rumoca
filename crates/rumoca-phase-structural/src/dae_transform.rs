@@ -1173,8 +1173,9 @@ fn direct_reconstruction_rejection(
 /// the reported refusal. A candidate whose structural residue bound proves it
 /// cannot reduce (see [`demotion_screen`]) is never reconstructed while a
 /// reducing candidate is sought, which leaves the first reducing candidate
-/// unchanged; when none reduces, those candidates are reconstructed after all
-/// so the fallback and the refusal are chosen over every candidate in order.
+/// unchanged; when none reduces, those candidates are reconstructed after all,
+/// from the end when a held fallback is allowed, so the fallback and the
+/// refusal are chosen over every candidate in order.
 fn demotion_pass_with_observer(
     source: &ReductionSource<'_>,
     residue: usize,
@@ -1229,7 +1230,17 @@ fn demotion_pass_with_observer(
         }
     }
     if choice.reduced.is_none() {
+        // With a held fallback allowed, the last holding candidate in order is
+        // the choice and a refusal is reported only when none holds, so the
+        // deferred candidates are tried from the end until one holds after
+        // every holding candidate already seen.
+        if policy.allow_held {
+            deferred.reverse();
+        }
         for index in deferred {
+            if policy.allow_held && choice.held.as_ref().is_some_and(|(last, ..)| *last > index) {
+                break;
+            }
             let attempt = attempt_direct_candidate(
                 source,
                 residue,
