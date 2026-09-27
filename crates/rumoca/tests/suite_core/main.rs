@@ -140,6 +140,7 @@ mod model_algorithm_continuous;
 mod model_conditional_dead_arm_test;
 mod model_value_forms;
 mod msl_table_regression;
+mod nanosecond_bdf_steps;
 mod negative_zero_kink;
 mod nested_class_shadowing_test;
 mod nested_record_function_redeclaration;

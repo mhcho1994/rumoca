@@ -394,7 +394,7 @@ fn build_problem(
     let initialize: InitialFn = Box::new(move |_parameters, _time, output| {
         output.as_mut_slice().copy_from_slice(&initial);
     });
-    let problem = OdeBuilder::<Matrix>::new()
+    let mut problem = OdeBuilder::<Matrix>::new()
         .t0(point.time())
         .h0(initial_step)
         .rtol(relative_tolerance)
@@ -404,8 +404,20 @@ fn build_problem(
         .init(initialize, point.width())
         .build()
         .map_err(|error| numerical(MeNumericalFailure::Construction, error));
+    if let Ok(problem) = problem.as_mut() {
+        problem.ode_options.min_timestep = roundoff_step_floor(point.time(), initial_step);
+    }
     probing.set(false);
     problem
+}
+
+/// The smallest step that still advances time distinguishably: four units of
+/// roundoff in the larger of the current time and the requested first step,
+/// the DASSL `hmin` rule. diffsol's default is an absolute `1e-13`, which is
+/// coarser than the first steps a nanosecond-scale circuit needs, so such a
+/// model failed at its start although every step it takes is resolvable.
+fn roundoff_step_floor(time: f64, initial_step: f64) -> f64 {
+    4.0 * f64::EPSILON * time.abs().max(initial_step.abs())
 }
 
 fn initial_state(
