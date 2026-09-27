@@ -1,4 +1,5 @@
 mod accumulator_reductions;
+mod bounded_while;
 mod dependent_domains;
 /// Dataflow liveness over the function statement tree, and the store-deletion
 /// evidence built from it.
@@ -107,6 +108,7 @@ pub(super) fn compact_function_loops(
         function,
         flat,
     )?;
+    let settled = bounded_while::bound_while_loops(&settled, shapes);
     let mut bounded_shapes = shapes.clone();
     infer_function_integer_bounds(&settled, &mut bounded_shapes);
     let settled = rectangularize_bounded_slice_assignments(&settled, &bounded_shapes);

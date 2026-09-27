@@ -105,6 +105,7 @@ mod function_return_checked;
 mod function_slice_compaction_rank_position;
 mod function_spd_loop_compaction;
 mod function_staged_record_update_test;
+mod function_while_loops;
 mod gear_loop_regression;
 mod homotopy_branch_selection;
 mod implicit_derivative_aliases;

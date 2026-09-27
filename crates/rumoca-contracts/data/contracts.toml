@@ -155,6 +155,15 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'ALG-018'
+category = 'Algorithm'
+name = 'While loop execution'
+mls_ref = '§11.2.3'
+requirement = 'The body of a while-statement is executed as long as the condition is true'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'ANN-001'
 category = 'Annotation'
 name = 'Forbidden constructs'

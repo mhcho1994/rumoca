@@ -24,7 +24,7 @@ This document catalogs the implicit and explicit contracts from the Modelica Lan
 | §4.3 INST contracts | 387–444 | Instantiation rules (53 contracts) |
 | §4.4 EXPR contracts | 445–489 | Expression/operator rules (41 contracts) |
 | §4.5 EQN contracts | 490–532 | Equation rules (38 contracts) |
-| §4.6 ALG contracts | 533–554 | Algorithm rules (17 contracts) |
+| §4.6 ALG contracts | 533–554 | Algorithm rules (18 contracts) |
 | §4.7 CONN contracts | 555–589 | Connection rules (30 contracts) |
 | §4.8 FUNC contracts | 590–632 | Function rules (38 contracts) |
 | §4.9 TYPE contracts | 633–673 | Type/interface rules (36 contracts) |
@@ -560,8 +560,8 @@ Defines state-to-state transitions with priority and timing control.
 | ALG-014 | terminate not in function | §11.2 | "terminate-statement shall not be used in functions" |
 | ALG-015 | Assert execution halt | §11.2.8.1 | "A failed assert stops the execution of the current algorithm" |
 | ALG-016 | For range fixed | §11.2.2 | "For-statement range expressions are evaluated once before entering loop" |
-| ALG-017 | LHS initialization | §11.1 | "Variables on the left-hand side of := must be initialized when algorithm is invoked"
-
+| ALG-017 | LHS initialization | §11.1 | "Variables on the left-hand side of := must be initialized when algorithm is invoked". Rumoca: an event algorithm seeds every discrete target with its `pre` value (§11.1.2), so a read before the target's own definition is a history read and no current-value self-dependency in the Appendix B solved-form proof |
+| ALG-018 | While loop execution | §11.2.3 | "The body of a while-statement is executed as long as the condition is true". Rumoca: a function `while` loop with a proven iteration bound (a counter conjunct `k < N`, `k <= N` with `N` settled at translation, one top-level `k := k + d` with `d > 0`, no `break`/`return`, and `k >= 1` proven by a subscript it indexes or a literal start) lowers to `for w in 1:N loop if c then S end if; end for`, exact because a false condition changes no value; a loop inside a conditional branch runs as statements guarded by the branch's immutable guard, and the loop-free remainder stays one conditional. Any other `while` keeps its typed rejection. Tested in `suite_core/function_while_loops.rs` |
 ### 4.7 Connection Contracts (CONN)
 
 | ID | Contract | MLS | Requirement |
@@ -961,7 +961,7 @@ areas.
 | Instantiation | INST | 54 |
 | Expressions | EXPR | 41 |
 | Equations | EQN | 39 |
-| Algorithms | ALG | 17 |
+| Algorithms | ALG | 18 |
 | Connections | CONN | 30 |
 | Functions | FUNC | 38 |
 | Types/Interfaces | TYPE | 36 |
@@ -974,7 +974,7 @@ areas.
 | State Machines | SM | 8 |
 | Annotations | ANN | 17 |
 | Unit Expressions | UNIT | 9 |
-| **Total** | | **445** |
+| **Total** | | **446** |
 
 ---
 

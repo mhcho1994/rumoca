@@ -878,7 +878,7 @@ fn collect_statement_targets(
     }
 }
 
-fn contains_event_control(statements: &[rumoca_core::Statement]) -> bool {
+pub(super) fn contains_event_control(statements: &[rumoca_core::Statement]) -> bool {
     statements.iter().any(|statement| match statement {
         rumoca_core::Statement::When { .. } => true,
         rumoca_core::Statement::For { equations, .. } => contains_event_control(equations),

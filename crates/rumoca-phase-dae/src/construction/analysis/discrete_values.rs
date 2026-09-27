@@ -196,6 +196,8 @@ fn collect_algorithm_owners(
     for algorithm in &flat.algorithms {
         let target_names =
             stable_discrete_targets(flat, roles, model_algorithm_targets(flat, algorithm));
+        let event_algorithm =
+            super::model_algorithms::contains_event_control(&algorithm.statements);
         if target_names.is_empty() {
             continue;
         }
@@ -215,14 +217,19 @@ fn collect_algorithm_owners(
                     algorithm.span,
                     occurrence,
                 )?;
+                // MLS 3.7 §11.1.2: an event algorithm starts every discrete
+                // target at its `pre` value (lowering seeds it so), so a read
+                // before the target's own definition is a history read, not a
+                // current-value self-dependency (`last := f(last)` in a `when`).
                 let ordered_scalar_self_dependencies = dependencies.contains(&name)
-                    && !algorithm_reads_target_before_definition(
-                        &algorithm.statements,
-                        &name,
-                        roles,
-                        false,
-                    )
-                    .0;
+                    && (event_algorithm
+                        || !algorithm_reads_target_before_definition(
+                            &algorithm.statements,
+                            &name,
+                            roles,
+                            false,
+                        )
+                        .0);
                 Ok(SourceTarget {
                     name,
                     dependencies,

@@ -3579,6 +3579,13 @@ kind = 'Sim'
 outcome = 'Accept'
 
 [[cases]]
+contract_id = 'ALG-018'
+case_id = 'alg_018_bounded_while_loop_runs_until_its_condition_fails'
+test_file = 'tests/alg_contracts.rs'
+kind = 'Sim'
+outcome = 'Accept'
+
+[[cases]]
 contract_id = 'FUNC-032'
 case_id = 'func_032_external_function_without_purity_warns'
 test_file = 'tests/func_contracts.rs'
