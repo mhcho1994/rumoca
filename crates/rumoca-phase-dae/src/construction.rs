@@ -64,7 +64,7 @@ use analysis::{
     function_assertion, function_record_field_name, is_event_condition,
     is_inferred_clock_condition, is_whole_clock_coordinate, model_algorithm_targets,
     record_field_projections, selected_conditional_statements, specialized_comprehension_plan,
-    structured_assignment_names,
+    structured_assignment_names, when_conditional_selects_clock_structure, inferred_clock_transfer, WhenBranchKey,
 };
 use clocks::{LoweredClocks, lower_clocked_value_owners, lower_clocks};
 use conditions::{combine_conditions, condition_owner_clock, lower_condition, negate_condition};

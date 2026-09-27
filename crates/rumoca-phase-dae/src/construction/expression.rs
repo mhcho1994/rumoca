@@ -693,12 +693,8 @@ fn lower_clock_transfer<'dae>(
     arguments: &[Expression],
     provenance: dae::DaeProvenance,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
-    let (source, kind) = clock_transfer_input(
-        function,
-        arguments,
-        symbols.functions.constants,
-        provenance.span(),
-    )?;
+    let (source, input) =
+        clock_transfer_input(function, arguments, symbols.functions, provenance.span())?;
     let source_plan = expression_clock_plan(source, symbols.functions).ok_or(
         dae::DaeConstructionError::MissingClockDomainOwner {
             span: provenance.span(),
@@ -714,6 +710,20 @@ fn lower_clock_transfer<'dae>(
             .ok_or(dae::DaeConstructionError::MissingClockDomainOwner {
                 span: provenance.span(),
             })?;
+    let kind = match input {
+        TransferInput::Exact(kind) => kind,
+        // MLS §16.5.2: the omitted factor is the one clock analysis proved
+        // relates the source partition to this target partition.
+        TransferInput::Inferred => symbols
+            .functions
+            .clocks
+            .lattice(target_clock)
+            .and_then(|target| inferred_clock_transfer(function, source_plan.lattice, target))
+            .ok_or(dae::DaeConstructionError::InvalidClockedOperand {
+                operator: function.name(),
+                span: provenance.span(),
+            })?,
+    };
     let mut source_symbols = symbols;
     source_symbols.owner_clock = Some(source_clock);
     let source = lower_expression_scoped(construction, source_symbols, binders, source, None)?;
@@ -727,62 +737,74 @@ fn lower_clock_transfer<'dae>(
     })
 }
 
+/// The transfer one clock conversion states: exact when every argument is
+/// given, inferred for `subSample(u)` / `superSample(u)` (MLS §16.5.2), whose
+/// factor follows from the source and target partitions' clocks.
+enum TransferInput {
+    Exact(dae::ClockTransferKind),
+    Inferred,
+}
+
+/// The source operand and MLS §16.5.2 transfer of one clock conversion.
 fn clock_transfer_input<'expression>(
     function: BuiltinFunction,
     arguments: &'expression [Expression],
-    constants: &EvalContext,
+    functions: &FunctionRegistry<'_, '_>,
     span: Span,
-) -> Result<(&'expression Expression, dae::ClockTransferKind), dae::DaeConstructionError> {
+) -> Result<(&'expression Expression, TransferInput), dae::DaeConstructionError> {
     let invalid = || dae::DaeConstructionError::InvalidClockedOperand {
         operator: function.name(),
         span,
     };
     let integer = |expression: &Expression| {
-        eval_expr(expression, constants)
+        eval_expr(expression, functions.constants)
             .ok()
             .and_then(|value| value.as_integer())
             .ok_or_else(invalid)
     };
     match (function, arguments) {
+        (BuiltinFunction::SubSample | BuiltinFunction::SuperSample, [source]) => {
+            Ok((source, TransferInput::Inferred))
+        }
         (BuiltinFunction::SubSample, [source, factor]) => Ok((
             source,
-            dae::ClockTransferKind::SubSample {
+            TransferInput::Exact(dae::ClockTransferKind::SubSample {
                 factor: integer(factor)?,
-            },
+            }),
         )),
         (BuiltinFunction::SuperSample, [source, factor]) => Ok((
             source,
-            dae::ClockTransferKind::SuperSample {
+            TransferInput::Exact(dae::ClockTransferKind::SuperSample {
                 factor: integer(factor)?,
-            },
+            }),
         )),
         (BuiltinFunction::ShiftSample, [source, counter]) => Ok((
             source,
-            dae::ClockTransferKind::ShiftSample {
+            TransferInput::Exact(dae::ClockTransferKind::ShiftSample {
                 counter: integer(counter)?,
                 resolution: 1,
-            },
+            }),
         )),
         (BuiltinFunction::ShiftSample, [source, counter, resolution]) => Ok((
             source,
-            dae::ClockTransferKind::ShiftSample {
+            TransferInput::Exact(dae::ClockTransferKind::ShiftSample {
                 counter: integer(counter)?,
                 resolution: integer(resolution)?,
-            },
+            }),
         )),
         (BuiltinFunction::BackSample, [source, counter]) => Ok((
             source,
-            dae::ClockTransferKind::BackSample {
+            TransferInput::Exact(dae::ClockTransferKind::BackSample {
                 counter: integer(counter)?,
                 resolution: 1,
-            },
+            }),
         )),
         (BuiltinFunction::BackSample, [source, counter, resolution]) => Ok((
             source,
-            dae::ClockTransferKind::BackSample {
+            TransferInput::Exact(dae::ClockTransferKind::BackSample {
                 counter: integer(counter)?,
                 resolution: integer(resolution)?,
-            },
+            }),
         )),
         _ => Err(invalid()),
     }
@@ -806,8 +828,12 @@ fn expression_clock_plan(
                 | BuiltinFunction::BackSample
         )
     {
-        let (source, kind) =
-            clock_transfer_input(*function, args, functions.constants, *span).ok()?;
+        let (source, input) = clock_transfer_input(*function, args, functions, *span).ok()?;
+        // An inferred factor is fixed only by the conversion's target partition,
+        // which an operand alone does not name.
+        let TransferInput::Exact(kind) = input else {
+            return None;
+        };
         let source = expression_clock_plan(source, functions)?;
         let lattice = match kind {
             dae::ClockTransferKind::SubSample { factor } => source.lattice.sub_sample(factor),

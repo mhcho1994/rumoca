@@ -18,6 +18,7 @@ use super::super::expression::conditional_guards::{
     attribute_conditional_folds, retains_flat_guard,
 };
 use super::super::function_shapes::{ProvenValue, ShapeEnvironment};
+use super::clocks::when_conditional_selects_clock_structure;
 use super::{ValueReads, VarName, Variability, flat};
 
 /// One owner whose folded guard fixes parameters at translation: the equation
@@ -67,6 +68,12 @@ pub(super) fn folded_guard_parameters(
             scan.visit_expression(start);
         }
     }
+    for chain in &flat.when_chains {
+        for branch in chain.branches() {
+            scan.owner = Some(branch.span);
+            scan.visit_clock_structure_conditionals(&branch.equations);
+        }
+    }
     for selection in &flat.parameter_branch_selections {
         let read = flatten_selection_parameters(flat, evaluable, selection);
         if !read.is_empty() {
@@ -95,6 +102,41 @@ impl GuardScan<'_> {
     /// The ordinary parameters `expression` reads by value.
     fn ordinary_parameters(&self, expression: &Expression) -> Vec<VarName> {
         ordinary_parameters(self.flat, self.evaluable, expression)
+    }
+
+    /// Record the guard parameters of every `when`-body conditional that
+    /// selects clock structure: DAE construction decides it at translation
+    /// (see [`when_conditional_selects_clock_structure`]).
+    fn visit_clock_structure_conditionals(&mut self, equations: &[flat::WhenEquation]) {
+        for equation in equations {
+            let flat::WhenEquation::Conditional {
+                branches,
+                else_branch,
+                ..
+            } = equation
+            else {
+                continue;
+            };
+            if when_conditional_selects_clock_structure(branches, else_branch.as_deref()) {
+                for (condition, _) in branches {
+                    let read = self.ordinary_parameters(condition);
+                    if !read.is_empty()
+                        && matches!(
+                            self.values.proven_value(condition),
+                            Some(ProvenValue::Boolean(_))
+                        )
+                    {
+                        self.record(read);
+                    }
+                }
+            }
+            for (_, nested) in branches {
+                self.visit_clock_structure_conditionals(nested);
+            }
+            if let Some(nested) = else_branch {
+                self.visit_clock_structure_conditionals(nested);
+            }
+        }
     }
 
     /// Record parameters a folded guard of the current owner reads.

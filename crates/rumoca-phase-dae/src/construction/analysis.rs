@@ -44,7 +44,9 @@ use super::*;
 use clocks::SampledTarget;
 use clocks::{ClockAnalysis, ClockDomainAnalysis, analyze_clocks};
 pub(super) use clocks::{
-    ClockPlan, ClockedValuePlan, is_inferred_clock_condition, is_whole_clock_coordinate,
+    ClockPlan, ClockedValuePlan, WhenBranchKey, inferred_clock_transfer,
+    is_inferred_clock_condition, is_whole_clock_coordinate,
+    when_conditional_selects_clock_structure,
 };
 use comprehensions::analyze_comprehensions;
 pub(super) use comprehensions::{
@@ -173,8 +175,8 @@ pub(super) struct Analysis {
     pub(super) clock_equation_rows: HashSet<usize>,
     pub(super) clocked_equation_owners: HashMap<usize, ClockPlan>,
     pub(super) clocked_value_owners: HashMap<InstanceId, ClockedValuePlan>,
-    /// Owning clock of every `when Clock()` branch, keyed by the branch span.
-    pub(super) clocked_when_owners: HashMap<Span, ClockPlan>,
+    /// Owning clock of every `when Clock()` branch, keyed by its position.
+    pub(super) clocked_when_owners: HashMap<WhenBranchKey, ClockPlan>,
     /// Owning clock of every runtime coordinate in a clocked partition.
     pub(super) clocked_coordinate_owners: HashMap<InstanceId, ClockPlan>,
     pub(super) model_algorithm_plans: Vec<ModelAlgorithmPlan>,

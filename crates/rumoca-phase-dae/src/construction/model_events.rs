@@ -34,7 +34,7 @@ pub(super) struct WhenChainsRequest<'input, 'shape, 'dae> {
     clocks: &'input LoweredClocks<'dae>,
     chains: &'input [flat::WhenChain],
     topology: &'input DiscreteValueTopologyPlan,
-    when_owners: &'input HashMap<Span, ClockPlan>,
+    when_owners: &'input HashMap<WhenBranchKey, ClockPlan>,
 }
 
 impl<'input, 'shape, 'dae> WhenChainsRequest<'input, 'shape, 'dae> {
@@ -45,7 +45,7 @@ impl<'input, 'shape, 'dae> WhenChainsRequest<'input, 'shape, 'dae> {
         clocks: &'input LoweredClocks<'dae>,
         chains: &'input [flat::WhenChain],
         topology: &'input DiscreteValueTopologyPlan,
-        when_owners: &'input HashMap<Span, ClockPlan>,
+        when_owners: &'input HashMap<WhenBranchKey, ClockPlan>,
     ) -> Self {
         Self {
             coordinates,
@@ -224,7 +224,7 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
             self.request.coordinates,
             self.request.topology,
         )?;
-        let guards = self.lower_chain_guards(chain)?;
+        let guards = self.lower_chain_guards(source_owner.0 as usize, chain)?;
         self.own_chain_clocks(chain, &guards)?;
         let owners = WhenSemanticOwners {
             source: source_owner,
@@ -263,11 +263,16 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
     /// y = 2;` held `y = 1` where OpenModelica reaches `y = 2` at `t = 0.7`.
     fn lower_chain_guards(
         &mut self,
+        chain_index: usize,
         chain: &flat::WhenChain,
     ) -> Result<Vec<EventGuard<'dae>>, dae::DaeConstructionError> {
         let mut guards = Vec::with_capacity(chain.branch_count());
-        for branch in chain.branches() {
-            let (condition, owner_clock) = self.lower_condition(branch)?;
+        for (branch_index, branch) in chain.branches().enumerate() {
+            let key = WhenBranchKey {
+                chain: chain_index,
+                branch: branch_index,
+            };
+            let (condition, owner_clock) = self.lower_condition(branch, key)?;
             guards.push(EventGuard {
                 trigger: condition,
                 condition,
@@ -348,12 +353,13 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
     fn lower_condition(
         &mut self,
         branch: &flat::WhenBranch,
+        key: WhenBranchKey,
     ) -> Result<
         (dae::ConditionId<'dae>, Option<dae::PeriodicClockId<'dae>>),
         dae::DaeConstructionError,
     > {
         let expression = &branch.condition;
-        let Some((clock, span)) = self.branch_clock(branch)? else {
+        let Some((clock, span)) = self.branch_clock(branch, key)? else {
             return lower_condition(
                 self.construction,
                 self.request.coordinates,
@@ -384,6 +390,7 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
     fn branch_clock(
         &self,
         branch: &flat::WhenBranch,
+        key: WhenBranchKey,
     ) -> Result<Option<(dae::PeriodicClockId<'dae>, Span)>, dae::DaeConstructionError> {
         if let Expression::VarRef {
             name,
@@ -409,7 +416,7 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
         let plan = self
             .request
             .when_owners
-            .get(&branch.span)
+            .get(&key)
             .ok_or(dae::DaeConstructionError::MissingClockDomainOwner { span: branch.span })?;
         let clock = self.request.clocks.id(plan, branch.span)?;
         Ok(Some((clock, branch.span)))
@@ -657,6 +664,12 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
         else_branch: Option<&[flat::WhenEquation]>,
         span: Span,
     ) -> Result<(), dae::DaeConstructionError> {
+        // A conditional that selects clock structure is decided at translation
+        // (MLS §16.7), exactly as clock analysis decided which of its arms'
+        // conversions relate partitions; only the selected arm is built.
+        if let Some(selected) = self.statically_selected_clock_structure(branches, else_branch) {
+            return self.lower_equations(owners, parent, selected);
+        }
         let mut previous = None;
         for (condition, equations) in branches {
             previous = Some(
@@ -667,6 +680,27 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
             self.lower_conditional_else(owners, parent, previous, equations, span)?;
         }
         Ok(())
+    }
+
+    /// The arm a clock-structure conditional selects under the parameter
+    /// values, or `None` when the conditional is an ordinary run-time branch.
+    fn statically_selected_clock_structure<'equations>(
+        &self,
+        branches: &'equations [(Expression, Vec<flat::WhenEquation>)],
+        else_branch: Option<&'equations [flat::WhenEquation]>,
+    ) -> Option<&'equations [flat::WhenEquation]> {
+        if !when_conditional_selects_clock_structure(branches, else_branch) {
+            return None;
+        }
+        for (condition, equations) in branches {
+            if eval_expr(condition, self.request.functions.constants)
+                .ok()?
+                .as_bool()?
+            {
+                return Some(equations);
+            }
+        }
+        Some(else_branch.unwrap_or_default())
     }
 
     fn lower_conditional_branch(
