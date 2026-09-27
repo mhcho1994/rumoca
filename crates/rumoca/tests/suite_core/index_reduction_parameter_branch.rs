@@ -117,21 +117,55 @@ fn tensor_parameter_branches_preserve_values_and_shaped_zero_derivatives() {
     check_motion_shape(&source.replace("start=0.4", "start=-0.4"), -0.4, 0.0, true);
 }
 
+/// MLS §8.5: a relation changes only at its event, so a relation guard is
+/// piecewise constant in time and the branch derivatives hold between events,
+/// across a time event and a state event alike.
 #[test]
-fn varying_guards_do_not_receive_the_parameter_derivative_proof() {
-    for guard in ["time < 0.05", "q > 0"] {
+fn relation_guards_differentiate_branch_wise_between_events() {
+    for (guard, t_end) in [("time < 0.05", 0.1), ("q > 0", 3.0)] {
         let source = SOURCE.replace("if positive then", &format!("if {guard} then"));
         let compiled = Compiler::new()
             .model("ParameterBranchKinematics")
-            .compile_str(&source, "varying_guard.mo")
+            .compile_str(&source, "relation_guard.mo")
             .unwrap();
-        let error = rumoca_phase_structural::prepare_for_solve(&compiled.dae)
-            .err()
-            .expect("a varying branch needs a separate event-aware differentiation proof");
-        assert!(
-            error.to_string().contains("structurally singular"),
-            "{error}"
-        );
+        let result = simulate_dae_with_diagnostics(
+            &compiled.dae,
+            &SimOptions {
+                t_end,
+                dt: Some(0.01),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{guard}: {error}"));
+        assert!(result.times.len() > 5, "{guard} produced an output grid");
+        let column = |name: &str| {
+            let index = result.names.iter().position(|value| value == name).unwrap();
+            &result.data[index]
+        };
+        for (row, &time) in result.times.iter().enumerate() {
+            let q = 0.4 * time.cos() + 0.3 * time.sin();
+            let v = -0.4 * time.sin() + 0.3 * time.cos();
+            let crossing = if guard.starts_with("time") {
+                0.05
+            } else {
+                (-0.4_f64 / 0.3).atan() + std::f64::consts::PI
+            };
+            if (time - crossing).abs() < 1e-6 {
+                continue;
+            }
+            let sign = if time < crossing { 1.0 } else { -1.0 };
+            for (name, expected) in [
+                ("x", sign * q),
+                ("velocity", sign * v),
+                ("acceleration", -sign * q),
+            ] {
+                let actual = column(name)[row];
+                assert!(
+                    (actual - expected).abs() < 1e-5,
+                    "{guard} {name}({time}): {actual} != {expected}"
+                );
+            }
+        }
     }
 }
 
