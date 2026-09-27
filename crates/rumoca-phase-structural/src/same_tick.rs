@@ -1272,11 +1272,17 @@ mod tests {
 
     fn probe<R>(wiring: Wiring, body: impl for<'dae> FnOnce(&Probe<'dae>) -> R) -> R {
         fixture(wiring).inspect(|view| {
-            let plan = crate::CausalDiscretePlan::derive(view)
-                .unwrap_or_else(|error| panic!("fixture discrete rows orient: {error}"));
-            let definitions = SameTickDefinitions::derive(view, &plan);
+            let definitions = SameTickDefinitions::derive(view, &oriented_plan(view));
             body(&Probe { view, definitions })
         })
+    }
+
+    /// The fixture's causal discrete plan; every fixture row orients.
+    fn oriented_plan(view: dae::DaeView<'_>) -> crate::CausalDiscretePlan<'_> {
+        match crate::CausalDiscretePlan::derive(view) {
+            Ok(plan) => plan,
+            Err(error) => panic!("fixture discrete rows orient: {error}"),
+        }
     }
 
     impl<'dae> Probe<'dae> {
