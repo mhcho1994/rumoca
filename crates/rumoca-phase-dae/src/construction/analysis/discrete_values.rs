@@ -140,8 +140,8 @@ fn collect_equation_owners(
             aggregate_connections,
         )? {
             EquationPartition::DiscreteValue(plan) => plan,
-            EquationPartition::MultiOutput { receivers } => {
-                push_multi_output_owner(equation, &receivers, roles, owners);
+            EquationPartition::MultiOutput { receivers, call } => {
+                push_multi_output_owner(equation, call, &receivers, roles, owners);
                 continue;
             }
             _ => continue,
@@ -164,13 +164,11 @@ fn collect_equation_owners(
 /// call's current discrete reads.
 fn push_multi_output_owner(
     equation: &flat::Equation,
+    call: &Expression,
     receivers: &[&VarName],
     roles: &HashMap<VarName, PlannedRole>,
     owners: &mut Vec<SourceOwner>,
 ) {
-    let Expression::Binary { rhs: call, .. } = &equation.residual else {
-        unreachable!("a multi-output partition owns a subtraction residual")
-    };
     let dependencies = current_discrete_dependencies(call, roles);
     let targets = receivers
         .iter()

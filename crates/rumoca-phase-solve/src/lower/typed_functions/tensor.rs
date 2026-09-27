@@ -611,8 +611,12 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             .value_type(value_type)
             .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
             .scalar_type();
+        let malformed =
+            || solve::SolveProgramConstructionError::InvalidCallInterface { provenance: at };
+        let dividend = arguments.get(0).ok_or_else(malformed)?;
+        let divisor = arguments.get(1).ok_or_else(malformed)?;
         if result_scalar == dae::ScalarType::Integer {
-            return self.integer_quotient(value_type, builtin, arguments, at);
+            return self.integer_quotient(value_type, builtin, (dividend, divisor), at);
         }
         if result_scalar != dae::ScalarType::Real {
             return Err(solve::SolveProgramConstructionError::InvalidCallInterface {
@@ -636,8 +640,8 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             }
             Ok(register)
         };
-        let lhs = operand(arguments.get(0).expect("checked quotient dividend"))?;
-        let rhs = operand(arguments.get(1).expect("checked quotient divisor"))?;
+        let lhs = operand(dividend)?;
+        let rhs = operand(divisor)?;
         let ratio = self
             .builder
             .binary(solve::SolveBinaryOperator::Divide, lhs, rhs, at)?;
@@ -671,15 +675,11 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         &mut self,
         value_type: dae::ValueTypeId<'dae>,
         builtin: dae::PureBuiltin,
-        arguments: dae::ExpressionOperands<'dae>,
+        (dividend, divisor): (dae::ExprId<'dae>, dae::ExprId<'dae>),
         at: rumoca_core::Span,
     ) -> Result<LoweredValue<'program, 'dae>, solve::SolveProgramConstructionError> {
-        let lhs = self
-            .expression(arguments.get(0).expect("checked quotient dividend"))?
-            .only_register(at)?;
-        let rhs = self
-            .expression(arguments.get(1).expect("checked quotient divisor"))?
-            .only_register(at)?;
+        let lhs = self.expression(dividend)?.only_register(at)?;
+        let rhs = self.expression(divisor)?.only_register(at)?;
         let quotient = self
             .builder
             .binary(solve::SolveBinaryOperator::Divide, lhs, rhs, at)?;

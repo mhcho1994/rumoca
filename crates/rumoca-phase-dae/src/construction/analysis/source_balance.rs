@@ -73,7 +73,7 @@ pub(super) fn source_balance(input: SourceBalanceInput<'_>) -> Result<BalanceDet
                 detail.discrete_value_definitions +=
                     plan.scalar_count.unwrap_or(equation.scalar_count);
             }
-            EquationPartition::MultiOutput { receivers } => {
+            EquationPartition::MultiOutput { receivers, .. } => {
                 add_multi_output_receivers(&mut detail, flat, roles, &receivers)?;
             }
             EquationPartition::ConsumedDiscreteValue => {}

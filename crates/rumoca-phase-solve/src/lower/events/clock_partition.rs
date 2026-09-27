@@ -351,14 +351,12 @@ impl SameTickExchange {
         let count = self.observes.len();
         let mut placed = vec![false; count];
         let mut order = Vec::with_capacity(count);
-        while order.len() < count {
-            let ready = (0..count)
-                .find(|&member| !placed[member] && self.producers_placed(member, &placed));
-            let next = ready.unwrap_or_else(|| {
-                (0..count)
-                    .find(|&member| !placed[member])
-                    .expect("an unplaced member remains")
-            });
+        // When no member is ready, the unplaced members wait on an observation
+        // cycle, and the first unplaced member breaks it.
+        while let Some(next) = (0..count)
+            .find(|&member| !placed[member] && self.producers_placed(member, &placed))
+            .or_else(|| (0..count).find(|&member| !placed[member]))
+        {
             placed[next] = true;
             order.push(next);
         }

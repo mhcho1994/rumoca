@@ -16,9 +16,14 @@ struct MultiOutputSource<'flat> {
     provenance: dae::DaeProvenance,
 }
 
+/// The receiving tuple and call of `(a, b, ...) = f(...)`; any other residual
+/// is not a multi-result equation.
 fn multi_output_source(
     equation: &flat::Equation,
 ) -> Result<MultiOutputSource<'_>, dae::DaeConstructionError> {
+    let invalid = || dae::DaeConstructionError::InvalidExpressionForm {
+        span: equation.span,
+    };
     let Expression::Binary {
         op: OpBinary::Sub,
         lhs,
@@ -26,19 +31,19 @@ fn multi_output_source(
         ..
     } = &equation.residual
     else {
-        unreachable!("a multi-output equation plan owns a subtraction residual")
+        return Err(invalid());
     };
-    let Expression::Tuple { elements, .. } = lhs.as_ref() else {
-        unreachable!("a multi-output equation plan owns a receiving tuple")
-    };
-    let Expression::FunctionCall {
-        name,
-        args,
-        is_constructor: false,
-        span,
-    } = rhs.as_ref()
+    let (
+        Expression::Tuple { elements, .. },
+        Expression::FunctionCall {
+            name,
+            args,
+            is_constructor: false,
+            span,
+        },
+    ) = (lhs.as_ref(), rhs.as_ref())
     else {
-        unreachable!("a multi-output equation plan owns a function call")
+        return Err(invalid());
     };
     Ok(MultiOutputSource {
         receivers: elements,
@@ -46,6 +51,15 @@ fn multi_output_source(
         arguments: args,
         provenance: dae::DaeProvenance::source(*span)?,
     })
+}
+
+/// One retained receiver: its result ordinal, its target, and its call result.
+type ReceiverResult<'flat, 'dae> = (usize, &'flat VarName, dae::ExprId<'dae>);
+
+/// The owner that defines the discrete-valued receivers of one equation.
+struct DiscreteValueDefinition<'scope, 'dae> {
+    staging: &'scope mut DiscreteValueStaging<'dae>,
+    owner: DiscreteValueOwnerHandle,
 }
 
 pub(super) fn lower_multi_output_equation<'dae>(
@@ -73,29 +87,25 @@ pub(super) fn lower_multi_output_equation<'dae>(
         .filter_map(|(ordinal, target)| target.as_ref().map(|target| (ordinal, target)))
         .collect::<Vec<_>>();
     let results = receiver_results(construction, symbols, &source, &selected)?;
-    let mut discrete = discrete;
-    let discrete_value_owner =
-        discrete_value_owner(coordinates, &selected, discrete.as_mut(), owner)?;
-    for ((ordinal, target), value) in selected.into_iter().zip(results) {
-        match coordinates[target] {
-            Coordinate::DiscreteValue(target) => {
-                let discrete = discrete
-                    .as_mut()
-                    .expect("a discrete-valued receiver has a discrete owner");
-                discrete.discrete_values.always(
-                    discrete_value_owner.expect("a discrete-valued receiver has a planned owner"),
+    let initialization = discrete.is_none();
+    let mut definition = discrete_value_definition(coordinates, &selected, discrete, owner)?;
+    for (ordinal, target, value) in results {
+        match (coordinates[target], definition.as_mut()) {
+            (Coordinate::DiscreteValue(target), Some(definition)) => {
+                definition.staging.always(
+                    definition.owner,
                     target,
                     value,
                     owner,
                     source.provenance,
                 )?;
             }
-            coordinate => define_residual_receiver(
+            (coordinate, _) => define_residual_receiver(
                 construction,
                 (coordinates, functions),
                 (&source.receivers[ordinal], value),
                 coordinate,
-                (owner, discrete.is_none()),
+                (owner, initialization),
             )?,
         }
     }
@@ -107,18 +117,12 @@ pub(super) fn lower_multi_output_equation<'dae>(
 /// The continuous receivers read one shared call. Every discrete receiver
 /// belongs to its own owner and reads its result from its own call of the same
 /// pure function, which the analysis proved yields the same value.
-fn receiver_results<'dae>(
+fn receiver_results<'flat, 'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     symbols: LoweringSymbols<'_, 'dae>,
     source: &MultiOutputSource<'_>,
-    selected: &[(usize, &VarName)],
-) -> Result<Vec<dae::ExprId<'dae>>, dae::DaeConstructionError> {
-    let is_discrete = |target: &VarName| {
-        matches!(
-            symbols.coordinates[target],
-            Coordinate::DiscreteReal(_) | Coordinate::DiscreteValue(_)
-        )
-    };
+    selected: &[(usize, &'flat VarName)],
+) -> Result<Vec<ReceiverResult<'flat, 'dae>>, dae::DaeConstructionError> {
     let call = |construction: &mut dae::DaeConstruction<'dae>| {
         lower_call_operands(
             construction,
@@ -129,50 +133,55 @@ fn receiver_results<'dae>(
             source.provenance,
         )
     };
+    let (discrete, continuous): (Vec<_>, Vec<_>) =
+        selected.iter().copied().partition(|(_, target)| {
+            matches!(
+                symbols.coordinates[*target],
+                Coordinate::DiscreteReal(_) | Coordinate::DiscreteValue(_)
+            )
+        });
     let shared = call(construction)?.results(
         construction,
-        selected
-            .iter()
-            .filter(|(_, target)| !is_discrete(target))
-            .map(|(ordinal, _)| *ordinal),
+        continuous.iter().map(|(ordinal, _)| *ordinal),
         source.provenance,
     )?;
-    let mut shared = shared.into_iter();
-    let mut results = Vec::with_capacity(selected.len());
-    for (ordinal, target) in selected {
-        if is_discrete(target) {
-            let own = call(construction)?.results(construction, [*ordinal], source.provenance)?;
-            results.extend(own);
-        } else {
-            results.push(
-                shared
-                    .next()
-                    .expect("one shared result per continuous receiver"),
-            );
-        }
+    let mut results = continuous
+        .into_iter()
+        .zip(shared)
+        .map(|((ordinal, target), value)| (ordinal, target, value))
+        .collect::<Vec<_>>();
+    for (ordinal, target) in discrete {
+        let own = call(construction)?.results(construction, [ordinal], source.provenance)?;
+        results.extend(own.into_iter().map(|value| (ordinal, target, value)));
     }
+    results.sort_by_key(|(ordinal, _, _)| *ordinal);
     Ok(results)
 }
 
-/// The planned B.1c owner of the discrete-valued receivers, if any.
-fn discrete_value_owner<'dae>(
+/// The planned B.1c owner of the discrete-valued receivers, if any. Analysis
+/// admits discrete receivers only in model equations, so an initialization
+/// equation has none.
+fn discrete_value_definition<'scope, 'dae>(
     coordinates: &HashMap<VarName, Coordinate<'dae>>,
     selected: &[(usize, &VarName)],
-    discrete: Option<&mut MultiOutputDiscreteOwners<'_, 'dae>>,
+    discrete: Option<MultiOutputDiscreteOwners<'scope, 'dae>>,
     owner: dae::DaeProvenance,
-) -> Result<Option<DiscreteValueOwnerHandle>, dae::DaeConstructionError> {
+) -> Result<Option<DiscreteValueDefinition<'scope, 'dae>>, dae::DaeConstructionError> {
     let targets = selected
         .iter()
         .filter(|(_, target)| matches!(coordinates[*target], Coordinate::DiscreteValue(_)))
         .map(|(_, target)| (*target).clone())
         .collect::<Vec<_>>();
-    if targets.is_empty() {
+    let Some(discrete) = discrete.filter(|_| !targets.is_empty()) else {
         return Ok(None);
-    }
-    let discrete = discrete.expect("analysis admits discrete receivers only in model equations");
-    discrete
+    };
+    let handle = discrete
         .discrete_values
-        .owner(owner, targets, coordinates, discrete.topology)
+        .owner(owner, targets, coordinates, discrete.topology)?;
+    Ok(handle.map(|owner| DiscreteValueDefinition {
+        staging: discrete.discrete_values,
+        owner,
+    }))
 }
 
 /// A continuous, initialization, or discrete Real receiver is defined by the

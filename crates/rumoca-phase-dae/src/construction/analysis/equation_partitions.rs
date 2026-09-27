@@ -14,12 +14,15 @@ pub(in crate::construction) enum EquationPartition<'flat> {
     /// ordinal and keeps the owner its role selects.
     MultiOutput {
         receivers: Vec<&'flat VarName>,
+        /// The called function every receiver reads its result from.
+        call: &'flat Expression,
     },
 }
 
 /// The receivers of an MLS §12.4.3 multi-result equation `(a, b, ...) =
-/// f(...)`, omitted slots excluded, or `None` for any other residual.
-fn multi_output_receivers(residual: &Expression) -> Option<Vec<&VarName>> {
+/// f(...)`, omitted slots excluded, with the call they read, or `None` for any
+/// other residual.
+fn multi_output_receivers(residual: &Expression) -> Option<(Vec<&VarName>, &Expression)> {
     let Expression::Binary {
         op: OpBinary::Sub,
         lhs,
@@ -29,20 +32,19 @@ fn multi_output_receivers(residual: &Expression) -> Option<Vec<&VarName>> {
     else {
         return None;
     };
-    let (Expression::Tuple { elements, .. }, Expression::FunctionCall { .. }) =
+    let (Expression::Tuple { elements, .. }, call @ Expression::FunctionCall { .. }) =
         (lhs.as_ref(), rhs.as_ref())
     else {
         return None;
     };
-    Some(
-        elements
-            .iter()
-            .filter_map(|element| match element {
-                Expression::VarRef { name, .. } => Some(name.var_name()),
-                _ => None,
-            })
-            .collect(),
-    )
+    let receivers = elements
+        .iter()
+        .filter_map(|element| match element {
+            Expression::VarRef { name, .. } => Some(name.var_name()),
+            _ => None,
+        })
+        .collect();
+    Some((receivers, call))
 }
 
 #[derive(Clone)]
@@ -94,7 +96,7 @@ pub(in crate::construction) fn equation_partition<'flat>(
     if aggregate_connections.members.contains(&row) {
         return Ok(EquationPartition::ConsumedDiscreteValue);
     }
-    if let Some(receivers) = multi_output_receivers(&equation.residual) {
+    if let Some((receivers, call)) = multi_output_receivers(&equation.residual) {
         let discrete = receivers.iter().any(|receiver| {
             matches!(
                 roles.get(*receiver),
@@ -102,7 +104,7 @@ pub(in crate::construction) fn equation_partition<'flat>(
             )
         });
         return Ok(if discrete {
-            EquationPartition::MultiOutput { receivers }
+            EquationPartition::MultiOutput { receivers, call }
         } else {
             EquationPartition::Continuous
         });
@@ -923,7 +925,7 @@ pub(super) fn defined_discrete_targets(
             EquationPartition::DiscreteValue(plan) => {
                 targets.insert(plan.target.clone());
             }
-            EquationPartition::MultiOutput { receivers } => {
+            EquationPartition::MultiOutput { receivers, .. } => {
                 targets.extend(
                     receivers
                         .into_iter()

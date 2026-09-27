@@ -459,12 +459,8 @@ pub(super) fn lower_value_sample<'dae>(
     if let Expression::VarRef {
         name, subscripts, ..
     } = value
-        && let Some(coordinate @ (Coordinate::DiscreteReal(_) | Coordinate::DiscreteValue(_))) =
-            symbols.coordinates.get(name.var_name()).copied()
+        && let Some(left_limit) = discrete_left_limit(symbols.coordinates.get(name.var_name()))
     {
-        let left_limit = coordinate
-            .previous(provenance.span())
-            .expect("a discrete coordinate has a pre value");
         return lower_coordinate_reference(
             construction,
             symbols,
@@ -475,6 +471,17 @@ pub(super) fn lower_value_sample<'dae>(
         );
     }
     lower_temporal_identity(construction, symbols, binders, value, provenance)
+}
+
+/// The pre value of a discrete-time coordinate, which is its left limit.
+fn discrete_left_limit<'dae>(
+    coordinate: Option<&Coordinate<'dae>>,
+) -> Option<dae::CoordinateInput<'dae>> {
+    match coordinate? {
+        Coordinate::DiscreteReal(id) => Some(dae::CoordinateInput::PreDiscreteReal(*id)),
+        Coordinate::DiscreteValue(id) => Some(dae::CoordinateInput::PreDiscreteValue(*id)),
+        _ => None,
+    }
 }
 
 pub(super) fn lower_temporal_identity<'dae>(
