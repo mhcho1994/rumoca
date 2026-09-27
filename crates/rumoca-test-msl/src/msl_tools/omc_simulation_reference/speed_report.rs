@@ -1,7 +1,8 @@
 //! Rumoca-vs-OMC compile-speed scalability comparison.
 //!
-//! Joins per-model rumoca compile seconds (from the rumoca results JSON) with
-//! OMC's self-reported compile time (`timeTotal - timeSimulation`) and produces
+//! Joins per-model rumoca time to runnable (front end, Solve lowering, and JIT,
+//! from the rumoca results JSON) with OMC's self-reported time to runnable
+//! (`timeTotal - timeSimulation`, which includes its C toolchain) and produces
 //! a two-series scalability curve: for each model-size bin, the average and
 //! median compile time for rumoca and for OMC, so the two can be plotted
 //! against each other (the slower-growing curve scales better).
@@ -140,7 +141,14 @@ fn collect_speed_records(
         let Some(runtime) = rumoca_runtimes.get(model_name) else {
             continue;
         };
-        let Some(rumoca_compile) = runtime.compile_seconds.filter(|value| *value > 0.0) else {
+        // Time to runnable on both sides: rumoca's front end plus Solve lowering
+        // and JIT against OMC's compile including its C toolchain.
+        let Some(rumoca_compile) = runtime
+            .compile_seconds
+            .zip(runtime.sim_build_seconds)
+            .map(|(front_end, build)| front_end + build)
+            .filter(|value| *value > 0.0)
+        else {
             continue;
         };
         let Some(scalar_equations) = runtime.scalar_equations else {
@@ -243,8 +251,8 @@ fn build_payload(
 fn metric_definitions() -> serde_json::Value {
     json!({
         "purpose": "Rumoca-vs-OMC compile-time comparison over MSL example models that BOTH tools compiled successfully. Drives the compile-speed table and the scalability plots.",
-        "rumoca_compile_seconds": "Rumoca front-end-through-DAE compile time (`compile_seconds` from the rumoca results JSON). Cranelift JIT; no external C compiler.",
-        "omc_compile_seconds": "OMC compile time = `timeTotal - timeSimulation` from OMC's self-reported SimulationResult record (frontend+backend+simcode+templates+C-compile; excludes the integration run).",
+        "rumoca_compile_seconds": "Rumoca time to runnable: front end through DAE (`compile_seconds`) plus Solve lowering and the Cranelift JIT (`sim_build_seconds`). No external C compiler.",
+        "omc_compile_seconds": "OMC time to runnable = `timeTotal - timeSimulation` from OMC's self-reported SimulationResult record (frontend+backend+simcode+templates+C compile; excludes the integration run). Both sides include native code generation: rumoca's JIT against OMC's C toolchain.",
         "speedup": "Per model: omc_compile_seconds / rumoca_compile_seconds (equivalently rumoca_speed / omc_speed). Value N means rumoca compiled N times faster; <1 means OMC was faster. The top-level `speedup` reports min/median/max of these per-model values.",
         "scaling_axis": "Models are binned by `scalar_equations` (the flattened square system size = scalar_unknowns), the workload both compilers process. `scaling_by_continuous_states` is a SECONDARY view only; most MSL examples have 0 continuous states, so it collapses.",
         "scaling.<tool>_compile_seconds.median": "Robust typical compile time for the bin (median of per-model seconds).",
