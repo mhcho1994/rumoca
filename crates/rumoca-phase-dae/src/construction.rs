@@ -112,7 +112,7 @@ use model_algorithm::{
     lower_separated_array_sum_model_algorithm, lower_total_array_model_algorithm,
 };
 use model_events::{WhenChainsRequest, always_condition, lower_when_assignment, lower_when_chains};
-use multi_output_equations::lower_multi_output_equation;
+use multi_output_equations::{MultiOutputDiscreteOwners, lower_multi_output_equation};
 use record_equation::lower_record_equation;
 use structured_body::{lower_structured_body, normalize_conditional_residual};
 use variable_construction::{
@@ -1516,7 +1516,9 @@ fn structured_family_partition<'flat>(
                 {
                     EquationPartition::DiscreteValue(plan) => Some(Ok(plan)),
                     EquationPartition::ConsumedDiscreteValue => Some(Err(())),
-                    EquationPartition::Continuous | EquationPartition::DiscreteReal { .. } => None,
+                    EquationPartition::Continuous
+                    | EquationPartition::DiscreteReal { .. }
+                    | EquationPartition::MultiOutput { .. } => None,
                 };
             }
             discrete_value_assignment(body, environment.roles, family.span)
@@ -1844,7 +1846,11 @@ fn lower_equations<'dae>(
                 equation,
                 plan,
                 owner,
-                input.initialization,
+                (!input.initialization).then_some(MultiOutputDiscreteOwners {
+                    discrete_values: &mut *discrete_values,
+                    topology: input.topology,
+                    owner_clock,
+                }),
             )?;
             continue;
         }
@@ -1962,6 +1968,9 @@ fn lower_ordinary_equation<'dae>(
             )?;
         }
         EquationPartition::ConsumedDiscreteValue => {}
+        EquationPartition::MultiOutput { .. } => {
+            unreachable!("a multi-output row is lowered by its multi-output plan")
+        }
     }
     Ok(())
 }

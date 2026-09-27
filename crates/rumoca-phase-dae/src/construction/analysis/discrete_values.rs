@@ -131,16 +131,20 @@ fn collect_equation_owners(
     owners: &mut Vec<SourceOwner>,
 ) -> Result<(), ToDaeError> {
     for (row, equation) in flat.equations.iter().enumerate() {
-        let EquationPartition::DiscreteValue(plan) = equation_partition(
+        let plan = match equation_partition(
             flat,
             row,
             equation,
             roles,
             connection_ranks,
             aggregate_connections,
-        )?
-        else {
-            continue;
+        )? {
+            EquationPartition::DiscreteValue(plan) => plan,
+            EquationPartition::MultiOutput { receivers } => {
+                push_multi_output_owner(equation, &receivers, roles, owners);
+                continue;
+            }
+            _ => continue,
         };
         owners.push(SourceOwner {
             targets: vec![SourceTarget {
@@ -153,6 +157,37 @@ fn collect_equation_owners(
         });
     }
     Ok(())
+}
+
+/// One MLS §12.4.3 multi-result equation defines all its discrete-valued
+/// receivers from one call, so they share one owner whose dependencies are the
+/// call's current discrete reads.
+fn push_multi_output_owner(
+    equation: &flat::Equation,
+    receivers: &[&VarName],
+    roles: &HashMap<VarName, PlannedRole>,
+    owners: &mut Vec<SourceOwner>,
+) {
+    let Expression::Binary { rhs: call, .. } = &equation.residual else {
+        unreachable!("a multi-output partition owns a subtraction residual")
+    };
+    let dependencies = current_discrete_dependencies(call, roles);
+    let targets = receivers
+        .iter()
+        .filter(|receiver| matches!(roles.get(**receiver), Some(PlannedRole::DiscreteValue)))
+        .map(|receiver| SourceTarget {
+            name: (*receiver).clone(),
+            dependencies: dependencies.clone(),
+            span: equation.span,
+            ordered_scalar_self_dependencies: false,
+        })
+        .collect::<Vec<_>>();
+    if !targets.is_empty() {
+        owners.push(SourceOwner {
+            targets,
+            span: equation.span,
+        });
+    }
 }
 
 fn collect_algorithm_owners(

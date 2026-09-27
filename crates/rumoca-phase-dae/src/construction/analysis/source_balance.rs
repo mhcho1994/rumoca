@@ -73,6 +73,20 @@ pub(super) fn source_balance(input: SourceBalanceInput<'_>) -> Result<BalanceDet
                 detail.discrete_value_definitions +=
                     plan.scalar_count.unwrap_or(equation.scalar_count);
             }
+            EquationPartition::MultiOutput { receivers } => {
+                for receiver in receivers {
+                    let scalar_count = checked_shape_size(receiver, &flat.variables[receiver])?;
+                    match roles[receiver] {
+                        PlannedRole::DiscreteReal => {
+                            detail.discrete_real_equations += scalar_count;
+                        }
+                        PlannedRole::DiscreteValue => {
+                            detail.discrete_value_definitions += scalar_count;
+                        }
+                        _ => detail.continuous_equations += scalar_count,
+                    }
+                }
+            }
             EquationPartition::ConsumedDiscreteValue => {}
         }
     }
