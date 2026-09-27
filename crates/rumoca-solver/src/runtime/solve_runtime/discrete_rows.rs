@@ -1274,6 +1274,14 @@ impl SolveRuntime {
     ) -> Result<Vec<GuardedRowValues>, RuntimeSolveError> {
         let mut guarded_values = Vec::new();
         let ordered_clocked = self.clock_partition_owns_clocked_rows();
+        // MLS §8.5: the equations active at one event instant are solved
+        // simultaneously. Solve lowering issues each guarded producer before
+        // every program that reads its current value, so evaluating the
+        // programs in issued order over a working state that carries each
+        // produced value forward gives every reader the instant's value; a
+        // program with no such reader sees exactly the pass-entry state.
+        let mut work_y = copy_runtime_values(input.eval_y, "guarded row work y")?;
+        let mut work_p = copy_runtime_values(input.eval_p, "guarded row work p")?;
         for program_index in 0..self.guarded_assignment_programs.len() {
             if self.event_transaction_coverage.guarded_assignments[program_index] {
                 continue;
@@ -1296,7 +1304,7 @@ impl SolveRuntime {
             if !self.guarded_assignment_accepts_snapshot(program_index, input.snapshot, input.t)? {
                 continue;
             }
-            let row_p = eval_p_cache.params(input.eval_p);
+            let row_p = eval_p_cache.params(&work_p);
             let row_p_with_root_overrides;
             let row_p = if input.snapshot.root_relation_overrides.is_empty() {
                 row_p
@@ -1311,10 +1319,17 @@ impl SolveRuntime {
             let mut values = Vec::new();
             self.eval_guarded_assignment_outputs(
                 program_index,
-                input.eval_y,
+                &work_y,
                 row_p,
                 input.t,
                 &mut values,
+            )?;
+            self.apply_guarded_assignment_outputs(
+                program_index,
+                &values,
+                input.snapshot.root_relation_overrides,
+                &mut work_y,
+                &mut work_p,
             )?;
             guarded_values.push((program_index, values));
         }

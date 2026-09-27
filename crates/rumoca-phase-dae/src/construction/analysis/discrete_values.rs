@@ -630,6 +630,16 @@ fn collect_current_discrete_dependencies(
             function: BuiltinFunction::Previous,
             ..
         } => {}
+        // MLS §16.5.1: `sample(u, c)` has "the value of the left limit of u
+        // when c is active", so sampling a variable reads its pre value and no
+        // current value of this instant.
+        Expression::BuiltinCall {
+            function: BuiltinFunction::Sample,
+            args,
+            ..
+        } if args
+            .first()
+            .is_some_and(|value| matches!(value, Expression::VarRef { .. })) => {}
         Expression::VarRef { name, .. } => {
             if matches!(roles.get(name.var_name()), Some(PlannedRole::DiscreteValue)) {
                 dependencies.insert(name.var_name().clone());

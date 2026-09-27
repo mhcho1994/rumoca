@@ -445,6 +445,39 @@ pub(super) fn lower_sample_event_operator<'dae>(
     })
 }
 
+/// MLS §16.5.1 `sample(u, c)`: "the value of the left limit of u when c is
+/// active". A continuous-time state or algebraic `u` is continuous at the tick,
+/// so its left limit is its current value; a discrete-time `u` may change at the
+/// tick's own event, so its left limit is its pre value.
+pub(super) fn lower_value_sample<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    symbols: LoweringSymbols<'_, 'dae>,
+    binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
+    value: &Expression,
+    provenance: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    if let Expression::VarRef {
+        name, subscripts, ..
+    } = value
+        && let Some(
+            coordinate @ (Coordinate::DiscreteReal(_) | Coordinate::DiscreteValue(_)),
+        ) = symbols.coordinates.get(name.var_name()).copied()
+    {
+        let left_limit = coordinate
+            .previous(provenance.span())
+            .expect("a discrete coordinate has a pre value");
+        return lower_coordinate_reference(
+            construction,
+            symbols,
+            binders,
+            left_limit,
+            subscripts,
+            provenance,
+        );
+    }
+    lower_temporal_identity(construction, symbols, binders, value, provenance)
+}
+
 pub(super) fn lower_temporal_identity<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     symbols: LoweringSymbols<'_, 'dae>,

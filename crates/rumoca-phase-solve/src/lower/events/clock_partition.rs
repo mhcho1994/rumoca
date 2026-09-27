@@ -344,6 +344,31 @@ impl SameTickExchange {
         (first..candidate).all(|member| self.fusable(member, candidate))
     }
 
+    /// A stable producer-before-reader order of the members: each member is
+    /// placed after every member it observes that does not in turn observe it.
+    /// Members of an observation cycle keep their relative input order.
+    pub(super) fn producer_order(&self) -> Vec<usize> {
+        let count = self.observes.len();
+        let mut placed = vec![false; count];
+        let mut order = Vec::with_capacity(count);
+        while order.len() < count {
+            let ready = (0..count).find(|&member| {
+                !placed[member]
+                    && self.observes[member].iter().all(|&observed| {
+                        placed[observed] || self.observes[observed].contains(&member)
+                    })
+            });
+            let next = ready.unwrap_or_else(|| {
+                (0..count)
+                    .find(|&member| !placed[member])
+                    .expect("an unplaced member remains")
+            });
+            placed[next] = true;
+            order.push(next);
+        }
+        order
+    }
+
     /// Whether every member of the set may share one program.
     pub(super) fn all_fusable(&self) -> bool {
         self.observes.iter().all(BTreeSet::is_empty)

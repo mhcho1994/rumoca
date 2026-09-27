@@ -531,7 +531,7 @@ fn lower_builtin_expression<'dae>(
             let Some(value) = clocked_value_sample(symbols.functions.flat, arguments) else {
                 return lower_sample_event_operator(construction, symbols, arguments, provenance);
             };
-            lower_temporal_identity(construction, symbols, binders, value, provenance)
+            lower_value_sample(construction, symbols, binders, value, provenance)
         }
         BuiltinFunction::Hold => lower_hold(construction, symbols, binders, arguments, provenance),
         BuiltinFunction::Previous => {

@@ -1300,6 +1300,12 @@ fn lower_guarded_targets<'dae>(
     // proof at this single boundary prevents a new DAE owner route from
     // silently constructing a hold-only program with the default plan fields.
     plan_guarded_targets(view, targets);
+    // MLS §8.5: the equations of one event instant are simultaneous, so a
+    // producer is issued before every target that reads its current value, and
+    // the runtime evaluates the issued programs in that order.
+    let order = SameTickExchange::derive(view, &rows.same_tick_definitions, targets)
+        .producer_order();
+    apply_permutation(targets, &order);
     let exchange = SameTickExchange::derive(view, &rows.same_tick_definitions, targets);
     let mut first = 0;
     while first < targets.len() {
@@ -1311,13 +1317,14 @@ fn lower_guarded_targets<'dae>(
         // other on the tick. SOLVE-C57's same-tick exchange is driven by the
         // issued order over the producers that *do* observe each other, never
         // by splitting every clock-owned family into one program per target.
-        // An unclocked family is not a clock-partition member at all, so its
-        // grouping is untouched.
+        // An unclocked family obeys the same rule: its program performs one
+        // entry read too, so a member that observes another is issued as its
+        // own program after that producer.
         while end < targets.len()
             && targets[end].clock == clock
             && targets[end].pre_mode == pre_mode
             && same_guarded_control(&targets[first], &targets[end])
-            && (clock.is_none() || exchange.fusable_with_range(first, end))
+            && exchange.fusable_with_range(first, end)
         {
             end += 1;
         }
@@ -1418,6 +1425,21 @@ fn same_guarded_control<'dae>(lhs: &GuardedTarget<'dae>, rhs: &GuardedTarget<'da
             .iter()
             .zip(rhs)
             .all(|(lhs, rhs)| lhs.0 == rhs.0 && lhs.1 == rhs.1 && lhs.3 == rhs.3)
+}
+
+/// Reorder `items` so position `k` holds the element formerly at `order[k]`.
+fn apply_permutation<T>(items: &mut [T], order: &[usize]) {
+    let mut position = (0..items.len()).collect::<Vec<_>>();
+    let mut holder = position.clone();
+    for (slot, &source) in order.iter().enumerate() {
+        let current = position[source];
+        items.swap(slot, current);
+        let displaced = holder[slot];
+        position[displaced] = current;
+        holder[current] = displaced;
+        position[source] = slot;
+        holder[slot] = source;
+    }
 }
 
 fn plan_guarded_targets<'dae>(view: dae::DaeView<'dae>, targets: &mut [GuardedTarget<'dae>]) {
