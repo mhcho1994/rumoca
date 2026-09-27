@@ -61,6 +61,11 @@ impl ReusableIncidence {
         Some(start..end)
     }
 
+    /// The number of continuous owners whose rows this incidence holds.
+    pub(crate) fn owner_count(&self) -> usize {
+        self.owner_first_row.len().saturating_sub(1)
+    }
+
     /// The scalar incidence rows, in equation order.
     pub(crate) const fn rows(&self) -> &IncidenceRows {
         &self.rows

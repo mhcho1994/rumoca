@@ -23,12 +23,18 @@
 mod alias_quotient;
 mod auxiliary_blocks;
 mod builtin_profiles;
+mod candidate_choice;
+mod holonomic_attempt;
+#[cfg(test)]
+use holonomic_attempt::refused_holonomic_outcome;
+use holonomic_attempt::{HolonomicAttempt, attempt_holonomic_candidate};
 mod component_constraint;
 mod component_projection;
 mod constant_values;
 mod constraints;
 mod declarations;
 mod demotion_bounds;
+use candidate_choice::{PassChoice, holonomic_analysis};
 mod demotion_screen;
 mod derivative_aliases;
 mod differentiation;
@@ -1290,79 +1296,6 @@ fn demotion_pass_with_observer(
     }
 }
 
-/// The choices one direct pass has made so far, each with its candidate's
-/// position in the pass order.
-#[derive(Default)]
-struct PassChoice {
-    /// The first strictly reducing candidate.
-    reduced: Option<(usize, DirectStateConstraint, usize, DemotionStep)>,
-    /// The last residue-holding candidate.
-    held: Option<(usize, DirectStateConstraint, usize, DemotionStep)>,
-    /// The first candidate refused for a discarded initial value.
-    blocked: Option<(usize, DiscardedInitialValue)>,
-}
-
-impl PassChoice {
-    /// Record one attempt at pass position `index`; a sorted attempt ends the
-    /// pass with its round.
-    fn record(
-        &mut self,
-        index: usize,
-        residue: usize,
-        attempt: DirectAttempt,
-    ) -> Option<DemotionRound> {
-        match attempt {
-            DirectAttempt::Sorted {
-                rebuilt,
-                manifold,
-                structural,
-            } => Some(DemotionRound {
-                step: Some(DemotionStep::Sorted {
-                    dae: rebuilt,
-                    manifold,
-                    structural,
-                }),
-                blocked: None,
-            }),
-            DirectAttempt::Accepted {
-                candidate,
-                residue: next,
-                step,
-            } if next < residue => {
-                if self
-                    .reduced
-                    .as_ref()
-                    .is_none_or(|(first, ..)| index < *first)
-                {
-                    self.reduced = Some((index, candidate, next, step));
-                }
-                None
-            }
-            DirectAttempt::Accepted {
-                candidate,
-                residue: next,
-                step,
-            } => {
-                if self.held.as_ref().is_none_or(|(last, ..)| index > *last) {
-                    self.held = Some((index, candidate, next, step));
-                }
-                None
-            }
-            DirectAttempt::Blocked(discarded) => {
-                if self
-                    .blocked
-                    .as_ref()
-                    .is_none_or(|(first, _)| index < *first)
-                {
-                    self.blocked = Some((index, discarded));
-                }
-                None
-            }
-            DirectAttempt::Rejected => None,
-        }
-    }
-}
-
 /// What one holonomic reduction found.
 struct HolonomicRound {
     /// The replacement DAE and its manifold expressions, if one matched.
@@ -1785,266 +1718,6 @@ fn manifold_scalar_is_state_only<'dae>(
     projected.is_ok() && valid && saw_state
 }
 
-/// What attempting one holonomic candidate against `model` found, mirroring
-/// [`DirectAttempt`]: every recorded event is already emitted by the time
-/// this returns.
-enum HolonomicAttempt {
-    Sorted {
-        dae: Box<dae::Dae>,
-        manifold: Vec<ManifoldConstraint>,
-        structural: PreparedStructuralAnalysis,
-    },
-    Accepted {
-        constraint: HolonomicConstraint,
-        residue: usize,
-        step: Box<HolonomicStep>,
-    },
-    Blocked(DiscardedInitialValue),
-    Rejected,
-}
-
-fn refused_holonomic_outcome(next: usize, residue: usize) -> AttemptOutcome<'static> {
-    debug_assert!(next >= residue);
-    if next == residue {
-        AttemptOutcome::Held { residue: next }
-    } else {
-        AttemptOutcome::Raised { residue: next }
-    }
-}
-
-fn residual_scalar_is_structurally_active<'dae>(
-    view: dae::DaeView<'dae>,
-    expression: dae::ExprId<'dae>,
-    scalar: usize,
-    domain_point: Option<(dae::DomainId<'dae>, &[i64])>,
-    cache: &mut rumoca_eval_dae::ScalarCoordinateProjectionCache<'dae>,
-) -> bool {
-    let mut active = false;
-    let projected = rumoca_eval_dae::for_each_scalar_coordinate_cached(
-        view,
-        expression,
-        scalar,
-        domain_point,
-        cache,
-        |coordinate, _| {
-            active |= matches!(
-                coordinate,
-                dae::CoordinateView::Derivative(_) | dae::CoordinateView::Algebraic(_)
-            );
-        },
-    );
-    projected.is_ok() && active
-}
-
-/// Whether the exact replacement for one holonomic owner still contributes a
-/// continuous unknown in at least one scalar equation it owns.
-///
-/// Differentiation can prove an expression admissible and nevertheless reduce
-/// it to an exact shaped zero once causal definitions are substituted. Such a
-/// residual is not a valid Pantelides replacement: retaining it would add an
-/// equation row that can never match an unknown. Check the rebuilt owner, not
-/// the source syntax, so this postcondition covers scalar residuals and compact
-/// structured families through the same scalar projection used by incidence.
-fn holonomic_replacement_is_structurally_active(
-    model: &dae::Dae,
-    constraint: &HolonomicConstraint,
-) -> bool {
-    model.inspect(|view| {
-        let Some(owner) = view.continuous_owners().nth(constraint.owner_ordinal) else {
-            return false;
-        };
-        let mut cache = rumoca_eval_dae::ScalarCoordinateProjectionCache::default();
-        match owner {
-            dae::ContinuousOwnerView::Residual { equation, .. } => {
-                let residual = equation.residual();
-                let Some(scalar_count) = view
-                    .expression(residual)
-                    .and_then(|expression| expression.value_type().scalar_count())
-                else {
-                    return false;
-                };
-                (0..scalar_count).any(|scalar| {
-                    constraint
-                        .proof
-                        .component
-                        .as_ref()
-                        .is_none_or(|component| component.scalar == scalar)
-                        && residual_scalar_is_structurally_active(
-                            view, residual, scalar, None, &mut cache,
-                        )
-                })
-            }
-            dae::ContinuousOwnerView::Structured { family, .. } => {
-                structured_replacement_is_active(view, family, constraint, &mut cache)
-            }
-        }
-    })
-}
-
-fn structured_replacement_is_active<'dae>(
-    view: dae::DaeView<'dae>,
-    family: dae::StructuredFamilyView<'dae>,
-    constraint: &HolonomicConstraint,
-    cache: &mut rumoca_eval_dae::ScalarCoordinateProjectionCache<'dae>,
-) -> bool {
-    let Some(body_ordinal) = constraint.body_ordinal else {
-        return false;
-    };
-    let Some(residual) = family.bodies().get(body_ordinal) else {
-        return false;
-    };
-    let Some(domain) = view.domain(family.domain()) else {
-        return false;
-    };
-    let structured = domain.structured();
-    (0..domain.scalar_count() as usize).any(|point| {
-        let Ok(Some(values)) = structured.index_tuple_at(point) else {
-            return false;
-        };
-        let Some(scalar) = family.scalar_view().body_scalar(point, domain.extents()) else {
-            return false;
-        };
-        if constraint
-            .proof
-            .component
-            .as_ref()
-            .is_some_and(|component| component.scalar != scalar)
-        {
-            return false;
-        }
-        residual_scalar_is_structurally_active(
-            view,
-            residual,
-            scalar,
-            Some((family.domain(), values.as_slice())),
-            cache,
-        )
-    })
-}
-
-/// Try one certificate, observing its identity and outcome. Every decision
-/// this makes is exactly the one the pre-observation code made at this same
-/// branch point.
-fn observe_discarded_holonomic_initial(
-    observer: &mut impl ReductionObserver,
-    identity: Identity,
-    discarded: &DiscardedInitialValue,
-) {
-    observer.observe(ReductionEvent::Attempt {
-        lane: Lane::Holonomic,
-        identity,
-        outcome: AttemptOutcome::WouldDiscardInitial {
-            variable: &discarded.variable,
-            span: discarded.span,
-        },
-    });
-}
-
-fn attempt_holonomic_candidate(
-    source: &ReductionSource<'_>,
-    residue: usize,
-    prior_manifold: &[ManifoldConstraint],
-    stated: &[u32],
-    constraint: HolonomicConstraint,
-    observer: &mut impl ReductionObserver,
-) -> Result<HolonomicAttempt, StructuralError> {
-    let model = source.model();
-    let identity = Identity::Holonomic(HolonomicIdentity::from(&constraint));
-    let (rebuilt, manifold) =
-        match rebuild_holonomic_constraint(source, &constraint, prior_manifold) {
-            Ok(pair) => pair,
-            Err(error) => {
-                observer.observe(ReductionEvent::Attempt {
-                    lane: Lane::Holonomic,
-                    identity,
-                    outcome: AttemptOutcome::NonSingularFailure { error: &error },
-                });
-                return Err(error);
-            }
-        };
-    if !equation_activity::preserves_equations(source.model(), &rebuilt)
-        || !holonomic_replacement_is_structurally_active(&rebuilt, &constraint)
-    {
-        observer.observe(ReductionEvent::Attempt {
-            lane: Lane::Holonomic,
-            identity,
-            outcome: AttemptOutcome::WouldCreateVacuousResidual,
-        });
-        return Ok(HolonomicAttempt::Rejected);
-    }
-    let (next, retained_error, structural) = match structural_analysis(&rebuilt) {
-        Ok(structural) => (None, None, Some(structural)),
-        Err(error) => match unmatched_residue(&error) {
-            Some(next) if next <= residue => (Some(next), Some(error), None),
-            Some(next) => {
-                observer.observe(ReductionEvent::Attempt {
-                    lane: Lane::Holonomic,
-                    identity,
-                    outcome: refused_holonomic_outcome(next, residue),
-                });
-                return Ok(HolonomicAttempt::Rejected);
-            }
-            None => {
-                observer.observe(ReductionEvent::Attempt {
-                    lane: Lane::Holonomic,
-                    identity,
-                    outcome: AttemptOutcome::NonSingularFailure { error: &error },
-                });
-                return Ok(HolonomicAttempt::Rejected);
-            }
-        },
-    };
-    let discarded = discarded_initial_after_attempt(
-        model,
-        &rebuilt,
-        stated,
-        Lane::Holonomic,
-        identity,
-        observer,
-    )?;
-    if let Some(discarded) = discarded {
-        observe_discarded_holonomic_initial(observer, identity, &discarded);
-        return Ok(HolonomicAttempt::Blocked(discarded));
-    }
-    let Some(next) = next else {
-        observer.observe(ReductionEvent::Attempt {
-            lane: Lane::Holonomic,
-            identity,
-            outcome: AttemptOutcome::Sorted,
-        });
-        observer.observe(ReductionEvent::Selected {
-            lane: Lane::Holonomic,
-            identity,
-            residue_before: residue,
-            residue_after: None,
-        });
-        return Ok(HolonomicAttempt::Sorted {
-            dae: Box::new(rebuilt),
-            manifold,
-            structural: structural.expect("a sorted holonomic attempt retains its analysis"),
-        });
-    };
-    observer.observe(ReductionEvent::Attempt {
-        lane: Lane::Holonomic,
-        identity,
-        outcome: if next < residue {
-            AttemptOutcome::Reduced { residue: next }
-        } else {
-            AttemptOutcome::Held { residue: next }
-        },
-    });
-    Ok(HolonomicAttempt::Accepted {
-        constraint,
-        residue: next,
-        step: Box::new(HolonomicStep::Reduced {
-            dae: rebuilt,
-            manifold,
-            residue: next,
-            error: retained_error.expect("reduced candidate retains its proving error"),
-        }),
-    })
-}
-
 /// Try every current certificate in deterministic owner order, preferring a
 /// strict residue reduction over a once-only owner-consuming held step.
 fn holonomic_pass_with_observer(
@@ -2057,6 +1730,8 @@ fn holonomic_pass_with_observer(
 ) -> Result<HolonomicPass, StructuralError> {
     let source = ReductionSource::new(model);
     let stated = model.inspect(stated_initial_variables);
+    // The pass model's incidence, reused by every candidate's analysis.
+    let (_, base) = structural_analysis_capturing(model, None, None);
     let (mut candidates, incident) = source.inspect(|view, facts| {
         let candidates = index_reduction_constraints(view, facts);
         let incident = crate::overdetermined_block_variables(view)?;
@@ -2096,6 +1771,7 @@ fn holonomic_pass_with_observer(
             prior_manifold,
             &stated,
             constraint,
+            base.as_ref(),
             observer,
         )?;
         match attempt {
@@ -2170,6 +1846,3 @@ fn unmatched_residue(error: &StructuralError) -> Option<usize> {
     };
     Some((n_equations - n_matched) + (n_unknowns - n_matched))
 }
-
-// SPEC_0021 file-size exception: this file is 2026 lines, over the 2000-line
-// action threshold; split plan: move the reconstruction and holonomic-constraint helpers into the existing dae_transform/ submodules.
