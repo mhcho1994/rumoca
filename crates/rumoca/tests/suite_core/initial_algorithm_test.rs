@@ -19,6 +19,9 @@
 //! holds when initialization finishes, and of its `pre` value at that instant.
 //! The equation section keeps its own owner for every later instant.
 //!
+//! A target is one declared coordinate; a component-array element such as
+//! `c[2].count` is addressed by its literal subscripts.
+//!
 //! Rejected, each naming the owner that is absent rather than a consequence of
 //! it: a call statement that binds an output or whose body has any other
 //! effect, a state/algebraic/output/input target the initialization system
@@ -458,6 +461,39 @@ fn a_discrete_target_is_determined_by_its_initial_algorithm() {
         (y + expected_t_start).abs() <= 1.0e-12,
         "y = {y}, expected {}",
         -expected_t_start
+    );
+}
+
+/// Flat declares each element of a component array as its own coordinate, so
+/// `c[2].count := ...` in an element's initial algorithm names exactly
+/// `c[2].count` (the `PowerConverters.DCAC.Control.IntersectivePWM` saw-tooth
+/// carriers).
+#[test]
+fn a_component_array_element_target_names_its_own_coordinate() {
+    let source = format!(
+        "{DISCRETE_INITIAL_VALUES}\nmodel Carriers\n  \
+         InitialAlgorithmDiscreteTarget c[2](startTime = {{-0.35, -0.25}});\nend Carriers;\n"
+    );
+    let compiled = Compiler::new()
+        .model("Carriers")
+        .compile_str(&source, "initial_algorithm.mo")
+        .expect("an element initial algorithm has a checked owner");
+    let result = simulate_dae(
+        &compiled.dae,
+        &SimOptions {
+            t_end: 0.01,
+            ..SimOptions::default()
+        },
+    )
+    .expect("the element initial values simulate");
+    // integer(0.35/0.1) = 3 and integer(0.25/0.1) = 2.
+    assert_eq!(
+        discrete_trace(&result, "c[1].count").first().copied(),
+        Some(3.0)
+    );
+    assert_eq!(
+        discrete_trace(&result, "c[2].count").first().copied(),
+        Some(2.0)
     );
 }
 

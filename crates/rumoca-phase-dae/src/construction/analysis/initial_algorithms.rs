@@ -255,10 +255,10 @@ fn reject_unsupported_statements(
             rumoca_core::Statement::Empty { .. } => {}
             rumoca_core::Statement::Assignment { comp, span, .. } => {
                 require_span(*span, "initial algorithm assignment")?;
-                if comp.parts().is_empty() || comp.parts().iter().any(|part| !part.subs.is_empty())
-                {
+                if assignment_target(flat, comp).is_none() {
                     return Err(unsupported(
-                        "an assignment target must be one whole, unsubscripted coordinate",
+                        "an assignment target must be one whole declared coordinate, \
+                         addressed by literal subscripts at most",
                         *span,
                     ));
                 }
@@ -713,15 +713,15 @@ impl Replay<'_> {
         match statement {
             rumoca_core::Statement::Empty { .. } => Ok(()),
             rumoca_core::Statement::Assignment { comp, value, span } => {
-                let target = rumoca_core::component_ref_to_base_reference(comp)
-                    .var_name()
-                    .clone();
-                if !self.flat.variables.contains_key(&target) {
+                let Some(target) = assignment_target(self.flat, comp) else {
                     return Err(unsupported(
-                        format!("assignment target `{target}` is not a declared coordinate"),
+                        format!(
+                            "assignment target `{}` is not a declared coordinate",
+                            rumoca_core::component_ref_to_base_reference(comp).var_name()
+                        ),
                         *span,
                     ));
-                }
+                };
                 let expression = substitute(value, values);
                 values.insert(
                     target,
@@ -954,6 +954,48 @@ fn negate(condition: &Expression, span: Span) -> Expression {
 
 fn unsupported(detail: impl Into<String>, span: Span) -> ToDaeError {
     ToDaeError::unsupported_algorithm("initial", detail, span)
+}
+
+/// The one declared scalar coordinate an assignment target names.
+///
+/// Flat declares each element of a component array as its own coordinate
+/// (`s[1].count`), so a target whose subscripts are all literal indices names
+/// exactly that coordinate; a computed subscript or an element of an array
+/// coordinate names no whole declared coordinate.
+fn assignment_target(
+    flat: &flat::Model,
+    comp: &rumoca_core::ComponentReference,
+) -> Option<VarName> {
+    let mut rendered = String::new();
+    for (position, part) in comp.parts().iter().enumerate() {
+        if position > 0 {
+            rendered.push('.');
+        }
+        rendered.push_str(&part.ident);
+        if part.subs.is_empty() {
+            continue;
+        }
+        let indices = part
+            .subs
+            .iter()
+            .map(|subscript| match subscript {
+                Subscript::Index { value, .. } => Some(value.to_string()),
+                Subscript::Expr { expr, .. } => match expr.as_ref() {
+                    Expression::Literal {
+                        value: rumoca_core::Literal::Integer(value),
+                        ..
+                    } => Some(value.to_string()),
+                    _ => None,
+                },
+                Subscript::Colon { .. } => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        rendered.push('[');
+        rendered.push_str(&indices.join(","));
+        rendered.push(']');
+    }
+    let target = VarName::new(&rendered);
+    flat.variables.contains_key(&target).then_some(target)
 }
 
 /// Substitute every coordinate the section has already written.
