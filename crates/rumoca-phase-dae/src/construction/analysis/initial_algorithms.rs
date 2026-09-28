@@ -862,11 +862,11 @@ fn branch_value(
         })
 }
 
-struct AssertionCall<'statement> {
-    condition: &'statement Expression,
-    message: &'statement Expression,
-    level: Option<&'statement Expression>,
-    span: Span,
+pub(super) struct AssertionCall<'statement> {
+    pub(super) condition: &'statement Expression,
+    pub(super) message: &'statement Expression,
+    pub(super) level: Option<&'statement Expression>,
+    pub(super) span: Span,
 }
 
 /// Recognize MLS §8.3.7 `assert` in both forms Flat produces for a statement.
@@ -875,7 +875,7 @@ struct AssertionCall<'statement> {
 /// to the predefined operator, while an equation-section `assert` reaches it as
 /// the dedicated statement. A user function may not shadow the operator here: a
 /// callee the Flat function table registers is a user call, not the operator.
-fn assertion_call<'statement>(
+pub(super) fn assertion_call<'statement>(
     flat: &flat::Model,
     statement: &'statement rumoca_core::Statement,
 ) -> Option<AssertionCall<'statement>> {

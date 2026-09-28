@@ -1587,9 +1587,9 @@ fn lower_condition_memory<'dae>(
             target,
             solve::DiscreteRowRole::ConditionMemory,
             solve::DiscreteEventPreMode::FollowCurrent,
-            clock.map(|(_, solve)| solve),
+            clock.and_then(|(_, solve)| solve),
         );
-        if let Some((_, clock_owner)) = clock {
+        if let Some((_, Some(clock_owner))) = clock {
             // A clocked activation buffer targets no DAE variable; it joins
             // the issued order purely as a consumer so it observes this tick's
             // settled operand values.
@@ -1619,10 +1619,10 @@ fn condition_operand_clock<'dae>(
     clocks: &LoweredClocks<'dae>,
     condition: dae::ConditionId<'dae>,
     span: Span,
-) -> Result<Option<(dae::ClockId<'dae>, solve::PeriodicClockId)>, LowerError> {
-    let mut owner: Option<(dae::ClockId<'dae>, solve::PeriodicClockId)> = None;
+) -> Result<Option<(dae::ClockId<'dae>, Option<solve::PeriodicClockId>)>, LowerError> {
+    let mut owner: Option<(dae::ClockId<'dae>, Option<solve::PeriodicClockId>)> = None;
     let mut conflict = false;
-    let mut visit = |found: (dae::ClockId<'dae>, solve::PeriodicClockId)| match owner {
+    let mut visit = |found: (dae::ClockId<'dae>, Option<solve::PeriodicClockId>)| match owner {
         Some((clock, _)) if clock != found.0 => conflict = true,
         Some(_) => {}
         None => owner = Some(found),
@@ -1845,14 +1845,15 @@ fn expression_clock_owner<'dae>(
     view: dae::DaeView<'dae>,
     clocks: &LoweredClocks<'dae>,
     expression: dae::ExprId<'dae>,
-) -> Option<(dae::ClockId<'dae>, solve::PeriodicClockId)> {
+) -> Option<(dae::ClockId<'dae>, Option<solve::PeriodicClockId>)> {
     let owner = super::clock_ownership::expression_clock_owner(view, expression, |variable| {
-        clocks.variable_owner(variable).map(|(clock, _)| clock)
+        clocks
+            .variable_owner(variable)
+            .map(|(clock, _)| clock)
+            .or_else(|| clocks.variable_trigger(variable).map(|(clock, _)| clock))
     })?;
-    Some((
-        owner,
-        clocks.clock(owner).expect("checked expression clock"),
-    ))
+    // An MLS §16.3 event clock owns a partition but has no periodic schedule.
+    Some((owner, clocks.clock(owner).ok()))
 }
 
 fn root_zero_domain<'dae>(

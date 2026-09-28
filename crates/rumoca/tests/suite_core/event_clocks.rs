@@ -136,3 +136,35 @@ end Inline;
         "{message}"
     );
 }
+
+/// `firstTick()` and a conditional in an event-clock partition, as in the MSL
+/// `IntegerChange` block: `changed` is false at the first tick and true
+/// whenever the sampled Integer differs from its previous tick.
+#[test]
+fn first_tick_and_conditions_follow_the_event_clock() {
+    let source = r#"
+model ChangeDetector
+  Boolean b = sin(2 * 3.141592653589793 * time) > 0.5;
+  Clock c = Clock(b);
+  Integer k = integer(floor(time / 1.5));
+  Integer u(start = 0);
+  Boolean changed(start = false);
+  Real flag(start = 0);
+  Real held;
+  Real s(start = 0, fixed = true);
+equation
+  der(s) = 1;
+  when c then
+    u = sample(k);
+    changed = if firstTick() then false else not (u == previous(u));
+    flag = if changed then 1.0 else 0.0;
+  end when;
+  held = hold(flag);
+end ChangeDetector;
+"#;
+    let result = simulate(source, "ChangeDetector", 3.0);
+    // Ticks at 1/12 + j sample k = 0, 0, 1, so only the tick at 2 1/12 changes it.
+    assert_eq!(value_at(&result, "held", 0.5), 0.0);
+    assert_eq!(value_at(&result, "held", 1.5), 0.0);
+    assert_eq!(value_at(&result, "held", 2.5), 1.0);
+}

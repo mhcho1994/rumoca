@@ -19,6 +19,11 @@ pub(in crate::construction) enum ModelAlgorithmPlan {
         tensor_loops: HashMap<Span, ModelEventTensorLoopPlan>,
         function_calls: HashMap<Span, ModelEventFunctionCallPlan>,
     },
+    /// An algorithm of `assert` statements only: MLS §11.1.2 and §11.2.8.1 check it like
+    /// the assert equations it states, one per statement.
+    Assertions {
+        assertions: Vec<flat::AssertEquation>,
+    },
 }
 
 #[derive(Clone)]
@@ -35,6 +40,9 @@ pub(super) fn analyze_model_algorithm(
     shapes: &FunctionShapeAnalysis,
 ) -> Result<ModelAlgorithmPlan, ToDaeError> {
     let model_values = shapes.model_values();
+    if let Some(assertions) = assertion_only_algorithm(flat, algorithm) {
+        return Ok(ModelAlgorithmPlan::Assertions { assertions });
+    }
     if contains_event_control(&algorithm.statements) {
         let targets = model_algorithm_targets(flat, algorithm);
         if targets.iter().any(|target| {
@@ -101,6 +109,31 @@ pub(super) fn analyze_model_algorithm(
     Ok(ModelAlgorithmPlan::Declarative {
         target: target.clone(),
     })
+}
+
+/// The assert equations of an algorithm whose statements are all `assert`
+/// (empty statements aside), or `None` for any other algorithm.
+fn assertion_only_algorithm(
+    flat: &flat::Model,
+    algorithm: &flat::Algorithm,
+) -> Option<Vec<flat::AssertEquation>> {
+    let mut assertions = Vec::new();
+    for statement in &algorithm.statements {
+        if matches!(statement, rumoca_core::Statement::Empty { .. }) {
+            continue;
+        }
+        let assertion = assertion_call(flat, statement)?;
+        assertions.push(flat::AssertEquation::new(
+            assertion.condition.clone(),
+            assertion.message.clone(),
+            assertion.level.cloned(),
+            assertion.span,
+            flat::EquationOrigin::Algorithm {
+                component: algorithm.origin.clone(),
+            },
+        ));
+    }
+    (!assertions.is_empty()).then_some(assertions)
 }
 
 fn analyze_event_tensor_loops(

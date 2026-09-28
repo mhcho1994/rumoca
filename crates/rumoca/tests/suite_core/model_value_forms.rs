@@ -166,3 +166,37 @@ end Quotients;
         assert_eq!(last(&result, name), value, "{name}");
     }
 }
+
+const ALGORITHM_ASSERTION: &str = r#"
+package AlgorithmAssertion
+  block Checked
+    parameter Real interval = 1;
+    output Real y;
+  algorithm
+    assert(interval > 0 or interval < 0, "the interval must be non-zero");
+  equation
+    y = time;
+  end Checked;
+  model Accepted
+    Checked checked;
+  end Accepted;
+  model Rejected
+    Checked checked(interval = 0);
+  end Rejected;
+end AlgorithmAssertion;
+"#;
+
+/// MLS §11.2.8.1: an algorithm of `assert` statements only is checked like the
+/// assert equations it states.
+#[test]
+fn an_assertion_only_algorithm_is_checked_at_run_time() {
+    let accepted = simulate(ALGORITHM_ASSERTION, "AlgorithmAssertion.Accepted")
+        .expect("the accepted interval simulates");
+    assert!((last(&accepted, "checked.y") - 1.0).abs() < 1.0e-12);
+    let rejected = simulate(ALGORITHM_ASSERTION, "AlgorithmAssertion.Rejected")
+        .expect_err("the violated assertion stops the simulation");
+    assert!(
+        rejected.contains("the interval must be non-zero"),
+        "{rejected}"
+    );
+}

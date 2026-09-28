@@ -115,6 +115,15 @@ pub(super) fn lower_algorithms<'dae>(
             functions: request.environment.functions,
         };
         match plan {
+            ModelAlgorithmPlan::Assertions { assertions } => {
+                super::lower_assertions(
+                    lowering.construction,
+                    lowering.coordinates,
+                    lowering.functions,
+                    request.environment.sample_lattices,
+                    assertions,
+                )?;
+            }
             ModelAlgorithmPlan::Declarative { target } => {
                 lower_declarative_model_algorithm(&mut lowering, algorithm, target)?;
             }

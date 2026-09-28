@@ -119,8 +119,8 @@ pub(super) use history_operators::HistoryOperatorPlans;
 use history_operators::analyze_history_operators;
 pub(super) use initial_algorithms::InitialDiscreteValue;
 use initial_algorithms::{
-    InitialAlgorithmAnalysis, analyze_initial_algorithms, claim_initial_discrete_equations,
-    reject_unsupported_initial_algorithm_statements,
+    InitialAlgorithmAnalysis, analyze_initial_algorithms, assertion_call,
+    claim_initial_discrete_equations, reject_unsupported_initial_algorithm_statements,
 };
 use loop_compaction::compact_function_loops;
 use model_algorithm_calls::analyze_event_function_calls;
