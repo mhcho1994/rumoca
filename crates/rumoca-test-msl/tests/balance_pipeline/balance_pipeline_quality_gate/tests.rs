@@ -1668,8 +1668,10 @@ fn oracle_boundary_migration_rejects_unreviewed_counts_digest_or_missing_evidenc
 
 #[test]
 fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi() {
-    let baseline =
-        load_msl_quality_baseline(&msl_quality_baseline_path()).expect("load checked baseline");
+    let baseline = load_msl_quality_baseline(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join(MSL_QUALITY_BASELINE_FILE_REL),
+    )
+    .expect("load checked baseline");
     assert_eq!(baseline.quality_gate_version, MSL_QUALITY_GATE_VERSION);
     assert_eq!(baseline.sim_timeout_seconds, SIM_TIMEOUT_SECS);
     assert_eq!(baseline.flatten_models, 493);

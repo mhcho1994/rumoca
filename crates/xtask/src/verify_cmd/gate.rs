@@ -120,6 +120,10 @@ pub(crate) fn gate_steps(packages: &[String], coverage: bool) -> Vec<GateStep> {
     workspace.extend_from_slice(crate::test_cmd::WORKSPACE_TEST_FEATURES);
     workspace.extend_from_slice(&SKIP_SNAPSHOT_ONLY_TESTS);
     steps.push(GateStep::cargo("workspace-tests", &workspace));
+    steps.push(GateStep::cargo(
+        "msl-harness-tests",
+        crate::test_cmd::MSL_HARNESS_UNIT_TEST_ARGS,
+    ));
     if !packages.is_empty() {
         let mut doc =
             GateStep::cargo("doc", &["doc", "-j", "8"]).with_packages(packages, &["--no-deps"]);

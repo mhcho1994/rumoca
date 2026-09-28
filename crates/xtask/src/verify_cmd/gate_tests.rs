@@ -212,6 +212,7 @@ fn gate_steps_follow_the_blocking_list_in_order() {
             "clippy",
             "lint",
             "workspace-tests",
+            "msl-harness-tests",
             "doc",
             "template-runtime"
         ]
@@ -231,8 +232,11 @@ fn gate_steps_follow_the_blocking_list_in_order() {
             .args
             .ends_with(&["--skip".to_string(), "commit_messages".to_string()])
     );
-    assert_eq!(steps[4].env, [("RUSTDOCFLAGS", "-D warnings")]);
-    assert!(steps[5].template_runtime);
+    // The MSL harness unit tests run with their feature and no environment.
+    assert!(steps[4].env.is_empty());
+    assert!(steps[4].args.contains(&"msl-full-test".to_string()));
+    assert_eq!(steps[5].env, [("RUSTDOCFLAGS", "-D warnings")]);
+    assert!(steps[6].template_runtime);
     // No changed crate: the workspace tests still run, but no docs.
     let unchanged = names(&gate_steps(&[], false));
     assert!(unchanged.contains(&"workspace-tests"));
@@ -240,7 +244,7 @@ fn gate_steps_follow_the_blocking_list_in_order() {
     // Coverage appends CI's run, report, and trim gate.
     let coverage = gate_steps(&packages, true);
     assert_eq!(
-        names(&coverage)[6..],
+        names(&coverage)[7..],
         [
             "coverage-run",
             "coverage-summary",
@@ -249,9 +253,9 @@ fn gate_steps_follow_the_blocking_list_in_order() {
         ]
     );
     // A failing test fails the coverage run, as in CI.
-    assert!(!coverage[6].args.contains(&"--ignore-run-fail".to_string()));
+    assert!(!coverage[7].args.contains(&"--ignore-run-fail".to_string()));
     assert!(
-        coverage[9]
+        coverage[10]
             .args
             .contains(&"--enforce-trim-regressions".to_string())
     );

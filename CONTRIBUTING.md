@@ -181,7 +181,9 @@ committed `HEAD`; uncommitted changes are not part of it) into
 blocking steps in order: `cargo fmt --check`, workspace clippy (without
 `rumoca-phase-instantiate`), `verify lint`, the tests of every workspace crate
 with the `rumoca/msl-sim-tests` regressions, as `verify workspace` runs them
-(`commit_messages` is skipped, since a snapshot has no history), rustdoc of
+(`commit_messages` is skipped, since a snapshot has no history), the
+`rumoca-test-msl` harness unit tests (as `verify workspace` runs them on
+Linux), rustdoc of
 the changed crates with warnings denied (default: crates changed relative to
 upstream `main`; `--crates` overrides), and the template runtime tests. The CasADi and JAX template targets need
 Python packages a local shell may lack, so their failures are reported but
@@ -249,6 +251,10 @@ Verification-surface classification:
   `rumoca/msl-sim-tests` MSL simulation regressions. It needs the pinned MSL
   tree at `target/msl/ModelicaStandardLibrary-4.1.0`, which the CI workspace
   job stages before running.
+  On Linux it also runs the `rumoca-test-msl` harness unit tests (checked
+  quality baseline, quality gate, selection, merge, and reporting). They read
+  only checked-in inputs, never an ambient `target/msl/parity-config.json`
+  from another run; only the two cohort drivers are skipped.
 - `backend-stress-tests` is an opt-in 30-model diagnostic survey, not a
   correctness gate: it reports per-model failures and only requires one
   end-to-end comparison for each selected backend.
