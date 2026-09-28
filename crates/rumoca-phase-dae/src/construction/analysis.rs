@@ -842,7 +842,6 @@ fn analyze_initial_owners(
 ) -> Result<InitialOwners, ToDaeError> {
     let mut algorithms = analyze_initial_algorithm_owners(
         flat,
-        roles,
         assertions,
         states,
         constants,
@@ -1183,14 +1182,16 @@ fn analyze_source_balance(
 /// produced — against one condition grammar.
 fn analyze_initial_algorithm_owners(
     flat: &flat::Model,
-    roles: &HashMap<VarName, PlannedRole>,
     assertion_scope: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
     shapes: &ShapeEnvironment,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<InitialAlgorithmAnalysis, ToDaeError> {
-    let initial_algorithms = analyze_initial_algorithms(flat, roles, states, constants, shapes)?;
+    // The replay reads initialization values, where MLS §4.9.5 makes an
+    // enumeration literal an ordinary value, so it takes the expression roles.
+    let initial_algorithms =
+        analyze_initial_algorithms(flat, assertion_scope.roles, states, constants, shapes)?;
     validate_assertions(
         flat.assert_equations
             .iter()
