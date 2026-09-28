@@ -10,7 +10,6 @@ use super::{AlgebraicProjectionBlock, StructuralPattern};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AffineEliminationLayout {
     pattern: StructuralPattern,
-    reduced_pattern: StructuralPattern,
     row_columns: Box<[Box<[usize]>]>,
     zero_guards: Box<[(usize, usize)]>,
     guard_steps: Box<[(usize, usize)]>,
@@ -80,12 +79,6 @@ impl AffineEliminationLayout {
             .collect();
         Some(Self {
             pattern: pattern.clone(),
-            reduced_pattern: StructuralPattern::full(
-                tears.len(),
-                tears.len(),
-                pattern.provenance(),
-            )
-            .ok()?,
             row_columns,
             zero_guards: zero_guards.into_boxed_slice(),
             guard_steps,
@@ -99,9 +92,6 @@ impl AffineEliminationLayout {
         &self.pattern
     }
 
-    pub const fn reduced_pattern(&self) -> &StructuralPattern {
-        &self.reduced_pattern
-    }
     pub fn row_columns(&self, row: usize) -> &[usize] {
         &self.row_columns[row]
     }

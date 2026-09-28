@@ -1,5 +1,6 @@
 mod controls;
 mod promotion;
+mod seed;
 
 use super::*;
 

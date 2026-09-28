@@ -1,16 +1,73 @@
 //! One immutable block matrix shared by its directional right-hand sides.
+//!
+//! A small or dense block factors its matrix densely once. A sparse candidate
+//! block solves through its issued torn affine elimination when the shared
+//! admission (`projection_policy::affine_elimination_capacity`) accepts it,
+//! and otherwise through faer's sparse LU of its pattern. Either factorization
+//! is built on the first solve and reused while the matrix bits are unchanged;
+//! a solve it declines is answered by the dense factorization and counted as
+//! a [`ProjectionFallback::SeedDense`] fallback at the block's site.
+
+use std::cell::{OnceCell, RefCell};
 
 use super::*;
+use nalgebra::{Dyn, LU};
+use rumoca_eval_solve::tensor_policy::{LinearSolveKernel, select_linear_solve_kernel};
 
 pub(crate) struct SeedBlockLinearization {
-    factor: nalgebra::linalg::LU<f64, nalgebra::Dyn, nalgebra::Dyn>,
+    solver: SeedSolver,
     jacobian: DMatrix<f64>,
+}
+
+enum SeedSolver {
+    Dense(LU<f64, Dyn, Dyn>),
+    Structured(Box<StructuredSeed>),
+}
+
+struct StructuredSeed {
+    kind: StructuredSolve,
+    cache: RefCell<SparseNewtonCache>,
+    /// Unit row and variable scales: the sensitivity system is unscaled.
+    unit: Box<[f64]>,
+    /// The dense factorization, formed only once a structured solve declines.
+    dense: OnceCell<LU<f64, Dyn, Dyn>>,
+    site: Option<usize>,
+}
+
+enum StructuredSolve {
+    Torn(solve::AffineEliminationLayout),
+    Sparse(solve::StructuralPattern),
+}
+
+impl StructuredSolve {
+    /// The structured solve of a sparse-candidate block of `n` rows.
+    fn select(structure: Option<&solve::JacobianStructure>, n: usize) -> Option<Self> {
+        let structure = structure?;
+        let pattern = structure.pattern();
+        if pattern.rows() as usize != n
+            || !matches!(
+                select_linear_solve_kernel(n, pattern),
+                Ok(LinearSolveKernel::SparseCandidate)
+            )
+        {
+            return None;
+        }
+        let torn = structure.affine_elimination().filter(|layout| {
+            layout.pattern() == pattern
+                && rumoca_eval_solve::projection_policy::affine_elimination_capacity(layout)
+                    .is_some()
+        });
+        Some(torn.map_or_else(
+            || Self::Sparse(pattern.clone()),
+            |layout| Self::Torn(layout.clone()),
+        ))
+    }
 }
 
 impl SeedBlockLinearization {
     pub(crate) fn build(
         model: &dyn ImplicitProjectionModel,
-        block_index: usize,
+        (block_index, site): (usize, Option<usize>),
         block: &solve::AlgebraicProjectionBlock,
         y: &[f64],
         args: AlgebraicProjectionArgs<'_>,
@@ -25,10 +82,19 @@ impl SeedBlockLinearization {
             &block.y_indices,
             structure,
         )?;
-        Ok(Self {
-            factor: jacobian.clone().lu(),
-            jacobian,
-        })
+        let solver = match StructuredSolve::select(structure, jacobian.nrows()) {
+            Some(kind) if jacobian.is_square() => {
+                SeedSolver::Structured(Box::new(StructuredSeed {
+                    kind,
+                    cache: RefCell::default(),
+                    unit: vec![1.0; jacobian.nrows()].into_boxed_slice(),
+                    dense: OnceCell::new(),
+                    site,
+                }))
+            }
+            _ => SeedSolver::Dense(jacobian.clone().lu()),
+        };
+        Ok(Self { solver, jacobian })
     }
 
     pub(super) fn row_scales(
@@ -50,7 +116,31 @@ impl SeedBlockLinearization {
     }
 
     pub(super) fn solve(&self, rhs: &DVector<f64>) -> Option<DVector<f64>> {
-        self.factor.solve(rhs)
+        let seed = match &self.solver {
+            SeedSolver::Dense(factor) => return factor.solve(rhs),
+            SeedSolver::Structured(seed) => seed,
+        };
+        let StructuredSeed {
+            kind,
+            cache,
+            unit,
+            dense,
+            site,
+        } = &**seed;
+        let _call = begin_block_call(*site, self.jacobian.nrows());
+        let mut cache = cache.borrow_mut();
+        let structured = match kind {
+            StructuredSolve::Torn(layout) => {
+                cache.solve_torn_scaled(&self.jacobian, rhs, unit, unit, layout)
+            }
+            StructuredSolve::Sparse(pattern) => {
+                cache.solve_scaled(&self.jacobian, rhs, unit, unit, pattern)
+            }
+        };
+        structured.or_else(|| {
+            note_block_fallback(*site, ProjectionFallback::SeedDense);
+            dense.get_or_init(|| self.jacobian.clone().lu()).solve(rhs)
+        })
     }
 
     pub(super) fn trace_singular(

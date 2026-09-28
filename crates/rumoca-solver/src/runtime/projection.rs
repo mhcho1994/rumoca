@@ -85,7 +85,14 @@ pub(crate) trait ImplicitProjectionModel {
     where
         Self: Sized,
     {
-        SeedBlockLinearization::build(self, block_index, block, y, args).map(Rc::new)
+        SeedBlockLinearization::build(
+            self,
+            (block_index, self.projection_site(block_index)),
+            block,
+            y,
+            args,
+        )
+        .map(Rc::new)
     }
 
     /// Evaluate construction-issued output groups at one immutable point.

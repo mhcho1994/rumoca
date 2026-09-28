@@ -1137,7 +1137,7 @@ mod tests {
             rows: 3,
             calls,
             fallback_calls,
-            fallbacks: [fallback_calls, 0, 0, 0, 0],
+            fallbacks: [fallback_calls, 0, 0, 0, 0, 0],
         };
         let mut report = rumoca_sim::ProjectionFallbackReport::default();
         report

@@ -1,7 +1,9 @@
 use super::*;
 
+/// Seventeen tears exceed the small-dense solve size but not the promotion
+/// limit, so the reduction runs instead of the full-system solve.
 #[test]
-fn a_large_reduced_system_retains_the_existing_sparse_policy() {
+fn a_reduced_system_past_the_small_dense_size_takes_the_reduction() {
     let expected = DVector::from_element(DIMENSION, 2.0);
     let original = CyclicAffine::new(&[], &expected);
     let mut plan = original.plan;
@@ -22,7 +24,7 @@ fn a_large_reduced_system_retains_the_existing_sparse_policy() {
         .collect();
     let model = CyclicAffine::from_system(original.matrix, original.rhs, plan, dependencies);
     let y = project(&model, 1e-10);
-    assert!(model.full_solves.get() > 0);
+    assert_eq!(model.full_solves.get(), 0);
     assert!(y.iter().all(|x| (x - 2.0).abs() < 1e-10));
 }
 

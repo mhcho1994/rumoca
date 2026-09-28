@@ -235,7 +235,7 @@ mod tests {
                 rows: 2,
                 calls: 40,
                 fallback_calls: 10,
-                fallbacks: [0, 0, 10, 0, 0],
+                fallbacks: [0, 0, 10, 0, 0, 0],
             },
         );
         report.sites.insert(

@@ -98,8 +98,10 @@ pub const TORN_PROMOTION_FACTOR: usize = 2;
 /// Promoted tears always available beyond the issued tear count.
 pub const TORN_PROMOTION_MIN_EXTRA: usize = 4;
 
-/// Largest reduced system a torn affine elimination may promote to.
-pub const TORN_PROMOTION_LIMIT: usize = 32;
+/// Largest reduced system a torn affine elimination may promote to. Its dense
+/// LU costs about `2/3 n^3` flops, so a reduction of at most 128 tears costs at
+/// most about 1.4 MFlop per factorization (SPEC_0044 ME-PROJ-001).
+pub const TORN_PROMOTION_LIMIT: usize = 128;
 
 /// Tear capacity of a torn affine elimination issued with `base` tears: the
 /// issued tears plus the causal steps it may promote in place when a guard is
@@ -141,8 +143,9 @@ pub const CHART_REGULAR_MULTIPLE: f64 = 1.0e6;
 
 /// Admission of the torn affine elimination, shared by the linked kernel and
 /// every generated C component: the block is a sparse candidate or a small
-/// dense system its issued tearing reduces (fewer tears than unknowns), its
-/// issued reduced system is small and dense, and a promotion capacity exists.
+/// dense system its issued tearing reduces (fewer tears than unknowns), and a
+/// promotion capacity exists, so its issued reduced system, factorized densely,
+/// holds at most [`TORN_PROMOTION_LIMIT`] tears.
 /// The result is that capacity. A small block the tearing reduces is
 /// eliminated like a large one, so the construction's causal order is what
 /// every call executes.
@@ -157,12 +160,7 @@ pub fn affine_elimination_capacity(
         Ok(LinearSolveKernel::SmallDense) => layout.tears().len() < n,
         _ => false,
     };
-    let admitted = block_admitted
-        && matches!(
-            select_linear_solve_kernel(layout.tears().len(), layout.reduced_pattern()),
-            Ok(LinearSolveKernel::SmallDense)
-        );
-    admitted
+    block_admitted
         .then(|| torn_promotion_capacity(layout.tears().len()))
         .flatten()
 }
@@ -177,10 +175,11 @@ mod tests {
         assert_eq!(torn_promotion_capacity(1), Some(5));
         assert_eq!(torn_promotion_capacity(4), Some(8));
         assert_eq!(torn_promotion_capacity(14), Some(28));
-        assert_eq!(torn_promotion_capacity(16), Some(32));
-        assert_eq!(torn_promotion_capacity(20), Some(32));
-        assert_eq!(torn_promotion_capacity(32), Some(32));
-        assert_eq!(torn_promotion_capacity(33), None);
+        assert_eq!(torn_promotion_capacity(49), Some(98));
+        assert_eq!(torn_promotion_capacity(64), Some(128));
+        assert_eq!(torn_promotion_capacity(100), Some(128));
+        assert_eq!(torn_promotion_capacity(128), Some(128));
+        assert_eq!(torn_promotion_capacity(129), None);
     }
 }
 

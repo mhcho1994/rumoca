@@ -4,8 +4,9 @@
 //! counted per canonical projection block on this thread: a torn solve that
 //! declines to the dense block Newton, an affine elimination that declines to
 //! the full-system solve, a projection-stage seed rescue, a staged refresh that
-//! falls back to the complete simultaneous projection, and a Newton step whose
-//! Jacobian cannot serve it. A run reports every block whose fallback rate
+//! falls back to the complete simultaneous projection, a Newton step whose
+//! Jacobian cannot serve it, and a sensitivity solve whose torn or sparse
+//! factorization declines to the dense one. A run reports every block whose fallback rate
 //! exceeds [`rumoca_eval_solve::projection_policy::PROJECTION_FALLBACK_REPORT_RATE`];
 //! a fallback is never silent.
 
@@ -30,15 +31,19 @@ pub enum ProjectionFallback {
     CompletePlan,
     /// A Newton step's Jacobian could not serve it at the point.
     JacobianDeclined,
+    /// A sensitivity solve's torn or sparse factorization declined and the
+    /// block's dense factorization answered it.
+    SeedDense,
 }
 
 impl ProjectionFallback {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::TornToDense,
         Self::AffineFullSystem,
         Self::SeedRescue,
         Self::CompletePlan,
         Self::JacobianDeclined,
+        Self::SeedDense,
     ];
 
     /// Stable name for reports and provenance.
@@ -50,6 +55,7 @@ impl ProjectionFallback {
             Self::SeedRescue => "seed_rescue",
             Self::CompletePlan => "complete_plan",
             Self::JacobianDeclined => "jacobian_declined",
+            Self::SeedDense => "seed_dense",
         }
     }
 
@@ -77,7 +83,7 @@ pub struct ProjectionFallbackCounts {
     /// seed rescue before its block's projection) belongs to that call.
     pub fallback_calls: u64,
     /// Fallbacks by [`ProjectionFallback`] in declaration order.
-    pub fallbacks: [u64; 5],
+    pub fallbacks: [u64; 6],
 }
 
 impl ProjectionFallbackCounts {
