@@ -2,13 +2,13 @@ mod algorithm;
 mod algorithm_lowering;
 mod analysis;
 pub use analysis::StructuralSelection;
+mod clock_operator_hosts;
 mod clocks;
 mod conditions;
 mod discrete_values;
 mod enumeration_conversion;
 mod equation_systems;
 mod expression;
-mod first_tick_hosts;
 mod function_array_assembly;
 mod function_body;
 mod function_construction;
@@ -69,6 +69,7 @@ use analysis::{
     specialized_comprehension_plan, structured_assignment_names,
     when_conditional_selects_clock_structure,
 };
+use clock_operator_hosts::clock_operator_hosts;
 use clocks::{LoweredClocks, lower_clocked_value_owners, lower_clocks};
 use conditions::{combine_conditions, condition_owner_clock, lower_condition, negate_condition};
 use discrete_values::{DiscreteValueOwnerHandle, DiscreteValueStaging};
@@ -86,7 +87,6 @@ use expression::{
     lower_model_algorithm_expression, lower_scoped_model_algorithm_expression,
     planned_input_variability, require_span, variable_attribute_expressions,
 };
-use first_tick_hosts::first_tick_hosts;
 use function_array_assembly::lower_function_array_assembly;
 use function_body::{
     FunctionConditional, FunctionFold, TotalArrayDefinition, function_value_coordinate,
@@ -270,7 +270,6 @@ fn build_checked<'dae>(
     }
     let value_types = reserve_value_types(flat, analysis, construction)?;
     let mut clocks = lower_analysis_clocks(construction, flat, analysis)?;
-    clocks.issue_first_ticks(construction, first_tick_hosts(flat, analysis))?;
     let no_function_ids = HashMap::new();
     let no_coordinate_instances = HashMap::new();
     let analysis_functions = model_function_registry(
@@ -289,6 +288,7 @@ fn build_checked<'dae>(
         variable_plan,
     )?;
     let coordinates = variable_identities.coordinates;
+    clocks.define_event_conditions(construction, &coordinates)?;
     let function_ids = construct_functions(
         flat,
         &analysis.function_shapes,
@@ -393,10 +393,11 @@ fn lower_analysis_clocks<'dae>(
     flat: &flat::Model,
     analysis: &Analysis,
 ) -> Result<LoweredClocks<'dae>, dae::DaeConstructionError> {
-    lower_clocks(
+    let mut clocks = lower_clocks(
         construction,
         flat,
         &analysis.clock_plans,
+        &analysis.event_clocks,
         &analysis.clocked_value_owners,
         analysis
             .expression_events
@@ -407,7 +408,21 @@ fn lower_analysis_clocks<'dae>(
                 };
                 Some((schedule, span))
             }),
-    )
+    )?;
+    // MLS §16.10: `interval()` of an event clock reads the clock's first tick
+    // and the time of its previous tick.
+    let event_intervals = clock_operator_hosts(flat, analysis, BuiltinFunction::Interval)
+        .into_iter()
+        .filter(|(plan, _)| plan.lattice().is_none())
+        .collect::<Vec<_>>();
+    clocks.issue_first_ticks(
+        construction,
+        clock_operator_hosts(flat, analysis, BuiltinFunction::FirstTick)
+            .into_iter()
+            .chain(event_intervals.iter().copied()),
+    )?;
+    clocks.issue_event_intervals(construction, event_intervals)?;
+    Ok(clocks)
 }
 
 /// Build the MLS §8.5 time events proven by expression analysis.
@@ -1313,7 +1328,7 @@ fn lower_assertions<'dae, 'flat>(
 struct EventGuard<'dae> {
     trigger: dae::ConditionId<'dae>,
     condition: dae::ConditionId<'dae>,
-    owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    owner_clock: Option<dae::ClockId<'dae>>,
     branch_provenance: dae::DaeProvenance,
     always: bool,
     parent_activation: Option<(dae::ConditionId<'dae>, dae::ConditionId<'dae>)>,

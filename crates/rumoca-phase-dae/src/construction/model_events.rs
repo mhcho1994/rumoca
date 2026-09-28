@@ -295,7 +295,7 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
                 own_clocked_targets(
                     self.construction,
                     self.request.coordinates,
-                    clock.into(),
+                    clock,
                     &branch.equations,
                 )?;
             }
@@ -354,10 +354,8 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
         &mut self,
         branch: &flat::WhenBranch,
         key: WhenBranchKey,
-    ) -> Result<
-        (dae::ConditionId<'dae>, Option<dae::PeriodicClockId<'dae>>),
-        dae::DaeConstructionError,
-    > {
+    ) -> Result<(dae::ConditionId<'dae>, Option<dae::ClockId<'dae>>), dae::DaeConstructionError>
+    {
         let expression = &branch.condition;
         let Some((clock, span)) = self.branch_clock(branch, key)? else {
             return lower_condition(
@@ -373,11 +371,7 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
             .construction
             .conditions(|conditions| conditions.reserve(provenance))?;
         self.construction.conditions(|conditions| {
-            conditions.define(
-                condition,
-                dae::ConditionInput::Clock(clock.into()),
-                provenance,
-            )
+            conditions.define(condition, dae::ConditionInput::Clock(clock), provenance)
         })?;
         Ok((condition, Some(clock)))
     }
@@ -391,7 +385,7 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
         &self,
         branch: &flat::WhenBranch,
         key: WhenBranchKey,
-    ) -> Result<Option<(dae::PeriodicClockId<'dae>, Span)>, dae::DaeConstructionError> {
+    ) -> Result<Option<(dae::ClockId<'dae>, Span)>, dae::DaeConstructionError> {
         if let Expression::VarRef {
             name,
             subscripts,

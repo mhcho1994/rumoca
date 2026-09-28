@@ -44,8 +44,8 @@ use super::*;
 use clocks::SampledTarget;
 use clocks::{ClockAnalysis, ClockDomainAnalysis, analyze_clocks};
 pub(super) use clocks::{
-    ClockPlan, ClockedValuePlan, WhenBranchKey, inferred_clock_transfer,
-    is_inferred_clock_condition, is_whole_clock_coordinate,
+    ClockPlan, ClockSchedule, ClockedValuePlan, EventClockPlan, WhenBranchKey,
+    inferred_clock_transfer, is_inferred_clock_condition, is_whole_clock_coordinate,
     when_conditional_selects_clock_structure,
 };
 use comprehensions::analyze_comprehensions;
@@ -172,6 +172,9 @@ pub(super) struct Analysis {
     /// the typed periodic clock instead of buffering a held B.1c coordinate.
     pub(super) sample_alias_schedules: HashMap<VarName, PeriodicClockSchedule>,
     pub(super) clock_plans: HashMap<InstanceId, ClockPlan>,
+    /// MLS §16.3 event clocks, keyed by the clock coordinate their constructor
+    /// defines.
+    pub(super) event_clocks: HashMap<InstanceId, EventClockPlan>,
     pub(super) clock_equation_rows: HashSet<usize>,
     pub(super) clocked_equation_owners: HashMap<usize, ClockPlan>,
     pub(super) clocked_value_owners: HashMap<InstanceId, ClockedValuePlan>,
@@ -619,6 +622,7 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         expression_events,
         sample_alias_schedules,
         clock_plans: clocks.plans,
+        event_clocks: clocks.event_clocks,
         clock_equation_rows: clocks.equation_rows,
         clocked_equation_owners: clock_domains.equation_owners,
         clocked_value_owners: clock_domains.value_owners,

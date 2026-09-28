@@ -424,7 +424,7 @@ fn append_pre_variables(
             bindings.push(solve::PreParamBinding {
                 dest_p_index,
                 source: solve::PreParamSource::P { index: source },
-                clock_schedule: Some(clock_schedule.clone()),
+                clock_schedule: clock_schedule.clone(),
             });
         }
         scalar_count = scalar_count.checked_add(current.count).ok_or_else(|| {
@@ -562,25 +562,28 @@ fn mark_expression_variables<'dae>(
     });
 }
 
+/// The refresh schedule of a `previous` lane. A periodic clock refreshes it on
+/// its own ticks. An MLS §16.3 event clock ticks only at events, and its
+/// coordinates change only at its ticks, so an ordinary pre lane, refreshed at
+/// every event, holds the value of the previous tick when the next one reads it.
 fn previous_schedule<'dae>(
     view: dae::DaeView<'dae>,
     previous: dae::PreviousView<'dae>,
-) -> Result<solve::PeriodicEventSchedule, LowerError> {
+) -> Result<Option<solve::PeriodicEventSchedule>, LowerError> {
     let clock = view
         .clock(previous.clock())
         .expect("checked previous clock resolves");
     let dae::ClockOperation::Periodic(schedule) = clock.operation() else {
-        return Err(LowerError::unsupported(
-            "triggered-clock previous history has no periodic Solve schedule",
-            previous.provenance().span(),
-        ));
+        return Ok(None);
     };
-    solve::PeriodicEventSchedule::from_schedule(*schedule).map_err(|error| {
-        LowerError::contract(
-            format!("invalid previous-value clock schedule: {error}"),
-            previous.provenance().span(),
-        )
-    })
+    solve::PeriodicEventSchedule::from_schedule(*schedule)
+        .map(Some)
+        .map_err(|error| {
+            LowerError::contract(
+                format!("invalid previous-value clock schedule: {error}"),
+                previous.provenance().span(),
+            )
+        })
 }
 
 struct YColumns {

@@ -1,11 +1,16 @@
 use super::*;
 
-/// The clock partitions that read `firstTick()`, with one occurrence span each.
-pub(super) fn first_tick_hosts(flat: &flat::Model, analysis: &Analysis) -> Vec<(ClockPlan, Span)> {
+/// The clock partitions that read the MLS §16.10 `operator` (`firstTick()` or
+/// `interval()`), with one occurrence span each.
+pub(super) fn clock_operator_hosts(
+    flat: &flat::Model,
+    analysis: &Analysis,
+    operator: BuiltinFunction,
+) -> Vec<(ClockPlan, Span)> {
     let mut hosts = Vec::new();
     for (row, equation) in flat.equations.iter().enumerate() {
         if let (Some(span), Some(plan)) = (
-            first_tick_span(&equation.residual),
+            operator_span(&equation.residual, operator),
             analysis.clocked_equation_owners.get(&row),
         ) {
             hosts.push((*plan, span));
@@ -13,7 +18,11 @@ pub(super) fn first_tick_hosts(flat: &flat::Model, analysis: &Analysis) -> Vec<(
     }
     for (chain_index, chain) in flat.when_chains.iter().enumerate() {
         for (branch_index, branch) in chain.branches().enumerate() {
-            let Some(span) = branch.equations.iter().find_map(when_equation_first_tick) else {
+            let Some(span) = branch
+                .equations
+                .iter()
+                .find_map(|equation| when_equation_operator(equation, operator))
+            else {
                 continue;
             };
             let key = WhenBranchKey {
@@ -35,23 +44,23 @@ pub(super) fn first_tick_hosts(flat: &flat::Model, analysis: &Analysis) -> Vec<(
     hosts
 }
 
-fn first_tick_span(expression: &Expression) -> Option<Span> {
-    if let Expression::BuiltinCall {
-        function: BuiltinFunction::FirstTick,
-        span,
-        ..
-    } = expression
+fn operator_span(expression: &Expression, operator: BuiltinFunction) -> Option<Span> {
+    if let Expression::BuiltinCall { function, span, .. } = expression
+        && *function == operator
     {
         return Some(*span);
     }
     expression_children(expression)
         .into_iter()
-        .find_map(first_tick_span)
+        .find_map(|child| operator_span(child, operator))
 }
 
-fn when_equation_first_tick(equation: &flat::WhenEquation) -> Option<Span> {
+fn when_equation_operator(
+    equation: &flat::WhenEquation,
+    operator: BuiltinFunction,
+) -> Option<Span> {
     match equation {
-        flat::WhenEquation::Assign { value, .. } => first_tick_span(value),
+        flat::WhenEquation::Assign { value, .. } => operator_span(value, operator),
         flat::WhenEquation::Conditional {
             branches,
             else_branch,
@@ -59,14 +68,17 @@ fn when_equation_first_tick(equation: &flat::WhenEquation) -> Option<Span> {
         } => branches
             .iter()
             .find_map(|(condition, equations)| {
-                first_tick_span(condition)
-                    .or_else(|| equations.iter().find_map(when_equation_first_tick))
+                operator_span(condition, operator).or_else(|| {
+                    equations
+                        .iter()
+                        .find_map(|equation| when_equation_operator(equation, operator))
+                })
             })
             .or_else(|| {
                 else_branch
                     .iter()
                     .flatten()
-                    .find_map(when_equation_first_tick)
+                    .find_map(|equation| when_equation_operator(equation, operator))
             }),
         _ => None,
     }

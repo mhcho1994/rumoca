@@ -185,6 +185,17 @@ fn exact_value_clock_conversion<'expression>(
     }))
 }
 
+/// The lattice a clock conversion reads; an event clock has none.
+fn conversion_lattice(plan: ClockPlan, span: Span) -> Result<ClockLattice, ToDaeError> {
+    plan.lattice().ok_or_else(|| {
+        ToDaeError::unsupported_runtime_operator(
+            "clock conversion",
+            "an event clock has no periodic lattice to convert",
+            span,
+        )
+    })
+}
+
 pub(super) fn propagate_clock_conversion_owners(
     edges: &[ClockConversionEdge],
     domains: &mut DisjointDomains,
@@ -200,35 +211,29 @@ pub(super) fn propagate_clock_conversion_owners(
             let target_root = domains.find(edge.target);
             let source = owners.get(&source_root).copied();
             let target = owners.get(&target_root).copied();
+            let lattice = |plan: ClockPlan| conversion_lattice(plan, edge.span);
             match (source, target) {
                 (Some((source, _)), Some((target, _))) => {
-                    require_conversion_lattice(kind, edge.span, source.lattice, target.lattice)?;
+                    require_conversion_lattice(
+                        kind,
+                        edge.span,
+                        lattice(source)?,
+                        lattice(target)?,
+                    )?;
                 }
                 (Some((source, _)), None) => {
-                    let lattice = conversion_target_lattice(kind, edge.span, source.lattice)?;
+                    let converted = conversion_target_lattice(kind, edge.span, lattice(source)?)?;
                     owners.insert(
                         target_root,
-                        (
-                            ClockPlan {
-                                lattice,
-                                constructor_span: edge.span,
-                            },
-                            edge.span,
-                        ),
+                        (ClockPlan::periodic(converted, edge.span), edge.span),
                     );
                     progress = true;
                 }
                 (None, Some((target, _))) => {
-                    let lattice = conversion_source_lattice(kind, edge.span, target.lattice)?;
+                    let converted = conversion_source_lattice(kind, edge.span, lattice(target)?)?;
                     owners.insert(
                         source_root,
-                        (
-                            ClockPlan {
-                                lattice,
-                                constructor_span: edge.span,
-                            },
-                            edge.span,
-                        ),
+                        (ClockPlan::periodic(converted, edge.span), edge.span),
                     );
                     progress = true;
                 }
@@ -256,7 +261,7 @@ pub(super) fn validate_inferred_conversions(
         let ConversionKind::Inferred(factor) = edge.kind else {
             continue;
         };
-        let owner = |member| owners.get(&member).map(|(clock, _)| clock.lattice);
+        let owner = |member| owners.get(&member).and_then(|(clock, _)| clock.lattice());
         let (Some(source), Some(target)) = (
             owner(domains.find(edge.source)),
             owner(domains.find(edge.target)),

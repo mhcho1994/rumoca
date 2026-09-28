@@ -964,6 +964,31 @@ fn lower_discrete_real_equations<'dae>(
         let (value, element) = (definition.value(), definition.element());
         let span = equation.provenance().span();
         let variable = dae::VariableId::from(definition.target());
+        // MLS §16.3: an event clock's partition is active only on its ticks,
+        // so its rows, unconditional or under `when c`, are guarded updates on
+        // the clock's tick condition.
+        if let Some((event_clock, tick)) = clocks.variable_trigger(variable) {
+            if let dae::DiscreteRealActivation::When { trigger, guard } = equation.activation()
+                && (condition_clock_owner(view, trigger).is_none()
+                    || condition_clock_owner(view, guard).is_none())
+            {
+                return Err(LowerError::non_computable(
+                    "an event-clock row is activated by a condition other than its clock",
+                    span,
+                ));
+            }
+            conditional.push(EventUpdate {
+                trigger: tick,
+                guard: tick,
+                variable,
+                element,
+                value,
+                span,
+                clock: None,
+                event_clock: Some(event_clock),
+            });
+            continue;
+        }
         match equation.activation() {
             dae::DiscreteRealActivation::Always if element.is_some() => {
                 element_units
@@ -994,6 +1019,7 @@ fn lower_discrete_real_equations<'dae>(
                     clock: checked_discrete_real_activation_clock(
                         view, clocks, variable, guard, span,
                     )?,
+                    event_clock: None,
                 });
             }
         }
@@ -1237,6 +1263,7 @@ fn lower_event_actions<'dae>(
                     value,
                     span: action.provenance().span(),
                     clock: condition_clock_owner(view, action.guard()),
+                    event_clock: None,
                 });
             }
         }
@@ -1260,6 +1287,8 @@ struct EventUpdate<'dae> {
     value: dae::ExprId<'dae>,
     span: Span,
     clock: Option<dae::ClockId<'dae>>,
+    /// The MLS §16.3 event clock whose tick guards this update, if any.
+    event_clock: Option<dae::ClockId<'dae>>,
 }
 
 pub(in crate::lower) type GuardedAssignment<'dae> = (
@@ -1277,6 +1306,9 @@ pub(in crate::lower) struct GuardedTarget<'dae> {
     pub(in crate::lower) branches: Vec<GuardedAssignment<'dae>>,
     pub(in crate::lower) pre_mode: solve::DiscreteEventPreMode,
     pub(in crate::lower) clock: Option<(dae::ClockId<'dae>, solve::PeriodicClockId)>,
+    /// The MLS §16.3 event clock whose tick guards the target: the program is
+    /// compiled under it, though it has no periodic schedule.
+    pub(in crate::lower) event_clock: Option<dae::ClockId<'dae>>,
     pub(in crate::lower) dynamic_branch_count: usize,
     pub(in crate::lower) fallback_branch: Option<usize>,
 }
@@ -1322,6 +1354,7 @@ fn lower_guarded_updates<'dae>(
                 width,
                 pre_mode,
                 span: update.span,
+                event_clock: update.event_clock,
             },
             branch,
             clock,
@@ -1352,6 +1385,7 @@ fn lower_guarded_targets<'dae>(
     let mut first = 0;
     while first < targets.len() {
         let clock = targets[first].clock;
+        let event_clock = targets[first].event_clock;
         let pre_mode = targets[first].pre_mode;
         let mut end = first + 1;
         // Family fusion is restored: a fused program is one entry read, so two
@@ -1364,6 +1398,7 @@ fn lower_guarded_targets<'dae>(
         // own program after that producer.
         while end < targets.len()
             && targets[end].clock == clock
+            && targets[end].event_clock == event_clock
             && targets[end].pre_mode == pre_mode
             && same_guarded_control(&targets[first], &targets[end])
             && exchange.fusable_with_range(first, end)
@@ -1379,7 +1414,10 @@ fn lower_guarded_targets<'dae>(
         let conditional_owners = RefCell::new(FunctionConditionalOwnerRegistry::default());
         let program = ScalarCompiler::new(view, layout, None)
             .with_function_conditional_owners(&conditional_owners)
-            .guarded_assignment_group_program(clock.map(|(clock, _)| clock), group)?;
+            .guarded_assignment_group_program(
+                clock.map(|(clock, _)| clock).or(event_clock),
+                group,
+            )?;
         let program_index = rows.guarded_assignments.len();
         rows.push_group(program, group, role)?;
         if let Some((_, clock_owner)) = clock {
@@ -1412,6 +1450,7 @@ fn record_guarded_target<'dae>(
         width,
         pre_mode,
         span,
+        event_clock,
     } = target;
     let Some(group) = targets
         .iter_mut()
@@ -1425,6 +1464,7 @@ fn record_guarded_target<'dae>(
             branches: vec![branch],
             pre_mode,
             clock,
+            event_clock,
             dynamic_branch_count: 0,
             fallback_branch: None,
         });
@@ -1442,7 +1482,7 @@ fn record_guarded_target<'dae>(
             span,
         ));
     }
-    if group.clock != clock {
+    if group.clock != clock || group.event_clock != event_clock {
         return Err(LowerError::non_computable(
             "one event target has incompatible clock activation owners",
             span,
@@ -1460,6 +1500,7 @@ struct GuardedTargetMetadata<'dae> {
     width: usize,
     pre_mode: solve::DiscreteEventPreMode,
     span: Span,
+    event_clock: Option<dae::ClockId<'dae>>,
 }
 
 fn same_guarded_control<'dae>(lhs: &GuardedTarget<'dae>, rhs: &GuardedTarget<'dae>) -> bool {

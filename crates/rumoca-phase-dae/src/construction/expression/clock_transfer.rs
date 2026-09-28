@@ -33,7 +33,8 @@ pub(super) fn lower_clock_transfer<'dae>(
             .functions
             .clocks
             .lattice(target_clock)
-            .and_then(|target| inferred_clock_transfer(function, source_plan.lattice, target))
+            .zip(source_plan.lattice())
+            .and_then(|(target, source)| inferred_clock_transfer(function, source, target))
             .ok_or(dae::DaeConstructionError::InvalidClockedOperand {
                 operator: function.name(),
                 span: provenance.span(),
@@ -43,12 +44,9 @@ pub(super) fn lower_clock_transfer<'dae>(
     source_symbols.owner_clock = Some(source_clock);
     let source = lower_expression_scoped(construction, source_symbols, binders, source, None)?;
     construction.expressions(|expressions| {
-        expressions.at(provenance).clock_transfer(
-            kind,
-            source,
-            source_clock.into(),
-            target_clock.into(),
-        )
+        expressions
+            .at(provenance)
+            .clock_transfer(kind, source, source_clock, target_clock)
     })
 }
 
@@ -154,26 +152,31 @@ fn expression_clock_plan(
         let Some(source) = expression_clock_plan(source, functions)? else {
             return Ok(None);
         };
+        // An event clock has no lattice, so no transfer of it is exact.
+        let source_lattice =
+            source
+                .lattice()
+                .ok_or(dae::DaeConstructionError::InvalidClockedOperand {
+                    operator: function.name(),
+                    span: *span,
+                })?;
         let lattice = match kind {
-            dae::ClockTransferKind::SubSample { factor } => source.lattice.sub_sample(factor),
-            dae::ClockTransferKind::SuperSample { factor } => source.lattice.super_sample(factor),
+            dae::ClockTransferKind::SubSample { factor } => source_lattice.sub_sample(factor),
+            dae::ClockTransferKind::SuperSample { factor } => source_lattice.super_sample(factor),
             dae::ClockTransferKind::ShiftSample {
                 counter,
                 resolution,
-            } => source.lattice.shift_sample(counter, resolution),
+            } => source_lattice.shift_sample(counter, resolution),
             dae::ClockTransferKind::BackSample {
                 counter,
                 resolution,
-            } => source.lattice.back_sample(counter, resolution),
+            } => source_lattice.back_sample(counter, resolution),
         }
         .map_err(|source| dae::DaeConstructionError::InvalidClockLattice {
             source,
             span: *span,
         })?;
-        return Ok(Some(ClockPlan {
-            lattice,
-            constructor_span: *span,
-        }));
+        return Ok(Some(ClockPlan::periodic(lattice, *span)));
     }
     let mut owner = None;
     collect_expression_clock_plan(expression, functions, &mut owner);
@@ -191,10 +194,58 @@ fn collect_expression_clock_plan(
             .clocked_coordinate_owners
             .get(&variable.instance_id)
     {
-        debug_assert!(owner.is_none_or(|existing| existing.lattice == plan.lattice));
+        debug_assert!(owner.is_none_or(|existing| existing.schedule == plan.schedule));
         owner.get_or_insert(*plan);
     }
     for child in expression_children(expression) {
         collect_expression_clock_plan(child, functions, owner);
     }
+}
+
+/// MLS §16.10 Operator 16.15 `interval()` of an event clock: `startInterval`
+/// at the first tick, and the time since the previous tick afterwards.
+pub(super) fn lower_event_interval<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    symbols: LoweringSymbols<'_, 'dae>,
+    binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
+    clock: dae::ClockId<'dae>,
+    provenance: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let parts = symbols
+        .functions
+        .clocks
+        .event_interval(clock, provenance.span())?;
+    let start = match parts.start_interval {
+        Some(start) => lower_expression_scoped(construction, symbols, binders, start, None)?,
+        None => construction.expressions(|expressions| {
+            expressions
+                .at(provenance)
+                .literal(dae::DaeLiteral::Real(0.0))
+        })?,
+    };
+    construction.expressions(|expressions| {
+        let indicator = expressions
+            .at(provenance)
+            .coordinate(dae::CoordinateInput::Previous(parts.first_tick))?;
+        let half = expressions
+            .at(provenance)
+            .literal(dae::DaeLiteral::Real(0.5))?;
+        let first =
+            expressions
+                .at(provenance)
+                .binary(dae::BinaryOperator::Greater, indicator, half)?;
+        let now = expressions
+            .at(provenance)
+            .coordinate(dae::CoordinateInput::Time)?;
+        let last = expressions
+            .at(provenance)
+            .coordinate(dae::CoordinateInput::Previous(parts.last_tick))?;
+        let elapsed =
+            expressions
+                .at(provenance)
+                .binary(dae::BinaryOperator::Subtract, now, last)?;
+        expressions
+            .at(provenance)
+            .conditional([(first, start)], elapsed)
+    })
 }

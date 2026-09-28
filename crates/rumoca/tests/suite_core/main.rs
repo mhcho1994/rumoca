@@ -61,6 +61,7 @@ mod derivative_kinks;
 mod differential_structure;
 mod enumeration_compact_range_test;
 mod evaluable_parameters;
+mod event_clocks;
 mod event_commutation;
 mod event_inductive_commutation;
 mod event_iteration_entry;

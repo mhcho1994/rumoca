@@ -8,7 +8,7 @@ use super::*;
 
 use calls::*;
 pub(super) use calls::{FunctionCallLowering, classify_function_call};
-use clock_transfer::lower_clock_transfer;
+use clock_transfer::{lower_clock_transfer, lower_event_interval};
 use conditional_guards::{
     attribute_conditional_folds, guard_reads_tunable_parameter, retains_equation_guard,
 };
@@ -46,14 +46,14 @@ pub(super) struct LoweringSymbols<'symbols, 'dae> {
     pub(super) shapes: &'symbols ShapeEnvironment,
     pub(super) function_body: Option<&'symbols dae::FunctionBody<'dae>>,
     pub(super) values: Option<&'symbols HashMap<VarName, dae::ExprId<'dae>>>,
-    pub(super) owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    pub(super) owner_clock: Option<dae::ClockId<'dae>>,
 }
 
 pub(super) fn lower_clocked_expression<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     coordinates: &HashMap<VarName, Coordinate<'dae>>,
     functions: &FunctionRegistry<'_, 'dae>,
-    owner_clock: dae::PeriodicClockId<'dae>,
+    owner_clock: dae::ClockId<'dae>,
     expression: &Expression,
     generated_root: Option<dae::DaeGeneration>,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
@@ -96,7 +96,7 @@ pub(super) fn lower_clocked_model_algorithm_expression<'dae>(
     coordinates: &HashMap<VarName, Coordinate<'dae>>,
     functions: &FunctionRegistry<'_, 'dae>,
     values: &HashMap<VarName, dae::ExprId<'dae>>,
-    owner_clock: dae::PeriodicClockId<'dae>,
+    owner_clock: dae::ClockId<'dae>,
     expression: &Expression,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
     lower_scoped_model_algorithm_expression(
@@ -115,7 +115,7 @@ pub(super) fn lower_scoped_model_algorithm_expression<'dae>(
     coordinates: &HashMap<VarName, Coordinate<'dae>>,
     functions: &FunctionRegistry<'_, 'dae>,
     values: &HashMap<VarName, dae::ExprId<'dae>>,
-    owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    owner_clock: Option<dae::ClockId<'dae>>,
     binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
     expression: &Expression,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
@@ -550,11 +550,16 @@ fn lower_builtin_expression<'dae>(
             let owner_clock = symbols
                 .owner_clock
                 .ok_or(dae::DaeConstructionError::MissingClockDomainOwner { span })?;
-            construction.expressions(|expressions| {
-                expressions
-                    .at(provenance)
-                    .coordinate(dae::CoordinateInput::ClockInterval(owner_clock))
-            })
+            match symbols.functions.clocks.periodic(owner_clock) {
+                Some(periodic) => construction.expressions(|expressions| {
+                    expressions
+                        .at(provenance)
+                        .coordinate(dae::CoordinateInput::ClockInterval(periodic))
+                }),
+                None => {
+                    lower_event_interval(construction, symbols, binders, owner_clock, provenance)
+                }
+            }
         }
         BuiltinFunction::FirstTick => {
             if arguments.len() > 1 {

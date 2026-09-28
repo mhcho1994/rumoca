@@ -6,8 +6,7 @@ pub(super) fn lower_condition<'dae>(
     functions: &FunctionRegistry<'_, 'dae>,
     sample_lattices: &[(Span, PeriodicClockSchedule)],
     expression: &Expression,
-) -> Result<(dae::ConditionId<'dae>, Option<dae::PeriodicClockId<'dae>>), dae::DaeConstructionError>
-{
+) -> Result<(dae::ConditionId<'dae>, Option<dae::ClockId<'dae>>), dae::DaeConstructionError> {
     let (condition, relations, owner_clock) = lower_condition_tree(
         construction,
         coordinates,
@@ -37,7 +36,7 @@ pub(super) fn lower_condition<'dae>(
 pub(super) fn condition_owner_clock<'dae>(
     functions: &FunctionRegistry<'_, 'dae>,
     expression: &Expression,
-) -> Result<Option<dae::PeriodicClockId<'dae>>, dae::DaeConstructionError> {
+) -> Result<Option<dae::ClockId<'dae>>, dae::DaeConstructionError> {
     let span = expression
         .span()
         .expect("analysis proves condition provenance");
@@ -81,12 +80,12 @@ pub(super) fn condition_owner_clock<'dae>(
 type LoweredCondition<'dae> = (
     dae::ConditionId<'dae>,
     Vec<dae::RelationId<'dae>>,
-    Option<dae::PeriodicClockId<'dae>>,
+    Option<dae::ClockId<'dae>>,
 );
 type LoweredConditionNode<'dae> = (
     dae::ConditionInput<'dae>,
     Vec<dae::RelationId<'dae>>,
-    Option<dae::PeriodicClockId<'dae>>,
+    Option<dae::ClockId<'dae>>,
 );
 
 fn lower_condition_tree<'dae>(
@@ -188,11 +187,7 @@ fn lower_sample_alias_condition<'dae>(
 ) -> Result<LoweredConditionNode<'dae>, dae::DaeConstructionError> {
     let schedule = functions.sample_alias_schedules[name];
     let clock = functions.clocks.sample_id(schedule, provenance.span())?;
-    Ok((
-        dae::ConditionInput::Clock(clock.into()),
-        Vec::new(),
-        Some(clock),
-    ))
+    Ok((dae::ConditionInput::Clock(clock), Vec::new(), Some(clock)))
 }
 
 /// The zero crossings a relational activation leaf owns.
@@ -244,11 +239,7 @@ fn lower_sample_condition<'dae>(
         });
     };
     let clock = functions.clocks.sample_id(schedule, provenance.span())?;
-    Ok((
-        dae::ConditionInput::Clock(clock.into()),
-        Vec::new(),
-        Some(clock),
-    ))
+    Ok((dae::ConditionInput::Clock(clock), Vec::new(), Some(clock)))
 }
 
 fn lower_binary_condition<'dae>(
@@ -317,7 +308,7 @@ fn lower_vector_condition<'dae>(
     (
         dae::ConditionId<'dae>,
         Vec<dae::RelationId<'dae>>,
-        Option<dae::PeriodicClockId<'dae>>,
+        Option<dae::ClockId<'dae>>,
     ),
     dae::DaeConstructionError,
 > {
@@ -371,11 +362,11 @@ fn combine_element_activations<'dae>(
 }
 
 fn merge_condition_clock<'dae>(
-    lhs: Option<dae::PeriodicClockId<'dae>>,
-    rhs: Option<dae::PeriodicClockId<'dae>>,
+    lhs: Option<dae::ClockId<'dae>>,
+    rhs: Option<dae::ClockId<'dae>>,
     disjunction: bool,
     provenance: dae::DaeProvenance,
-) -> Result<Option<dae::PeriodicClockId<'dae>>, dae::DaeConstructionError> {
+) -> Result<Option<dae::ClockId<'dae>>, dae::DaeConstructionError> {
     match (lhs, rhs) {
         (Some(lhs), Some(rhs)) if lhs != rhs => Err(dae::DaeConstructionError::DuplicateKey {
             kind: "condition clock owner",

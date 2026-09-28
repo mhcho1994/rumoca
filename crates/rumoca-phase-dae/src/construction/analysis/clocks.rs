@@ -10,10 +10,53 @@ pub(in crate::construction) use conversions::{
     inferred_clock_transfer, when_conditional_selects_clock_structure,
 };
 
+/// What decides when a clock ticks.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(in crate::construction) enum ClockSchedule {
+    /// MLS §16.3 Operators 16.2 and 16.3: a periodic clock on its exact
+    /// lattice.
+    Periodic(ClockLattice),
+    /// MLS §16.3 Operator 16.4: an event clock, identified by the clock
+    /// coordinate its `Clock(condition)` constructor defines.
+    Event(InstanceId),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(in crate::construction) struct ClockPlan {
-    pub(in crate::construction) lattice: ClockLattice,
+    pub(in crate::construction) schedule: ClockSchedule,
     pub(in crate::construction) constructor_span: Span,
+}
+
+impl ClockPlan {
+    pub(in crate::construction) const fn periodic(
+        lattice: ClockLattice,
+        constructor_span: Span,
+    ) -> Self {
+        Self {
+            schedule: ClockSchedule::Periodic(lattice),
+            constructor_span,
+        }
+    }
+
+    /// The exact lattice of a periodic clock; an event clock has none.
+    pub(in crate::construction) const fn lattice(&self) -> Option<ClockLattice> {
+        match self.schedule {
+            ClockSchedule::Periodic(lattice) => Some(lattice),
+            ClockSchedule::Event(_) => None,
+        }
+    }
+}
+
+/// The condition of one MLS §16.3 event clock `Clock(condition,
+/// startInterval)`.
+#[derive(Clone)]
+pub(in crate::construction) struct EventClockPlan {
+    /// The Boolean coordinate whose rising `pre` edge ticks the clock.
+    pub(in crate::construction) condition: VarName,
+    /// The value of `interval()` at the first tick (MLS §16.10 Operator
+    /// 16.15); `None` is the default 0.
+    pub(in crate::construction) start_interval: Option<Expression>,
+    pub(in crate::construction) span: Span,
 }
 
 #[derive(Clone, Copy)]
@@ -36,6 +79,9 @@ pub(super) struct SampledTarget {
 
 pub(super) struct ClockAnalysis {
     pub(super) plans: HashMap<InstanceId, ClockPlan>,
+    /// Every event clock, keyed by the clock coordinate its constructor
+    /// defines (the identity in [`ClockSchedule::Event`]).
+    pub(super) event_clocks: HashMap<InstanceId, EventClockPlan>,
     pub(super) equation_rows: HashSet<usize>,
     pub(super) sampled_targets: HashMap<InstanceId, SampledTarget>,
 }
@@ -60,6 +106,7 @@ pub(super) struct ClockDomainAnalysis {
 /// through the same catalog every other construction path uses and then keys
 /// its plans on the resolved variable's own occurrence identity.
 struct ClockCoordinates<'flat> {
+    flat: &'flat flat::Model,
     ordered: Vec<&'flat flat::Variable>,
     by_name: HashMap<&'flat VarName, &'flat flat::Variable>,
 }
@@ -84,10 +131,11 @@ pub(super) fn analyze_clocks(
 ) -> Result<ClockAnalysis, ToDaeError> {
     let clocks = exact_clock_coordinates(flat)?;
     let mut plans = HashMap::new();
+    let mut event_clocks = HashMap::new();
     let mut aliases = Vec::new();
     let mut derived = Vec::new();
     let mut equation_rows = HashSet::new();
-    derive_bound_clock_plans(constants, &clocks, &mut plans)?;
+    derive_bound_clock_plans(flat, constants, &clocks, &mut plans, &mut event_clocks)?;
     for (row, equation) in flat.equations.iter().enumerate() {
         let residual = static_clock_branch(&equation.residual, constants, &clocks)?;
         let Some((lhs, rhs)) = subtraction_operands(residual) else {
@@ -101,6 +149,18 @@ pub(super) fn analyze_clocks(
         let rhs = static_clock_branch(rhs, constants, &clocks)?;
         let lhs_clock = whole_clock_reference(lhs, &clocks);
         let rhs_clock = whole_clock_reference(rhs, &clocks);
+        if let (Some(target), None) = (lhs_clock, rhs_clock)
+            && let Some(event) = event_constructor(flat, rhs)?
+        {
+            let plan = ClockPlan {
+                schedule: ClockSchedule::Event(target.instance_id),
+                constructor_span: event.span,
+            };
+            insert_plan(&mut plans, target, plan, equation.span)?;
+            event_clocks.insert(target.instance_id, event);
+            equation_rows.insert(row);
+            continue;
+        }
         match (lhs_clock, rhs_clock, periodic_constructor(rhs, constants)?) {
             (Some(target), None, Some(plan)) => {
                 insert_plan(&mut plans, target, plan, equation.span)?;
@@ -134,6 +194,7 @@ pub(super) fn analyze_clocks(
     let sampled_targets = analyze_sampled_targets(flat, &clocks, &plans, &equation_rows)?;
     Ok(ClockAnalysis {
         plans,
+        event_clocks,
         equation_rows,
         sampled_targets,
     })
@@ -170,13 +231,19 @@ fn exact_clock_coordinates(flat: &flat::Model) -> Result<ClockCoordinates<'_>, T
             .iter()
             .all(|variable| flat.effective_types[&variable.type_id].canonical_type() == clock_type)
     );
-    Ok(ClockCoordinates { ordered, by_name })
+    Ok(ClockCoordinates {
+        flat,
+        ordered,
+        by_name,
+    })
 }
 
 fn derive_bound_clock_plans(
+    flat: &flat::Model,
     constants: &EvalContext,
     clocks: &ClockCoordinates<'_>,
     plans: &mut HashMap<InstanceId, ClockPlan>,
+    event_clocks: &mut HashMap<InstanceId, EventClockPlan>,
 ) -> Result<(), ToDaeError> {
     for _ in 0..clocks.len() {
         let mut progress = false;
@@ -187,6 +254,16 @@ fn derive_bound_clock_plans(
             let Some(binding) = variable.binding.as_ref() else {
                 continue;
             };
+            if let Some(event) = event_constructor(flat, binding)? {
+                let plan = ClockPlan {
+                    schedule: ClockSchedule::Event(variable.instance_id),
+                    constructor_span: event.span,
+                };
+                insert_plan(plans, variable, plan, event.span)?;
+                event_clocks.insert(variable.instance_id, event);
+                progress = true;
+                continue;
+            }
             let Some(plan) = bound_clock_plan(binding, constants, clocks, plans)? else {
                 continue;
             };
@@ -206,6 +283,11 @@ fn bound_clock_plan(
     clocks: &ClockCoordinates<'_>,
     plans: &HashMap<InstanceId, ClockPlan>,
 ) -> Result<Option<ClockPlan>, ToDaeError> {
+    // A top-level event constructor is planned by its caller, so one reached
+    // here is the source of a clock conversion.
+    if let Some(event) = event_constructor(clocks.flat, expression)? {
+        return Err(event_clock_conversion("clock conversion", event.span));
+    }
     if let Some(plan) = periodic_constructor(expression, constants)? {
         return Ok(Some(plan));
     }
@@ -235,26 +317,27 @@ fn bound_clock_plan(
     let Some(source_plan) = bound_clock_plan(source, constants, clocks, plans)? else {
         return Ok(None);
     };
+    let Some(source_lattice) = source_plan.lattice() else {
+        return Err(event_clock_conversion(operator, *span));
+    };
     let lattice = match (function, args.as_slice()) {
-        (BuiltinFunction::SubSample, [_, factor]) => source_plan
-            .lattice
-            .sub_sample(clock_integer(factor, constants, operator, *span)?),
-        (BuiltinFunction::SuperSample, [_, factor]) => source_plan
-            .lattice
-            .super_sample(clock_integer(factor, constants, operator, *span)?),
-        (BuiltinFunction::ShiftSample, [_, counter]) => source_plan
-            .lattice
-            .shift_sample(clock_integer(counter, constants, operator, *span)?, 1),
-        (BuiltinFunction::ShiftSample, [_, counter, resolution]) => {
-            source_plan.lattice.shift_sample(
-                clock_integer(counter, constants, operator, *span)?,
-                clock_integer(resolution, constants, operator, *span)?,
-            )
+        (BuiltinFunction::SubSample, [_, factor]) => {
+            source_lattice.sub_sample(clock_integer(factor, constants, operator, *span)?)
         }
-        (BuiltinFunction::BackSample, [_, counter]) => source_plan
-            .lattice
-            .back_sample(clock_integer(counter, constants, operator, *span)?, 1),
-        (BuiltinFunction::BackSample, [_, counter, resolution]) => source_plan.lattice.back_sample(
+        (BuiltinFunction::SuperSample, [_, factor]) => {
+            source_lattice.super_sample(clock_integer(factor, constants, operator, *span)?)
+        }
+        (BuiltinFunction::ShiftSample, [_, counter]) => {
+            source_lattice.shift_sample(clock_integer(counter, constants, operator, *span)?, 1)
+        }
+        (BuiltinFunction::ShiftSample, [_, counter, resolution]) => source_lattice.shift_sample(
+            clock_integer(counter, constants, operator, *span)?,
+            clock_integer(resolution, constants, operator, *span)?,
+        ),
+        (BuiltinFunction::BackSample, [_, counter]) => {
+            source_lattice.back_sample(clock_integer(counter, constants, operator, *span)?, 1)
+        }
+        (BuiltinFunction::BackSample, [_, counter, resolution]) => source_lattice.back_sample(
             clock_integer(counter, constants, operator, *span)?,
             clock_integer(resolution, constants, operator, *span)?,
         ),
@@ -290,10 +373,7 @@ fn bound_clock_plan(
     .map_err(|error| {
         ToDaeError::unsupported_runtime_operator(operator, error.to_string(), *span)
     })?;
-    Ok(Some(ClockPlan {
-        lattice,
-        constructor_span: *span,
-    }))
+    Ok(Some(ClockPlan::periodic(lattice, *span)))
 }
 
 fn clock_integer(
@@ -1415,10 +1495,86 @@ fn periodic_constructor(
         }
     }
     .map_err(|error| ToDaeError::unsupported_runtime_operator("Clock", error.to_string(), *span))?;
-    Ok(Some(ClockPlan {
-        lattice,
-        constructor_span: *span,
-    }))
+    Ok(Some(ClockPlan::periodic(lattice, *span)))
+}
+
+/// MLS §16.3 Operator 16.4 `Clock(condition, startInterval)`: an event clock,
+/// recognized by its Boolean first argument. The condition must name a
+/// Boolean coordinate, whose rising `pre` edge ticks the clock.
+fn event_constructor(
+    flat: &flat::Model,
+    expression: &Expression,
+) -> Result<Option<EventClockPlan>, ToDaeError> {
+    let Expression::BuiltinCall {
+        function: BuiltinFunction::Clock,
+        args,
+        span,
+    } = expression
+    else {
+        return Ok(None);
+    };
+    let (condition, start_interval) = match args.as_slice() {
+        [condition] => (condition, None),
+        [condition, start_interval] => (condition, Some(start_interval.clone())),
+        _ => return Ok(None),
+    };
+    if let Expression::VarRef {
+        name, subscripts, ..
+    } = condition
+        && let Some(variable) = flat.variables.get(name.var_name())
+        && is_boolean_variable(flat, variable)
+    {
+        if !subscripts.is_empty() {
+            return Err(event_clock_condition(*span));
+        }
+        return Ok(Some(EventClockPlan {
+            condition: name.var_name().clone(),
+            start_interval,
+            span: *span,
+        }));
+    }
+    if is_boolean_expression(condition) {
+        return Err(event_clock_condition(*span));
+    }
+    Ok(None)
+}
+
+fn is_boolean_variable(flat: &flat::Model, variable: &flat::Variable) -> bool {
+    flat.effective_types
+        .get(&variable.type_id)
+        .is_some_and(|effective| effective.canonical_type() == flat.predefined_types.boolean)
+}
+
+/// A Boolean-valued expression form that is not a coordinate reference.
+fn is_boolean_expression(expression: &Expression) -> bool {
+    match expression {
+        Expression::Binary { op, .. } => {
+            op.is_relational() || matches!(op, OpBinary::And | OpBinary::Or)
+        }
+        Expression::Unary { op, .. } => matches!(op, rumoca_core::OpUnary::Not),
+        Expression::Literal {
+            value: rumoca_core::Literal::Boolean(_),
+            ..
+        } => true,
+        _ => false,
+    }
+}
+
+fn event_clock_condition(span: Span) -> ToDaeError {
+    ToDaeError::unsupported_runtime_operator(
+        "Clock",
+        "an event clock condition must name a scalar Boolean variable",
+        span,
+    )
+}
+
+/// An event clock has no lattice, so no exact clock conversion of it exists.
+fn event_clock_conversion(operator: &str, span: Span) -> ToDaeError {
+    ToDaeError::unsupported_runtime_operator(
+        operator,
+        "an event clock has no periodic lattice to convert",
+        span,
+    )
 }
 
 /// MLS §16.7: clock partitioning is a static property of the model, so an
@@ -1458,7 +1614,7 @@ fn insert_plan(
     span: Span,
 ) -> Result<(), ToDaeError> {
     if let Some(existing) = plans.get(&target.instance_id)
-        && existing.lattice != plan.lattice
+        && existing.schedule != plan.schedule
     {
         return Err(ToDaeError::unresolved_clock_schedule(
             target.name.as_str(),
@@ -1514,7 +1670,7 @@ fn propagate_aliases(
                 plans.get(&lhs.instance_id).copied(),
                 plans.get(&rhs.instance_id).copied(),
             ) {
-                (Some(lhs_plan), Some(rhs_plan)) if lhs_plan.lattice != rhs_plan.lattice => {
+                (Some(lhs_plan), Some(rhs_plan)) if lhs_plan.schedule != rhs_plan.schedule => {
                     return Err(ToDaeError::unresolved_clock_schedule(
                         format!("{} = {}", lhs.name, rhs.name),
                         "this clock alias joins conflicting constructors",

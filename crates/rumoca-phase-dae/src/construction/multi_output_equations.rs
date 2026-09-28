@@ -5,7 +5,7 @@ pub(super) struct MultiOutputDiscreteOwners<'scope, 'dae> {
     pub(super) discrete_values: &'scope mut DiscreteValueStaging<'dae>,
     pub(super) topology: &'scope DiscreteValueTopologyPlan,
     /// The clock of the partition the equation belongs to, when it is clocked.
-    pub(super) owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    pub(super) owner_clock: Option<dae::ClockId<'dae>>,
 }
 
 /// The receiving tuple and the called function of one multi-result equation.

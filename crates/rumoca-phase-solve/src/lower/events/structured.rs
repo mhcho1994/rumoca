@@ -21,11 +21,18 @@ pub(super) fn lower_discrete_value_owners<'dae>(
             lower_structured_discrete_value_owner(view, layout, clocks, rows, owner)?;
             continue;
         }
-        match first.activation() {
-            dae::DiscreteBranchActivation::Always => {
+        let tick = owner
+            .targets()
+            .iter()
+            .find_map(|target| clocks.variable_trigger(dae::VariableId::from(target)));
+        match (first.activation(), tick) {
+            (_, Some(tick)) => {
+                lower_triggered_discrete_value_owner(view, layout, rows, owner, tick)?;
+            }
+            (dae::DiscreteBranchActivation::Always, None) => {
                 lower_unconditional_discrete_value_owner(view, layout, clocks, rows, owner)?;
             }
-            dae::DiscreteBranchActivation::When { .. } => {
+            (dae::DiscreteBranchActivation::When { .. }, _) => {
                 lower_conditional_discrete_value_owner(view, layout, clocks, rows, owner)?;
             }
         }
@@ -687,11 +694,73 @@ fn lower_conditional_discrete_value_owner<'dae>(
                     width: variable.scalar_count(),
                     pre_mode: branch.pre_mode,
                     span: branch.span,
+                    event_clock: None,
                 },
                 branch.assignment,
                 branch.clock,
             )?;
         }
+    }
+    lower_guarded_targets(
+        view,
+        layout,
+        rows,
+        &mut lowered,
+        solve::DiscreteRowRole::Equation,
+    )
+}
+
+/// Lowers an always-active B.1c owner of an MLS §16.3 event clock: its
+/// partition is active only on the clock's ticks, so every target is a
+/// guarded update whose trigger and guard are the tick condition.
+fn lower_triggered_discrete_value_owner<'dae>(
+    view: dae::DaeView<'dae>,
+    layout: &LoweredLayout<'dae>,
+    rows: &mut DiscreteRows<'dae>,
+    owner: dae::DiscreteValueOwnerView<'dae>,
+    (event_clock, tick): (dae::ClockId<'dae>, dae::ConditionId<'dae>),
+) -> Result<(), LowerError> {
+    let branch = owner
+        .branches()
+        .get(0)
+        .expect("checked B.1c owner has a nonempty branch set");
+    let clock_activated = match branch.activation() {
+        dae::DiscreteBranchActivation::Always => true,
+        dae::DiscreteBranchActivation::When { trigger, guard } => {
+            condition_clock_owner(view, trigger).is_some()
+                && condition_clock_owner(view, guard).is_some()
+        }
+    };
+    if owner.branches().len() != 1 || !clock_activated {
+        return Err(LowerError::non_computable(
+            "an event-clock row is activated by a condition other than its clock",
+            owner.provenance().span(),
+        ));
+    }
+    let mut lowered = Vec::new();
+    for (target, (value, provenance)) in owner.targets().iter().zip(branch.values().iter()) {
+        let variable = dae::VariableId::from(target);
+        let span = provenance.span();
+        let pre_mode = merge_pre_mode(
+            expression_pre_mode(view, value, false),
+            condition_pre_mode(view, tick),
+        );
+        record_guarded_target(
+            &mut lowered,
+            GuardedTargetMetadata {
+                variable,
+                target_base: variable_scalar_slot(layout, target.index(), 0, span)?,
+                width: view
+                    .variable(variable)
+                    .expect("checked B.1c target resolves")
+                    .scalar_count(),
+                pre_mode,
+                span,
+                event_clock: Some(event_clock),
+            },
+            (tick, tick, value, condition_memory(layout, tick, span)?),
+            None,
+        )?;
     }
     lower_guarded_targets(
         view,

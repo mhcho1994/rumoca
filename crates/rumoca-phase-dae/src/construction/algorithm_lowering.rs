@@ -224,13 +224,13 @@ fn preclaim_algorithm_clock_targets<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     environment: AlgorithmEnvironment<'_, '_, 'dae>,
     statements: &[rumoca_core::Statement],
-    inherited: Option<dae::PeriodicClockId<'dae>>,
+    inherited: Option<dae::ClockId<'dae>>,
 ) -> Result<(), dae::DaeConstructionError> {
     if let Some(clock) = inherited {
         return own_clocked_algorithm_targets(
             construction,
             environment.coordinates,
-            clock.into(),
+            clock,
             environment
                 .function_calls
                 .expect("event analysis supplies clocked function-call plans"),
@@ -493,7 +493,7 @@ fn record_model_event_step<'dae>(
     steps.borrow_mut().push(dae::ModelEventStep::new(
         guard.trigger,
         guard.condition,
-        guard.owner_clock.map(Into::into),
+        guard.owner_clock,
         definitions,
         provenance,
     ));
@@ -651,7 +651,7 @@ fn lower_algorithm_if<'dae>(
             own_clocked_algorithm_targets(
                 construction,
                 environment.coordinates,
-                clock.into(),
+                clock,
                 environment
                     .function_calls
                     .expect("event analysis supplies clocked function-call plans"),
@@ -717,7 +717,7 @@ fn lower_algorithm_if_condition<'dae>(
     (
         Option<dae::ExprId<'dae>>,
         dae::ConditionId<'dae>,
-        Option<dae::PeriodicClockId<'dae>>,
+        Option<dae::ClockId<'dae>>,
     ),
     dae::DaeConstructionError,
 > {
@@ -847,7 +847,7 @@ fn record_model_event_join<'dae>(
     steps.borrow_mut().push(dae::ModelEventStep::new(
         activation.trigger,
         activation.condition,
-        activation.owner_clock.map(Into::into),
+        activation.owner_clock,
         definitions,
         provenance,
     ));
@@ -875,7 +875,7 @@ fn algorithm_if_guard<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     parent: Option<EventGuard<'dae>>,
     available: dae::ConditionId<'dae>,
-    owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    owner_clock: Option<dae::ClockId<'dae>>,
     provenance_span: Span,
     span: Span,
 ) -> Result<EventGuard<'dae>, dae::DaeConstructionError> {
@@ -1005,7 +1005,7 @@ fn lower_algorithm_when<'dae>(
             own_clocked_algorithm_targets(
                 construction,
                 environment.coordinates,
-                clock.into(),
+                clock,
                 environment
                     .function_calls
                     .expect("event analysis supplies clocked function-call plans"),

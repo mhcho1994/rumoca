@@ -371,10 +371,10 @@ pub(super) fn lower_previous<'dae>(
         })?;
     let previous = construction.temporal(|temporal| match coordinate {
         Coordinate::DiscreteReal(variable) => {
-            temporal.previous_discrete_real(clock.into(), variable, provenance)
+            temporal.previous_discrete_real(clock, variable, provenance)
         }
         Coordinate::DiscreteValue(variable) => {
-            temporal.previous_discrete_value(clock.into(), variable, provenance)
+            temporal.previous_discrete_value(clock, variable, provenance)
         }
         _ => Err(dae::DaeConstructionError::InvalidVariableRole {
             name: name.var_name().clone(),
@@ -432,11 +432,7 @@ pub(super) fn lower_sample_event_operator<'dae>(
     let clock = symbols.functions.clocks.sample_id(schedule, span)?;
     let condition = construction.conditions(|conditions| conditions.reserve(provenance))?;
     construction.conditions(|conditions| {
-        conditions.define(
-            condition,
-            dae::ConditionInput::Clock(clock.into()),
-            provenance,
-        )
+        conditions.define(condition, dae::ConditionInput::Clock(clock), provenance)
     })?;
     construction.expressions(|expressions| {
         expressions

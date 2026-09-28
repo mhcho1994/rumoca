@@ -6,7 +6,7 @@ pub(super) struct OrdinaryEquationRow<'input, 'scope, 'dae> {
     pub(super) equation: &'scope flat::Equation,
     pub(super) owner: dae::DaeProvenance,
     pub(super) generation: Option<dae::DaeGeneration>,
-    pub(super) owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    pub(super) owner_clock: Option<dae::ClockId<'dae>>,
 }
 
 pub(super) fn lower_ordinary_equation<'dae>(

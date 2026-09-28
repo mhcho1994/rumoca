@@ -868,9 +868,14 @@ areas.
   function body are exact Integer quotients (truncating `div`, flooring `mod`)
   in the typed Solve program, and a function-body quotient needs no event owner
   whatever its operands' variability.
-- Not yet supported: event clocks `Clock(condition)` in Solve lowering (the
-  DAE carries them, but no partition activation exists for them);
-  `Clock(c, solverMethod)` discretized
+- Event clocks (§16.3 Operator 16.4): `Clock(condition, startInterval)` whose
+  condition names a scalar Boolean coordinate ticks when `edge(pre(condition))`
+  becomes true; its partition's rows are guarded updates on the tick,
+  `previous` reads the value of the previous tick, and `interval()` (§16.10)
+  is `startInterval` at the first tick and the time since the previous tick
+  afterwards. A clock conversion of an event clock, and a condition that is not
+  a Boolean coordinate, are refused at construction.
+- Not yet supported: `Clock(c, solverMethod)` discretized
   partitions (§16.8.1), refused at construction when a clock-owned equation
   contains `der()` so a partition is never integrated continuously; external C noise generators with Integer state
   arrays (`Xorshift64star`).
