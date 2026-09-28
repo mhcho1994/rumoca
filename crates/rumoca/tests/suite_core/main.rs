@@ -168,6 +168,7 @@ mod receiver_function_redeclare;
 mod reduced_state_charts;
 mod replaceable_function_redeclare;
 mod requested_states;
+mod root_time_event_coincidence;
 mod sampled_integral_consistency;
 mod sampled_timer_accuracy;
 mod semi_linear_zero_flow;

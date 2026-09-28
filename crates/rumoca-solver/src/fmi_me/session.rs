@@ -809,12 +809,36 @@ impl MeSimulationSession<'_, '_> {
         let located = self.scan_with_retained(&step, &retained);
         self.host.retained_indicators = retained;
         match located? {
-            Some(application) => {
+            Some(application) if !self.coincides_with_time_event(&step, &application) => {
                 crate::runtime::hotpath_stats::inc_root_hit();
                 self.apply_located_root(&step, &application, cursor)
             }
-            None => self.commit_accepted_endpoint(&step, cursor),
+            _ => self.commit_accepted_endpoint(&step, cursor),
         }
+    }
+
+    /// Whether a located root is the scheduled time event this step reaches,
+    /// under the component's `RootLocationPlan` (SPEC_0044 ME-EVENT-004); the
+    /// endpoint's time-event iteration then handles it.
+    fn coincides_with_time_event(
+        &self,
+        step: &MeAcceptedStep,
+        application: &MeRootApplication,
+    ) -> bool {
+        let Some(event_time) = self.host.reached_cached_event_time(step.accepted().time()) else {
+            return false;
+        };
+        let start = step.previous().time();
+        self.host
+            .kernel
+            .borrow()
+            .root_location()
+            .coincides_with_time_event(
+                application.application().time(),
+                event_time,
+                start,
+                step.accepted().time() - start,
+            )
     }
 
     /// The scan's view of the component and the plugin's continuous extension.
@@ -824,6 +848,7 @@ impl MeSimulationSession<'_, '_> {
             derivatives: &self.host.derivatives,
             backend: self.backend.as_ref(),
             budget: &self.host.budget,
+            event_boundary: self.host.next_event_time,
         }
     }
 
@@ -1352,6 +1377,11 @@ struct SessionScanTarget<'a> {
     derivatives: &'a MeDerivativeController,
     backend: &'a dyn MeIntegratorBackend,
     budget: &'a TimeoutBudget,
+    /// The scheduled time event the accepted step stops at: an indicator at
+    /// or past it is the event's left limit, exactly as the integrator
+    /// evaluated the step, so a crossing before the event is not hidden by
+    /// its post-event relations.
+    event_boundary: Option<f64>,
 }
 
 impl RootScanTarget for SessionScanTarget<'_> {
@@ -1374,7 +1404,7 @@ impl RootScanTarget for SessionScanTarget<'_> {
         indicators: &mut Vec<f64>,
     ) -> Result<(), MeSessionError> {
         let mut kernel = self.kernel.borrow_mut();
-        kernel.set_time(MeTime::at(time))?;
+        kernel.set_time(MeTime::new(time, self.event_boundary))?;
         kernel.set_continuous_states(states)?;
         indicators.clear();
         kernel.get_event_indicators(indicators)?;

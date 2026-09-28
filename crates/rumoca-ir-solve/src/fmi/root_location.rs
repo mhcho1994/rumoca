@@ -66,6 +66,24 @@ impl RootLocationPlan {
         roundoff.min(scan_resolution)
     }
 
+    /// Whether a root located at `root_time`, in the accepted interval that
+    /// starts at `interval_start` and lasts `duration`, coincides with the
+    /// scheduled time event at `event_time`.
+    ///
+    /// A coincident root is not applied on its own: the time event's iteration
+    /// handles it, so its relations see post-time-event values and the two
+    /// changes form one event instant rather than two separated by roundoff.
+    #[must_use]
+    pub fn coincides_with_time_event(
+        &self,
+        root_time: f64,
+        event_time: f64,
+        interval_start: f64,
+        duration: f64,
+    ) -> bool {
+        (event_time - root_time).abs() <= self.interval_roundoff(interval_start, duration)
+    }
+
     #[must_use]
     pub const fn refinement_iteration_cap(&self) -> usize {
         self.refinement_iteration_cap
@@ -94,5 +112,15 @@ mod tests {
         assert_eq!(plan.location_tolerance(1.0, 0.5), 0.5);
         assert_eq!(plan.refinement_iteration_cap(), 128);
         assert_eq!(plan.tie_break(), RootTieBreak::LeastApplicationCoordinate);
+    }
+
+    /// A root within the interval's roundoff of a scheduled time event is the
+    /// same instant; one clearly before it is its own event.
+    #[test]
+    fn a_root_within_roundoff_of_a_time_event_coincides_with_it() {
+        let plan = RootLocationPlan::STANDARD;
+        assert!(plan.coincides_with_time_event(1.0 - 3.0e-15, 1.0, 0.99, 0.01));
+        assert!(plan.coincides_with_time_event(1.0, 1.0, 0.99, 0.01));
+        assert!(!plan.coincides_with_time_event(1.0 - 1.0e-9, 1.0, 0.99, 0.01));
     }
 }
