@@ -35,6 +35,7 @@
 - [Scenario Config and VS Code](./tooling/scenario-config.md)
 - [MSL Quality Gate](./tooling/msl-quality-gate.md)
 - [MultiBody Coverage Work](./tooling/multibody-coverage.md)
+- [Electrical Coverage Work](./tooling/electrical-coverage.md)
 - [MSL Baseline Promotion Analysis, 2026-06-05](./tooling/msl-baseline-promotion-analysis-2026-06-05.md)
 
 # Policies
