@@ -63,6 +63,7 @@ mod enumeration_compact_range_test;
 mod evaluable_parameters;
 mod event_commutation;
 mod event_inductive_commutation;
+mod event_iteration_entry;
 mod event_latch_cascade;
 mod event_relation_cascade;
 mod final_parameter_modifiers;

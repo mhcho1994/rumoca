@@ -41,8 +41,8 @@ pub(crate) struct VerifyGateArgs {
     /// Also run the coverage trim gate with CI's flags (about an hour)
     #[arg(long)]
     pub(crate) coverage: bool,
-    /// Crates whose unit tests and docs run (default: crates changed relative
-    /// to upstream `main`)
+    /// Crates whose rustdoc runs (default: crates changed relative to upstream
+    /// `main`); every crate's tests always run
     #[arg(long, num_args = 1..)]
     pub(crate) crates: Vec<String>,
     /// Keep the gate's Cargo target directory after a pass
@@ -88,8 +88,8 @@ impl GateStep {
     }
 }
 
-/// The ordered blocking steps for `packages` (the crates whose unit tests and
-/// docs run), with the coverage steps when requested.
+/// The ordered blocking steps: every crate's tests, rustdoc for `packages`,
+/// and the coverage steps when requested.
 pub(crate) fn gate_steps(packages: &[String], coverage: bool) -> Vec<GateStep> {
     let mut steps = vec![
         GateStep::cargo("fmt", &["fmt", "--all", "--", "--check"]),
@@ -110,53 +110,16 @@ pub(crate) fn gate_steps(packages: &[String], coverage: bool) -> Vec<GateStep> {
         ),
         GateStep::cargo("lint", &["xtask", "verify", "lint"]),
     ];
-    // `commit_messages` reads git history, which an archived snapshot lacks.
-    if !packages.is_empty() {
-        steps.push(
-            GateStep::cargo("crate-tests", &["test", "-j", "8"])
-                .with_packages(packages, &["--", "--skip", "commit_messages"]),
-        );
-    }
-    steps.push(GateStep::cargo(
-        "suite_core",
-        &["test", "-j", "8", "-p", "rumoca", "--test", "suite_core"],
-    ));
-    steps.push(GateStep::cargo(
-        "msl-sim-tests",
-        &[
-            "test",
-            "-j",
-            "8",
-            "-p",
-            "rumoca",
-            "-p",
-            "rumoca-sim",
-            "--features",
-            "rumoca/msl-sim-tests",
-            "--lib",
-            "--tests",
-            "--",
-            "--skip",
-            "commit_messages",
-        ],
-    ));
-    steps.push(GateStep::cargo(
-        "arch-gates",
-        &[
-            "test",
-            "-j",
-            "8",
-            "-p",
-            "rumoca",
-            "--test",
-            "architecture_hardening_test",
-            "--test",
-            "suite_gates",
-            "--",
-            "--skip",
-            "commit_messages",
-        ],
-    ));
+    // CI's `verify workspace` runs every crate's tests, not only the crates a
+    // change touches: a change can break another crate's tests, such as the
+    // trusted-reference differential in `rumoca-reference`. The same excludes
+    // and features apply; only `commit_messages` is skipped, since it reads
+    // git history that an archived snapshot lacks.
+    let mut workspace = vec!["test", "-j", "8", "--workspace"];
+    workspace.extend_from_slice(crate::test_cmd::WORKSPACE_TEST_EXCLUDES);
+    workspace.extend_from_slice(crate::test_cmd::WORKSPACE_TEST_FEATURES);
+    workspace.extend_from_slice(&SKIP_SNAPSHOT_ONLY_TESTS);
+    steps.push(GateStep::cargo("workspace-tests", &workspace));
     if !packages.is_empty() {
         let mut doc =
             GateStep::cargo("doc", &["doc", "-j", "8"]).with_packages(packages, &["--no-deps"]);
@@ -185,20 +148,24 @@ pub(crate) fn gate_steps(packages: &[String], coverage: bool) -> Vec<GateStep> {
     steps
 }
 
+/// The test-binary arguments that skip the one test an archived snapshot
+/// cannot run: `commit_messages` reads git history.
+const SKIP_SNAPSHOT_ONLY_TESTS: [&str; 3] = ["--", "--skip", "commit_messages"];
+
 fn coverage_steps() -> Vec<GateStep> {
+    // CI's `coverage run` fails on a failing test; a measurement that ignored
+    // run failures would pass a broken tree.
+    let mut run = vec![
+        "llvm-cov",
+        "--workspace",
+        "--tests",
+        "--json",
+        "--output-path",
+        "target/llvm-cov/workspace-full.json",
+    ];
+    run.extend_from_slice(&SKIP_SNAPSHOT_ONLY_TESTS);
     let steps = vec![
-        GateStep::cargo(
-            "coverage-run",
-            &[
-                "llvm-cov",
-                "--workspace",
-                "--tests",
-                "--json",
-                "--output-path",
-                "target/llvm-cov/workspace-full.json",
-                "--ignore-run-fail",
-            ],
-        ),
+        GateStep::cargo("coverage-run", &run),
         GateStep::cargo(
             "coverage-summary",
             &[

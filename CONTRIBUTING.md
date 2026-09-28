@@ -179,15 +179,15 @@ committed `HEAD`; uncommitted changes are not part of it) into
 `<temp>/rumoca-gate/<rev>/snap` with its own Cargo target directory, links
 `target/msl` and `target/fmi-conformance` from the repository, and runs CI's
 blocking steps in order: `cargo fmt --check`, workspace clippy (without
-`rumoca-phase-instantiate`), `verify lint`, the unit tests of the changed
-crates (default: crates changed relative to upstream `main`; `--crates`
-overrides), `suite_core`, the `rumoca/msl-sim-tests` regressions, the
-architecture and `suite_gates` tests (`commit_messages` is skipped, since a
-snapshot has no history), rustdoc of the changed crates with warnings denied,
-and the template runtime tests. The CasADi and JAX template targets need
+`rumoca-phase-instantiate`), `verify lint`, the tests of every workspace crate
+with the `rumoca/msl-sim-tests` regressions, as `verify workspace` runs them
+(`commit_messages` is skipped, since a snapshot has no history), rustdoc of
+the changed crates with warnings denied (default: crates changed relative to
+upstream `main`; `--crates` overrides), and the template runtime tests. The CasADi and JAX template targets need
 Python packages a local shell may lack, so their failures are reported but
 do not fail the gate. `--coverage` adds the coverage run, report, and trim gate
-with CI's allowances (it needs `cargo-llvm-cov`). The run stops at the first
+with CI's allowances (it needs `cargo-llvm-cov`); a failing test fails the
+coverage run, as it does in CI. The run stops at the first
 failing step and prints `GATE_OK <rev> (<log>)` or `GATE_FAILED <rev> (<log>)`
 with the failing step; the target directory is removed after a pass unless
 `--keep` is given. The tools (FMPy, CMake, Java, `xmllint`) are taken from the

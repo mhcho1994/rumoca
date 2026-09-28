@@ -65,7 +65,7 @@ pub(crate) fn run_workspace_docs(root: &Path) -> Result<()> {
 /// dedicated playground/python jobs. This is the single source of truth shared
 /// by the plain-`cargo test`, doctest, and nextest-shard paths so the three
 /// can never drift apart.
-const WORKSPACE_TEST_EXCLUDES: &[&str] = &[
+pub(crate) const WORKSPACE_TEST_EXCLUDES: &[&str] = &[
     "--exclude",
     "rumoca-bind-python",
     "--exclude",
@@ -74,7 +74,7 @@ const WORKSPACE_TEST_EXCLUDES: &[&str] = &[
 
 /// Required Cargo-feature-selected regressions that plain workspace defaults
 /// do not discover. CI stages the pinned MSL cache before this command.
-const WORKSPACE_TEST_FEATURES: &[&str] = &["--features", "rumoca/msl-sim-tests"];
+pub(crate) const WORKSPACE_TEST_FEATURES: &[&str] = &["--features", "rumoca/msl-sim-tests"];
 
 /// Unit + integration tests under nextest, then doctests. nextest schedules
 /// individual tests across every core in isolated processes; plain
