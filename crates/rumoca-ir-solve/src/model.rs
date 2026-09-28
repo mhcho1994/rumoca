@@ -353,6 +353,37 @@ pub struct InitializationProjectionBlock {
     /// Initialization unknowns may reside in either solver Y storage or
     /// parameter P storage.  Time and constant slots are invalid here.
     pub unknowns: Vec<ScalarSlot>,
+    /// The Newton scale of each unknown, aligned with `unknowns`.
+    pub scales: Vec<InitializationUnknownScale>,
+}
+
+/// The magnitude an initialization unknown is scaled by in the projection's
+/// Newton step (MLS 3.7 §4.8.1: `nominal` exists for solver scaling).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum InitializationUnknownScale {
+    /// A solver coordinate keeps its solver variable scale
+    /// ([`SolveModel::solver_variable_scale`]).
+    Solver,
+    /// A `fixed = false` parameter with a declared `nominal`, evaluated once
+    /// at construction; finite and positive.
+    Nominal(f64),
+    /// A `fixed = false` parameter without `nominal` is scaled by the
+    /// magnitude of its §8.6 start guess when the projection begins, or 1 when
+    /// that guess is zero or not finite. A fixed floor would treat a 1e-5 s
+    /// time constant as order 1 and let one Newton step leave its branch.
+    GuessMagnitude,
+}
+
+impl InitializationUnknownScale {
+    /// The scale of a parameter unknown whose projection begins at `guess`.
+    /// A solver coordinate's scale is not this table's; it reads 1 here.
+    pub fn at_guess(self, guess: f64) -> f64 {
+        match self {
+            Self::Nominal(nominal) => nominal,
+            Self::GuessMagnitude if guess.is_finite() && guess != 0.0 => guess.abs(),
+            Self::GuessMagnitude | Self::Solver => 1.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

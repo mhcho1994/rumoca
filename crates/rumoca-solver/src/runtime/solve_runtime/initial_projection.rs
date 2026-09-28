@@ -1019,6 +1019,7 @@ mod tests {
                             blocks: vec![solve::InitializationProjectionBlock {
                                 rows: vec![0],
                                 unknowns: vec![solve::scalar_slot_y(0)],
+                                scales: vec![solve::InitializationUnknownScale::Solver],
                             }],
                         },
                         ..Default::default()
@@ -1097,6 +1098,7 @@ mod tests {
                             blocks: vec![solve::InitializationProjectionBlock {
                                 rows: vec![0],
                                 unknowns: vec![solve::scalar_slot_y(0)],
+                                scales: vec![solve::InitializationUnknownScale::Solver],
                             }],
                         },
                         ..Default::default()
@@ -1244,6 +1246,7 @@ mod tests {
                             blocks: vec![solve::InitializationProjectionBlock {
                                 rows: vec![0],
                                 unknowns: vec![solve::scalar_slot_p(0)],
+                                scales: vec![solve::InitializationUnknownScale::GuessMagnitude],
                             }],
                         },
                         update_rhs: to_scalar_program_block(&dependent_update)

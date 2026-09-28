@@ -36,6 +36,7 @@ fn project_initial_y_plan<M: AlgebraicProjectionModel>(
                     .copied()
                     .map(solve::scalar_slot_y)
                     .collect(),
+                scales: vec![solve::InitializationUnknownScale::Solver; block.y_indices.len()],
             })
             .collect(),
     };
@@ -1814,6 +1815,7 @@ fn project_initial_variables_solves_fixed_false_parameter_unknown() {
         blocks: vec![solve::InitializationProjectionBlock {
             rows: vec![0],
             unknowns: vec![solve::scalar_slot_p(0)],
+            scales: vec![solve::InitializationUnknownScale::GuessMagnitude],
         }],
     };
     let mut y = Vec::new();

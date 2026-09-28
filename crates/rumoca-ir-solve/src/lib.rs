@@ -2788,6 +2788,7 @@ fn validate_initial_projection_plan(
     let mut unknowns_seen = BTreeSet::new();
     for block in &plan.blocks {
         validate_projection_block_shape(context, block.rows.len(), block.unknowns.len())?;
+        validate_initial_projection_scales(block)?;
         validate_indices(context, &block.rows, row_upper_bound)?;
         validate_initial_projection_unknowns(
             context,
@@ -2814,6 +2815,35 @@ fn validate_initial_projection_plan(
                 unknown: format!("{unknown:?}"),
                 span: None,
             });
+        }
+    }
+    Ok(())
+}
+
+/// Each unknown carries one scale of its own storage kind: a solver coordinate
+/// its solver scale, a parameter a finite positive `nominal` or its guess.
+fn validate_initial_projection_scales(
+    block: &InitializationProjectionBlock,
+) -> Result<(), SolveProblemShapeContractError> {
+    let invalid = |detail| SolveProblemShapeContractError::InitializationOwnership { detail };
+    if block.scales.len() != block.unknowns.len() {
+        return Err(invalid(
+            "initialization projection scales are not aligned with the block unknowns",
+        ));
+    }
+    for (unknown, scale) in block.unknowns.iter().zip(&block.scales) {
+        let consistent = match (unknown, scale) {
+            (ScalarSlot::Y { .. }, InitializationUnknownScale::Solver) => true,
+            (ScalarSlot::P { .. }, InitializationUnknownScale::GuessMagnitude) => true,
+            (ScalarSlot::P { .. }, InitializationUnknownScale::Nominal(nominal)) => {
+                nominal.is_finite() && *nominal > 0.0
+            }
+            _ => false,
+        };
+        if !consistent {
+            return Err(invalid(
+                "an initialization unknown's scale does not match its storage kind",
+            ));
         }
     }
     Ok(())

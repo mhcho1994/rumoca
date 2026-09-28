@@ -1957,7 +1957,12 @@ RMC_COLD static int rmc_init_project(ModelInstance* m) {
     RMC_MARK; int result = 1;
     double* pscale = rmc_dalloc(m, P_LEN); double* residual = rmc_dalloc(m, RMC_INIT_ROWS); double* scales = rmc_dalloc(m, RMC_INIT_ROWS);
     if (!pscale || !residual || !scales) { RMC_RELEASE; return rmc_exhausted(m); }
-    for (size_t k = 0; k < P_LEN; ++k) pscale[k] = isfinite(m->p[k]) ? fmax(fabs(m->p[k]), 1.0) : 1.0;
+    /* InitializationUnknownScale::at_guess: the start guess magnitude, or 1
+       when it is zero or not finite; a declared nominal replaces it. */
+    for (size_t k = 0; k < P_LEN; ++k) pscale[k] = (isfinite(m->p[k]) && m->p[k] != 0.0) ? fabs(m->p[k]) : 1.0;
+{%- for index in init.nominal_indices %}
+    pscale[{{ index }}] = {{ init.nominal_values[loop.index0] }};
+{%- endfor %}
     for (int iteration = 0; iteration < RMC_REFINE_ITERS && result == 1; ++iteration) {
         bool changed = false;
         rmc_init_seed(m);

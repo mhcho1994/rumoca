@@ -1959,6 +1959,7 @@ fn solve_problem_shape_contract_rejects_duplicate_initial_projection_unknown() {
         blocks: vec![InitializationProjectionBlock {
             rows: vec![0, 0],
             unknowns: vec![scalar_slot_y(1), scalar_slot_y(1)],
+            scales: vec![InitializationUnknownScale::Solver; 2],
         }],
     };
     assert!(InitializationSolveSystem::construct(input).is_err());

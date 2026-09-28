@@ -21,6 +21,7 @@ fn input() -> InitializationSystemInput {
             blocks: vec![InitializationProjectionBlock {
                 rows: vec![0],
                 unknowns: vec![scalar_slot_y(0)],
+                scales: vec![crate::InitializationUnknownScale::Solver],
             }],
         },
         ..Default::default()

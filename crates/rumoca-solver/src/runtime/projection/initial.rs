@@ -24,22 +24,34 @@ pub(crate) fn project_initial_variables_with_plan<M: AlgebraicProjectionModel>(
     let combined_model = CombinedInitializationProjectionModel {
         model,
         y_len: y.len(),
-        parameter_scales: p
-            .iter()
-            .map(|value| {
-                if value.is_finite() {
-                    value.abs().max(1.0)
-                } else {
-                    1.0
-                }
-            })
-            .collect(),
+        parameter_scales: initialization_parameter_scales(plan, p),
     };
     project_initial_variables_by_plan(&combined_model, &mut values, &[], t, &combined_plan, tol)?;
     let (projected_y, projected_p) = values.split_at(y.len());
     y.copy_from_slice(projected_y);
     p.copy_from_slice(projected_p);
     Ok(())
+}
+
+/// The Newton scale of every parameter coordinate, translated from the scale
+/// Solve IR issues for each projection unknown at the guess the projection
+/// begins from. A parameter the projection does not solve is never stepped,
+/// so its entry is unused.
+fn initialization_parameter_scales(
+    plan: &solve::InitializationProjectionPlan,
+    p: &[f64],
+) -> Vec<f64> {
+    let mut scales = vec![1.0; p.len()];
+    for block in &plan.blocks {
+        for (unknown, scale) in block.unknowns.iter().zip(&block.scales) {
+            if let solve::ScalarSlot::P { index, .. } = *unknown
+                && let (Some(entry), Some(&guess)) = (scales.get_mut(index), p.get(index))
+            {
+                *entry = scale.at_guess(guess);
+            }
+        }
+    }
+    scales
 }
 
 pub(super) fn combined_initial_projection_plan(
