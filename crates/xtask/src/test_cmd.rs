@@ -88,7 +88,7 @@ pub(crate) fn run_workspace_tests(root: &Path) -> Result<()> {
     args.extend_from_slice(WORKSPACE_TEST_FEATURES);
     run_cargo(root, &args)?;
     if cfg!(target_os = "linux") {
-        run_msl_harness_unit_tests(root)?;
+        run_cargo(root, MSL_HARNESS_UNIT_TEST_ARGS)?;
     }
     run_workspace_doctests(root)
 }
@@ -113,12 +113,6 @@ pub(crate) const MSL_HARNESS_UNIT_TEST_ARGS: &[&str] = &[
     "--skip",
     "balance_pipeline::balance_pipeline_merge::test_msl_merge_and_gate",
 ];
-
-pub(crate) fn run_msl_harness_unit_tests(root: &Path) -> Result<()> {
-    let mut cmd = Command::new("cargo");
-    cmd.args(MSL_HARNESS_UNIT_TEST_ARGS).current_dir(root);
-    run_status(cmd)
-}
 
 /// Doctests only. `cargo nextest` cannot run doctests, so the sharded CI lane
 /// pairs its nextest partitions with exactly one invocation of this to preserve
