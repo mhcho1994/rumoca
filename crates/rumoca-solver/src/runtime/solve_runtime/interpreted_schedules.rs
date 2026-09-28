@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rumoca_eval_solve::{EvalSolveError, PreparedScalarProgramBlock};
+use rumoca_eval_solve::{EvalSolveError, PreparedEvaluationBlock};
 use rumoca_ir_solve as solve;
 use rustc_hash::FxHashMap;
 
@@ -16,7 +16,7 @@ use crate::RuntimeSolveError;
 /// One schedule prepared for the interpreter: its segments as programs and
 /// the solver slot of every output, in segment order.
 pub(crate) struct InterpretedSchedule {
-    block: PreparedScalarProgramBlock,
+    block: PreparedEvaluationBlock,
     targets: Vec<usize>,
 }
 
@@ -131,6 +131,6 @@ fn prepare_schedule(
         Ok(block) => block,
         Err(error) => return Err(invalid(error.to_string())),
     };
-    let block = PreparedScalarProgramBlock::new(block)?;
+    let block = PreparedEvaluationBlock::new(block)?;
     Ok(InterpretedSchedule { block, targets })
 }
