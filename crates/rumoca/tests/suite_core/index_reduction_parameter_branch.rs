@@ -128,15 +128,15 @@ fn relation_guards_differentiate_branch_wise_between_events() {
             .model("ParameterBranchKinematics")
             .compile_str(&source, "relation_guard.mo")
             .unwrap();
-        let result = simulate_dae_with_diagnostics(
-            &compiled.dae,
-            &SimOptions {
-                t_end,
-                dt: Some(0.01),
-                ..Default::default()
-            },
-        )
-        .unwrap_or_else(|error| panic!("{guard}: {error}"));
+        let options = SimOptions {
+            t_end,
+            dt: Some(0.01),
+            ..Default::default()
+        };
+        let result = match simulate_dae_with_diagnostics(&compiled.dae, &options) {
+            Ok(result) => result,
+            Err(error) => panic!("{guard}: {error}"),
+        };
         assert!(result.times.len() > 5, "{guard} produced an output grid");
         let column = |name: &str| {
             let index = result.names.iter().position(|value| value == name).unwrap();
@@ -186,9 +186,9 @@ fn relation_guards_without_an_owned_event_keep_the_refusal() {
             .model("ParameterBranchKinematics")
             .compile_str(&source, "no_event_guard.mo")
             .unwrap();
-        let error = rumoca_phase_structural::prepare_for_solve(&compiled.dae)
-            .err()
-            .unwrap_or_else(|| panic!("{replacement}: an eventless guard needs a refusal"));
+        let Err(error) = rumoca_phase_structural::prepare_for_solve(&compiled.dae) else {
+            panic!("{replacement}: an eventless guard needs a refusal");
+        };
         assert!(
             error.to_string().contains("structurally singular"),
             "{replacement}: {error}"
@@ -205,8 +205,10 @@ fn check_motion_shape(source: &str, start: f64, sign: f64, tensor: bool) {
         .model("ParameterBranchKinematics")
         .compile_str(source, "parameter_branch_kinematics.mo")
         .unwrap();
-    let prepared = rumoca_phase_structural::prepare_for_solve(&compiled.dae)
-        .unwrap_or_else(|error| panic!("{error:?}"));
+    let prepared = match rumoca_phase_structural::prepare_for_solve(&compiled.dae) {
+        Ok(prepared) => prepared,
+        Err(error) => panic!("{error:?}"),
+    };
     assert_eq!(
         prepared.as_dae().inspect(|view| view
             .variables()
@@ -218,16 +220,16 @@ fn check_motion_shape(source: &str, start: f64, sign: f64, tensor: bool) {
         prepared.as_dae().inspect(assert_tensor_conditionals);
     }
     for solver_mode in [SimSolverMode::Bdf, SimSolverMode::RkLike] {
-        let result = simulate_dae_with_diagnostics(
-            &compiled.dae,
-            &SimOptions {
-                solver_mode,
-                t_end: 0.1,
-                dt: Some(0.01),
-                ..Default::default()
-            },
-        )
-        .unwrap_or_else(|error| panic!("{solver_mode:?}: {error}"));
+        let options = SimOptions {
+            solver_mode,
+            t_end: 0.1,
+            dt: Some(0.01),
+            ..Default::default()
+        };
+        let result = match simulate_dae_with_diagnostics(&compiled.dae, &options) {
+            Ok(result) => result,
+            Err(error) => panic!("{solver_mode:?}: {error}"),
+        };
         for (row, &time) in result.times.iter().enumerate() {
             let q = start * time.cos() + 0.3 * time.sin();
             let v = -start * time.sin() + 0.3 * time.cos();

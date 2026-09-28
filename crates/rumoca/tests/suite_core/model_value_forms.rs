@@ -5,35 +5,34 @@
 use rumoca::Compiler;
 use rumoca_sim::{SimOptions, SimResult, simulate_dae};
 
-fn compile(source: &str, model: &str) -> Result<rumoca::CompilationResult, String> {
-    Compiler::new()
+/// Compile and simulate `model`; a compile or simulation error is returned
+/// as its debug text.
+fn simulate(source: &str, model: &str) -> Result<SimResult, String> {
+    let compiled = match Compiler::new()
         .model(model)
         .compile_str(source, &format!("{model}.mo"))
-        .map_err(|error| format!("{error:?}"))
-}
-
-fn simulate(source: &str, model: &str) -> Result<SimResult, String> {
-    let compiled = compile(source, model)?;
-    simulate_dae(
-        &compiled.dae,
-        &SimOptions {
-            t_end: 1.0,
-            dt: Some(0.1),
-            ..Default::default()
-        },
-    )
-    .inspect(|result| {
-        assert!(result.times.len() > 5, "{model} produced an output grid");
-    })
-    .map_err(|error| format!("{error:?}"))
+    {
+        Ok(compiled) => compiled,
+        Err(error) => return Err(format!("{error:?}")),
+    };
+    let options = SimOptions {
+        t_end: 1.0,
+        dt: Some(0.1),
+        ..Default::default()
+    };
+    match simulate_dae(&compiled.dae, &options) {
+        Ok(result) => {
+            assert!(result.times.len() > 5, "{model} produced an output grid");
+            Ok(result)
+        }
+        Err(error) => Err(format!("{error:?}")),
+    }
 }
 
 fn last(result: &SimResult, name: &str) -> f64 {
-    let index = result
-        .names
-        .iter()
-        .position(|candidate| candidate == name)
-        .unwrap_or_else(|| panic!("result has no column `{name}`"));
+    let Some(index) = result.names.iter().position(|candidate| candidate == name) else {
+        panic!("result has no column `{name}`");
+    };
     *result.data[index]
         .last()
         .expect("a simulated column has samples")

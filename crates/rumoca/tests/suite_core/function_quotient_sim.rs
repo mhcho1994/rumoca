@@ -12,11 +12,9 @@ use rumoca::Compiler;
 use rumoca_sim::{SimOptions, SimResult, simulate_dae_with_diagnostics};
 
 fn series<'a>(result: &'a SimResult, name: &str) -> &'a [f64] {
-    let index = result
-        .names
-        .iter()
-        .position(|candidate| candidate == name)
-        .unwrap_or_else(|| panic!("simulation result missing column {name}"));
+    let Some(index) = result.names.iter().position(|candidate| candidate == name) else {
+        panic!("simulation result missing column {name}");
+    };
     result.data[index].as_slice()
 }
 
@@ -246,8 +244,10 @@ fn integer_result_quotient_is_an_exact_integer_division() {
         .model("IntegerResult")
         .compile_str(INTEGER_RESULT, "IntegerResult.mo")
         .expect("the Integer-result fixture constructs its DAE");
-    let result = simulate_dae_with_diagnostics(&compiled.dae, &SimOptions::default())
-        .unwrap_or_else(|error| panic!("the Integer-result quotient simulates: {error}"));
+    let result = match simulate_dae_with_diagnostics(&compiled.dae, &SimOptions::default()) {
+        Ok(result) => result,
+        Err(error) => panic!("the Integer-result quotient simulates: {error}"),
+    };
     let y = series(&result, "y");
     assert!(y.len() > 5, "IntegerResult produced an output grid");
     let x = series(&result, "x");
