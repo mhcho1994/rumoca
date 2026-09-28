@@ -226,15 +226,33 @@ struct Track<'a> {
     t_end: f64,
     dt: f64,
     solver_mode: SimSolverMode,
-    tolerance: f64,
+    /// Largest magnitude of the compared channels.
+    scale: f64,
+    /// Fastest rate (1/s) of the compared dynamics.
+    rate: f64,
+}
+
+/// The trace agreement a fixed-step component can promise against the
+/// adaptive native run. The component integrates classical RK4 once per
+/// `dt` (its `CoSimulationStepPlan`), whose global error over the horizon is
+/// bounded by `horizon * rate^5 * dt^4 / 120` in units of `scale`; the native
+/// run is adaptive to its `rtol`/`atol`. The sum, with a factor of ten for
+/// the constants the bound leaves out, is the tolerance.
+fn fixed_step_rk4_tolerance(track: &Track<'_>) -> f64 {
+    let native = SimOptions::default();
+    let horizon = track.t_end - track.t_start;
+    let rk4 = horizon * track.rate.powi(5) * track.dt.powi(4) / 120.0;
+    10.0 * (track.scale * (rk4 + native.rtol) + native.atol)
 }
 
 /// Build, validate, run the component over a do-step grid, and assert each
-/// requested channel tracks the native series within `tolerance`.
+/// requested channel tracks the native series within the
+/// [`fixed_step_rk4_tolerance`] of the track.
 fn assert_tracks_native(
     result: &rumoca::CompilationResult,
     track: Track<'_>,
 ) -> (TempDir, Vec<Vec<f64>>) {
+    let tolerance = fixed_step_rk4_tolerance(&track);
     let Track {
         model,
         channels,
@@ -243,7 +261,7 @@ fn assert_tracks_native(
         t_end,
         dt,
         solver_mode,
-        tolerance,
+        ..
     } = track;
     let opts = SimOptions {
         t_start,
@@ -336,7 +354,8 @@ fn fmi_ls_wasm_component_validates_and_executes_pinned_lifecycle() {
             t_end: 0.5,
             dt: 0.1,
             solver_mode: SimSolverMode::RkLike,
-            tolerance: 1.0e-4,
+            scale: 1.0,
+            rate: 1.0,
         },
     );
     for row in &rows {
@@ -402,7 +421,8 @@ end BouncingBall;
             t_end: 0.8,
             dt: 0.01,
             solver_mode: SimSolverMode::Bdf,
-            tolerance: 5.0e-2,
+            scale: 5.0,
+            rate: 1.0,
         },
     );
     for row in &rows {
@@ -442,7 +462,8 @@ fn fmi_ls_wasm_fourbar1_matches_native_multibody_trace() {
             t_end: 0.1,
             dt: 0.005,
             solver_mode: SimSolverMode::Bdf,
-            tolerance: 5.0e-3,
+            scale: 20.0,
+            rate: 10.0,
         },
     );
 }

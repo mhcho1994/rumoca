@@ -127,6 +127,14 @@ fn validate_variables(metadata: &FmiMetadata) -> Result<(), FmiCCodegenError> {
 }
 
 impl FmiCCodegenView {
+    /// The component's Co-Simulation step rule (ME-LSW-001).
+    fn co_simulation(&self) -> &super::CoSimulationStepPlan {
+        match &self.profile {
+            Profile::EventFree(v) => &v.co_simulation,
+            Profile::StaticAssertions(v) | Profile::ScalarEvents(v, _) => &v.co_simulation,
+        }
+    }
+
     fn model(&self) -> &crate::SolveModel {
         match &self.profile {
             Profile::EventFree(v) => &v.model,
@@ -179,7 +187,7 @@ impl FmiCCodegenView {
 impl Serialize for FmiCCodegenView {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let metadata = self.metadata();
-        let mut entries = serializer.serialize_map(Some(12))?;
+        let mut entries = serializer.serialize_map(Some(13))?;
         entries.serialize_entry("initial_y", &self.model().initial_y)?;
         entries.serialize_entry("initial_parameters", &self.model().parameters)?;
         entries.serialize_entry(
@@ -199,6 +207,7 @@ impl Serialize for FmiCCodegenView {
             ),
         )?;
         entries.serialize_entry("event_indicator_roots", &self.event_indicator_roots())?;
+        entries.serialize_entry("co_simulation", &self.co_simulation())?;
         entries.serialize_entry(
             "root_location",
             &match &self.profile {

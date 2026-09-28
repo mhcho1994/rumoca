@@ -1,5 +1,6 @@
 {%- set model_identifier = "Rumoca_" ~ (artifact.identities.fmu | replace("-", "_")) %}
-{%- from "fmi-c-kernel.jinja" import scalar_op, assertions, assertion_lifecycle, value_array, rmc_kind, text_fields, text_table %}
+{%- from "fmi-c-kernel.jinja" import scalar_op, assertions, assertion_lifecycle, value_array, rmc_kind, text_fields, text_table, cs_integrator %}
+{%- set cs_integrate = cs_integrator(fmi) %}
 {%- from "fmi-me-projection.jinja" import refresh_values, workspace_fields, workspace_reset %}
 {%- from "fmi-scalar-events.jinja" import scalar_events, event_reset, cs_events %}
 #include "model.h"
@@ -79,7 +80,7 @@ static fmi3Status evaluate_derivatives(ModelInstance* m) {
     return fmi3OK;
 }
 {%- endif %}
-static fmi3Status integrate_rk4(ModelInstance* m, fmi3Float64 start, fmi3Float64 step) {
+static fmi3Status {{ cs_integrate }}(ModelInstance* m, fmi3Float64 start, fmi3Float64 step) {
     double initial[STATE_LEN]; double k1[STATE_LEN]; double k2[STATE_LEN]; double k3[STATE_LEN]; double k4[STATE_LEN];
     size_t count = {{ solve.solve_layout.state_scalar_count }};
     for (size_t i=0;i<count;++i) initial[i]=m->y[i];
@@ -94,7 +95,7 @@ static fmi3Status integrate_rk4(ModelInstance* m, fmi3Float64 start, fmi3Float64
     return settle_assertion_event(m);
 }
 {%- if fmi.scalar_events %}
-{{ cs_events(fmi, "integrate_rk4", "fmi3") }}
+{{ cs_events(fmi, cs_integrate, "fmi3") }}
 {%- endif %}
 {#- One row per FMI 3 value reference, indexed by the reference itself: time
     is 0, the variables are 1..N in inventory order and the state derivatives
@@ -317,7 +318,7 @@ FMI_EXPORT fmi3Status fmi3DoStep(fmi3Instance i,fmi3Float64 current,fmi3Float64 
     if(!m||m->type!=INTERFACE_CS||m->state!=MODEL_STEP||!eventNeeded||!terminate||!earlyReturn||!lastTime||!isfinite(current)||!isfinite(step)||step<=0.0)return fmi3Error;
     if(fabs(current-m->time)>1e-12*fmax(1.0,fmax(fabs(current),fabs(m->time))))return fmi3Error;
     double old_y[Y_LEN];for(size_t k=0;k<Y_LEN;++k)old_y[k]=m->y[k];
-    if({% if fmi.scalar_events %}rmc_cs_advance{% else %}integrate_rk4{% endif %}(m,current,step)!=fmi3OK){for(size_t k=0;k<Y_LEN;++k)m->y[k]=old_y[k];m->time=current;return fmi3Error;}
+    if({% if fmi.scalar_events %}rmc_cs_advance{% else %}{{ cs_integrate }}{% endif %}(m,current,step)!=fmi3OK){for(size_t k=0;k<Y_LEN;++k)m->y[k]=old_y[k];m->time=current;return fmi3Error;}
 {%- if me_refresh.switching %}
     bool request = false, changed = false, nominals = false;
     if (rmc_chart_completed(m, &request) != fmi3OK || (request && rmc_chart_transfer(m, &changed, &nominals) != fmi3OK)) { for(size_t k=0;k<Y_LEN;++k)m->y[k]=old_y[k]; m->time=current; return fmi3Error; }

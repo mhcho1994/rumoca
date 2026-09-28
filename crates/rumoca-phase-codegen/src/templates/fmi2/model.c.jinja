@@ -1,5 +1,6 @@
 {%- set model_identifier = "Rumoca_" ~ (artifact.identities.fmu | replace("-", "_")) %}
-{%- from "fmi-c-kernel.jinja" import scalar_op, assertions, assertion_lifecycle, value_array, rmc_kind, text_fields, text_table %}
+{%- from "fmi-c-kernel.jinja" import scalar_op, assertions, assertion_lifecycle, value_array, rmc_kind, text_fields, text_table, cs_integrator %}
+{%- set cs_integrate = cs_integrator(fmi) %}
 {%- from "fmi-me-projection.jinja" import refresh_values, workspace_fields, workspace_reset %}
 {%- from "fmi-scalar-events.jinja" import scalar_events, event_reset, cs_events %}
 #include "model.h"
@@ -83,7 +84,7 @@ static fmi2Status evaluate_derivatives(ModelInstance* m) {
 }
 {%- endif %}
 
-static fmi2Status integrate_rk4(ModelInstance* m, fmi2Real start, fmi2Real step) {
+static fmi2Status {{ cs_integrate }}(ModelInstance* m, fmi2Real start, fmi2Real step) {
     double initial[STATE_LEN];
     double k1[STATE_LEN];
     double k2[STATE_LEN];
@@ -109,7 +110,7 @@ static fmi2Status integrate_rk4(ModelInstance* m, fmi2Real start, fmi2Real step)
     return settle_assertion_event(m);
 }
 {%- if fmi.scalar_events %}
-{{ cs_events(fmi, "integrate_rk4", "fmi2") }}
+{{ cs_events(fmi, cs_integrate, "fmi2") }}
 {%- endif %}
 
 {#- One row per FMI 2 value reference, indexed by the reference itself: time
@@ -257,7 +258,7 @@ FMI_EXPORT fmi2Status fmi2DoStep(fmi2Component c, fmi2Real current, fmi2Real ste
     if (fabs(current - m->time) > 1e-12 * fmax(1.0, fmax(fabs(current), fabs(m->time)))) return fmi2Error;
     double old_y[Y_LEN];
     for (size_t i = 0; i < Y_LEN; ++i) old_y[i] = m->y[i];
-    if ({% if fmi.scalar_events %}rmc_cs_advance{% else %}integrate_rk4{% endif %}(m, current, step) != fmi2OK) {
+    if ({% if fmi.scalar_events %}rmc_cs_advance{% else %}{{ cs_integrate }}{% endif %}(m, current, step) != fmi2OK) {
         for (size_t i = 0; i < Y_LEN; ++i) m->y[i] = old_y[i];
         m->time = current;
         return fmi2Error;

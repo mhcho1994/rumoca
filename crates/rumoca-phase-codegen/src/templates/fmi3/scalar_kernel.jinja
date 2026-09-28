@@ -463,3 +463,11 @@ static void rmc_release_text(ModelInstance* m) { (void)m; }
 static inline bool rmc_own_text(ModelInstance* dst, const ModelInstance* src) { (void)dst; (void)src; return true; }
 {%- endif %}
 {%- endmacro %}
+
+{#- The component's Co-Simulation step rule (ir-solve fmi::CoSimulationStepPlan,
+    SPEC_0044 ME-LSW-001): the name of the substep integrator it selects. -#}
+{%- macro cs_integrator(fmi) -%}
+{%- if fmi.co_simulation.method == "ClassicalRk4" and fmi.co_simulation.substep == "CommunicationStep" -%}integrate_rk4
+{%- else -%}{{ fail("unsupported-feature:fmi.c.co-simulation-step " ~ fmi.co_simulation.method ~ "/" ~ fmi.co_simulation.substep) }}
+{%- endif -%}
+{%- endmacro %}

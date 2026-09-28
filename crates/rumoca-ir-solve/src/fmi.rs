@@ -33,6 +33,7 @@
 //! encoding is available only after one of those admission proofs.
 
 mod c_codegen;
+mod co_simulation;
 mod event_free;
 mod indicator_plan;
 mod max_step_duration;
@@ -45,6 +46,7 @@ mod static_assertions;
 mod tests;
 
 pub use c_codegen::{FmiCCodegenError, FmiCCodegenView};
+pub use co_simulation::{CoSimulationMethod, CoSimulationStepPlan, CoSimulationSubstep};
 pub use event_free::{FmiEventFreeCodegenView, FmiEventFreeError};
 pub use indicator_plan::{
     FmiIndicatorPlan, IndicatorEntry, IndicatorPlanError, IndicatorPlanInputs,
@@ -389,6 +391,7 @@ pub struct FmiComponent {
     metadata: FmiMetadata,
     event_indicators: FmiEventIndicatorInventory,
     root_location: RootLocationPlan,
+    co_simulation: CoSimulationStepPlan,
     model: Arc<SolveModel>,
 }
 
@@ -412,6 +415,7 @@ impl FmiComponent {
             metadata,
             event_indicators,
             root_location: RootLocationPlan::STANDARD,
+            co_simulation: CoSimulationStepPlan::STANDARD,
             model: Arc::new(model),
         })
     }
@@ -512,6 +516,7 @@ impl FmiComponent {
             metadata: self.metadata,
             event_indicators: self.event_indicators,
             root_location: self.root_location,
+            co_simulation: self.co_simulation,
             model: self.model,
         }
     }
@@ -598,6 +603,7 @@ pub struct FmiCodegenView {
     metadata: FmiMetadata,
     event_indicators: FmiEventIndicatorInventory,
     root_location: RootLocationPlan,
+    co_simulation: CoSimulationStepPlan,
     model: Arc<SolveModel>,
 }
 
