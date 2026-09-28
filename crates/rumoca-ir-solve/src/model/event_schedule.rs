@@ -290,12 +290,11 @@ impl EventIterationSchedule {
         &self.stalled_settle
     }
 
-    /// The passes an iteration looks back over for a repeated state: when a
-    /// pass returns to the discrete values and relation memory of one of
-    /// them with the coordinate unchanged, every state of that cycle is a
-    /// fixed point, so its alternating relations sit on a surface where their
-    /// expression is continuous, as a relation inside `smooth` does
-    /// (ME-EVENT-008). Zero disables the rule.
+    /// The passes an iteration looks back over for a repeated state: a pass
+    /// that returns to the discrete values and relation memory of one of them
+    /// with the coordinate unchanged has entered a cycle, which the mode
+    /// search of [`Self::mode_search_relations`] resolves (ME-EVENT-008). Zero
+    /// disables cycle detection, so a cycle runs to the fixed-point cap.
     pub const fn relation_surface_window(&self) -> usize {
         self.relation_surface_window
     }
@@ -305,8 +304,11 @@ impl EventIterationSchedule {
     /// coordinate one of them reads. Each assignment of their sides is
     /// projected, and the first whose relations all agree with the sides
     /// they were given is taken, which is how an MLS Appendix B iteration
-    /// crosses a fold that its passes alone cannot reach. Zero disables the
-    /// search; a larger set keeps the surface rule.
+    /// crosses a fold that its passes alone cannot reach. When every mode was
+    /// searched and none is consistent, each state of the cycle is a fixed
+    /// point on a surface where the relations' expression is continuous, so
+    /// the current side is kept and counted as a relation-surface settle. A
+    /// cycle with more relations than this, or with none, is refused.
     pub const fn mode_search_relations(&self) -> usize {
         self.mode_search_relations
     }

@@ -65,7 +65,7 @@ pub fn msl_sim_output_dt(
     (dt.is_finite() && dt > 0.0).then_some(dt)
 }
 
-pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 4;
+pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 5;
 pub const MODEL_WORKER_RESULT_FILE: &str = "result.json";
 pub const MODEL_WORKER_PARTIAL_RESULT_FILE: &str = "partial_result.json";
 /// Resident-plus-swap ceiling for one persistent MSL model worker.
@@ -857,6 +857,9 @@ pub struct WorkerModelResult {
     /// model was simulated (each ran unshared); absent when none failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_value_proof_failures: Option<u64>,
+    /// Relation settles kept on a coordinate surface (SPEC_0044 ME-EVENT-008),
+    /// summed over roots; absent when none.
+    pub relation_surface_settles: Option<u64>,
     pub ir_dae_file: Option<String>,
     pub ir_solve_file: Option<String>,
     pub ir_solve_error: Option<String>,
@@ -951,7 +954,10 @@ impl WorkerModelResult {
             worst = Some(worst.map_or(counts.rate(), |rate| rate.max(counts.rate())));
         }
         self.projection_fallback_rate = worst;
-        self.projection_fallback_detail = worst.map(|_| report.warnings().join("; "));
+        let surfaces = report.relation_surface_total();
+        self.relation_surface_settles = (surfaces > 0).then_some(surfaces);
+        self.projection_fallback_detail =
+            (worst.is_some() || surfaces > 0).then(|| report.warnings().join("; "));
     }
 
     pub fn phase_failure(
@@ -1019,6 +1025,7 @@ impl WorkerModelResult {
             projection_fallback_detail: None,
             sim_settings: None,
             shared_value_proof_failures: None,
+            relation_surface_settles: None,
             ir_dae_file: None,
             ir_solve_file: None,
             ir_solve_error: None,

@@ -255,8 +255,27 @@ impl SolveRuntime {
                 root_relation_overrides,
                 &mut project_algebraics,
             )?;
-            let surface = on_relation_surface(&mut history, window, y, p, tol);
-            if surface || (!changed && event_iteration_plan_settled(&self.model, y, p)?) {
+            if !changed && event_iteration_plan_settled(&self.model, y, p)? {
+                return self.eval_event_actions(y, p, event_pre_p, t, row_filter);
+            }
+            if !on_relation_surface(&mut history, window, y, p, tol) {
+                continue;
+            }
+            let resumed = self.resolve_relation_cycle(
+                &history,
+                &mut DiscreteRowsSettleInput {
+                    y,
+                    p,
+                    t,
+                    tol,
+                    max_iters,
+                },
+                root_relation_overrides,
+                &mut project_algebraics,
+            )?;
+            if resumed {
+                history.clear();
+            } else {
                 return self.eval_event_actions(y, p, event_pre_p, t, row_filter);
             }
         }
@@ -375,13 +394,13 @@ impl SolveRuntime {
             }
             // A cycle cannot leave on its own; a consistent mode of the
             // cycling relations, when one exists, is the event's answer.
-            let found = self.search_consistent_mode(
+            let resumed = self.resolve_relation_cycle(
                 &history,
                 input,
                 root_relation_overrides,
                 project_algebraics,
             )?;
-            if !found {
+            if !resumed {
                 return Ok(changed_any);
             }
             history.clear();
@@ -405,11 +424,12 @@ impl SolveRuntime {
         input: &mut DiscreteRowsSettleInput<'_>,
         root_relation_overrides: &mut Vec<(usize, f64)>,
         project_algebraics: &mut ProjectAlgebraics<'_>,
-    ) -> Result<bool, RuntimeSolveError> {
+    ) -> Result<ModeSearch, RuntimeSolveError> {
         let limit = self.event_schedule().mode_search_relations();
         let candidates = self.mode_candidates(history, input.p)?;
-        if limit == 0 || candidates.is_empty() || candidates.len() > limit {
-            return Ok(false);
+        let roots = candidates.iter().map(|(root, _)| *root).collect::<Vec<_>>();
+        if candidates.is_empty() || candidates.len() > limit {
+            return Ok(ModeSearch::Unsearched { roots, limit });
         }
         let (base_y, base_p) = (input.y.to_vec(), input.p.to_vec());
         for mode in 0..(1usize << candidates.len()) {
@@ -419,13 +439,46 @@ impl SolveRuntime {
             if self.mode_is_consistent(&candidates, &sides, input, project_algebraics)? {
                 root_relation_overrides
                     .retain(|(root, _)| !candidates.iter().any(|(c, _)| c == root));
-                root_relation_overrides.extend(candidates.iter().map(|(root, _)| *root).zip(sides));
-                return Ok(true);
+                root_relation_overrides.extend(roots.iter().copied().zip(sides));
+                return Ok(ModeSearch::Found);
             }
             input.y.copy_from_slice(&base_y);
             input.p.copy_from_slice(&base_p);
         }
-        Ok(false)
+        Ok(ModeSearch::NoneConsistent { roots })
+    }
+
+    /// Resolve an iteration that entered a cycle (ME-EVENT-008): `true` when
+    /// a consistent mode was pinned and the iteration continues; `false` when
+    /// every joint mode was searched and none is consistent, so every state
+    /// of the cycle is a fixed point and the current side is kept, counted as
+    /// a relation-surface settle. A cycle the bounded search cannot cover is
+    /// refused, naming its relations.
+    fn resolve_relation_cycle(
+        &self,
+        history: &std::collections::VecDeque<(Vec<f64>, Vec<f64>)>,
+        input: &mut DiscreteRowsSettleInput<'_>,
+        root_relation_overrides: &mut Vec<(usize, f64)>,
+        project_algebraics: &mut ProjectAlgebraics<'_>,
+    ) -> Result<bool, RuntimeSolveError> {
+        let search = self.search_consistent_mode(
+            history,
+            input,
+            root_relation_overrides,
+            project_algebraics,
+        )?;
+        match search {
+            ModeSearch::Found => Ok(true),
+            ModeSearch::NoneConsistent { roots } => {
+                crate::runtime::fallbacks::note_relation_surface(&roots);
+                Ok(false)
+            }
+            ModeSearch::Unsearched { roots, limit } => Err(RuntimeSolveError::solve_ir(format!(
+                "event iteration at t={} cycles among relations {roots:?}, which the \
+                 mode search (limit {limit} relations) cannot cover",
+                input.t
+            ))),
+        }
     }
 
     /// Roots whose relation memory differs across the cycle, and every root
@@ -1160,4 +1213,15 @@ fn on_relation_surface(
         history.pop_front();
     }
     repeats
+}
+
+/// What a mode search over a relation cycle found.
+enum ModeSearch {
+    /// A consistent joint mode, now pinned through the relation overrides.
+    Found,
+    /// Every joint mode of these roots was projected and none was consistent.
+    NoneConsistent { roots: Vec<usize> },
+    /// The cycle has no relation candidates, or more than `limit`, so it was
+    /// not searched.
+    Unsearched { roots: Vec<usize>, limit: usize },
 }

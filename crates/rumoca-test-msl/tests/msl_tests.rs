@@ -425,6 +425,9 @@ struct MslModelResult {
     /// Failed single-program shared-value proofs while simulating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shared_value_proof_failures: Option<u64>,
+    /// Relation settles kept on a coordinate surface (ME-EVENT-008).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relation_surface_settles: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sim_trace_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

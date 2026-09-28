@@ -1586,7 +1586,6 @@ impl SolveMeKernel {
         entry: MeEventEntry,
     ) -> Result<MeDiscreteStates, MeError> {
         let continuous_states_before = self.states.clone();
-        let tolerance = self.tolerance.max(1.0e-10);
         match entry.cause {
             MeEventCause::StateEvent => {
                 self.advance_state_to_event_right_limit = false;
@@ -1616,8 +1615,7 @@ impl SolveMeKernel {
                     .map_or(entry.event_time.min(entry.horizon), |(_, event)| {
                         event_boundary_horizon(event, entry.horizon, self.stop_time)
                     });
-                let outcome =
-                    self.process_runtime_event_boundary(event_time, horizon_t, tolerance, event)?;
+                let outcome = self.process_runtime_event_boundary(event_time, horizon_t, event)?;
                 let right_limit_t = outcome.right_limit_t;
                 if coincident_time_event.is_some() {
                     self.stop_schedule.advance_past(event_time);
@@ -1641,7 +1639,6 @@ impl SolveMeKernel {
                 let outcome = self.process_runtime_event_boundary(
                     entry.event_time,
                     event_boundary_horizon(event, entry.horizon, self.stop_time),
-                    tolerance,
                     event,
                 )?;
                 self.advance_state_to_event_right_limit = false;

@@ -64,16 +64,11 @@ struct InitialEventUpdate<'a> {
     initial_event: Option<RuntimeEventStop>,
 }
 
-fn initial_event_right_limit(
-    event: RuntimeEventStop,
-    event_t: f64,
-    horizon_t: f64,
-    tolerance: f64,
-) -> Option<f64> {
+fn initial_event_right_limit(event: RuntimeEventStop, event_t: f64, horizon_t: f64) -> Option<f64> {
     if !event.observe_right_limit || event.pre_mode != EventPreMode::FollowCurrent {
         return None;
     }
-    let right_t = bounded_event_right_limit_time(event_t, horizon_t, tolerance);
+    let right_t = bounded_event_right_limit_time(event_t, horizon_t);
     (right_t > event_t).then_some(right_t)
 }
 
@@ -228,7 +223,7 @@ impl SolveRuntime {
                 action,
             });
         };
-        let right_t = initial_event_right_limit(event, t_start, t_end, tol);
+        let right_t = initial_event_right_limit(event, t_start, t_end);
         // The accepted initial-event value is the left endpoint of delay
         // history. A positive-delay query at the synthetic right-limit time
         // must read that accepted point, not remain in the initialization

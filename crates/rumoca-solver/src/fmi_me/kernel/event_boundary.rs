@@ -29,11 +29,10 @@ impl SolveMeKernel {
         &mut self,
         event_time: f64,
         horizon: f64,
-        tolerance: f64,
         event: RuntimeEventStop,
     ) -> Result<EventBoundaryOutcome, MeError> {
         self.apply_event_time(event_time, event)?;
-        let right_time = bounded_event_right_limit_time(event_time, horizon, tolerance);
+        let right_time = bounded_event_right_limit_time(event_time, horizon);
         let right_limit_t = if event.observe_right_limit
             && event.pre_mode == EventPreMode::FollowCurrent
             && right_time > event_time

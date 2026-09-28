@@ -120,9 +120,21 @@ impl ProjectionFallbackCounts {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectionFallbackReport {
     pub sites: BTreeMap<ProjectionSite, ProjectionFallbackCounts>,
+    /// Event iterations that ended on a relation surface (SPEC_0044
+    /// ME-EVENT-008): each named root cycled between its sides, every side was
+    /// a fixed point of the coordinate, and no joint mode of the cycling
+    /// relations was consistent, so the current side was kept. Counted per
+    /// root.
+    pub relation_surfaces: BTreeMap<usize, u64>,
 }
 
 impl ProjectionFallbackReport {
+    /// Relation settles kept on a coordinate surface, summed over roots.
+    #[must_use]
+    pub fn relation_surface_total(&self) -> u64 {
+        self.relation_surfaces.values().sum()
+    }
+
     /// The sites whose fallback rate exceeds the reporting threshold.
     pub fn over_threshold(
         &self,
@@ -136,7 +148,8 @@ impl ProjectionFallbackReport {
     /// One line per site over the threshold, for a run's warnings.
     #[must_use]
     pub fn warnings(&self) -> Vec<String> {
-        self.over_threshold()
+        let mut lines: Vec<String> = self
+            .over_threshold()
             .map(|(site, counts)| {
                 let breakdown = ProjectionFallback::ALL
                     .iter()
@@ -156,7 +169,20 @@ impl ProjectionFallbackReport {
                     counts.calls
                 )
             })
-            .collect()
+            .collect();
+        if !self.relation_surfaces.is_empty() {
+            let roots = self
+                .relation_surfaces
+                .iter()
+                .map(|(root, count)| format!("root {root} x{count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!(
+                "{} relation settle(s) kept a relation on its coordinate surface ({roots})",
+                self.relation_surface_total()
+            ));
+        }
+        lines
     }
 }
 
@@ -169,6 +195,7 @@ thread_local! {
     /// Sites whose fallback came ahead of their next call (a seed rescue
     /// before its block's projection); that call has already fallen back.
     static PENDING: RefCell<Vec<ProjectionSite>> = const { RefCell::new(Vec::new()) };
+    static SURFACES: RefCell<BTreeMap<usize, u64>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 /// The projection fallback counts on this thread since the last
@@ -177,6 +204,7 @@ thread_local! {
 pub fn projection_fallbacks() -> ProjectionFallbackReport {
     ProjectionFallbackReport {
         sites: COUNTS.with(|counts| counts.borrow().clone()),
+        relation_surfaces: SURFACES.with(|surfaces| surfaces.borrow().clone()),
     }
 }
 
@@ -184,6 +212,7 @@ pub fn reset_projection_fallbacks() {
     COUNTS.with(|counts| counts.borrow_mut().clear());
     ACTIVE.with(|active| active.borrow_mut().clear());
     PENDING.with(|pending| pending.borrow_mut().clear());
+    SURFACES.with(|surfaces| surfaces.borrow_mut().clear());
 }
 
 /// One projection call at a site, counted when it begins; it ends when this
@@ -246,6 +275,16 @@ pub(crate) fn note_fallback(site: ProjectionSite, fallback: ProjectionFallback) 
     });
 }
 
+/// Count one event iteration kept on the relation surface of `roots`.
+pub(crate) fn note_relation_surface(roots: &[usize]) {
+    SURFACES.with(|surfaces| {
+        let mut surfaces = surfaces.borrow_mut();
+        for root in roots {
+            *surfaces.entry(*root).or_default() += 1;
+        }
+    });
+}
+
 /// Single-program sharings whose shared-value proof failed in this process;
 /// each ran its program unshared (SPEC_0043 shared-value segments).
 #[must_use]
@@ -256,6 +295,24 @@ pub fn shared_value_proof_failures() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relation_surface_settles_are_counted_per_root_and_reported() {
+        reset_projection_fallbacks();
+        note_relation_surface(&[4, 9]);
+        note_relation_surface(&[4]);
+        let report = projection_fallbacks();
+        assert_eq!(report.relation_surfaces.get(&4), Some(&2));
+        assert_eq!(report.relation_surface_total(), 3);
+        assert!(
+            report
+                .warnings()
+                .iter()
+                .any(|line| line.contains("coordinate surface (root 4 x2, root 9 x1)"))
+        );
+        reset_projection_fallbacks();
+        assert_eq!(projection_fallbacks().relation_surface_total(), 0);
+    }
 
     #[test]
     fn a_call_counts_once_however_many_fallbacks_it_takes() {

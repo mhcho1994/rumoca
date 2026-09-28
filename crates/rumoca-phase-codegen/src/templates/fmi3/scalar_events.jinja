@@ -413,9 +413,12 @@ static bool rmc_mode_consistent(ModelInstance* m, const size_t* candidates, size
 }
 static {{ prefix }}Status rmc_mode_search(ModelInstance* m, const RmcSurface* s, bool* found) {
     size_t candidates[RMC_MODE_LIMIT > 0 ? RMC_MODE_LIMIT : 1];
-    size_t count = RMC_MODE_LIMIT > 0 ? rmc_mode_candidates(m, s, candidates) : 0;
+    size_t count = rmc_mode_candidates(m, s, candidates);
     *found = false;
-    if (count == 0 || count > RMC_MODE_LIMIT) return {{ prefix }}OK;
+    if (count == 0 || count > RMC_MODE_LIMIT) {
+        RMC_LOG(m, "event iteration cycles among more relations than the mode search covers");
+        return {{ prefix }}Error;
+    }
     double* base = malloc((Y_LEN + P_LEN) * sizeof(double));
     if (!base) { RMC_LOG(m, "the mode search could not allocate its base point"); return {{ prefix }}Error; }
     memcpy(base, m->y, sizeof(m->y));
@@ -437,6 +440,9 @@ static {{ prefix }}Status rmc_mode_search(ModelInstance* m, const RmcSurface* s,
         }
     }
     free(base);
+    /* relation_memory.rs resolve_relation_cycle: no joint mode is consistent,
+       so the current side is kept and reported as a relation-surface settle. */
+    if (!*found) RMC_LOG_AT(m, "relation_surface", "an event iteration kept a relation on its coordinate surface");
     return {{ prefix }}OK;
 }
 
@@ -509,8 +515,11 @@ static {{ prefix }}Status rmc_event_iterate(ModelInstance* m, bool canonicalize)
     for (size_t pass = 0; pass < {{ schedule.fixed_point_cap }} && !settled; ++pass) {
         bool changed = pass > 0 && rmc_advance_lanes(m);
         if (rmc_event_pass(m, &changed) != {{ prefix }}OK) { rmc_surface_close(&surface); return {{ prefix }}Error; }
-        bool on_surface = rmc_on_surface(m, &surface);
-        settled = on_surface || (!changed && rmc_lanes_settled(m));
+        settled = !changed && rmc_lanes_settled(m);
+        if (settled || !rmc_on_surface(m, &surface)) continue;
+        bool found = false;
+        if (rmc_mode_search(m, &surface, &found) != {{ prefix }}OK) { rmc_surface_close(&surface); return {{ prefix }}Error; }
+        if (found) { surface.count = 0; surface.head = 0; } else settled = true;
     }
     rmc_surface_close(&surface);
     if (!settled) { RMC_LOG(m, "event update iteration did not converge"); return {{ prefix }}Error; }
