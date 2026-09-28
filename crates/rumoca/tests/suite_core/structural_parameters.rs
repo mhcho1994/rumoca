@@ -58,6 +58,16 @@ package Structural
   equation
     der(x) = -x;
   end FinalBinding;
+  block SizeOfInput
+    input Real a[:] = {1, 2, 3};
+    parameter Integer n = size(a, 1) - 1;
+    Real b[n + 1];
+  equation
+    b = a*time;
+  end SizeOfInput;
+  model InputExtent
+    SizeOfInput f(a = {1, 2, 3});
+  end InputExtent;
 end Structural;
 "#;
 
@@ -127,4 +137,11 @@ fn a_final_binding_carries_an_ordinary_parameter_into_an_extent() {
             .sum::<usize>()
     });
     assert_eq!(states, 4);
+}
+
+/// `size(a, 1)` reads only the translation-time shape of the input `a`, so a
+/// dimension parameter bound to it is structural without reading `a`'s values.
+#[test]
+fn a_size_of_an_input_array_binds_a_structural_parameter() {
+    assert_eq!(evaluable(&compile("Structural.InputExtent")), ["f.n"]);
 }

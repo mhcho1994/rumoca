@@ -34,7 +34,14 @@ impl<'dae> ExpressionAt<'_, 'dae> {
         arguments: Vec<ExprId<'dae>>,
         result: ValueType,
     ) -> Result<ExprId<'dae>, DaeConstructionError> {
-        let variability = max_variability(self.storage, &arguments, self.provenance)?;
+        // `size(a, k)` reads only the shape of `a`, which MLS §10.1 fixes at
+        // translation, so its variability is the dimension index's alone.
+        let read = if builtin == PureBuiltin::Size {
+            &arguments[1.min(arguments.len())..]
+        } else {
+            &arguments[..]
+        };
+        let variability = max_variability(self.storage, read, self.provenance)?;
         let binder_domain =
             merged_binder_domain(self.storage, arguments.iter().copied(), self.provenance)?;
         let ty = self.storage.intern_type(result, self.provenance)?;
