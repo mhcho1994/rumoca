@@ -1139,11 +1139,12 @@ fn assign_equation_owners(
             .map(|&member| domains.find(member))
             .and_then(|root| owners.get(&root))
             .map(|(clock, _)| *clock);
+        let equation = &flat.equations[row];
         if let Some(owner) = owner {
+            reject_discretized_partition(&equation.residual)?;
             equation_owners.insert(row, owner);
             continue;
         }
-        let equation = &flat.equations[row];
         if let Some(span) = required_clock_owner_span(&equation.residual, flat, sampled_targets) {
             return Err(ToDaeError::unsupported_flat(
                 "clocked equation ownership proof",
@@ -1153,6 +1154,37 @@ fn assign_equation_owners(
         }
     }
     Ok(equation_owners)
+}
+
+/// MLS §16.8.1: a clocked partition whose equations contain `der()` is a
+/// discretized continuous-time partition, integrated between ticks by its
+/// clock's `solverMethod`. Reading its derivative as an ordinary continuous
+/// equation would integrate the state continuously and silently replace the
+/// discretization, so such a partition is refused until it is discretized.
+fn reject_discretized_partition(residual: &Expression) -> Result<(), ToDaeError> {
+    let Some(span) = derivative_span(residual) else {
+        return Ok(());
+    };
+    Err(ToDaeError::unsupported_flat(
+        "discretized clocked partition",
+        "an equation of a clocked partition contains der(); MLS §16.8.1 discretizes such a \
+         partition with its solverMethod, which is not supported",
+        span,
+    ))
+}
+
+fn derivative_span(expression: &Expression) -> Option<Span> {
+    if let Expression::BuiltinCall {
+        function: BuiltinFunction::Der,
+        span,
+        ..
+    } = expression
+    {
+        return Some(*span);
+    }
+    expression_children(expression)
+        .into_iter()
+        .find_map(derivative_span)
 }
 
 fn required_clock_owner_span(

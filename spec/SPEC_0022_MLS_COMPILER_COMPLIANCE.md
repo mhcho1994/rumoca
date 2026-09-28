@@ -871,7 +871,8 @@ areas.
 - Not yet supported: event clocks `Clock(condition)` in Solve lowering (the
   DAE carries them, but no partition activation exists for them);
   `Clock(c, solverMethod)` discretized
-  partitions (§16.8.1); external C noise generators with Integer state
+  partitions (§16.8.1), refused at construction when a clock-owned equation
+  contains `der()` so a partition is never integrated continuously; external C noise generators with Integer state
   arrays (`Xorshift64star`).
 - State-machine support currently covers library-style `Modelica.StateGraph`
   models that lower as ordinary discrete/event equations, with

@@ -418,6 +418,36 @@ end ConnectedFeedback;
     }
 }
 
+/// MLS §16.8.1: an equation that reads a clocked value and contains `der()`
+/// belongs to a discretized partition. Integrating it continuously would
+/// silently replace the clock's discretization, so it is refused.
+#[test]
+fn discretized_partition_is_refused_before_simulation() {
+    let source = r#"
+model Discretized
+  Clock c = Clock(0.1);
+  Real u;
+  Real x(start = 1, fixed = true);
+  Real y;
+equation
+  u = sample(time, c);
+  der(x) = -x + u;
+  y = hold(x);
+end Discretized;
+"#;
+    let Err(error) = Compiler::new()
+        .model("Discretized")
+        .compile_str(source, "Discretized.mo")
+    else {
+        panic!("a discretized partition is refused");
+    };
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("discretized clocked partition"),
+        "{message}"
+    );
+}
+
 /// MLS §16.5 / §9.1: a clocked vector assignment `y = u` and the scalar
 /// connections to its elements define each element of a discrete Real array
 /// by its own row. Each element counter advances on every tick of its own
