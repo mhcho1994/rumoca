@@ -14,6 +14,74 @@
       "retired_by": "near_zero_channel_scaling"
     },
     {
+      "model_name": "Modelica.Clocked.Examples.Elementary.BooleanSignals.Sample2",
+      "kind": "reference_failure",
+      "reason": "OMC a96aa1a-cmake reports an internal backend error for this model (BackendDAETransform.analyseStrongComponentBlock: purely discrete algebraic loop through xor, xor1, sample2 and hold1), so the parity harness records the reference as an error. OMC still writes a result file after the error; the Rumoca trace agrees with it exactly on every shared channel. This is a reference-generation failure, not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "OMC log: Internal error BackendDAETransform.analyseStrongComponentBlock failed (Purely discrete algebraic loops cannot be solved by iterative processes)",
+          "harness omc_simulation_reference status: error",
+          "Rumoca vs the OMC-written result: 14 of 14 shared channels, max abs difference 0 over t in [0, 0.2]"
+        ],
+        "artifact": "msl:Modelica.Clocked.Examples.Elementary.BooleanSignals.Sample2"
+      }
+    },
+    {
+      "model_name": "Modelica.Clocked.Examples.Elementary.BooleanSignals.TickBasedPulse",
+      "kind": "reference_failure",
+      "reason": "OMC a96aa1a-cmake reports an internal error transforming the clocked equation pulse.startOutput = previous(pulse.counter) >= pulse.startTick - 1 to residual form, so the parity harness records the reference as an error. OMC still simulates and writes a result; the Rumoca trace agrees with it exactly and with the tick sequence computed by hand from MLS section 16 (widthTicks=2, periodTicks=4, startTick=2). This is a reference-generation failure, not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "OMC log: Internal error - BackendDAEOptimize.makeEquationToResidualExp failed to transform equation: pulse.startOutput = previous(pulse.counter) >= pulse.startTick - 1 to residual form",
+          "harness omc_simulation_reference status: error",
+          "Rumoca vs the OMC-written result: 3 of 3 shared channels, max abs difference 0 over t in [0, 1]",
+          "pulse.y at ticks 0, 0.1, ..., 0.7: false, true, true, false, false, true, true, false in both traces and by hand"
+        ],
+        "artifact": "msl:Modelica.Clocked.Examples.Elementary.BooleanSignals.TickBasedPulse"
+      }
+    },
+    {
+      "model_name": "Modelica.Clocked.Examples.Elementary.IntegerSignals.Sample2",
+      "kind": "reference_failure",
+      "reason": "OMC a96aa1a-cmake reports an internal backend error for this model (BackendDAETransform.analyseStrongComponentBlock: purely discrete algebraic loop), so the parity harness records the reference as an error. OMC still writes a result file after the error; the Rumoca trace agrees with it exactly on every shared channel. This is a reference-generation failure, not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "OMC log: Internal error BackendDAETransform.analyseStrongComponentBlock failed (Purely discrete algebraic loops cannot be solved by iterative processes)",
+          "harness omc_simulation_reference status: error",
+          "Rumoca vs the OMC-written result: 14 of 14 shared channels, max abs difference 0 over t in [0, 0.2]"
+        ],
+        "artifact": "msl:Modelica.Clocked.Examples.Elementary.IntegerSignals.Sample2"
+      }
+    },
+    {
+      "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.TickBasedSine",
+      "kind": "reference_failure",
+      "reason": "OMC a96aa1a-cmake reports an internal error transforming the clocked equation sine.startOutput = previous(sine.counter) >= sine.startTick - 1 to residual form, so the parity harness records the reference as an error. OMC still simulates and writes a result; the clocked channels of the Rumoca trace agree with it to 2.5e-32, and the continuous sineRef.y agrees at every sampled instant apart from its startTime=0.3 event, where OMC records both the pre- and post-event values. This is a reference-generation failure, not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "OMC log: Internal error - BackendDAEOptimize.makeEquationToResidualExp failed to transform equation: sine.startOutput = previous(sine.counter) >= sine.startTick - 1 to residual form",
+          "harness omc_simulation_reference status: error",
+          "Rumoca vs the OMC-written result: sine.y and assignClock1.u/y max abs difference 2.5e-32 over t in [0, 1]",
+          "sineRef.y identical at t = 0.28, 0.29, 0.3+, 0.31, 0.32, 0.4, 0.5; the only difference is the duplicated OMC row at the t=0.3 startTime event"
+        ],
+        "artifact": "msl:Modelica.Clocked.Examples.Elementary.RealSignals.TickBasedSine"
+      }
+    },
+    {
+      "model_name": "Modelica.Electrical.Analog.Examples.AmplifierWithOpAmpDetailed",
+      "kind": "reference_failure",
+      "reason": "The default OMC reference (tolerance 2e-7) shows a one-cycle excursion of the op-amp internal states between 0.9 and 1.4 ms that the periodic Rumoca trace does not have, giving 11 deviating channels. OMC cannot refine its own reference: the same model at tolerance 1e-10 terminates at t = 1.369e-4 s with 'DASKR-- NONLINEAR SOLVER FAILED TO CONVERGE' and 'Integrator failed'. No converged OMC reference exists, so the pointwise comparison is not identifying; this is not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "11 deviating channels against the default OMC reference; the OMC excursion lies in 0.9-1.4 ms",
+          "OMC at tolerance 1e-10 terminates at t=1.369e-4 s: DASKR nonlinear solver failed to converge, integrator failed",
+          "OMC at default tolerance 2e-7 finishes successfully"
+        ],
+        "commit": "305c8ce49",
+        "artifact": "docs/dev-guide/src/tooling/electrical-coverage.md"
+      }
+    },
+    {
       "model_name": "Modelica.Electrical.Analog.Examples.ChuaCircuit",
       "kind": "model_issue",
       "reason": "The MSL model is explicitly chaotic and runs for 50000 seconds. Exponential trajectory separation makes one solver's pointwise trajectory non-identifying; this model requires invariant or statistical comparison.",
@@ -261,6 +329,77 @@
           "no current, flux, force, inductance, position, or terminal channel deviates"
         ]
       }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.Components.EddyCurrentLosses",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channel of the phase-1 converter (orientation 0, V_m.im structurally zero, V_m.re alternating with the current) is the constant 0, while atan2 is pi for a negative real part. The only non-high channels are these two angles; 678 of 680 are high.",
+      "evidence": {
+        "facts": [
+          "678/0/2 channels (high/minor/deviating)",
+          "deviating: converter_m and converter_e singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC repro: atan2(0, -0.757) = 0 and ComplexMath.arg(Complex(-0.757, 0)) = 0"
+        ],
+        "commit": "6313cdbe3",
+        "artifact": "docs/dev-guide/src/tooling/electrical-coverage.md"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.Components.SinglePhaseInductance",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 single-phase phasors are the constant 0, while atan2 is pi for a negative real part. The only non-high channels are these four angles; 78 of 82 are high.",
+      "evidence": {
+        "facts": [
+          "78/0/4 channels",
+          "deviating: reluctance_m.arg_Phi, reluctance_m.arg_V_m, converter_m.arg_V_m, converter_m.arg_Phi",
+          "OMC repro: atan2(0, -0.757) = 0"
+        ],
+        "commit": "6313cdbe3",
+        "artifact": "docs/dev-guide/src/tooling/electrical-coverage.md"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.QuasiStatic.FluxTubes.Examples.FixedShapes.CuboidSections",
+      "kind": "comparator_limitation",
+      "reason": "Every non-high channel is an arg_* angle, and every difference is the sign of a zero. At t = 0 the phasors are exactly zero, and atan2 of a zero phasor returns 0, pi or -pi according to the signs of its zeros (Rumoca (-0, -0) gives -pi, OMC records 0). cuboidTop and idle lie on the branch cut, pi in one trace and -pi in the other. Pointwise angle comparison is not identifying there.",
+      "evidence": {
+        "facts": [
+          "171/0/11 channels",
+          "11 angles differ at t = 0; 5 of them are pi against -pi throughout",
+          "no non-angle channel differs"
+        ],
+        "commit": "6313cdbe3",
+        "artifact": "docs/dev-guide/src/tooling/electrical-coverage.md"
+      },
+      "retired_by": "angle_branch_aware_comparison"
+    },
+    {
+      "model_name": "Modelica.Magnetic.QuasiStatic.FluxTubes.Examples.FixedShapes.CylinderSections",
+      "kind": "comparator_limitation",
+      "reason": "The only differences are 8 arg_* angles at t = 0, where the flux-tube phasors are exactly zero and atan2 returns 0, pi or -pi according to the signs of the zeros; every later sample agrees. The angle of a zero phasor is undefined.",
+      "evidence": {
+        "facts": [
+          "156/0/8 channels",
+          "8 angles differ at t = 0 only"
+        ],
+        "commit": "6313cdbe3",
+        "artifact": "docs/dev-guide/src/tooling/electrical-coverage.md"
+      },
+      "retired_by": "angle_branch_aware_comparison"
+    },
+    {
+      "model_name": "Modelica.Magnetic.QuasiStatic.FluxTubes.Examples.Leakage.CylinderLeakage",
+      "kind": "comparator_limitation",
+      "reason": "The only non-high channels are two angles of phasors with a negative real part and a zero imaginary part, on the atan2 branch cut: pi in one trace and -pi in the other, the same angle.",
+      "evidence": {
+        "facts": [
+          "232/0/2 channels",
+          "hollowCylinderAxialFlux1.arg_H and magneticFluxSensor.arg_Phi: pi against -pi throughout"
+        ],
+        "commit": "6313cdbe3",
+        "artifact": "docs/dev-guide/src/tooling/electrical-coverage.md"
+      },
+      "retired_by": "angle_branch_aware_comparison"
     },
     {
       "model_name": "Modelica.Mechanics.MultiBody.Examples.Rotational3DEffects.BevelGear1D",
