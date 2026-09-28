@@ -812,6 +812,9 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             Builtin::Sin | Builtin::Cos | Builtin::Sqrt => {
                 self.differentiate_unary_geometry(builtin, arguments, order, provenance)
             }
+            Builtin::Exp | Builtin::Log => {
+                self.differentiate_exponential(builtin, arguments, order, provenance)
+            }
             Builtin::Atan2 => self.differentiate_atan2_builtin(arguments, order, provenance),
             Builtin::LinearSolve => self.differentiate_linear_solve(arguments, order, provenance),
             _ => unreachable!("differentiability preflight rejects this builtin"),

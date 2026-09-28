@@ -84,6 +84,64 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
         Ok(result)
     }
 
+    /// `d(exp u) = exp(u)*u'`, `d2(exp u) = exp(u)*(u'' + u'^2)`;
+    /// `d(log u) = u'/u`, `d2(log u) = (u'' - u'^2/u)/u`.
+    pub(super) fn differentiate_exponential(
+        &mut self,
+        builtin: dae::PureBuiltin,
+        arguments: dae::ExpressionOperands<'source>,
+        order: u8,
+        provenance: dae::DaeProvenance,
+    ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
+        assert!((1..=2).contains(&order));
+        let multiply = dae::BinaryOperator::ElementwiseMultiply;
+        let divide = dae::BinaryOperator::ElementwiseDivide;
+        let argument = arguments.get(0).expect("checked exponential operand");
+        let value = self.differentiation_value(argument, provenance)?;
+        let mut inner = self.differentiate_order(argument, order, provenance)?;
+        if order == 2 {
+            let first = self.differentiate_order(argument, 1, provenance)?;
+            let squared = self.derivative_product(multiply, first, first, provenance)?;
+            inner = if builtin == dae::PureBuiltin::Exp {
+                self.combine_sum(dae::BinaryOperator::Add, inner, squared, provenance)?
+            } else {
+                let scaled = self.derivative_quotient(squared, value, provenance)?;
+                self.combine_sum(dae::BinaryOperator::Subtract, inner, scaled, provenance)?
+            };
+        }
+        let Derivative::Expression(inner) = inner else {
+            return Ok(Derivative::Zero);
+        };
+        let result = if builtin == dae::PureBuiltin::Exp {
+            let exponential = self
+                .target
+                .at(provenance)
+                .builtin(dae::PureBuiltin::Exp, [value])?;
+            self.target
+                .at(provenance)
+                .binary(multiply, exponential, inner)?
+        } else {
+            self.target.at(provenance).binary(divide, inner, value)?
+        };
+        Ok(Derivative::Expression(result))
+    }
+
+    /// `derivative ./ value`, keeping a zero derivative zero.
+    fn derivative_quotient(
+        &mut self,
+        derivative: Derivative<'target>,
+        value: dae::ExprId<'target>,
+        provenance: dae::DaeProvenance,
+    ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
+        let Derivative::Expression(derivative) = derivative else {
+            return Ok(Derivative::Zero);
+        };
+        self.target
+            .at(provenance)
+            .binary(dae::BinaryOperator::ElementwiseDivide, derivative, value)
+            .map(Derivative::Expression)
+    }
+
     fn differentiate_sqrt(
         &mut self,
         argument: dae::ExprId<'source>,
