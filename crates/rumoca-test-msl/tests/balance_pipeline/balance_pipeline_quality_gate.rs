@@ -241,8 +241,23 @@ pub(super) struct MslReferenceBoundaryMigration {
     evidence_git_commit: String,
     evidence_run: String,
     policy_excluded_before: usize,
+    /// Models this boundary adds to the unexcepted non-high roster, each
+    /// naming its open defect (SPEC_0050).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    roster_additions: Vec<MslRosterAddition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     previous: Option<Box<MslReferenceBoundaryMigration>>,
+}
+
+/// A reviewed roster addition: a completion that is neither strict-high nor
+/// covered by a typed exception because of an open Rumoca defect, which the
+/// roster names instead of an exception row hiding it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct MslRosterAddition {
+    model_name: String,
+    cause: String,
+    facts: Vec<String>,
+    owner: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

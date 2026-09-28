@@ -33,6 +33,7 @@ pub(super) fn reviewed_reference_boundary_migration() -> MslReferenceBoundaryMig
     migration.evidence_git_commit = "70fa6612a34b7e6b454672e448a747d6e4bdd440".to_string();
     migration.evidence_run = "typed-trace-exceptions-full".to_string();
     migration.policy_excluded_before = 23;
+    migration.roster_additions = vec![logical_sample_roster_addition()];
     migration
 }
 
@@ -93,6 +94,7 @@ pub(super) fn base_reference_boundary_migration() -> MslReferenceBoundaryMigrati
         evidence_git_commit: "3d76411c1a41a1b27e6a0ecbf1cf3e204f0b47a4".to_string(),
         evidence_run: "multibody-guarded-affine-full-11".to_string(),
         policy_excluded_before: 19,
+        roster_additions: Vec::new(),
         previous: None,
     }
 }
@@ -200,5 +202,33 @@ pub(super) fn push_partial_model_roster_regression_reasons(
             "partial model roster gained unreviewed names: {}",
             added.join(", ")
         ));
+    }
+}
+
+/// The reviewed roster addition of the typed-exception boundary: LogicalSample
+/// simulates since the event-clock lowering, and its trace diverges from the
+/// result OMC writes despite its backend error. A typed exception would hide
+/// that Rumoca defect, so the roster names it until the kernel lane's
+/// root/time-event coincidence rule fixes it.
+pub(super) fn logical_sample_roster_addition() -> MslRosterAddition {
+    MslRosterAddition {
+        model_name: "Modelica.Clocked.Examples.Elementary.ClockSignals.LogicalSample".to_string(),
+        cause:
+            "root/time-event coincidence gap in the rotational clocks plus the ConjunctiveClock \
+                first-tick latch"
+                .to_string(),
+        facts: vec![
+            "rotational_clock_2 angular_offset, update_offset, sub, abs1 and less channels \
+             diverge by 3.0 at t=0.3976"
+                .to_string(),
+            "rotational_clock_1.direction_sign.u and update_direction.y diverge by 6.0 and \
+             sample_conjunctive.y by 3.54 at t=1.4"
+                .to_string(),
+            "OMC a96aa1a-cmake: Internal error BackendDAETransform.analyseStrongComponentBlock \
+             failed (purely discrete algebraic loop through disjunctiveClock.reset_ticked); OMC \
+             still writes a result file"
+                .to_string(),
+        ],
+        owner: "kernel lane (root/time-event coincidence rule, SPEC_0044 ME-EVENT-004)".to_string(),
     }
 }

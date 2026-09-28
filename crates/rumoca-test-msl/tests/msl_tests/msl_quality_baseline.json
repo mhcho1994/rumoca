@@ -396,6 +396,18 @@
     "evidence_git_commit": "70fa6612a34b7e6b454672e448a747d6e4bdd440",
     "evidence_run": "typed-trace-exceptions-full",
     "policy_excluded_before": 23,
+    "roster_additions": [
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.ClockSignals.LogicalSample",
+        "cause": "root/time-event coincidence gap in the rotational clocks plus the ConjunctiveClock first-tick latch",
+        "facts": [
+          "rotational_clock_2 angular_offset, update_offset, sub, abs1 and less channels diverge by 3.0 at t=0.3976",
+          "rotational_clock_1.direction_sign.u and update_direction.y diverge by 6.0 and sample_conjunctive.y by 3.54 at t=1.4",
+          "OMC a96aa1a-cmake: Internal error BackendDAETransform.analyseStrongComponentBlock failed (purely discrete algebraic loop through disjunctiveClock.reset_ticked); OMC still writes a result file"
+        ],
+        "owner": "kernel lane (root/time-event coincidence rule, SPEC_0044 ME-EVENT-004)"
+      }
+    ],
     "previous": {
       "from_quality_gate_version": 6,
       "to_quality_gate_version": 7,
@@ -781,6 +793,7 @@
   },
   "parity_measured": true,
   "unexcepted_non_high_models": [
+    "Modelica.Clocked.Examples.Elementary.ClockSignals.LogicalSample",
     "Modelica.Electrical.Analog.Examples.OpAmps.SignalGenerator",
     "Modelica.Electrical.Machines.Examples.SynchronousMachines.SMEE_Generator"
   ],

@@ -1679,7 +1679,7 @@ fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi
     assert_eq!(baseline.partial_model_names, reviewed_partial_model_names());
     assert_eq!(baseline.tensor_preservation.report_errors, 0);
     assert_eq!(baseline.certified_strict_high_models.len(), 194);
-    assert_eq!(baseline.unexcepted_non_high_models.len(), 2);
+    assert_eq!(baseline.unexcepted_non_high_models.len(), 3);
     assert_eq!(
         baseline.trace_exceptions_sha256.as_deref(),
         Some(
@@ -1884,4 +1884,35 @@ fn quality_context_rejects_baseline_partial_roster_drift() {
         msl_quality_context_mismatch_reason(gate_input_with_sim_rate(8, 10), &baseline, None)
             .expect("baseline count/roster drift must fail closed");
     assert!(reason.contains("count/roster mismatch"), "{reason}");
+}
+
+/// A roster addition must name its defect and be in the roster it adds to;
+/// the checked baseline's LogicalSample addition is reviewed (SPEC_0050).
+#[test]
+fn roster_additions_name_their_defect_and_join_the_roster() {
+    let baseline =
+        load_msl_quality_baseline(&msl_quality_baseline_path()).expect("load checked baseline");
+    assert!(validate_unexcepted_non_high_roster(&baseline).is_ok());
+    assert_eq!(
+        baseline
+            .reference_boundary_migration
+            .as_ref()
+            .map(|migration| migration.roster_additions.clone()),
+        Some(vec![schema_migrations::logical_sample_roster_addition()])
+    );
+
+    let mut unnamed = baseline.clone();
+    unnamed
+        .reference_boundary_migration
+        .as_mut()
+        .unwrap()
+        .roster_additions[0]
+        .cause = " ".to_string();
+    assert!(validate_unexcepted_non_high_roster(&unnamed).is_err());
+
+    let mut outside = baseline;
+    outside
+        .unexcepted_non_high_models
+        .shift_remove("Modelica.Clocked.Examples.Elementary.ClockSignals.LogicalSample");
+    assert!(validate_unexcepted_non_high_roster(&outside).is_err());
 }

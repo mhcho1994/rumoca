@@ -726,23 +726,54 @@ function compareTraceExceptions(current, baseline, improvements, regressions) {
 
 // The roster of completions without strict-high parity or a typed trace
 // exception only shrinks: a model outside the baseline roster is a regression
-// even when the count holds (SPEC_0033 simulation soundness).
+// even when the count holds (SPEC_0033 simulation soundness). A baseline from
+// before the roster existed is compared by the reviewed boundary that
+// introduces it, and a model joins the roster only through the
+// `roster_additions` of a reviewed boundary the comparison crosses, naming the
+// defect (SPEC_0050).
 function compareUnexceptedRoster(current, baseline, improvements, regressions) {
   const currentRoster = modelRosterAt(current, 'current snapshot');
+  if (!Object.hasOwn(baseline, 'unexcepted_non_high_models')) {
+    improvements.push(`unexcepted non-high roster introduced: ${currentRoster.length}`);
+    return;
+  }
   const baselineRoster = new Set(modelRosterAt(baseline, 'baseline snapshot'));
+  const reviewed = crossedRosterAdditions(current, baseline);
   for (const model of currentRoster) {
-    if (!baselineRoster.has(model)) {
+    if (baselineRoster.has(model)) {
+      continue;
+    }
+    if (reviewed.has(model)) {
+      improvements.push(`unexcepted non-high roster: reviewed addition ${model}`);
+    } else {
       regressions.push(`unexcepted non-high roster gained ${model}`);
     }
   }
-  compareMetric(
-    'unexcepted non-high models',
-    currentRoster.length,
-    baselineRoster.size,
-    false,
-    improvements,
-    regressions,
-  );
+  if (reviewed.size === 0) {
+    compareMetric(
+      'unexcepted non-high models',
+      currentRoster.length,
+      baselineRoster.size,
+      false,
+      improvements,
+      regressions,
+    );
+  }
+}
+
+// The roster additions of the current snapshot's reference boundaries that
+// lie above the baseline's quality gate version.
+function crossedRosterAdditions(current, baseline) {
+  const baselineVersion = integerAt(baseline, ['quality_gate_version'], 'baseline snapshot');
+  const models = new Set();
+  let boundary = current.reference_boundary_migration;
+  while (boundary && boundary.to_quality_gate_version > baselineVersion) {
+    for (const addition of boundary.roster_additions ?? []) {
+      models.add(addition.model_name);
+    }
+    boundary = boundary.previous;
+  }
+  return models;
 }
 
 function modelRosterAt(snapshot, name) {

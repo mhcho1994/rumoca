@@ -28,7 +28,41 @@ pub(super) fn validate_unexcepted_non_high_roster(baseline: &MslQualityBaseline)
             "MSL quality baseline lists {model} as both certified strict-high and unexcepted non-high"
         )));
     }
-    Ok(())
+    roster_additions_are_reviewed(baseline)
+}
+
+/// A model joins the roster only through a reviewed boundary that names its
+/// open defect: the cause, the facts, and the owner (SPEC_0050).
+fn roster_additions_are_reviewed(baseline: &MslQualityBaseline) -> io::Result<()> {
+    let mut boundary = baseline.reference_boundary_migration.as_ref();
+    while let Some(migration) = boundary {
+        for addition in &migration.roster_additions {
+            if addition.cause.trim().is_empty()
+                || addition.owner.trim().is_empty()
+                || addition.facts.iter().all(|fact| fact.trim().is_empty())
+            {
+                return Err(io::Error::other(format!(
+                    "MSL roster addition {} must name its cause, facts, and owner",
+                    addition.model_name
+                )));
+            }
+        }
+        boundary = migration.previous.as_deref();
+    }
+    let Some(head) = baseline.reference_boundary_migration.as_ref() else {
+        return Ok(());
+    };
+    match head.roster_additions.iter().find(|addition| {
+        !baseline
+            .unexcepted_non_high_models
+            .contains(&addition.model_name)
+    }) {
+        Some(addition) => Err(io::Error::other(format!(
+            "MSL roster addition {} is not in the baseline roster",
+            addition.model_name
+        ))),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn unexcepted_roster_growth_reasons(
