@@ -55,6 +55,7 @@ mod parameter_conditionals;
 mod reconstruction;
 mod runtime_quotients;
 mod semantic_owners;
+mod sortability;
 mod source;
 mod temporal;
 mod tensor_maps;
@@ -1781,15 +1782,11 @@ fn holonomic_pass_with_observer(
     // Once a candidate reduces, the pass returns it and drops every held or
     // blocked candidate, so only a sorting one could still change the choice.
     let mut unsortable = Vec::new();
+    let mut screen = None;
     for constraint in candidates {
         if reduced.is_some()
             && let Some(base) = base.as_ref()
-            && source.demotion_rows.holonomic_cannot_sort(
-                constraint.owner_ordinal,
-                constraint.lifted_algebraic,
-                base.rows().len(),
-                residue,
-            )
+            && holonomic_cannot_sort(&source, base, &mut screen, &constraint, residue)
         {
             unsortable.push(constraint);
             continue;
@@ -1882,4 +1879,33 @@ fn unmatched_residue(error: &StructuralError) -> Option<usize> {
         return None;
     };
     Some((n_equations - n_matched) + (n_unknowns - n_matched))
+}
+
+/// Whether `constraint` provably cannot sort the pass model: first by the
+/// changed-row count bound, then by the graph-only matching of the rows its
+/// replacement leaves unchanged. The screen's matching is built on first use
+/// and shared by the rest of the pass.
+fn holonomic_cannot_sort<'a>(
+    source: &ReductionSource<'_>,
+    base: &'a crate::incidence::ReusableIncidence,
+    screen: &mut Option<sortability::SortabilityScreen<'a>>,
+    constraint: &HolonomicConstraint,
+    residue: usize,
+) -> bool {
+    if source.demotion_rows.holonomic_cannot_sort(
+        constraint.owner_ordinal,
+        constraint.lifted_algebraic,
+        base.rows().len(),
+        residue,
+    ) {
+        return true;
+    }
+    let readers = constraint
+        .lifted_algebraic
+        .map_or(&[][..], |variable| source.demotion_rows.owners(variable));
+    screen
+        .get_or_insert_with(|| {
+            sortability::SortabilityScreen::new(base, source.demotion_rows.unknown_count())
+        })
+        .cannot_sort(readers.iter().copied().chain([constraint.owner_ordinal]))
 }
