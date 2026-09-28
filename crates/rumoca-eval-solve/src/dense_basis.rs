@@ -73,6 +73,18 @@ impl DenseStageMatrix {
     /// `-pinv(A) * residual` from a thin SVD, truncating singular values at or
     /// below [`Self::threshold`] of the largest. faer runs sequentially here
     /// (no parallel backend is enabled), so the result is deterministic.
+    #[cfg(kani)]
+    fn minimum_norm_solve(&self, residual: &[f64]) -> Result<DVector<f64>, DenseBasisError> {
+        // Kani cannot build faer (global assembly in pulp); the proof build
+        // keeps the nalgebra pseudo-inverse this step replaced.
+        let svd = nalgebra::linalg::SVD::try_new(self.0.clone(), true, true, f64::EPSILON, 4096)
+            .ok_or(DenseBasisError::Decomposition)?;
+        let threshold = self.threshold(svd.singular_values.amax());
+        svd.solve(&(-DVector::from_column_slice(residual)), threshold)
+            .map_err(|_| DenseBasisError::Decomposition)
+    }
+
+    #[cfg(not(kani))]
     fn minimum_norm_solve(&self, residual: &[f64]) -> Result<DVector<f64>, DenseBasisError> {
         let (rows, columns) = self.0.shape();
         let matrix = faer::Mat::<f64>::from_fn(rows, columns, |r, c| self.0[(r, c)]);

@@ -13,6 +13,8 @@ rumoca-core = { workspace = true }
 rumoca-ir-solve = { workspace = true }
 tracing = { workspace = true }
 nalgebra = "0.34"
+
+[target.'cfg(not(kani))'.dependencies]
 faer = { workspace = true }
 
 [dev-dependencies]
