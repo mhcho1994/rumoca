@@ -169,7 +169,9 @@ fn simulate_artifact_auto(
     match diffsol::select_auto_integrator(&artifact, opts, execution_backend.clone())
         .map_err(|error| SimulationDiagnosticError::Solver(error.to_string()))?
     {
-        diffsol::SelectedAutoIntegrator::Bdf => {
+        diffsol::SelectedAutoIntegrator::Bdf(Some(prepared)) => diffsol::simulate_probed(&prepared)
+            .map_err(|err| SimulationDiagnosticError::Solver(err.to_string())),
+        diffsol::SelectedAutoIntegrator::Bdf(None) => {
             simulate_artifact_diffsol(artifact, opts, execution_backend)
         }
         diffsol::SelectedAutoIntegrator::RkLike => {
