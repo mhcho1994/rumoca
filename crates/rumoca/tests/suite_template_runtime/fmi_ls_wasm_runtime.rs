@@ -440,7 +440,11 @@ fn fmi_ls_wasm_fourbar1_matches_native_multibody_trace() {
         return;
     }
     let Some(msl) = msl_root() else {
-        eprintln!("skipping FMI-LS-Wasm Fourbar1 check; MSL checkout not available");
+        // Fails in the strict CI lane; skips only an ordinary local run.
+        super::template_runtime_policy::prerequisites_are_available(
+            "FMI-LS-Wasm Fourbar1 check",
+            &[("MSL 4.1.0 checkout", false)],
+        );
         return;
     };
     let result = rumoca::Compiler::new()
@@ -522,4 +526,41 @@ fn fmi_ls_wasm_vendored_contract_matches_pinned_upstream_bytes() {
             "changed {path}"
         );
     }
+}
+
+/// The checks above skip only in an ordinary local run. The CI wasm lane must
+/// provision every prerequisite and run strict, so a missing tool or MSL
+/// checkout fails there instead of passing silently.
+#[test]
+fn fmi_ls_wasm_ci_lane_provisions_its_prerequisites_and_runs_strict() {
+    let root = workspace_root();
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let flake = fs::read_to_string(root.join("flake.nix")).expect("read flake.nix");
+    assert!(
+        ci.contains("- backend: wasm\n            nix_shell: ci-template-wasm"),
+        "the wasm template-runtime lane must run in the ci-template-wasm shell"
+    );
+    assert!(
+        ci.contains("--backend \"$TEMPLATE_BACKEND\" \\\n            --require-external-tools"),
+        "template-runtime lanes must run with --require-external-tools"
+    );
+    assert!(
+        ci.contains(
+            "- name: Ensure MSL (fmi-ls-wasm Fourbar1 check)\n        if: matrix.backend == 'wasm'"
+        ),
+        "the wasm lane must provide the MSL checkout the Fourbar1 check reads"
+    );
+    let shell = flake
+        .split("devShells.ci-template-wasm =")
+        .nth(1)
+        .and_then(|rest| rest.split("devShells.").next())
+        .expect("flake.nix defines devShells.ci-template-wasm");
+    assert!(
+        shell.contains("pkgs.wasm-tools"),
+        "ci-template-wasm must provide wasm-tools"
+    );
+    assert!(
+        shell.contains("export CC_wasm32_wasip2="),
+        "ci-template-wasm must export CC_wasm32_wasip2"
+    );
 }
