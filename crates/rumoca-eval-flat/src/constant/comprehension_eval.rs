@@ -1,4 +1,4 @@
-//! Array comprehensions `{expr for i in range, ...}` (MLS §10.4.2.1) in
+//! Array comprehensions `{expr for i in range, ...}` (MLS §10.4.1) in
 //! model-scope constant evaluation.
 //!
 //! Each iterator binds its name for the iterations of its own range only, so a

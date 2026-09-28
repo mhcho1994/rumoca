@@ -316,7 +316,7 @@ end InferThroughConversion;
     assert!((value_at(&result, "held", 0.19) - 0.1).abs() < 1.0e-12);
 }
 
-/// MLS §16.9: `firstTick()` is true exactly at the first tick of the clock of
+/// MLS §16.10: `firstTick()` is true exactly at the first tick of the clock of
 /// the partition it is read in, in an equation or a clocked `when` body.
 #[test]
 fn first_tick_is_true_only_at_the_first_tick() {

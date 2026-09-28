@@ -399,7 +399,7 @@ fn conversion_source_lattice(
 /// The partition incidence and clock conversions of declaration bindings.
 ///
 /// A binding `v = expr` of a runtime coordinate is the equation `v = expr`
-/// (MLS §4.4.1), so it joins `v` to the partition of every clocked coordinate
+/// (MLS §4.4.2.1), so it joins `v` to the partition of every clocked coordinate
 /// `expr` reads, and a binding that is itself a clock conversion (MLS §16.5.2)
 /// relates `v`'s partition to its source's the way the equation would.
 pub(super) fn clocked_binding_conversion_edges(

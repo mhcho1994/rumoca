@@ -68,7 +68,7 @@ fn assertion_condition_reads_enumeration_literals() {
     assert!(rejected.contains("unsuitable mode"), "{rejected}");
 }
 
-/// MLS §10.4.2.1: a comprehension in a parameter binding is a constant array;
+/// MLS §10.4.1: a comprehension in a parameter binding is a constant array;
 /// its iterator is constant, so a quotient over it needs no event.
 #[test]
 fn parameter_binding_comprehension_evaluates() {

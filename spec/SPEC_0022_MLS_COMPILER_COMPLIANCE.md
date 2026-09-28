@@ -859,7 +859,7 @@ areas.
   value); a vector `sample` defines clocked discrete Real elements; an MLS
   §12.4.3 multi-result call equation may define discrete receivers (one pure
   call per discrete owner); the condition of an `if` inside a clocked `when`
-  body is a clocked value of the partition; `firstTick()` (§16.9) reads the
+  body is a clocked value of the partition; `firstTick()` (§16.10) reads the
   `previous` of a generated clocked indicator of its partition clock; the
   scalar elements of a discrete Real array may each be defined by their own
   row (`y[1] = u[1]`, a connection `d.u = y[1]`), oriented like whole

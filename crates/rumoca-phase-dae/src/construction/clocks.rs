@@ -17,7 +17,7 @@ pub(super) struct LoweredClocks<'dae> {
     /// Flat expression occurrence names. `Reference::instance_id` carries the
     /// enclosing class occurrence, so it cannot select a referenced coordinate.
     pub(super) by_coordinate: HashMap<VarName, dae::PeriodicClockId<'dae>>,
-    /// MLS §16.9 `firstTick()`: per clock, the `previous` of a generated
+    /// MLS §16.10 `firstTick()`: per clock, the `previous` of a generated
     /// clocked indicator that starts at one and is zero after every tick.
     first_ticks: HashMap<dae::PeriodicClockId<'dae>, dae::PreviousId<'dae>>,
 }
@@ -119,7 +119,7 @@ pub(super) fn lower_clocks<'dae>(
 
 impl<'dae> LoweredClocks<'dae> {
     /// Issue the `firstTick()` indicator of every clock whose partition reads
-    /// it (MLS §16.9: true at the first tick of the clock, false afterwards).
+    /// it (MLS §16.10: true at the first tick of the clock, false afterwards).
     ///
     /// The indicator is a generated clocked discrete Real `f` with `start =
     /// 1` and the partition equation `f = 0`, so `previous(f)` is one exactly
