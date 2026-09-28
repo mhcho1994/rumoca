@@ -202,3 +202,49 @@ end HeldCondition;
     assert!((value_at(&result, "off", 0.9) - 10.5).abs() < 1.0e-6);
     assert!((value_at(&result, "dir", 0.9) - 10.5).abs() < 1.0e-6);
 }
+
+/// A clock array (the MSL `ClockVectorInput`) is a set of connection hubs:
+/// each element carries the clock connected to it into the block.
+#[test]
+fn clock_array_elements_carry_their_connected_clocks() {
+    let source = r#"
+model ClockHub
+  connector ClockIn = input Clock;
+  connector ClockOut = output Clock;
+  block Source
+    input Boolean u;
+    ClockOut y;
+  equation
+    y = Clock(u);
+  end Source;
+  block Counter
+    ClockIn u;
+    Integer n(start = 0);
+  equation
+    when u then
+      n = previous(n) + 1;
+    end when;
+  end Counter;
+  block Hub
+    ClockIn u[2];
+    Counter k[2];
+  equation
+    connect(u[1], k[1].u);
+    connect(u[2], k[2].u);
+  end Hub;
+  Source s1(u = time > 0.2);
+  Source s2(u = time > 0.6);
+  Hub h;
+  Real s(start = 0, fixed = true);
+equation
+  der(s) = 1;
+  connect(s1.y, h.u[1]);
+  connect(s2.y, h.u[2]);
+end ClockHub;
+"#;
+    let result = simulate(source, "ClockHub", 1.0);
+    assert_eq!(value_at(&result, "h.k[1].n", 0.4), 1.0);
+    assert_eq!(value_at(&result, "h.k[2].n", 0.4), 0.0);
+    assert_eq!(value_at(&result, "h.k[1].n", 0.9), 1.0);
+    assert_eq!(value_at(&result, "h.k[2].n", 0.9), 1.0);
+}

@@ -135,6 +135,8 @@ pub(super) fn analyze_clocks(
     let mut aliases = Vec::new();
     let mut derived = Vec::new();
     let mut equation_rows = HashSet::new();
+    let mut element_hubs =
+        std::collections::BTreeMap::<(u32, u32), Vec<(&flat::Variable, Span)>>::new();
     derive_bound_clock_plans(flat, constants, &clocks, &mut plans, &mut event_clocks)?;
     for (row, equation) in flat.equations.iter().enumerate() {
         let residual = static_clock_branch(&equation.residual, constants, &clocks)?;
@@ -149,6 +151,26 @@ pub(super) fn analyze_clocks(
         let rhs = static_clock_branch(rhs, constants, &clocks)?;
         let lhs_clock = whole_clock_reference(lhs, &clocks);
         let rhs_clock = whole_clock_reference(rhs, &clocks);
+        // A connection to one element of a clock array (a `ClockVectorInput`)
+        // aliases that element: every scalar clock connected to it shares its
+        // clock.
+        match (
+            lhs_clock,
+            rhs_clock,
+            clock_element_reference(lhs, &clocks),
+            clock_element_reference(rhs, &clocks),
+        ) {
+            (Some(member), None, None, Some(element))
+            | (None, Some(member), Some(element), None) => {
+                element_hubs
+                    .entry(element)
+                    .or_default()
+                    .push((member, equation.span));
+                equation_rows.insert(row);
+                continue;
+            }
+            _ => {}
+        }
         if let (Some(target), None) = (lhs_clock, rhs_clock)
             && let Some(event) = event_constructor(flat, rhs)?
         {
@@ -181,8 +203,20 @@ pub(super) fn analyze_clocks(
         }
     }
 
+    let mut hub_arrays = HashSet::new();
+    for ((array, _), members) in &element_hubs {
+        hub_arrays.insert(*array);
+        for pair in members.windows(2) {
+            aliases.push((pair[0].0, pair[1].0, pair[1].1));
+        }
+    }
     resolve_clock_definitions(&mut plans, &derived, &aliases, constants, &clocks)?;
     for variable in &clocks.ordered {
+        // A clock array whose elements are only connection hubs has no clock
+        // of its own.
+        if hub_arrays.contains(&variable.instance_id.index()) {
+            continue;
+        }
         if !plans.contains_key(&variable.instance_id) {
             return Err(ToDaeError::unresolved_clock_schedule(
                 variable.name.as_str(),
@@ -1458,6 +1492,37 @@ fn whole_clock_reference<'flat>(
         .is_empty()
         .then(|| clocks.resolve(name.var_name()))
         .flatten()
+}
+
+/// One element of a clock array named by literal one-based subscripts on
+/// every dimension: the array's instance index and the row-major offset.
+fn clock_element_reference(
+    expression: &Expression,
+    clocks: &ClockCoordinates<'_>,
+) -> Option<(u32, u32)> {
+    let Expression::VarRef {
+        name, subscripts, ..
+    } = expression
+    else {
+        return None;
+    };
+    let variable = clocks.resolve(name.var_name())?;
+    if variable.dims.is_empty() || variable.dims.len() != subscripts.len() {
+        return None;
+    }
+    let mut offset = 0_u32;
+    for (subscript, extent) in subscripts.iter().zip(&variable.dims) {
+        let rumoca_core::Subscript::Index { value, .. } = subscript else {
+            return None;
+        };
+        let extent = u32::try_from(*extent).ok()?;
+        let index = u32::try_from(*value).ok()?.checked_sub(1)?;
+        if index >= extent {
+            return None;
+        }
+        offset = offset.checked_mul(extent)?.checked_add(index)?;
+    }
+    Some((variable.instance_id.index(), offset))
 }
 
 fn periodic_constructor(

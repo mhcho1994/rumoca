@@ -227,13 +227,8 @@ fn validate_variable(
     let external_input = is_external_input(flat, name, variable)?;
     if is_predefined_clock_variable(flat, variable)? {
         require_span(variable.source_span, format!("clock declaration `{name}`"))?;
-        if !variable.dims.is_empty() {
-            return Err(ToDaeError::unsupported_flat(
-                "clock ownership proof",
-                format!("clock coordinate `{name}` must be scalar"),
-                variable.source_span,
-            ));
-        }
+        // A clock array (a `ClockVectorInput`) is admitted as a set of
+        // connection hubs; the clock analysis proves every element is one.
         return Ok(PlannedRole::Clock);
     }
     let scalar_type = validate_variable_header(flat, name, variable)?;

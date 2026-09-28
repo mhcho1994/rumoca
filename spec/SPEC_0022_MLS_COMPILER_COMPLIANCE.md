@@ -879,6 +879,10 @@ areas.
   is `startInterval` at the first tick and the time since the previous tick
   afterwards. A clock conversion of an event clock, and a condition that is not
   a Boolean coordinate, are refused at construction.
+- Clock arrays (a `ClockVectorInput`): each element of a clock array is a
+  connection hub that carries the scalar clock connected to it; an element
+  with no connected clock, or a clock array used other than through element
+  connections, has no resolved schedule and is refused.
 - Not yet supported: `Clock(c, solverMethod)` discretized
   partitions (§16.8.1), refused at construction when a clock-owned equation
   contains `der()` so a partition is never integrated continuously; external C noise generators with Integer state
