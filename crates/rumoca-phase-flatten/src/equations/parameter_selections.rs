@@ -11,6 +11,30 @@ use rumoca_ir_ast as ast;
 use rumoca_ir_flat as flat;
 
 use super::build_qualified_name;
+use crate::{Context, FlattenError};
+
+/// MLS 3.7 sections 4.5 and 18.6: a `fixed = false` or `Evaluate = false`
+/// parameter is not evaluable, so a for-equation range reading one has no
+/// translation value (section 8.3.3); refuse it before expansion reads it.
+pub(super) fn refuse_non_evaluable_range(
+    ctx: &Context,
+    indices: &[ast::ForIndex],
+    prefix: &ast::QualifiedName,
+    span: rumoca_core::Span,
+) -> Result<(), FlattenError> {
+    let Some(parameter) = indices.iter().find_map(|index| {
+        crate::boolean_eval::non_evaluable_parameter_read(ctx, &index.range, prefix)
+    }) else {
+        return Ok(());
+    };
+    Err(FlattenError::unsupported_equation(
+        format!(
+            "for-equation range reads non-evaluable parameter `{parameter}` (fixed = false or \
+             Evaluate = false); MLS 3.7 section 8.3.3 evaluates the range at translation"
+        ),
+        span,
+    ))
+}
 
 /// The record of a structural use whose evaluated expressions are `conditions`.
 pub(crate) fn parameter_branch_selection<'a>(

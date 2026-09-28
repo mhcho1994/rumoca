@@ -68,6 +68,25 @@ package Structural
   model InputExtent
     SizeOfInput f(a = {1, 2, 3});
   end InputExtent;
+  model UnfixedDimension
+    parameter Integer n(fixed = false, start = 2);
+    Real x[n](each start = 1, each fixed = true);
+  initial equation
+    n = 2;
+  equation
+    der(x) = -x;
+  end UnfixedDimension;
+  model UnevaluatedRange
+    parameter Integer m = 2 annotation(Evaluate = false);
+    Real x[3](each start = 1, each fixed = true);
+  equation
+    for i in 1:m loop
+      der(x[i]) = -x[i];
+    end for;
+    for i in m + 1:3 loop
+      der(x[i]) = 0;
+    end for;
+  end UnevaluatedRange;
 end Structural;
 "#;
 
@@ -137,6 +156,38 @@ fn a_final_binding_carries_an_ordinary_parameter_into_an_extent() {
             .sum::<usize>()
     });
     assert_eq!(states, 4);
+}
+
+fn refusal(model: &str) -> String {
+    let Err(error) = Compiler::new()
+        .model(model)
+        .compile_str(MODELS, "Structural.mo")
+    else {
+        panic!("{model} must be refused");
+    };
+    format!("{error:?}")
+}
+
+/// MLS 3.7 §4.5, §10.1: a `fixed = false` parameter is not evaluable, so an
+/// extent reading it has no translation value.
+#[test]
+fn a_dimension_reading_a_fixed_false_parameter_is_refused() {
+    let error = refusal("Structural.UnfixedDimension");
+    assert!(
+        error.contains("non-evaluable parameter `n`"),
+        "unexpected refusal: {error}"
+    );
+}
+
+/// MLS 3.7 §18.6, §8.3.3: `Evaluate = false` makes a parameter non-evaluable,
+/// so a for-equation range reading it is refused rather than folded.
+#[test]
+fn a_for_range_reading_an_evaluate_false_parameter_is_refused() {
+    let error = refusal("Structural.UnevaluatedRange");
+    assert!(
+        error.contains("non-evaluable parameter `m`"),
+        "unexpected refusal: {error}"
+    );
 }
 
 /// `size(a, 1)` reads only the translation-time shape of the input `a`, so a

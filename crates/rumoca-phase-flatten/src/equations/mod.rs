@@ -34,8 +34,8 @@ mod der_divergent_branches;
 mod if_equation_alignment;
 mod parameter_selections;
 use der_divergent_branches::{branches_differ_in_der_targets, try_select_parameter_branch};
-use parameter_selections::branches_structurally_equal;
 pub(crate) use parameter_selections::parameter_branch_selection;
+use parameter_selections::{branches_structurally_equal, refuse_non_evaluable_range};
 mod connections_graph;
 mod flattened_equations;
 mod structured_domain;
@@ -515,6 +515,7 @@ pub(crate) fn flatten_equation_with_def_map(
         ast::Equation::For { indices, equations } => {
             // Expand for-equations by iterating over indices (MLS §8.3.3)
             // This now also handles when-equations inside for-loops (MLS §8.3.5)
+            refuse_non_evaluable_range(ctx, indices, prefix, span)?;
             let flattened =
                 expand_for_equation(ctx, indices, equations, prefix, span, &origin, def_map)?;
             Ok(record_structural_range(

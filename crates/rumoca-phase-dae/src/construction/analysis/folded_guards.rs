@@ -228,6 +228,17 @@ fn ordinary_parameters(
         .collect()
 }
 
+/// Whether `name` is a `fixed = false` or `Evaluate = false` parameter.
+fn non_evaluable_parameter(flat: &flat::Model, name: &VarName) -> bool {
+    flat.variables.get(name).is_some_and(|variable| {
+        variable.evaluate_refused
+            || variable
+                .fixed
+                .as_ref()
+                .is_some_and(|fixed| fixed.iter().any(|value| !value))
+    })
+}
+
 /// `found` with every ordinary parameter a member's binding reads, so each
 /// member's binding reads only constants and evaluable parameters.
 fn close_over_bindings(
@@ -238,7 +249,10 @@ fn close_over_bindings(
     let mut closed = HashSet::new();
     let mut pending = found.into_iter().collect::<Vec<_>>();
     while let Some(name) = pending.pop() {
-        if !closed.insert(name.clone()) {
+        // MLS 3.7 sections 4.5 and 18.6: a `fixed = false` or
+        // `Evaluate = false` parameter is never evaluable, so it is never
+        // closed over; flatten refuses a structural use that reads one.
+        if non_evaluable_parameter(flat, &name) || !closed.insert(name.clone()) {
             continue;
         }
         if let Some(binding) = flat

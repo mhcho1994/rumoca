@@ -21,7 +21,7 @@ impl Context {
                 continue;
             }
             let span = instance_source_span(instance_data, tree)?;
-            record_structural_dimension_parameters(self, flat, instance_data, span);
+            record_structural_dimension_parameters(self, flat, instance_data, span)?;
             let Some(flat_var) = flat.variables.get(&var_name) else {
                 continue;
             };
@@ -199,7 +199,7 @@ fn record_structural_dimension_parameters(
     flat: &mut Model,
     instance_data: &ast::InstanceData,
     span: rumoca_core::Span,
-) {
+) -> Result<(), FlattenError> {
     let dimensions = instance_data
         .dims_expr
         .iter()
@@ -212,11 +212,26 @@ fn record_structural_dimension_parameters(
     let scope = ast::QualifiedName {
         parts: parts[..parts.len().saturating_sub(1)].to_vec(),
     };
+    // MLS 3.7 sections 4.5 and 18.6: a `fixed = false` or `Evaluate = false`
+    // parameter is not evaluable, so a dimension reading one has no
+    // translation value (section 10.1).
+    if let Some(parameter) = dimensions.iter().find_map(|dimension| {
+        crate::boolean_eval::non_evaluable_parameter_read(ctx, dimension, &scope)
+    }) {
+        return Err(FlattenError::unresolved_component_dimension(
+            instance_data.qualified_name.to_string(),
+            format!(
+                "the dimension reads non-evaluable parameter `{parameter}` (fixed = false or \
+                 Evaluate = false); MLS 3.7 section 10.1 fixes every dimension at translation"
+            ),
+            span,
+        ));
+    }
     if !dimensions
         .iter()
         .any(|dimension| crate::boolean_eval::reads_parameter(ctx, dimension, &scope))
     {
-        return;
+        return Ok(());
     }
     let selection = crate::equations::parameter_branch_selection(
         flat::StructuralParameterUse::ArrayDimension,
@@ -227,6 +242,7 @@ fn record_structural_dimension_parameters(
     if !selection.references.is_empty() && !flat.parameter_branch_selections.contains(&selection) {
         flat.parameter_branch_selections.push(selection);
     }
+    Ok(())
 }
 
 fn unexpanded_structured_parent_dims(
