@@ -119,12 +119,12 @@ Failure classifications:
 | Automatic trace classification MUST NOT branch on model name, OMC output, or an observed comparison band | trace producer/comparator | Corpus-specific heuristics cannot establish correctness |
 | A run whose comparator stage did not execute, or compared zero models, reports "parity unmeasured", not a number | harness gate, `verify msl-parity` | Missing comparison must be visible, not defaulted |
 | A quoted number MUST state `models_compared` and the skipped/missing counts beside it | reports, review evidence | Partial coverage is part of the claim |
-| Tracked comparator exclusions MUST explain why pointwise OMC comparison is non-identifying; they remain visible and non-strict-high but are not refinement counterexamples | comparator | Oracle-test boundaries must be auditable |
 | An unmeasured cohort run MUST fail its quality gate, not pass with `sim_ok` | harness gate, `verify msl-parity` | A run nobody could check must not read as a green run |
 | The cohort ratchet MUST be strict-high; strict-high MUST contain zero deviation channels | harness gate | One wrong observable falsifies parity |
 | `sim_ok` MUST remain a raw execution count and MUST NOT be called supported, certified, or passing | reports, PRs, specs | Solver completion does not prove semantics |
 | A package or stage simulation pass MUST require a comparable strict-high OMC trace | package pass-rate report | Near, deviation, and absent bands are unsupported |
-| A full Tier 2 gate MUST classify every `sim_ok` as strict-high, tracked exclusion, or typed `trace_nonidentifiable` | harness gate | Every completion needs parity or a reviewed boundary |
+| A full Tier 2 gate MUST classify every `sim_ok` as strict-high or typed-excepted | harness gate | Every completion needs parity or a reviewed boundary |
+| Trace exceptions and the shrink-only soundness roster MUST satisfy [SPEC_0050](SPEC_0050_TRACE_EVIDENCE_CATALOG.md) | comparator, gate | If it compiles, it simulates correctly |
 | Every non-high result without such a boundary MUST be triaged as a refinement counterexample or harness defect | review evidence, issue/PR | Wrong traces falsify the claim |
 | A counterexample MUST yield a general semantic fix or typed profile rejection | compiler/runtime owners | Model exceptions cannot establish correctness |
 | Any actionable counterexample blocks merges, releases, and unrelated capability work until its count is zero | campaign planning, PR/release gates | False success outranks breadth |
@@ -163,6 +163,7 @@ All rows are mandatory; otherwise the gate reports `parity unmeasured`.
 | Table bands equal the reference bands | `band_table_disagreement` |
 | Full cohort can identify every baseline-certified strict-high model | `certified_cohort_regression_reasons` |
 | No baseline-certified strict-high model departed or changed band | `certified_model_regression` |
+| No unexcepted non-high completion is outside the baseline roster | `unexcepted_roster_growth_reasons` |
 | Reference `total_models` equals `sim_target_models` | `load_current_msl_parity_gate_input_required` |
 | Reference has no OMC assertion failures | `load_current_msl_parity_gate_input_required` |
 

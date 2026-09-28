@@ -4,8 +4,10 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod soundness;
 mod speed;
 
+use soundness::render_soundness_section;
 use speed::render_speed_section;
 
 const DEFAULT_RESULTS_DIR: &str = "target/msl/results";
@@ -52,6 +54,11 @@ fn render_pr_comment(results_dir: &Path, baseline_path: Option<&Path>) -> Result
         body.push_str(&summary);
         body.push('\n');
     }
+
+    body.push_str("#### Simulation Soundness Roster\n\n");
+    let baseline = load_quality_baseline(baseline_path)?;
+    body.push_str(&render_soundness_section(results_dir, baseline.as_ref())?);
+    body.push('\n');
 
     append_report_section(
         &mut body,

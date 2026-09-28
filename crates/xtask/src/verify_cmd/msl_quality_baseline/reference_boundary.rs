@@ -12,7 +12,26 @@ pub(super) struct ReferenceBoundaryMigration {
 }
 
 fn reviewed_migration() -> ReferenceBoundaryMigration {
-    let mut migration = previous_reference_boundary_migration();
+    let mut migration = v7_migration();
+    migration.previous = Some(Box::new(migration.clone()));
+    migration.metric.from_quality_gate_version = 7;
+    migration.metric.to_quality_gate_version = 8;
+    migration.metric.change = "typed-trace-exceptions-v1".to_string();
+    migration.metric.strict_high_before = 231;
+    migration.metric.strict_high_after = 231;
+    migration.metric.policy_excluded_after = 23;
+    migration.metric.excluded_strict_high_before = 0;
+    migration.metric.excluded_non_high_before = 0;
+    migration.metric.exclusions_sha256 =
+        "48a9f1b4f6e64f199d2799819b1d889c96bc7a81ca6c2e0e6988c0ca87747046".to_string();
+    migration.evidence_git_commit = "EVIDENCE_COMMIT_PIN".to_string();
+    migration.evidence_run = "typed-trace-exceptions-full".to_string();
+    migration.policy_excluded_before = 23;
+    migration
+}
+
+fn v7_migration() -> ReferenceBoundaryMigration {
+    let mut migration = v6_migration();
     migration.previous = Some(Box::new(migration.clone()));
     migration.metric.from_quality_gate_version = 6;
     migration.metric.to_quality_gate_version = 7;
@@ -31,7 +50,7 @@ fn reviewed_migration() -> ReferenceBoundaryMigration {
     migration
 }
 
-fn previous_reference_boundary_migration() -> ReferenceBoundaryMigration {
+fn v6_migration() -> ReferenceBoundaryMigration {
     let mut migration = base_reference_boundary_migration();
     migration.previous = Some(Box::new(migration.clone()));
     migration.metric.from_quality_gate_version = 5;
@@ -75,7 +94,7 @@ pub(super) fn validate_reference_boundary_migration(
 ) -> Result<()> {
     let expected = match baseline.quality_gate_version {
         MSL_QUALITY_GATE_VERSION => Some(reviewed_migration()),
-        PREVIOUS_REFERENCE_BOUNDARY_VERSION => Some(previous_reference_boundary_migration()),
+        PREVIOUS_REFERENCE_BOUNDARY_VERSION => Some(v7_migration()),
         _ => None,
     };
     ensure!(
@@ -139,7 +158,7 @@ mod tests {
     #[test]
     fn reference_boundary_migration_preserves_all_existing_ratchets() {
         let checked = checked_baseline();
-        for version in [4, 6] {
+        for version in [4, 7] {
             preserves_ratchets_from(&checked, version);
         }
     }
@@ -147,8 +166,7 @@ mod tests {
     fn preserves_ratchets_from(checked: &MslQualityBaselineHeader, version: u64) {
         let mut promoted = checked.clone();
         promoted.quality_gate_version = version;
-        promoted.reference_boundary_migration =
-            (version == 6).then(previous_reference_boundary_migration);
+        promoted.reference_boundary_migration = (version == 7).then(v7_migration);
         assert_eq!(
             choose_baseline(&promoted, checked).unwrap(),
             BaselineChoice::CheckedInMigration
@@ -193,6 +211,7 @@ mod tests {
         assert!(schema_target_reaches_current(4, &baseline));
         assert!(schema_target_reaches_current(5, &baseline));
         assert!(schema_target_reaches_current(6, &baseline));
+        assert!(schema_target_reaches_current(7, &baseline));
         assert!(!schema_target_reaches_current(3, &baseline));
         let migration = baseline.reference_boundary_migration.as_mut().unwrap();
         migration
@@ -200,7 +219,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .metric
-            .to_quality_gate_version = 7;
+            .to_quality_gate_version = 8;
         assert!(!schema_target_reaches_current(4, &baseline));
         assert!(validate_reference_boundary_migration(&baseline).is_err());
     }

@@ -839,15 +839,25 @@ fn load_trace_exclusions_reads_each_entrys_own_reason() {
     let temp = tempfile::tempdir().expect("tempdir");
     let exclusions_file = temp.path().join("trace_exclusions.json");
     let payload = serde_json::json!({
-        "schema": "msl_trace_compare_exclusions",
-        "exclusions": [
+        "schema": crate::msl_tools::common::TRACE_EXCLUSIONS_SCHEMA,
+        "exceptions": [
             {
                 "model_name": "Modelica.Blocks.Examples.Noise.ImpureGenerator",
-                "reason": "stochastic random-input model"
+                "kind": "impure_source",
+                "reason": "stochastic random-input model",
+                "evidence": {
+                    "facts": ["draws from Modelica.Math.Random.Generators"],
+                    "artifact": "msl:Modelica.Blocks.Examples.Noise.ImpureGenerator"
+                }
             },
             {
                 "model_name": "Modelica.Math.Random.Examples.GenerateRandomNumbers",
-                "reason": "wall-clock seeded generator"
+                "kind": "impure_source",
+                "reason": "wall-clock seeded generator",
+                "evidence": {
+                    "facts": ["seeds from the wall clock"],
+                    "artifact": "msl:Modelica.Math.Random.Examples.GenerateRandomNumbers"
+                }
             }
         ]
     });
@@ -880,13 +890,13 @@ fn load_trace_exclusions_reads_each_entrys_own_reason() {
     assert_eq!(exclusions.len(), 2);
     assert_eq!(
         exclusions.get("Modelica.Blocks.Examples.Noise.ImpureGenerator"),
-        Some(&"stochastic random-input model".to_string()),
+        Some(&"impure_source: stochastic random-input model".to_string()),
         "each entry keeps its own reason; one shared constant would attribute a false \
          rationale to every future exclusion"
     );
     assert_eq!(
         exclusions.get("Modelica.Math.Random.Examples.GenerateRandomNumbers"),
-        Some(&"wall-clock seeded generator".to_string())
+        Some(&"impure_source: wall-clock seeded generator".to_string())
     );
 }
 

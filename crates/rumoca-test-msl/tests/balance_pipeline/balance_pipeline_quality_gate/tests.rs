@@ -137,6 +137,9 @@ fn baseline_quality_template() -> MslQualityBaseline {
         runtime_ratio_stats: None,
         runtime_ratio_cohort_models: None,
         certified_strict_high_models: IndexSet::new(),
+        unexcepted_non_high_models: IndexSet::new(),
+        trace_exceptions_sha256: None,
+        evidence_provenance: None,
         trace_accuracy_stats: None,
         tensor_preservation: MslTensorPreservationBaseline {
             models_reported: 0,
@@ -1530,38 +1533,61 @@ fn trace_fixed_denominator_gate_accepts_current_ci_delta() {
 
 #[test]
 fn simulation_soundness_rejects_unclassified_non_high_results() {
-    let parity = MslParityGateInput {
-        total_models: Some(10),
-        omc_version: Some("OpenModelica 1.26.1".to_string()),
-        runtime_context: None,
-        runtime_ratio_stats: None,
-        runtime_model_ratios: IndexMap::new(),
-        trace_accuracy_stats: Some(trace_accuracy_baseline()),
-        omc_assertion_failure_models: 0,
-        omc_assertion_failure_examples: Vec::new(),
-    };
     let mut reasons = Vec::new();
 
     push_trace_soundness_reasons(
         &mut reasons,
         gate_input_with_sim_rate(10, 10),
-        Some(&parity),
+        &baseline_quality_template(),
+        Some(&soundness_parity(trace_accuracy_baseline())),
     );
 
     assert_eq!(reasons.len(), 1);
     assert!(
-        reasons[0].contains(
-            "sim_ok=10 strict_high=8 reviewed_exceptions=0 unclassified=2 overclassified=0"
-        )
+        reasons[0]
+            .contains("sim_ok=10 strict_high=8 typed_exceptions=0 unclassified=2 overclassified=0"),
+        "{reasons:?}"
     );
 }
 
+/// A pointwise non-identifiable completion without a typed exception row is
+/// unclassified; only typed rows and the baseline roster account for a
+/// completion that is not strict-high.
 #[test]
-fn simulation_soundness_accepts_strict_high_and_reviewed_oracle_boundaries() {
+fn simulation_soundness_accepts_typed_exceptions_and_the_baseline_roster_only() {
     let mut trace = trace_accuracy_baseline();
     trace.policy_excluded_models = 1;
     trace.trace_nonidentifiable_models = 1;
-    let parity = MslParityGateInput {
+    let parity = soundness_parity(trace);
+    let mut reasons = Vec::new();
+    push_trace_soundness_reasons(
+        &mut reasons,
+        gate_input_with_sim_rate(10, 10),
+        &baseline_quality_template(),
+        Some(&parity),
+    );
+    assert_eq!(
+        reasons.len(),
+        1,
+        "an untyped non-identifiable completion is unclassified"
+    );
+
+    let baseline = MslQualityBaseline {
+        unexcepted_non_high_models: IndexSet::from_iter(["Nonidentifiable0".to_string()]),
+        ..baseline_quality_template()
+    };
+    let mut reasons = Vec::new();
+    push_trace_soundness_reasons(
+        &mut reasons,
+        gate_input_with_sim_rate(10, 10),
+        &baseline,
+        Some(&parity),
+    );
+    assert!(reasons.is_empty(), "{reasons:?}");
+}
+
+fn soundness_parity(trace: MslTraceAccuracyStatsBaseline) -> MslParityGateInput {
+    MslParityGateInput {
         total_models: Some(10),
         omc_version: Some("OpenModelica 1.26.1".to_string()),
         runtime_context: None,
@@ -1570,16 +1596,7 @@ fn simulation_soundness_accepts_strict_high_and_reviewed_oracle_boundaries() {
         trace_accuracy_stats: Some(trace),
         omc_assertion_failure_models: 0,
         omc_assertion_failure_examples: Vec::new(),
-    };
-    let mut reasons = Vec::new();
-
-    push_trace_soundness_reasons(
-        &mut reasons,
-        gate_input_with_sim_rate(10, 10),
-        Some(&parity),
-    );
-
-    assert!(reasons.is_empty());
+    }
 }
 
 mod parity_cache;

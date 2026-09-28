@@ -5,7 +5,7 @@ use super::common::{
     SIM_STOP_TIME_DEFAULT, TRACE_EXCLUSIONS_FILE_REL, choose_effective_batch_size, get_git_commit,
     get_omc_version, git_worktree_is_dirty, has_fatal_omc_error, load_target_models,
     load_trace_exclusions_file, msl_load_lines, round3, summarize_batch_timings,
-    summarize_omc_error, unix_timestamp_seconds, write_pretty_json,
+    summarize_omc_error, typed_exception_reasons, unix_timestamp_seconds, write_pretty_json,
 };
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
@@ -1436,7 +1436,7 @@ fn load_trace_exclusions(args: &Args, paths: &MslPaths) -> Result<BTreeMap<Strin
     if !file.is_file() {
         return Ok(BTreeMap::new());
     }
-    let exclusions = load_trace_exclusions_file(&file)?;
+    let exclusions = typed_exception_reasons(load_trace_exclusions_file(&file)?);
     if exclusions.is_empty() {
         return Ok(BTreeMap::new());
     }

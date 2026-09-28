@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const EXPECTED_QUALITY_GATE_VERSION = 7;
+const EXPECTED_QUALITY_GATE_VERSION = 8;
 const DEFAULT_CHECKED_IN_BASELINE_PATH = fileURLToPath(
   new URL(
     '../../crates/rumoca-test-msl/tests/msl_tests/msl_quality_baseline.json',
@@ -299,6 +299,8 @@ export function ratchetDecision(current, baseline, checkedInBaseline = null) {
       regressions,
     );
     compareDerivedMetrics(current, comparisonBaseline, improvements, regressions);
+    compareUnexceptedRoster(current, comparisonBaseline, improvements, regressions);
+    compareTraceExceptions(current, comparisonBaseline, improvements, regressions);
     compareRuntimeSpeedups(current, comparisonBaseline, improvements, regressions);
   } else {
     improvements.push(`OMC context: ${comparisonOmc} -> ${currentOmc}`);
@@ -693,6 +695,60 @@ function compareDerivedMetrics(current, baseline, improvements, regressions) {
     improvements,
     regressions,
   );
+}
+
+// The typed trace exception file only changes through a reviewed boundary: a
+// snapshot read under a different file than its baseline is a regression
+// unless its own reference boundary pins that file (SPEC_0050).
+function compareTraceExceptions(current, baseline, improvements, regressions) {
+  const read = nonEmptyStringAt(current, ['trace_exceptions_sha256'], 'current snapshot');
+  const previous = Object.hasOwn(baseline, 'trace_exceptions_sha256')
+    ? nonEmptyStringAt(baseline, ['trace_exceptions_sha256'], 'baseline snapshot')
+    : nonEmptyStringAt(
+      baseline,
+      ['reference_boundary_migration', 'exclusions_sha256'],
+      'baseline snapshot',
+    );
+  if (read === previous) {
+    return;
+  }
+  const pinned = nonEmptyStringAt(
+    current,
+    ['reference_boundary_migration', 'exclusions_sha256'],
+    'current snapshot',
+  );
+  if (pinned === read) {
+    improvements.push(`trace exceptions: reviewed boundary  -> `);
+  } else {
+    regressions.push(`trace exceptions changed without a reviewed boundary:  -> `);
+  }
+}
+
+// The roster of completions without strict-high parity or a typed trace
+// exception only shrinks: a model outside the baseline roster is a regression
+// even when the count holds (SPEC_0033 simulation soundness).
+function compareUnexceptedRoster(current, baseline, improvements, regressions) {
+  const currentRoster = modelRosterAt(current, 'current snapshot');
+  const baselineRoster = new Set(modelRosterAt(baseline, 'baseline snapshot'));
+  for (const model of currentRoster) {
+    if (!baselineRoster.has(model)) {
+      regressions.push(`unexcepted non-high roster gained ${model}`);
+    }
+  }
+  compareMetric(
+    'unexcepted non-high models',
+    currentRoster.length,
+    baselineRoster.size,
+    false,
+    improvements,
+    regressions,
+  );
+}
+
+function modelRosterAt(snapshot, name) {
+  const roster = valueAt(snapshot, ['unexcepted_non_high_models']);
+  assert.equal(Array.isArray(roster), true, `${name}: unexcepted_non_high_models must be an array`);
+  return roster;
 }
 
 function compareMetric(label, current, baseline, higherIsBetter, improvements, regressions) {
