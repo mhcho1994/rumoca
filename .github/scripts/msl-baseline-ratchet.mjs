@@ -718,9 +718,9 @@ function compareTraceExceptions(current, baseline, improvements, regressions) {
     'current snapshot',
   );
   if (pinned === read) {
-    improvements.push(`trace exceptions: reviewed boundary  -> `);
+    improvements.push(`trace exceptions: reviewed boundary ${previous} -> ${read}`);
   } else {
-    regressions.push(`trace exceptions changed without a reviewed boundary:  -> `);
+    regressions.push(`trace exceptions changed without a reviewed boundary: ${previous} -> ${read}`);
   }
 }
 
