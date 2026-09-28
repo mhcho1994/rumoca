@@ -1946,6 +1946,8 @@ fn torn_tangent_evaluators(
     jvp: &solve::ScalarProgramBlock,
     compiled: bool,
 ) -> Rc<[Option<rumoca_eval_solve::TornTangentEvaluator>]> {
+    // One-direction plans all read the same JVP rows; prepare them once.
+    let mut shared = None;
     plan.blocks
         .iter()
         .map(|block| {
@@ -1958,7 +1960,7 @@ fn torn_tangent_evaluators(
                 solve::TornTangentPlan::derive(tearing, jvp)
             }
             .ok()?;
-            rumoca_eval_solve::TornTangentEvaluator::new(plan, jvp).ok()
+            rumoca_eval_solve::TornTangentEvaluator::sharing_directions(plan, jvp, &mut shared).ok()
         })
         .collect()
 }

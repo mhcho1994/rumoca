@@ -23,8 +23,8 @@ use assignment_shape::canonical_assignment_shape_for_output;
 use assignment_shape::non_causal_assignment_operation;
 pub use assignment_shape::tensor_affine::AffineTensorProjection;
 pub use assignment_shape::{
-    derive_target_assignment_shape_for_output, derive_target_assignment_shapes,
-    isolates_through_zero_coefficient, isolator_coefficient_proof, output_reads_y,
+    OutputYReads, derive_target_assignment_shape_for_output, derive_target_assignment_shapes,
+    isolates_through_zero_coefficient, isolator_coefficient_proof, output_y_reads,
 };
 pub use dependency::ScalarProgramYDependency;
 use dependency::assignment_y_dependencies_for_shapes;
