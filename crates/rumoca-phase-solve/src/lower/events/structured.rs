@@ -762,13 +762,8 @@ fn lower_triggered_discrete_value_owner<'dae>(
             None,
         )?;
     }
-    lower_guarded_targets(
-        view,
-        layout,
-        rows,
-        &mut lowered,
-        solve::DiscreteRowRole::Equation,
-    )
+    rows.event_clock_targets.extend(lowered);
+    Ok(())
 }
 
 struct LoweredDiscreteValueBranch<'dae> {

@@ -870,7 +870,11 @@ areas.
   whatever its operands' variability.
 - Event clocks (§16.3 Operator 16.4): `Clock(condition, startInterval)` whose
   condition names a scalar Boolean coordinate ticks when `edge(pre(condition))`
-  becomes true; its partition's rows are guarded updates on the tick,
+  becomes true, once per rise: a condition that stays true through later event
+  iterations or events does not tick it again. Its partition's rows are guarded
+  updates on the tick, ordered over the whole partition so a row observes the
+  tick's values of the rows it reads while `sample(u)` reads `u` at its left
+  limit (§16.5.1), before the tick's own `hold` updates;
   `previous` reads the value of the previous tick, and `interval()` (§16.10)
   is `startInterval` at the first tick and the time since the previous tick
   afterwards. A clock conversion of an event clock, and a condition that is not

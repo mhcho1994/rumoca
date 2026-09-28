@@ -146,7 +146,7 @@ fn first_tick_and_conditions_follow_the_event_clock() {
 model ChangeDetector
   Boolean b = sin(2 * 3.141592653589793 * time) > 0.5;
   Clock c = Clock(b);
-  Integer k = integer(floor(time / 1.5));
+  Integer k = if time >= 1.5 then 1 else 0;
   Integer u(start = 0);
   Boolean changed(start = false);
   Real flag(start = 0);
@@ -167,4 +167,38 @@ end ChangeDetector;
     assert_eq!(value_at(&result, "held", 0.5), 0.0);
     assert_eq!(value_at(&result, "held", 1.5), 0.0);
     assert_eq!(value_at(&result, "held", 2.5), 1.0);
+}
+
+/// The clock ticks once when `edge(pre(b))` rises: `b` staying true through the
+/// later event at 0.5 does not tick it again. The tick samples `s` at its left
+/// limit (MLS §16.5.1), before the tick's own `hold(off)` update, so `dir` is
+/// `a` at the tick and not zero.
+#[test]
+fn an_event_clock_ticks_once_while_its_condition_stays_true() {
+    let source = r#"
+model HeldCondition
+  Boolean b = time > 0.05;
+  Clock c = Clock(b);
+  Real a = 10 * time + 10;
+  discrete Real off(start = 0);
+  discrete Real dir(start = 0);
+  Real s = a - hold(off);
+  Integer n(start = 0);
+  Integer late(start = 0);
+equation
+  off = sample(a, c);
+  dir = sample(s, c);
+  when c then
+    n = previous(n) + 1;
+  end when;
+  when time > 0.5 then
+    late = 1;
+  end when;
+end HeldCondition;
+"#;
+    let result = simulate(source, "HeldCondition", 1.0);
+    assert_eq!(value_at(&result, "late", 0.9), 1.0);
+    assert_eq!(value_at(&result, "n", 0.9), 1.0);
+    assert!((value_at(&result, "off", 0.9) - 10.5).abs() < 1.0e-6);
+    assert!((value_at(&result, "dir", 0.9) - 10.5).abs() < 1.0e-6);
 }

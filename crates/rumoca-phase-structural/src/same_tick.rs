@@ -301,7 +301,6 @@ impl<'dae> SameTickDefinitions<'dae> {
         value_reads: &[dae::ExprId<'dae>],
         condition_reads: &[dae::ConditionId<'dae>],
     ) -> BTreeSet<u32> {
-        let mut pending = Vec::new();
         let mut direct = BTreeSet::new();
         for &value in value_reads {
             collect_same_instant_reads(view, value, &mut direct);
@@ -309,7 +308,18 @@ impl<'dae> SameTickDefinitions<'dae> {
         for &condition in condition_reads {
             collect_condition_same_instant_reads(view, condition, &mut direct);
         }
-        pending.extend(direct.iter().copied());
+        self.variable_read_closure(view, direct)
+    }
+
+    /// The coordinates `seeds` name, alias-followed through the exact
+    /// definitions: everything a reader of `seeds` observes at the tick.
+    #[must_use]
+    pub fn variable_read_closure(
+        &self,
+        view: dae::DaeView<'dae>,
+        seeds: BTreeSet<u32>,
+    ) -> BTreeSet<u32> {
+        let mut pending = seeds.into_iter().collect::<Vec<_>>();
         let mut closure = BTreeSet::new();
         while let Some(variable) = pending.pop() {
             if !closure.insert(variable) {

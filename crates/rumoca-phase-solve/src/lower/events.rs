@@ -51,6 +51,14 @@ pub(super) fn lower_discrete_and_events<'dae>(
     let mut discrete = DiscreteRows::new(view)?;
     lower_discrete_real_equations(view, layout, clocks, &mut discrete)?;
     lower_discrete_value_owners(view, layout, clocks, &mut discrete)?;
+    let mut event_clock_targets = std::mem::take(&mut discrete.event_clock_targets);
+    lower_guarded_targets(
+        view,
+        layout,
+        &mut discrete,
+        &mut event_clock_targets,
+        solve::DiscreteRowRole::Equation,
+    )?;
     let mut event_actions = Vec::new();
     let mut action_conditions = ScalarRows::default();
     lower_event_actions(
@@ -270,6 +278,9 @@ struct DiscreteRows<'dae> {
     /// Exact same-tick definitions (SOLVE-C57), derived once per DAE. Program
     /// granularity consults it while lowering, and the issued order replays it.
     same_tick_definitions: rumoca_phase_structural::SameTickDefinitions<'dae>,
+    /// The guarded targets of every MLS §16.3 event clock, lowered together
+    /// so the same-tick order spans all of an event partition's owners.
+    event_clock_targets: Vec<GuardedTarget<'dae>>,
     /// Clock-owned producers pending SOLVE-C57 same-tick order issuance.
     clocked_producers: Vec<PendingClockedProducer<'dae>>,
     /// The issued clock-partition schedule (SOLVE-C57), filled by
@@ -956,6 +967,7 @@ fn lower_discrete_real_equations<'dae>(
 ) -> Result<(), LowerError> {
     let definitions = resolve_discrete_real_definitions(view)?;
     let mut conditional = Vec::new();
+    let mut event_clocked = Vec::new();
     let mut element_units = BTreeMap::<u32, (dae::VariableId<'dae>, Span, Vec<_>)>::new();
     for (definition, equation) in definitions.into_iter().zip(view.discrete_real_equations()) {
         let Some(definition) = definition else {
@@ -977,7 +989,7 @@ fn lower_discrete_real_equations<'dae>(
                     span,
                 ));
             }
-            conditional.push(EventUpdate {
+            event_clocked.push(EventUpdate {
                 trigger: tick,
                 guard: tick,
                 variable,
@@ -1027,6 +1039,8 @@ fn lower_discrete_real_equations<'dae>(
     for (variable, span, units) in element_units.into_values() {
         lower_unconditional_discrete_real(view, layout, clocks, rows, variable, &units, span)?;
     }
+    let event_clock_targets = guarded_targets_of(view, layout, clocks, &event_clocked)?;
+    rows.event_clock_targets.extend(event_clock_targets);
     lower_guarded_updates(
         view,
         layout,
@@ -1321,6 +1335,16 @@ fn lower_guarded_updates<'dae>(
     updates: &[EventUpdate<'dae>],
     role: solve::DiscreteRowRole,
 ) -> Result<(), LowerError> {
+    let mut targets = guarded_targets_of(view, layout, clocks, updates)?;
+    lower_guarded_targets(view, layout, rows, &mut targets, role)
+}
+
+fn guarded_targets_of<'dae>(
+    view: dae::DaeView<'dae>,
+    layout: &LoweredLayout<'dae>,
+    clocks: &LoweredClocks<'dae>,
+    updates: &[EventUpdate<'dae>],
+) -> Result<Vec<GuardedTarget<'dae>>, LowerError> {
     let mut targets = Vec::<GuardedTarget<'dae>>::new();
     for update in updates {
         let expression = view
@@ -1360,7 +1384,7 @@ fn lower_guarded_updates<'dae>(
             clock,
         )?;
     }
-    lower_guarded_targets(view, layout, rows, &mut targets, role)
+    Ok(targets)
 }
 
 fn lower_guarded_targets<'dae>(
