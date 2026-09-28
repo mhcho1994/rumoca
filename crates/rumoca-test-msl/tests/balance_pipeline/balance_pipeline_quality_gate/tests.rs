@@ -1672,11 +1672,23 @@ fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi
         load_msl_quality_baseline(&msl_quality_baseline_path()).expect("load checked baseline");
     assert_eq!(baseline.quality_gate_version, MSL_QUALITY_GATE_VERSION);
     assert_eq!(baseline.sim_timeout_seconds, SIM_TIMEOUT_SECS);
-    assert_eq!(baseline.flatten_models, 487);
+    assert_eq!(baseline.flatten_models, 493);
     assert_eq!(baseline.partial_models, 13);
     assert_eq!(baseline.partial_model_names, reviewed_partial_model_names());
     assert_eq!(baseline.tensor_preservation.report_errors, 0);
-    assert_eq!(baseline.certified_strict_high_models.len(), 129);
+    assert_eq!(baseline.certified_strict_high_models.len(), 192);
+    assert_eq!(baseline.unexcepted_non_high_models.len(), 6);
+    assert_eq!(
+        baseline.trace_exceptions_sha256.as_deref(),
+        Some(
+            reviewed_reference_boundary_migration()
+                .metric
+                .exclusions_sha256
+                .as_str()
+        ),
+        "the checked baseline names the reviewed exception file"
+    );
+    assert!(baseline.evidence_provenance.is_some());
     assert!(baseline.certified_strict_high_models.contains(
         "Modelica.Electrical.PowerConverters.Examples.ACDC.RectifierCenterTap2mPulse.\
          DiodeCenterTap2mPulse"
@@ -1707,14 +1719,15 @@ fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi
 
     let reference = baseline
         .reference_boundary_migration
-        .expect("reviewed v4-to-v5-to-v6-to-v7 boundaries");
+        .expect("reviewed v4-to-v8 boundary chain");
     assert_eq!(reference, reviewed_reference_boundary_migration());
     assert_eq!(
         reference.metric.strict_high_before,
         reference.metric.strict_high_after
     );
+    // The typed-exception boundary types every reviewed row; it removes none.
     assert_eq!(
-        reference.policy_excluded_before + 2,
+        reference.policy_excluded_before,
         reference.metric.policy_excluded_after
     );
     assert_eq!(reference.metric.excluded_strict_high_before, 0);

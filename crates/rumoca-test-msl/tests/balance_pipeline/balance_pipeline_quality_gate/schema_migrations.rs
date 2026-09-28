@@ -30,7 +30,7 @@ pub(super) fn reviewed_reference_boundary_migration() -> MslReferenceBoundaryMig
     migration.metric.excluded_non_high_before = 0;
     migration.metric.exclusions_sha256 =
         "48a9f1b4f6e64f199d2799819b1d889c96bc7a81ca6c2e0e6988c0ca87747046".to_string();
-    migration.evidence_git_commit = "EVIDENCE_COMMIT_PIN".to_string();
+    migration.evidence_git_commit = "70fa6612a34b7e6b454672e448a747d6e4bdd440".to_string();
     migration.evidence_run = "typed-trace-exceptions-full".to_string();
     migration.policy_excluded_before = 23;
     migration
