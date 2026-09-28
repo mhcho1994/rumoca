@@ -1424,8 +1424,14 @@ impl ProgramLowerer<'_, '_> {
                 }
             }),
             solve::SolveScalarType::Boolean => Ok(match operator {
-                solve::SolveBinaryOperator::And => self.builder.ins().band(lhs, rhs),
-                solve::SolveBinaryOperator::Or => self.builder.ins().bor(lhs, rhs),
+                // MLS §10.3.4 orders `false < true`: the least of two Booleans
+                // is their conjunction and the greatest their disjunction.
+                solve::SolveBinaryOperator::And | solve::SolveBinaryOperator::Min => {
+                    self.builder.ins().band(lhs, rhs)
+                }
+                solve::SolveBinaryOperator::Or | solve::SolveBinaryOperator::Max => {
+                    self.builder.ins().bor(lhs, rhs)
+                }
                 _ => {
                     return Err(CompileError::Backend(
                         "invalid typed Boolean binary operator".into(),

@@ -729,6 +729,51 @@ fn arr_040_min_of_strings_rejected() {
     );
 }
 
+/// Booleans are ordered `false < true`, so `min` and `max` of Booleans are the
+/// conjunction and disjunction, as reductions, as binary calls, and inside a
+/// function body (the `Modelica.Math.BooleanVectors.allTrue` form).
+#[test]
+fn arr_040_boolean_min_max_order_false_before_true() {
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        model M
+            function allTrue
+                input Boolean b[:];
+                output Boolean result = size(b, 1) == 0 or min(b);
+            algorithm
+            end allTrue;
+            function anyTrue
+                input Boolean b[:];
+                output Boolean result = max(b);
+            algorithm
+            end anyTrue;
+            Boolean v[2] = {time > 0.5, time > 2.0};
+            Boolean all = allTrue(v);
+            Boolean any = anyTrue(v);
+            Boolean lo = min(v[1], v[2]);
+            Boolean hi = max(v[1], v[2]);
+            Boolean least = min(v);
+            Boolean greatest = max(v);
+            Real t(start = 0, fixed = true);
+        equation
+            der(t) = 1;
+        end M;
+    "#,
+        "M",
+        1.0,
+    );
+    for (name, expected) in [
+        ("all", 0.0),
+        ("any", 1.0),
+        ("lo", 0.0),
+        ("hi", 1.0),
+        ("least", 0.0),
+        ("greatest", 1.0),
+    ] {
+        assert_eq!(trace.final_value(name), expected, "{name} at t = 1");
+    }
+}
+
 // =============================================================================
 // ARR-020: All arguments of array() must be type compatible expressions
 // =============================================================================

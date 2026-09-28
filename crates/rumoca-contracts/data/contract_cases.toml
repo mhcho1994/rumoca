@@ -2515,6 +2515,13 @@ kind = 'Compile'
 outcome = 'Reject'
 
 [[cases]]
+contract_id = 'ARR-040'
+case_id = 'arr_040_boolean_min_max_order_false_before_true'
+test_file = 'tests/arr_contracts.rs'
+kind = 'Sim'
+outcome = 'Accept'
+
+[[cases]]
 contract_id = 'ARR-041'
 case_id = 'arr_041_diagonal_of_vector_accepted'
 test_file = 'tests/arr_contracts.rs'

@@ -155,6 +155,9 @@ pub(super) fn eval_binary_element(
         (SolveValueKind::Boolean(lhs), SolveValueKind::Boolean(rhs)) => match operator {
             SolveBinaryOperator::And => Ok(SolveValueKind::Boolean(lhs && rhs)),
             SolveBinaryOperator::Or => Ok(SolveValueKind::Boolean(lhs || rhs)),
+            // MLS §10.3.4: `false < true`, so the least is the conjunction.
+            SolveBinaryOperator::Min => Ok(SolveValueKind::Boolean(lhs && rhs)),
+            SolveBinaryOperator::Max => Ok(SolveValueKind::Boolean(lhs || rhs)),
             _ => invalid("evaluate Boolean binary operation", provenance),
         },
         _ => invalid("evaluate binary operation", provenance),

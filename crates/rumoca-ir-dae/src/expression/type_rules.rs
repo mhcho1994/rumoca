@@ -431,6 +431,9 @@ pub(super) fn builtin_result<'dae>(
     if builtin == PureBuiltin::Integer {
         return integer_result(arguments, &first, at);
     }
+    if matches!(builtin, PureBuiltin::Min | PureBuiltin::Max) {
+        return extremum_result(storage, arguments, first, at);
+    }
     expect_numeric(first.scalar_type(), at)?;
     match builtin {
         PureBuiltin::Abs | PureBuiltin::Sign => {
@@ -475,14 +478,6 @@ pub(super) fn builtin_result<'dae>(
             expect_arity(arguments, 1, at)?;
             Ok(ValueType::scalar(first.scalar_type()))
         }
-        PureBuiltin::Min | PureBuiltin::Max if arguments.len() == 1 => {
-            Ok(ValueType::scalar(first.scalar_type()))
-        }
-        PureBuiltin::Min | PureBuiltin::Max => {
-            arguments[1..].iter().try_fold(first, |common, argument| {
-                common_value_type(&common, storage.expr_type(*argument, at)?, at)
-            })
-        }
         PureBuiltin::Zeros
         | PureBuiltin::Ones
         | PureBuiltin::Fill
@@ -499,10 +494,36 @@ pub(super) fn builtin_result<'dae>(
         | PureBuiltin::LinearSolve => {
             unreachable!("array constructors return before numeric builtins")
         }
-        PureBuiltin::NoEvent | PureBuiltin::Integer | PureBuiltin::Homotopy | PureBuiltin::Size => {
+        PureBuiltin::NoEvent
+        | PureBuiltin::Integer
+        | PureBuiltin::Homotopy
+        | PureBuiltin::Size
+        | PureBuiltin::Min
+        | PureBuiltin::Max => {
             unreachable!("type-directed builtins return before numeric dispatch")
         }
     }
+}
+
+/// MLS §10.3.4 (ARR-040): `min` and `max` order Boolean, Integer, and Real
+/// elements, with `false < true` for Boolean. One argument reduces an array to
+/// its element type; several arguments take their common type.
+fn extremum_result(
+    storage: &Storage,
+    arguments: &[ExprId<'_>],
+    first: ValueType,
+    at: DaeProvenance,
+) -> Result<ValueType, DaeConstructionError> {
+    let scalar = first.scalar_type();
+    if scalar != ScalarType::Boolean {
+        expect_numeric(scalar, at)?;
+    }
+    if arguments.len() == 1 {
+        return Ok(ValueType::scalar(scalar));
+    }
+    arguments[1..].iter().try_fold(first, |common, argument| {
+        common_value_type(&common, storage.expr_type(*argument, at)?, at)
+    })
 }
 
 /// MLS §4.9.5.2: `Integer(e)` is the Integer ordinal of an enumeration value,
