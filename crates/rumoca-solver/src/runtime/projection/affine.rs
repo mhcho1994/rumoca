@@ -40,15 +40,7 @@ fn settle_affine_block<M: ImplicitProjectionModel>(
         candidate[index] = 0.0;
     }
     let structure = model.algebraic_projection_block_structure(block_index);
-    let jacobian = algebraic_block_jacobian(
-        model,
-        candidate,
-        p,
-        t,
-        &block.rows,
-        &block.y_indices,
-        structure,
-    )?;
+    let jacobian = affine_block_jacobian(model, candidate, (p, t), block, block_index, structure)?;
     let (row_scales, variable_scales) = algebraic_block_scales(
         model,
         candidate,
@@ -106,7 +98,49 @@ fn settle_affine_block<M: ImplicitProjectionModel>(
         }
         settled = system.project(candidate)?;
     }
+    if structure.is_some() {
+        model.retain_affine_block_jacobian(block_index, system.jacobian);
+    }
     Ok(settled)
+}
+
+/// The block Jacobian at `candidate`, refilled into the matrix the previous
+/// solve of this block retained when it has a structural pattern. Every
+/// structured writer writes only pattern entries, so the retained matrix is
+/// zero outside the pattern and clearing its pattern entries makes it the
+/// fresh zero matrix the fill expects, without clearing the whole block.
+fn affine_block_jacobian<M: ImplicitProjectionModel>(
+    model: &M,
+    candidate: &[f64],
+    (p, t): (&[f64], f64),
+    block: &solve::AlgebraicProjectionBlock,
+    block_index: usize,
+    structure: Option<&solve::JacobianStructure>,
+) -> Result<DMatrix<f64>, RuntimeSolveError> {
+    let shape = (block.rows.len(), block.y_indices.len());
+    let storage = match structure {
+        Some(structure) => model
+            .take_affine_block_jacobian(block_index)
+            .map(|mut retained| {
+                debug_assert_eq!(retained.shape(), shape);
+                let pattern = structure.pattern();
+                for row in 0..shape.0 {
+                    pattern.visit_row_columns(row, |column| retained[(row, column)] = 0.0);
+                }
+                retained
+            }),
+        None => None,
+    }
+    .unwrap_or_else(|| DMatrix::zeros(shape.0, shape.1));
+    algebraic_block_jacobian_in(
+        model,
+        candidate,
+        p,
+        t,
+        (&block.rows, &block.y_indices),
+        structure,
+        storage,
+    )
 }
 
 struct AffineBlockSystem<'a, M> {

@@ -38,7 +38,7 @@ use super::scaling::{
 };
 use super::{
     ImplicitProjectionModel, KernelAnswer, KernelRequest, ProjectionBlockUpdate, RuntimeSolveError,
-    implicit_selected_jacobian_v_rows,
+    TornBlock, implicit_selected_jacobian_v_rows,
 };
 
 use rumoca_eval_solve::projection_policy::{TORN_BACKTRACK_STEPS, TORN_OUTER_MAX_ITERS};
@@ -54,10 +54,11 @@ pub(super) fn project_torn_algebraic_block<M: ImplicitProjectionModel>(
     y: &mut [f64],
     p: &[f64],
     t: f64,
-    tearing: &solve::BlockTearing,
+    block: TornBlock<'_>,
     tol: f64,
     certify_coordinates: bool,
 ) -> Result<Option<ProjectionBlockUpdate>, RuntimeSolveError> {
+    let tearing = block.tearing;
     if tearing.tear_y_indices.len() != tearing.residual_rows.len() {
         return Ok(None);
     }
@@ -112,7 +113,7 @@ pub(super) fn project_torn_algebraic_block<M: ImplicitProjectionModel>(
             y,
             p,
             t,
-            tearing,
+            block,
             &residual,
             &variable_scales,
             tol,
@@ -179,12 +180,13 @@ fn advance_torn_newton<M: ImplicitProjectionModel>(
     y: &mut [f64],
     p: &[f64],
     t: f64,
-    tearing: &solve::BlockTearing,
+    block: TornBlock<'_>,
     residual: &[f64],
     variable_scales: &[f64],
     tol: f64,
     certify_coordinates: bool,
 ) -> Result<TornStep, RuntimeSolveError> {
+    let tearing = block.tearing;
     // A residual that is exactly zero rowwise satisfies every positive scaled
     // tolerance (`scaled_tolerance` never falls below `f64::MIN_POSITIVE`),
     // so the fresh tangent Jacobian's row scales could only confirm
@@ -200,7 +202,7 @@ fn advance_torn_newton<M: ImplicitProjectionModel>(
         return Ok(TornStep::Settled);
     }
     let base = TornValues::save(tearing, y);
-    let Some(jacobian) = reduced_jacobian(model, (&*y, p, t), tearing, certify_coordinates)? else {
+    let Some(jacobian) = reduced_jacobian(model, (&*y, p, t), block, certify_coordinates)? else {
         return Ok(TornStep::Decline);
     };
     let row_scales =
@@ -330,12 +332,13 @@ struct ReducedJacobian {
 fn reduced_jacobian<M: ImplicitProjectionModel>(
     model: &M,
     (y, p, t): (&[f64], &[f64], f64),
-    tearing: &solve::BlockTearing,
+    block: TornBlock<'_>,
     certify_coordinates: bool,
 ) -> Result<Option<ReducedJacobian>, RuntimeSolveError> {
+    let tearing = block.tearing;
     let shape = (tearing.residual_rows.len(), tearing.tear_y_indices.len());
     let exact = match model.linked_kernel(KernelRequest::TornJacobian {
-        tearing,
+        block,
         point: (y, p, t),
     })? {
         KernelAnswer::TornJacobian(exact) => exact,

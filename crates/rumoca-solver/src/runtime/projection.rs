@@ -264,6 +264,17 @@ pub(crate) trait ImplicitProjectionModel {
         None
     }
 
+    /// The Jacobian an earlier affine solve of block `block_index` retained:
+    /// block-shaped and zero at every entry outside the block's structural
+    /// pattern. `None` when the model retains none.
+    fn take_affine_block_jacobian(&self, _block_index: usize) -> Option<DMatrix<f64>> {
+        None
+    }
+
+    /// Retain an affine block Jacobian that is zero outside its structural
+    /// pattern for the next affine solve of block `block_index`.
+    fn retain_affine_block_jacobian(&self, _block_index: usize, _jacobian: DMatrix<f64>) {}
+
     /// The canonical projection block that fallback counts attribute block
     /// `block_index` of this model's plan to; `None` leaves it uncounted.
     fn projection_site(&self, _block_index: usize) -> Option<usize>
@@ -375,9 +386,17 @@ pub(crate) enum KernelRequest<'a> {
     /// tangent plan; declined where the plan declines (a vanished causal
     /// coefficient), and the caller then differences the sweep.
     TornJacobian {
-        tearing: &'a solve::BlockTearing,
+        block: TornBlock<'a>,
         point: (&'a [f64], &'a [f64], f64),
     },
+}
+
+/// A torn projection block: its index among the calling model's projection
+/// blocks (the index `project_algebraic_block` receives) and its tearing.
+#[derive(Clone, Copy)]
+pub(crate) struct TornBlock<'a> {
+    pub(crate) index: usize,
+    pub(crate) tearing: &'a solve::BlockTearing,
 }
 
 /// The answer to a [`KernelRequest`].
@@ -752,14 +771,18 @@ fn try_torn_algebraic_block<M: ImplicitProjectionModel>(
     y: &mut [f64],
     p: &[f64],
     t: f64,
-    block: &solve::AlgebraicProjectionBlock,
+    (block_index, block): (usize, &solve::AlgebraicProjectionBlock),
     tol: f64,
     certify_coordinates: bool,
 ) -> Result<Option<ProjectionBlockUpdate>, RuntimeSolveError> {
     let Some(tearing) = block.tearing.as_ref() else {
         return Ok(None);
     };
-    tearing::project_torn_algebraic_block(model, y, p, t, tearing, tol, certify_coordinates)
+    let block = TornBlock {
+        index: block_index,
+        tearing,
+    };
+    tearing::project_torn_algebraic_block(model, y, p, t, block, tol, certify_coordinates)
 }
 
 fn project_algebraic_block<M: ImplicitProjectionModel>(
@@ -813,8 +836,15 @@ fn project_algebraic_block<M: ImplicitProjectionModel>(
     // and corpus-pin gates rather than by any runtime cross-check (there is no
     // second ground truth to compare against, and re-solving densely would give
     // back the cost the tearing removes).
-    if let Some(update) = try_torn_algebraic_block(model, y, p, t, block, tol, certify_coordinates)?
-    {
+    if let Some(update) = try_torn_algebraic_block(
+        model,
+        y,
+        p,
+        t,
+        (block_index, block),
+        tol,
+        certify_coordinates,
+    )? {
         return Ok(update);
     }
     if block.tearing.is_some() {

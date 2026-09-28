@@ -1251,42 +1251,28 @@ impl SolveRuntime {
     /// The reduced tear Jacobian of a torn block from its tangent plan (see
     /// [`KernelRequest::TornJacobian`](crate::runtime::projection::KernelRequest)):
     /// `None` when the block has no plan, and a singular answer when a causal
-    /// coefficient vanishes at this point.
+    /// coefficient vanishes at this point. `index` is the block's position in
+    /// the algebraic projection plan, the same index its tangent plan was
+    /// issued under, so the lookup is direct.
     pub(crate) fn torn_tangent_jacobian(
         &self,
+        index: usize,
         tearing: &solve::BlockTearing,
         y: &[f64],
         p: &[f64],
         t: f64,
     ) -> Result<Option<Option<rumoca_eval_solve::TornTangentJacobian>>, RuntimeSolveError> {
-        if self.torn_tangents.iter().all(Option::is_none) {
-            return Ok(None);
-        }
-        // Projection blocks are borrowed from this runtime's plan, so a block
-        // is found by identity; the structural comparison serves a caller
-        // holding a copy of the plan.
-        let blocks = &self
-            .model
-            .problem
-            .continuous
-            .algebraic_projection_plan
-            .blocks;
-        let index = blocks
-            .iter()
-            .position(|block| {
-                block
-                    .tearing
-                    .as_ref()
-                    .is_some_and(|own| std::ptr::eq(own, tearing))
-            })
-            .or_else(|| {
-                blocks
-                    .iter()
-                    .position(|block| block.tearing.as_ref() == Some(tearing))
-            });
-        let evaluator = index
-            .and_then(|index| self.torn_tangents.get(index))
-            .and_then(Option::as_ref);
+        debug_assert!(
+            self.model
+                .problem
+                .continuous
+                .algebraic_projection_plan
+                .blocks
+                .get(index)
+                .is_some_and(|block| block.tearing.as_ref() == Some(tearing)),
+            "a torn block index names the plan block that owns its tearing"
+        );
+        let evaluator = self.torn_tangents.get(index).and_then(Option::as_ref);
         let Some(evaluator) = evaluator else {
             return Ok(None);
         };

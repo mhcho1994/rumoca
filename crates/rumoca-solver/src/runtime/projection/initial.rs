@@ -864,6 +864,24 @@ pub(super) fn algebraic_block_jacobian(
     y_indices: &[usize],
     structure: Option<&solve::JacobianStructure>,
 ) -> Result<DMatrix<f64>, RuntimeSolveError> {
+    let jacobian = DMatrix::<f64>::zeros(rows.len(), y_indices.len());
+    algebraic_block_jacobian_in(model, y, p, t, (rows, y_indices), structure, jacobian)
+}
+
+/// [`algebraic_block_jacobian`] filled into `jacobian`, which must be block-shaped
+/// and zero wherever a fresh zero matrix would be read: everywhere without a
+/// structure, and at every entry with one, since every structured writer
+/// writes only pattern entries. A reused matrix that is zero outside the
+/// pattern therefore needs only its pattern entries cleared.
+pub(super) fn algebraic_block_jacobian_in(
+    model: &dyn ImplicitProjectionModel,
+    y: &[f64],
+    p: &[f64],
+    t: f64,
+    (rows, y_indices): (&[usize], &[usize]),
+    structure: Option<&solve::JacobianStructure>,
+    mut jacobian: DMatrix<f64>,
+) -> Result<DMatrix<f64>, RuntimeSolveError> {
     if let Some(structure) = structure {
         validate_projection_structure(
             structure.pattern(),
@@ -872,7 +890,7 @@ pub(super) fn algebraic_block_jacobian(
             "algebraic",
         )?;
     }
-    let mut jacobian = DMatrix::<f64>::zeros(rows.len(), y_indices.len());
+    debug_assert_eq!(jacobian.shape(), (rows.len(), y_indices.len()));
     if let Some(structure) = structure
         && model.eval_prepared_implicit_jacobian(
             structure,
