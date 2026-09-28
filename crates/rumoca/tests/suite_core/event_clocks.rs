@@ -288,3 +288,35 @@ end ShiftedEventClock;
     assert!((value_at(&result, "held", 2.5) - (2.0 + 1.0 / 12.0)).abs() < 1.0e-6);
     assert!((value_at(&result, "held", 3.5) - (3.0 + 1.0 / 12.0)).abs() < 1.0e-6);
 }
+
+/// MLS §16.3: with `b(start = true)` and `b` true at the start, `pre(b)` never
+/// rises at t = 0, so the clock does not tick there; its first tick is the
+/// first later rise of `b`, at 0.75, and the next at 1.75.
+#[test]
+fn an_event_clock_whose_condition_starts_true_first_ticks_at_its_next_rise() {
+    let source = r#"
+model StartsTrue
+  Real s(start = 0, fixed = true);
+  Boolean b(start = true);
+  Clock c = Clock(b);
+  Integer n(start = 0);
+  Real y(start = -1);
+  Real held;
+equation
+  der(s) = 1;
+  b = cos(2 * 3.141592653589793 * time) > 0;
+  when c then
+    n = previous(n) + 1;
+    y = sample(s);
+  end when;
+  held = hold(y);
+end StartsTrue;
+"#;
+    let result = simulate(source, "StartsTrue", 2.0);
+    for (time, ticks) in [(0.0, 0.0), (0.7, 0.0), (0.8, 1.0), (1.7, 1.0), (1.8, 2.0)] {
+        assert_eq!(value_at(&result, "n", time), ticks, "n at {time}");
+    }
+    assert_eq!(value_at(&result, "held", 0.7), -1.0);
+    assert!((value_at(&result, "held", 0.8) - 0.75).abs() < 1.0e-6);
+    assert!((value_at(&result, "held", 1.8) - 1.75).abs() < 1.0e-6);
+}
