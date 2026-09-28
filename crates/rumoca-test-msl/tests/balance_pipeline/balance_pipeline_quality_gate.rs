@@ -1,3 +1,5 @@
+// SPEC_0021 file-size exception - split plan: move the soundness roster and reviewed-boundary checks into balance_pipeline_quality_gate/soundness.rs, leaving the stage and trace floor checks here; tracked as MSL gate cleanup debt (SPEC_0021 follow-up).
+
 mod cache;
 mod certified_cohort;
 mod compiler_contract_migration;

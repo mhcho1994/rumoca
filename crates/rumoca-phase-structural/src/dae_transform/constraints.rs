@@ -1,3 +1,5 @@
+// SPEC_0021 file-size exception - split plan: extract the piecewise-guard and relation-event admission preflights into constraints/guards.rs, leaving the singular-system constraint recognizers here; tracked as structural cleanup debt (SPEC_0021 follow-up).
+
 //! Recognize the singular-system constraints this phase is allowed to reduce.
 //!
 //! The reduction these preflights gate is Pantelides differentiation with
