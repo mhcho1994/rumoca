@@ -4453,6 +4453,7 @@ dependencies = [
 name = "rumoca-eval-solve"
 version = "0.10.1"
 dependencies = [
+ "faer",
  "indexmap 2.14.0",
  "nalgebra",
  "rumoca-core",

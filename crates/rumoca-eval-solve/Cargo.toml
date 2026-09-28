@@ -13,6 +13,7 @@ rumoca-core = { workspace = true }
 rumoca-ir-solve = { workspace = true }
 tracing = { workspace = true }
 nalgebra = "0.34"
+faer = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

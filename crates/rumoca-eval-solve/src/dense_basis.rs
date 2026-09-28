@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests;
 
-use nalgebra::{DMatrix, DVector, Dyn, linalg::SVD};
+use nalgebra::{DMatrix, DVector};
 
 /// Column policy supplied by the semantic owner. Higher priorities remain free
 /// when a lower-priority regular dependent basis exists.
@@ -63,15 +63,37 @@ impl DenseStageMatrix {
         if self.0.nrows() == 0 || self.0.ncols() == 0 {
             return Ok(vec![0.; self.0.ncols()]);
         }
-        let decomposition = decompose(self.0.clone())?;
-        let threshold = self.threshold(decomposition.singular_values.amax());
-        let step = decomposition
-            .solve(&(-DVector::from_column_slice(residual)), threshold)
-            .map_err(|_| DenseBasisError::Decomposition)?;
+        let step = self.minimum_norm_solve(residual)?;
         if !step.iter().all(|x| x.is_finite()) {
             return Err(DenseBasisError::NonFinite);
         }
         Ok(step.as_slice().to_vec())
+    }
+
+    /// `-pinv(A) * residual` from a thin SVD, truncating singular values at or
+    /// below [`Self::threshold`] of the largest. faer runs sequentially here
+    /// (no parallel backend is enabled), so the result is deterministic.
+    fn minimum_norm_solve(&self, residual: &[f64]) -> Result<DVector<f64>, DenseBasisError> {
+        let (rows, columns) = self.0.shape();
+        let matrix = faer::Mat::<f64>::from_fn(rows, columns, |r, c| self.0[(r, c)]);
+        let svd = matrix
+            .thin_svd()
+            .map_err(|_| DenseBasisError::Decomposition)?;
+        let (u, s, v) = (svd.U(), svd.S().column_vector(), svd.V());
+        let largest = (0..s.nrows()).map(|k| s[k].abs()).fold(0.0, f64::max);
+        let threshold = self.threshold(largest);
+        let mut step = DVector::zeros(columns);
+        for k in 0..s.nrows() {
+            if s[k] <= threshold {
+                continue;
+            }
+            let projection: f64 = (0..rows).map(|r| u[(r, k)] * -residual[r]).sum();
+            let weight = projection / s[k];
+            for c in 0..columns {
+                step[c] += v[(c, k)] * weight;
+            }
+        }
+        Ok(step)
     }
 
     /// Choose a complete dependent basis and return its independent complement.
@@ -240,10 +262,6 @@ fn subtract_direction(vector: &mut DVector<f64>, direction: &DVector<f64>) {
     for _ in 0..2 {
         vector.axpy(-direction.dot(vector), direction, 1.);
     }
-}
-
-fn decompose(matrix: DMatrix<f64>) -> Result<SVD<f64, Dyn, Dyn>, DenseBasisError> {
-    SVD::try_new(matrix, true, true, f64::EPSILON, 4096).ok_or(DenseBasisError::Decomposition)
 }
 
 fn remainder(mut vector: DVector<f64>, basis: &[DVector<f64>]) -> DVector<f64> {
