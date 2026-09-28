@@ -4,7 +4,7 @@ use rumoca_eval_dae::FunctionCallContext;
 use rumoca_ir_dae as dae;
 
 use super::{
-    DifferentiationFacts, EqualityAnchor, Visit, can_materialize_holonomic_value,
+    DifferentiationFacts, EqualityAnchor, Visit, VisitMarks, can_materialize_holonomic_value,
     can_materialize_holonomic_value_in_context, has_invariant_subscripts, is_differentiable_binary,
     is_differentiable_builtin, projected_element,
 };
@@ -13,9 +13,9 @@ pub(super) fn has_state_only_first_derivative<'dae>(
     view: dae::DaeView<'dae>,
     facts: &DifferentiationFacts,
     expression: dae::ExprId<'dae>,
-    visited: &mut [Visit],
-    state_visited: &mut [Visit],
-    value_visited: &mut [Visit],
+    visited: &mut VisitMarks,
+    state_visited: &mut VisitMarks,
+    value_visited: &mut VisitMarks,
 ) -> bool {
     StateDerivativeWalk {
         view,
@@ -30,9 +30,9 @@ pub(super) fn has_state_only_first_derivative<'dae>(
 struct StateDerivativeWalk<'facts, 'dae> {
     view: dae::DaeView<'dae>,
     facts: &'facts DifferentiationFacts,
-    visited: &'facts mut [Visit],
-    state_visited: &'facts mut [Visit],
-    value_visited: &'facts mut [Visit],
+    visited: &'facts mut VisitMarks,
+    state_visited: &'facts mut VisitMarks,
+    value_visited: &'facts mut VisitMarks,
 }
 
 impl<'dae> StateDerivativeWalk<'_, 'dae> {

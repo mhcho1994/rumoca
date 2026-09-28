@@ -29,17 +29,94 @@ pub fn for_each_expression<'dae>(
 /// when the expression is already an owned leaf for the query. Shared nodes
 /// are visited once. This keeps dependency selection at the checked DAE
 /// boundary without requiring consumers to reproduce the expression grammar.
-///
-/// A query that walks many roots against one DAE should own an
-/// [`ExpressionTraversal`] and call [`ExpressionTraversal::visit_pruned`]
-/// instead: this entry point sizes a fresh visited set per call, which costs
-/// the whole arena on every root.
+/// The visited set is this thread's shared stamp table, so a call costs only
+/// the nodes it reaches; a multi-root pass uses an [`ExpressionTraversal`].
 pub fn for_each_expression_pruned<'dae>(
     dae: DaeView<'dae>,
     root: ExprId<'dae>,
-    visit: impl FnMut(ExprId<'dae>, ExpressionView<'dae>) -> bool,
+    mut visit: impl FnMut(ExprId<'dae>, ExpressionView<'dae>) -> bool,
 ) {
-    ExpressionTraversal::new().visit_pruned(dae, [root], visit);
+    with_shared_stamps(dae, |stamps| {
+        walk_pruned(dae, stamps, &mut vec![root], |id, node| {
+            Some(visit(id, node))
+        });
+    });
+}
+
+/// Walk `pending`, last first, marking each expression in `stamps`' open pass.
+/// The visitor answers `Some(true)` to descend, `Some(false)` to prune, and
+/// `None` to stop; the walk returns whether it stopped.
+fn walk_pruned<'dae>(
+    dae: DaeView<'dae>,
+    stamps: &mut StampTable,
+    pending: &mut Vec<ExprId<'dae>>,
+    mut visit: impl FnMut(ExprId<'dae>, ExpressionView<'dae>) -> Option<bool>,
+) -> bool {
+    while let Some(expression) = pending.pop() {
+        if !stamps.mark(expression) {
+            continue;
+        }
+        let node = dae
+            .expression(expression)
+            .expect("a branded expression identity resolves in its owning DAE");
+        match visit(expression, node) {
+            Some(true) => push_children(dae, node.operation(), pending),
+            Some(false) => {}
+            None => return true,
+        }
+    }
+    false
+}
+
+/// Generation-stamped visited marks: stamp `0` is never visited, and each pass
+/// marks with a fresh generation, so opening a pass never clears the table
+/// (except after the generation counter wraps).
+#[derive(Debug, Default)]
+struct StampTable {
+    stamps: Vec<u32>,
+    generation: u32,
+}
+
+impl StampTable {
+    fn begin_pass(&mut self, len: usize) {
+        if self.stamps.len() < len {
+            self.stamps.resize(len, 0);
+        }
+        self.generation = self.generation.checked_add(1).unwrap_or_else(|| {
+            self.stamps.fill(0);
+            1
+        });
+    }
+
+    /// Mark `expression` in the open pass; `false` when it already was.
+    fn mark(&mut self, expression: ExprId<'_>) -> bool {
+        let stamp = &mut self.stamps[expression.index() as usize];
+        (*stamp != self.generation) && {
+            *stamp = self.generation;
+            true
+        }
+    }
+}
+
+thread_local! {
+    /// The table single-root walks share; a walk nested in another walk's
+    /// visitor finds it borrowed and uses a table of its own.
+    static SHARED_STAMPS: std::cell::RefCell<StampTable> = std::cell::RefCell::default();
+}
+
+fn with_shared_stamps<R>(dae: DaeView<'_>, walk: impl FnOnce(&mut StampTable) -> R) -> R {
+    SHARED_STAMPS.with(|shared| {
+        let (mut borrowed, mut own);
+        let table: &mut StampTable = if let Ok(table) = shared.try_borrow_mut() {
+            borrowed = table;
+            &mut borrowed
+        } else {
+            own = StampTable::default();
+            &mut own
+        };
+        table.begin_pass(dae.expression_count());
+        walk(table)
+    })
 }
 
 /// Reusable workspace for pruned expression walks over one DAE.
@@ -57,8 +134,7 @@ pub fn for_each_expression_pruned<'dae>(
 /// node alone, so a second arrival could only repeat the first answer.
 #[derive(Debug, Default)]
 pub struct ExpressionTraversal<'dae> {
-    stamps: Vec<u32>,
-    generation: u32,
+    stamps: StampTable,
     pending: Vec<ExprId<'dae>>,
 }
 
@@ -67,8 +143,10 @@ impl<'dae> ExpressionTraversal<'dae> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            stamps: Vec::new(),
-            generation: 0,
+            stamps: StampTable {
+                stamps: Vec::new(),
+                generation: 0,
+            },
             pending: Vec::new(),
         }
     }
@@ -84,41 +162,13 @@ impl<'dae> ExpressionTraversal<'dae> {
         roots: impl IntoIterator<Item = ExprId<'dae>>,
         mut visit: impl FnMut(ExprId<'dae>, ExpressionView<'dae>) -> bool,
     ) {
-        let generation = self.begin_pass(dae);
+        self.stamps.begin_pass(dae.expression_count());
         self.pending.clear();
         self.pending.extend(roots);
         self.pending.reverse();
-        while let Some(expression) = self.pending.pop() {
-            let index = expression.index() as usize;
-            if self.stamps[index] == generation {
-                continue;
-            }
-            self.stamps[index] = generation;
-            let node = dae
-                .expression(expression)
-                .expect("a branded expression identity resolves in its owning DAE");
-            if visit(expression, node) {
-                push_children(dae, node.operation(), &mut self.pending);
-            }
-        }
-    }
-
-    /// Open one pass and return the stamp that marks it.
-    ///
-    /// Stamp `0` means "never visited", so a wrapped generation counter is
-    /// restarted from a cleared table rather than colliding with stale marks.
-    fn begin_pass(&mut self, dae: DaeView<'dae>) -> u32 {
-        if self.stamps.len() < dae.expression_count() {
-            self.stamps.resize(dae.expression_count(), 0);
-        }
-        match self.generation.checked_add(1) {
-            Some(generation) => self.generation = generation,
-            None => {
-                self.stamps.fill(0);
-                self.generation = 1;
-            }
-        }
-        self.generation
+        walk_pruned(dae, &mut self.stamps, &mut self.pending, |id, node| {
+            Some(visit(id, node))
+        });
     }
 }
 
@@ -189,23 +239,11 @@ fn expression_any<'dae>(
     root: ExprId<'dae>,
     mut predicate: impl FnMut(ExpressionView<'dae>) -> bool,
 ) -> bool {
-    let mut pending = vec![root];
-    let mut visited = vec![false; dae.expression_count()];
-    while let Some(expression) = pending.pop() {
-        let index = expression.index() as usize;
-        if visited[index] {
-            continue;
-        }
-        visited[index] = true;
-        let node = dae
-            .expression(expression)
-            .expect("a branded expression identity resolves in its owning DAE");
-        if predicate(node) {
-            return true;
-        }
-        push_children(dae, node.operation(), &mut pending);
-    }
-    false
+    with_shared_stamps(dae, |stamps| {
+        walk_pruned(dae, stamps, &mut vec![root], |_, node| {
+            (!predicate(node)).then_some(true)
+        })
+    })
 }
 
 fn push_children<'dae>(

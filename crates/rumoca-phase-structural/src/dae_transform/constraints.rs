@@ -203,7 +203,7 @@ impl DifferentiationFacts {
             view,
             self,
             expression,
-            &mut vec![Visit::Pending; view.expression_count()],
+            &mut VisitMarks::default(),
             context,
             &mut states,
         )
@@ -291,6 +291,27 @@ enum Visit {
     Pending,
     InProgress,
     Differentiable,
+}
+
+/// The [`Visit`] marks of one walk over a DAE's expressions or variables.
+///
+/// Every index starts [`Visit::Pending`] and only the indices the walk reaches
+/// are stored, so starting a walk costs nothing proportional to the DAE.
+#[derive(Default)]
+struct VisitMarks(rustc_hash::FxHashMap<usize, Visit>);
+
+impl std::ops::Index<usize> for VisitMarks {
+    type Output = Visit;
+
+    fn index(&self, index: usize) -> &Visit {
+        self.0.get(&index).unwrap_or(&Visit::Pending)
+    }
+}
+
+impl std::ops::IndexMut<usize> for VisitMarks {
+    fn index_mut(&mut self, index: usize) -> &mut Visit {
+        self.0.entry(index).or_insert(Visit::Pending)
+    }
 }
 
 /// Reusable visitation state for all holonomic roots in one finalized DAE.
@@ -616,7 +637,7 @@ fn auxiliary_state_constraints(
                 return None;
             };
             let block = facts.auxiliary_blocks[id.index() as usize].as_ref()?;
-            let mut visited = vec![Visit::Pending; view.expression_count()];
+            let mut visited = VisitMarks::default();
             if variable.state_select() == StateSelect::Always
                 || !auxiliary_is_differentiable(view, facts, block, state, &mut visited)
             {
@@ -638,7 +659,7 @@ fn auxiliary_is_differentiable<'dae>(
     facts: &DifferentiationFacts,
     block: &super::auxiliary_blocks::AuxiliaryBlock,
     demoted: dae::StateId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
 ) -> bool {
     !block.state_anchors.contains(&demoted.index())
         && block.operands().all(|operand| {
@@ -866,13 +887,7 @@ fn direct_state_definition<'dae>(
         || variable.value_type().dimensions() != view.expression(rhs)?.value_type().dimensions()
         || dae::expr_contains_var(view, rhs, variable.id())
         || reaches_demoted_derivative(view, facts, rhs, state)
-        || !is_differentiable(
-            view,
-            facts,
-            rhs,
-            state,
-            &mut vec![Visit::Pending; view.expression_count()],
-        )
+        || !is_differentiable(view, facts, rhs, state, &mut VisitMarks::default())
     {
         return None;
     }
@@ -936,9 +951,9 @@ fn reaches_demoted_derivative<'dae>(
     demoted: dae::StateId<'dae>,
 ) -> bool {
     let mut pending = vec![root];
-    let mut expanded = vec![false; view.expression_count()];
+    let mut expanded = rustc_hash::FxHashSet::default();
     while let Some(root) = pending.pop() {
-        if std::mem::replace(&mut expanded[root.index() as usize], true) {
+        if !expanded.insert(root.index()) {
             continue;
         }
         let mut found = false;
@@ -1144,7 +1159,7 @@ fn prove_holonomic_differentiation<'dae>(
     {
         return None;
     }
-    let mut value_visited = vec![Visit::Pending; view.expression_count()];
+    let mut value_visited = VisitMarks::default();
     if !leaves
         .iter()
         .all(|&leaf| can_materialize_holonomic_value(view, facts, leaf, &mut value_visited))
@@ -1155,8 +1170,8 @@ fn prove_holonomic_differentiation<'dae>(
         .iter()
         .all(|&leaf| walk.can_differentiate_order(leaf, 2, true));
     let maximum_order = if second_order {
-        let mut derivative_visited = vec![Visit::Pending; view.expression_count()];
-        let mut derivative_states = vec![Visit::Pending; view.variable_count()];
+        let mut derivative_visited = VisitMarks::default();
+        let mut derivative_states = VisitMarks::default();
         if leaves.iter().all(|&leaf| {
             has_state_only_first_derivative(
                 view,
@@ -1251,7 +1266,7 @@ fn prove_algebraic_lift_differentiation<'dae>(
     }) {
         return None;
     }
-    let mut value_visited = vec![Visit::Pending; view.expression_count()];
+    let mut value_visited = VisitMarks::default();
     if !sources.iter().all(|&source| {
         can_materialize_holonomic_value(
             view,
@@ -1293,7 +1308,7 @@ impl<'facts, 'dae> HolonomicProofWalk<'facts, 'dae> {
         selected: super::function_derivatives::SelectedFunctionDerivative<'dae>,
         on_residual: bool,
     ) -> bool {
-        let mut value_visited = vec![Visit::Pending; self.view.expression_count()];
+        let mut value_visited = VisitMarks::default();
         selected.arguments.iter().all(|argument| {
             if argument.order == 0 {
                 can_materialize_holonomic_value_in_context(
@@ -1638,7 +1653,7 @@ fn is_differentiable<'dae>(
     facts: &DifferentiationFacts,
     expression: dae::ExprId<'dae>,
     demoted: dae::StateId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
 ) -> bool {
     is_differentiable_in_context(
         view,
@@ -1655,7 +1670,7 @@ fn is_differentiable_in_context<'dae>(
     facts: &DifferentiationFacts,
     expression: dae::ExprId<'dae>,
     demoted: dae::StateId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
     context: &FunctionCallContext<'dae>,
 ) -> bool {
     let scoped_context = context.scoped_to_expression(view, expression);
@@ -1723,7 +1738,7 @@ fn operation_is_differentiable<'dae>(
     facts: &DifferentiationFacts,
     operation: dae::ExpressionOperation<'dae>,
     demoted: dae::StateId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
     context: &FunctionCallContext<'dae>,
 ) -> bool {
     match operation {
@@ -1790,10 +1805,10 @@ fn selected_derivative_is_differentiable<'dae>(
     facts: &DifferentiationFacts,
     selected: super::function_derivatives::SelectedFunctionDerivative<'dae>,
     demoted: dae::StateId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
     context: &FunctionCallContext<'dae>,
 ) -> bool {
-    let mut value_visited = vec![Visit::Pending; view.expression_count()];
+    let mut value_visited = VisitMarks::default();
     selected
         .arguments
         .iter()
@@ -1828,7 +1843,7 @@ fn builtin_is_differentiable<'dae>(
     builtin: dae::PureBuiltin,
     arguments: dae::ExpressionOperands<'dae>,
     demoted: dae::StateId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
     context: &FunctionCallContext<'dae>,
 ) -> bool {
     is_differentiable_builtin(builtin, 1)
@@ -1842,7 +1857,7 @@ fn is_differentiable_coordinate<'dae>(
     facts: &DifferentiationFacts,
     coordinate: dae::CoordinateView<'dae>,
     demoted: dae::StateId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
 ) -> bool {
     match coordinate {
         dae::CoordinateView::Parameter(_) | dae::CoordinateView::Time => true,
