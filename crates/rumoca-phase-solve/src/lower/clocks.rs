@@ -275,12 +275,12 @@ fn collect_clocked_definitions<'dae>(
         .into_iter()
         .zip(view.discrete_real_equations())
     {
-        let Some((target, value)) = definition else {
+        let Some(definition) = definition else {
             continue;
         };
         rows.push((
-            dae::VariableId::from(target),
-            value,
+            dae::VariableId::from(definition.target()),
+            definition.value(),
             equation.provenance().span(),
         ));
     }

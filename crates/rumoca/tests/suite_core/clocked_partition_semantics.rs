@@ -417,3 +417,58 @@ end ConnectedFeedback;
         );
     }
 }
+
+/// MLS §16.5 / §9.1: a clocked vector assignment `y = u` and the scalar
+/// connections to its elements define each element of a discrete Real array
+/// by its own row. Each element counter advances on every tick of its own
+/// feedback loop through `previous`.
+#[test]
+fn array_elements_are_defined_by_their_own_rows() {
+    let source = r#"
+model ElementRows
+  block Assign
+    input Real u[2];
+    output Real y[2];
+    input Clock clock;
+  equation
+    when clock then
+      y = u;
+    end when;
+  end Assign;
+  block Delay
+    input Real u;
+    output Real y;
+  equation
+    y = previous(u);
+  end Delay;
+  Clock c = Clock(1, 10);
+  Assign assign;
+  Delay d1;
+  Delay d2;
+equation
+  assign.clock = c;
+  assign.u[1] = d1.y + 1;
+  assign.u[2] = d2.y + 2;
+  d1.u = assign.y[1];
+  d2.u = assign.y[2];
+end ElementRows;
+"#;
+    let result = simulate(source, "ElementRows", 1.0, 0.01);
+    for (tick, time) in [(1.0, 0.0), (5.0, 0.45), (11.0, 1.0)] {
+        assert_eq!(
+            value_at(&result, "assign.y[1]", time),
+            tick,
+            "y[1] at {time}"
+        );
+        assert_eq!(
+            value_at(&result, "assign.y[2]", time),
+            2.0 * tick,
+            "y[2] at {time}"
+        );
+        assert_eq!(
+            value_at(&result, "d1.y", time),
+            tick - 1.0,
+            "d1.y at {time}"
+        );
+    }
+}

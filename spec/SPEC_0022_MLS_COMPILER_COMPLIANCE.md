@@ -860,7 +860,10 @@ areas.
   §12.4.3 multi-result call equation may define discrete receivers (one pure
   call per discrete owner); the condition of an `if` inside a clocked `when`
   body is a clocked value of the partition; `firstTick()` (§16.9) reads the
-  `previous` of a generated clocked indicator of its partition clock.
+  `previous` of a generated clocked indicator of its partition clock; the
+  scalar elements of a discrete Real array may each be defined by their own
+  row (`y[1] = u[1]`, a connection `d.u = y[1]`), oriented like whole
+  coordinates and issued as one producer per array coordinate.
 - Functions (§3.7.2, §12): `div`/`mod`/`rem` of Integer operands in a
   function body are exact Integer quotients (truncating `div`, flooring `mod`)
   in the typed Solve program, and a function-body quotient needs no event owner
@@ -868,8 +871,7 @@ areas.
 - Not yet supported: event clocks `Clock(condition)` in Solve lowering (the
   DAE carries them, but no partition activation exists for them);
   `Clock(c, solverMethod)` discretized
-  partitions (§16.8.1); element-wise definitions of a discrete Real vector
-  (`a = u[1]`, `b = u[2]`); external C noise generators with Integer state
+  partitions (§16.8.1); external C noise generators with Integer state
   arrays (`Xorshift64star`).
 - State-machine support currently covers library-style `Modelica.StateGraph`
   models that lower as ordinary discrete/event equations, with

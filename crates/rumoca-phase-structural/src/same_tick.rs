@@ -386,10 +386,16 @@ fn collect_discrete_real_writers<'dae>(
         )
         .or_else(|| {
             let oriented = plan.discrete_real_definition(index)?;
-            Some((
-                dae::VariableId::from(oriented.target()).index(),
-                oriented.value(),
-            ))
+            let target = dae::VariableId::from(oriented.target()).index();
+            // One element of an array coordinate is not an exact definition of
+            // the whole coordinate: it is one of several writers.
+            if oriented.element().is_some() {
+                let mut reads = BTreeSet::new();
+                collect_same_instant_reads(view, oriented.value(), &mut reads);
+                record_opaque_writer(writers, target, &reads);
+                return None;
+            }
+            Some((target, oriented.value()))
         });
         if let Some((target, value)) = definition {
             record_definition(view, writers, target, value);

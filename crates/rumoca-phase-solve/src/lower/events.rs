@@ -956,16 +956,31 @@ fn lower_discrete_real_equations<'dae>(
 ) -> Result<(), LowerError> {
     let definitions = resolve_discrete_real_definitions(view)?;
     let mut conditional = Vec::new();
+    let mut element_units = BTreeMap::<u32, (dae::VariableId<'dae>, Span, Vec<_>)>::new();
     for (definition, equation) in definitions.into_iter().zip(view.discrete_real_equations()) {
-        let Some((target, value)) = definition else {
+        let Some(definition) = definition else {
             continue;
         };
+        let (value, element) = (definition.value(), definition.element());
         let span = equation.provenance().span();
-        let variable = dae::VariableId::from(target);
+        let variable = dae::VariableId::from(definition.target());
         match equation.activation() {
+            dae::DiscreteRealActivation::Always if element.is_some() => {
+                element_units
+                    .entry(variable.index())
+                    .or_insert_with(|| (variable, span, Vec::new()))
+                    .2
+                    .push((element, value));
+            }
             dae::DiscreteRealActivation::Always => {
                 lower_unconditional_discrete_real(
-                    view, layout, clocks, rows, variable, value, span,
+                    view,
+                    layout,
+                    clocks,
+                    rows,
+                    variable,
+                    &[(None, value)],
+                    span,
                 )?;
             }
             dae::DiscreteRealActivation::When { trigger, guard } => {
@@ -973,6 +988,7 @@ fn lower_discrete_real_equations<'dae>(
                     trigger,
                     guard,
                     variable,
+                    element,
                     value,
                     span,
                     clock: checked_discrete_real_activation_clock(
@@ -981,6 +997,9 @@ fn lower_discrete_real_equations<'dae>(
                 });
             }
         }
+    }
+    for (variable, span, units) in element_units.into_values() {
+        lower_unconditional_discrete_real(view, layout, clocks, rows, variable, &units, span)?;
     }
     lower_guarded_updates(
         view,
@@ -1019,34 +1038,40 @@ fn checked_discrete_real_activation_clock<'dae>(
     }
 }
 
+/// One unconditional discrete Real definition unit: the whole coordinate
+/// (`None`) or one row-major scalar element of an array coordinate.
+type DefinitionUnit<'dae> = (Option<u32>, dae::ExprId<'dae>);
+
+/// Lower every unconditional definition of one discrete Real coordinate. The
+/// element definitions of one array coordinate are issued as consecutive rows
+/// of a single producer, so the same-tick schedule still sees one writer per
+/// coordinate (SOLVE-C57).
 fn lower_unconditional_discrete_real<'dae>(
     view: dae::DaeView<'dae>,
     layout: &LoweredLayout<'dae>,
     clocks: &LoweredClocks<'dae>,
     rows: &mut DiscreteRows<'dae>,
     variable: dae::VariableId<'dae>,
-    value: dae::ExprId<'dae>,
+    units: &[DefinitionUnit<'dae>],
     span: Span,
 ) -> Result<(), LowerError> {
-    let value_type = view
-        .expression(value)
-        .expect("checked discrete definition value resolves")
-        .value_type();
     let clock = clocks.variable_owner(variable);
     let sampled = clocks.variable_is_sampled(variable);
-    let scalar_count = value_type
-        .scalar_count()
-        .expect("checked expression scalar capacity");
-    if let Some((clock_id, solve_clock)) = clock
-        && scalar_count > 1
+    let value_reads = if sampled {
+        Vec::new()
+    } else {
+        units.iter().map(|(_, value)| *value).collect()
+    };
+    if let (Some((clock_id, solve_clock)), [(None, value)]) = (clock, units)
+        && scalar_count(view, *value) > 1
     {
         let compiler = ScalarCompiler::new(view, layout, None);
         let program = if sampled {
-            compiler.sampled_aggregate_program(clock_id, value)?
+            compiler.sampled_aggregate_program(clock_id, *value)?
         } else {
-            compiler.clocked_aggregate_program(clock_id, value)?
+            compiler.clocked_aggregate_program(clock_id, *value)?
         };
-        let targets = (0..scalar_count)
+        let targets = (0..scalar_count(view, *value))
             .map(|scalar| variable_scalar_slot(layout, variable.index(), scalar, span))
             .collect::<Result<Vec<_>, _>>()?;
         let start_row = rows.targets.len();
@@ -1057,7 +1082,7 @@ fn lower_unconditional_discrete_real<'dae>(
             },
             solve_clock,
             vec![variable],
-            if sampled { Vec::new() } else { vec![value] },
+            value_reads,
             Vec::new(),
             span,
         );
@@ -1068,47 +1093,55 @@ fn lower_unconditional_discrete_real<'dae>(
             ContiguousGroupMetadata {
                 span,
                 role: solve::DiscreteRowRole::Equation,
-                pre_mode: expression_pre_mode(view, value, sampled),
+                pre_mode: expression_pre_mode(view, *value, sampled),
                 clock_owner: Some(solve_clock),
             },
         );
     }
     let first_row = rows.targets.len();
-    for scalar in 0..scalar_count {
-        let program = match clock {
-            Some((clock, _)) if sampled => {
-                ScalarCompiler::new(view, layout, None).sampled_program(clock, value, scalar)?
-            }
-            Some((clock, _)) => {
-                ScalarCompiler::new(view, layout, None).clocked_program(clock, value, scalar)?
-            }
-            None => ScalarCompiler::new(view, layout, None).program(value, scalar)?,
-        };
-        let target = variable_scalar_slot(layout, variable.index(), scalar, span)?;
-        rows.claim_scalar_event_owner(variable, target, span)?;
-        rows.push(
-            program,
-            span,
-            target,
-            solve::DiscreteRowRole::Equation,
-            expression_pre_mode(view, value, sampled),
-            clock.map(|(_, solve)| solve),
-        );
+    for &(element, value) in units {
+        for scalar in 0..scalar_count(view, value) {
+            let compiler = ScalarCompiler::new(view, layout, None);
+            let program = match clock {
+                Some((clock, _)) if sampled => compiler.sampled_program(clock, value, scalar)?,
+                Some((clock, _)) => compiler.clocked_program(clock, value, scalar)?,
+                None => compiler.program(value, scalar)?,
+            };
+            let offset = element.map_or(scalar, |element| element as usize);
+            let target = variable_scalar_slot(layout, variable.index(), offset, span)?;
+            rows.claim_scalar_event_owner(variable, target, span)?;
+            rows.push(
+                program,
+                span,
+                target,
+                solve::DiscreteRowRole::Equation,
+                expression_pre_mode(view, value, sampled),
+                clock.map(|(_, solve)| solve),
+            );
+        }
     }
     if let Some((_, clock_owner)) = clock {
         rows.record_clocked_producer(
             PendingClockedStep::ScalarRows {
                 start_row: first_row,
-                count: scalar_count,
+                count: rows.targets.len() - first_row,
             },
             clock_owner,
             vec![variable],
-            if sampled { Vec::new() } else { vec![value] },
+            value_reads,
             Vec::new(),
             span,
         );
     }
     Ok(())
+}
+
+fn scalar_count<'dae>(view: dae::DaeView<'dae>, value: dae::ExprId<'dae>) -> usize {
+    view.expression(value)
+        .expect("checked discrete definition value resolves")
+        .value_type()
+        .scalar_count()
+        .expect("checked expression scalar capacity")
 }
 
 /// Orients every discrete `Real` row toward the coordinate that row defines.
@@ -1129,13 +1162,10 @@ fn lower_unconditional_discrete_real<'dae>(
 /// reported at its own span, never guessed.
 pub(super) fn resolve_discrete_real_definitions<'dae>(
     view: dae::DaeView<'dae>,
-) -> Result<Vec<Option<(dae::DiscreteRealId<'dae>, dae::ExprId<'dae>)>>, LowerError> {
+) -> Result<Vec<Option<rumoca_phase_structural::DiscreteRealDefinition<'dae>>>, LowerError> {
     let plan = causal_discrete_plan(view)?;
     Ok((0..view.discrete_real_equation_count())
-        .map(|index| {
-            plan.discrete_real_definition(index)
-                .map(|definition| (definition.target(), definition.value()))
-        })
+        .map(|index| plan.discrete_real_definition(index))
         .collect())
 }
 
@@ -1203,6 +1233,7 @@ fn lower_event_actions<'dae>(
                     trigger: action.trigger(),
                     guard: action.guard(),
                     variable: dae::VariableId::from(state),
+                    element: None,
                     value,
                     span: action.provenance().span(),
                     clock: condition_clock_owner(view, action.guard()),
@@ -1225,6 +1256,7 @@ struct EventUpdate<'dae> {
     trigger: dae::ConditionId<'dae>,
     guard: dae::ConditionId<'dae>,
     variable: dae::VariableId<'dae>,
+    element: Option<u32>,
     value: dae::ExprId<'dae>,
     span: Span,
     clock: Option<dae::ClockId<'dae>>,
@@ -1273,7 +1305,9 @@ fn lower_guarded_updates<'dae>(
             .value_type()
             .scalar_count()
             .expect("checked event update scalar capacity");
-        let target_base = variable_scalar_slot(layout, update.variable.index(), 0, update.span)?;
+        let offset = update.element.map_or(0, |element| element as usize);
+        let target_base =
+            variable_scalar_slot(layout, update.variable.index(), offset, update.span)?;
         let clock = update
             .clock
             .map(|clock| clocks.clock(clock).map(|solve| (clock, solve)))
@@ -1379,7 +1413,10 @@ fn record_guarded_target<'dae>(
         pre_mode,
         span,
     } = target;
-    let Some(group) = targets.iter_mut().find(|group| group.variable == variable) else {
+    let Some(group) = targets
+        .iter_mut()
+        .find(|group| group.variable == variable && group.target_base == target_base)
+    else {
         targets.push(GuardedTarget {
             variable,
             target_base,
