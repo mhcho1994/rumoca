@@ -493,7 +493,7 @@ Defines state-to-state transitions with priority and timing control.
 | EXPR-037 | pre not in function | §3.7.5 | "pre operator is not allowed inside function classes" |
 | EXPR-038 | smooth differentiability | §3.7.5 | "smooth(p, expr) treats expression as p times continuously differentiable" |
 | EXPR-039 | noEvent event suppression | §3.3 | "noEvent suppresses event generation for relational operators within its scope" |
-| EXPR-040 | Event triggering operators | §3.7.2 | "div, ceil, floor, integer can only change values at events and will trigger events as needed" |
+| EXPR-040 | Event triggering operators | §3.7.2 | "div, ceil, floor, integer can only change values at events and will trigger events as needed". Rumoca: a model-level `floor`, `ceil`, or `integer` of a varying argument `x` outside `noEvent`/`smooth` owns one state-event root on `sin(pi*x) >= 0`, so a discrete target defined from it changes at each integer crossing; function bodies generate no events. Tested in `suite_core/integer_step_events.rs` |
 | EXPR-041 | smooth event freedom | §3.7.5 | "A tool is free to not generate events for expressions inside smooth. However, smooth does not guarantee that no events will be generated." Rumoca takes the freedom except for a relation inside `smooth(0, ..)` whose operands are unknowns of its own algebraic block, which owns an MLS §8.5 event (SPEC_0044 ME-EVENT-008) |
 
 ### 4.5 Equation Contracts (EQN)

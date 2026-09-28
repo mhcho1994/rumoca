@@ -127,6 +127,7 @@ mod initialization_ordering;
 mod initialization_tensor_incidence;
 mod inline_calls;
 mod integer_builtin_checked;
+mod integer_step_events;
 mod interface_flow_balance;
 mod invariant_pure_call_frames;
 mod jacobian_admission_battery;

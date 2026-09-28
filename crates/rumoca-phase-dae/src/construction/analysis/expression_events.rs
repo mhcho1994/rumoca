@@ -55,6 +55,10 @@ pub(in crate::construction) enum ExpressionEventPlan {
     DynamicTimeEvent(DynamicTimeEventOperand),
     /// `sample(start, interval)`, the MLS §3.7.5 periodic Boolean operator.
     SampleClock(rumoca_core::PeriodicClockSchedule),
+    /// `floor`, `ceil`, or `integer` of a varying argument: MLS §3.7.2 makes
+    /// each integer crossing of the argument an event, located by the
+    /// `sin(pi*x) >= 0` indicator root the dynamic quotients also use.
+    IntegerStep,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,6 +195,7 @@ impl ExpressionEventPlan {
             (Self::TimeEvent(left), Self::TimeEvent(right)) => left == right,
             (Self::DynamicTimeEvent(left), Self::DynamicTimeEvent(right)) => left == right,
             (Self::SampleClock(left), Self::SampleClock(right)) => left == right,
+            (Self::IntegerStep, Self::IntegerStep) => true,
             _ => false,
         }
     }
@@ -437,6 +442,17 @@ fn collect_event_owners(
                 ExpressionEventPlan::StateRelation
             };
             plans.insert(*span, &[lhs, rhs], plan)?;
+        }
+        Expression::BuiltinCall {
+            function: BuiltinFunction::Floor | BuiltinFunction::Ceil | BuiltinFunction::Integer,
+            args,
+            span,
+        } if !suppressed => {
+            if let [argument] = args.as_slice()
+                && relation_can_vary(argument, scope)
+            {
+                plans.insert(*span, &[argument], ExpressionEventPlan::IntegerStep)?;
+            }
         }
         _ => {}
     }

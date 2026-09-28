@@ -1,6 +1,7 @@
 mod calls;
 mod clock_transfer;
 pub(super) mod conditional_guards;
+mod integer_steps;
 mod operators;
 mod temporal;
 
@@ -1137,6 +1138,7 @@ fn lower_builtin_call<'dae>(
     // extents only from the trailing arguments, and `linspace(x1, x2, n)`
     // declares its extent in the third; the extent positions are named per
     // builtin so a non-extent argument is never mistaken for one.
+    let source_arguments = arguments;
     let arguments = arguments
         .iter()
         .enumerate()
@@ -1183,7 +1185,19 @@ fn lower_builtin_call<'dae>(
         }
         return construction.runtime_quotient(builtin, [lhs, rhs], provenance);
     }
-    construction.expressions(|expressions| expressions.at(provenance).builtin(builtin, arguments))
+    let lowered = construction.expressions(|expressions| {
+        expressions
+            .at(provenance)
+            .builtin(builtin, arguments.clone())
+    })?;
+    integer_steps::own_integer_step(
+        construction,
+        symbols,
+        source_arguments,
+        &arguments,
+        provenance,
+    )?;
+    Ok(lowered)
 }
 
 fn lower_function_call<'dae>(
