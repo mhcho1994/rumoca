@@ -212,6 +212,12 @@ pub(super) fn propagate_clock_conversion_owners(
             let source = owners.get(&source_root).copied();
             let target = owners.get(&target_root).copied();
             let lattice = |plan: ClockPlan| conversion_lattice(plan, edge.span);
+            if let Some(fixed) =
+                propagate_event_edge(edge, kind, (source_root, target_root), owners)?
+            {
+                progress |= fixed;
+                continue;
+            }
             match (source, target) {
                 (Some((source, _)), Some((target, _))) => {
                     require_conversion_lattice(
@@ -243,6 +249,86 @@ pub(super) fn propagate_clock_conversion_owners(
         if !progress {
             return Ok(());
         }
+    }
+}
+
+/// Propagate one conversion edge that has an event clock at either end;
+/// `None` when neither end is an event clock, otherwise whether the edge fixed
+/// the owner of its other end.
+fn propagate_event_edge(
+    edge: &ClockConversionEdge,
+    kind: dae::ClockTransferKind,
+    (source_root, target_root): (usize, usize),
+    owners: &mut HashMap<usize, (ClockPlan, Span)>,
+) -> Result<Option<bool>, ToDaeError> {
+    let source = owners.get(&source_root).copied();
+    let target = owners.get(&target_root).copied();
+    let is_event =
+        |plan: Option<(ClockPlan, Span)>| plan.is_some_and(|(plan, _)| plan.event().is_some());
+    if !is_event(source) && !is_event(target) {
+        return Ok(None);
+    }
+    let Some(owner) = event_conversion_owner(kind, edge.span, source, target)? else {
+        return Ok(Some(false));
+    };
+    let root = if source.is_some() {
+        target_root
+    } else {
+        source_root
+    };
+    owners.insert(root, (owner, edge.span));
+    Ok(Some(true))
+}
+
+/// MLS §16.5.2 on an event clock, which has no lattice: the only conversion is
+/// `shiftSample(u, counter)` by whole ticks, relating the event clock that
+/// skips `skip` ticks to the one that skips `skip + counter`. Called when one
+/// end is an event clock; returns the owner this edge fixes for its unowned
+/// end, or `None` when both ends are owned (after proving they agree).
+fn event_conversion_owner(
+    kind: dae::ClockTransferKind,
+    span: Span,
+    source: Option<(ClockPlan, Span)>,
+    target: Option<(ClockPlan, Span)>,
+) -> Result<Option<ClockPlan>, ToDaeError> {
+    let dae::ClockTransferKind::ShiftSample {
+        counter,
+        resolution,
+    } = kind
+    else {
+        return Err(event_clock_conversion("clock conversion", span));
+    };
+    match (source, target) {
+        (Some((source, _)), Some((target, _))) => {
+            let shifted = source
+                .shift_event(counter, resolution, span)
+                .ok_or_else(|| event_clock_conversion("shiftSample", span))??;
+            if shifted.schedule != target.schedule {
+                return Err(ToDaeError::unsupported_flat(
+                    "clocked value conversion ownership proof",
+                    "a shiftSample of an event clock must skip exactly its counter of ticks",
+                    span,
+                ));
+            }
+            Ok(None)
+        }
+        (Some((source, _)), None) => source.shift_event(counter, resolution, span).transpose(),
+        (None, Some((target, _))) => {
+            let unshifted = target.event().and_then(|(source, skip)| {
+                let counter = u32::try_from(counter).ok().filter(|_| resolution == 1)?;
+                Some(ClockPlan {
+                    schedule: ClockSchedule::Event {
+                        source,
+                        skip: skip.checked_sub(counter)?,
+                    },
+                    constructor_span: target.constructor_span,
+                })
+            });
+            unshifted
+                .map(Some)
+                .ok_or_else(|| event_clock_conversion("shiftSample", span))
+        }
+        (None, None) => Ok(None),
     }
 }
 

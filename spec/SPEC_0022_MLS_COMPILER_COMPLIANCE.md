@@ -877,8 +877,11 @@ areas.
   limit (§16.5.1), before the tick's own `hold` updates;
   `previous` reads the value of the previous tick, and `interval()` (§16.10)
   is `startInterval` at the first tick and the time since the previous tick
-  afterwards. A clock conversion of an event clock, and a condition that is not
-  a Boolean coordinate, are refused at construction.
+  afterwards. `shiftSample(u, k)` of an event clock (§16.5.2, resolution 1) is
+  the clock that skips its first `k` ticks and then ticks with it, for a
+  `Clock` and for a clocked value alike. Any other clock conversion of an
+  event clock, and a condition that is not a Boolean coordinate, are refused
+  at construction.
 - Clock arrays (a `ClockVectorInput`): each element of a clock array is a
   connection hub that carries the scalar clock connected to it; an element
   with no connected clock, or a clock array used other than through element

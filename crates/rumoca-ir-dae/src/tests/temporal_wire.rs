@@ -751,3 +751,83 @@ fn construction_rejects_dummy_unknown_and_out_of_range_provenance() {
         Err(DaeConstructionError::InvalidSourceRange { .. })
     ));
 }
+
+/// DAE-C23: an event clock converts only by `shiftSample(u, counter)` with
+/// resolution 1, onto the shifted clock that skips `counter` more ticks of the
+/// same unshifted event clock, and the shifted clock survives the wire.
+#[test]
+fn shifted_event_clocks_relate_only_by_whole_tick_shifts() {
+    let source = TestSource::new("discrete Real u; discrete Real y; y = shiftSample(u, 2);");
+    let u_at = source.source("discrete Real u", 0);
+    let y_at = source.source("discrete Real y", 0);
+    let at = source.source("shiftSample(u, 2)", 0);
+    let dae = Dae::construct(source.map, |dae| {
+        let real = dae.types(|types| {
+            types.intern(TypeId::new(0), ValueType::scalar(ScalarType::Real), u_at)
+        })?;
+        let (u, y) = dae.variables(|variables| {
+            Ok((
+                variables.discrete_real(
+                    VarName::new("u"),
+                    real,
+                    u_at,
+                    VariableAttributes::default(),
+                )?,
+                variables.discrete_real(
+                    VarName::new("y"),
+                    real,
+                    y_at,
+                    VariableAttributes::default(),
+                )?,
+            ))
+        })?;
+        let condition = dae.conditions(|conditions| conditions.reserve(at))?;
+        let tick =
+            dae.expressions(|expressions| expressions.at(at).literal(DaeLiteral::Boolean(true)))?;
+        dae.conditions(|conditions| {
+            conditions.define(condition, ConditionInput::Discrete(tick), at)
+        })?;
+        let (base, shifted) = dae.clocks(|clocks| {
+            let base = clocks.triggered(condition, at)?;
+            let shifted = clocks.shifted(base, 2, condition, at)?;
+            assert!(clocks.shifted(shifted, 1, condition, at).is_err());
+            assert!(clocks.shifted(base, 0, condition, at).is_err());
+            clocks.own_discrete_real(base, u, u_at)?;
+            clocks.own_discrete_real(shifted, y, y_at)?;
+            Ok((base, shifted))
+        })?;
+        dae.expressions(|expressions| {
+            let value = expressions
+                .at(at)
+                .coordinate(CoordinateInput::DiscreteReal(u))?;
+            let shift = |counter, resolution| ClockTransferKind::ShiftSample {
+                counter,
+                resolution,
+            };
+            for (counter, resolution) in [(1, 1), (2, 3)] {
+                assert!(
+                    expressions
+                        .at(at)
+                        .clock_transfer(shift(counter, resolution), value, base, shifted)
+                        .is_err(),
+                    "shiftSample({counter}, {resolution}) does not reach the clock skipping 2"
+                );
+            }
+            expressions
+                .at(at)
+                .clock_transfer(shift(2, 1), value, base, shifted)?;
+            Ok(())
+        })
+    })
+    .expect("a whole-tick shift of an event clock is constructible");
+
+    let encoded = serde_json::to_string(&dae).unwrap();
+    let decoded: Dae = serde_json::from_str(&encoded).unwrap();
+    decoded.inspect(|view| {
+        assert_eq!(view.clock_count(), 2);
+        assert!(matches!(
+            view.clock(view.clock_id(1).unwrap()).unwrap().operation(),
+            ClockOperation::Shifted { base, counter: 2, .. } if base.index() == 0
+        ));
+    });
+}

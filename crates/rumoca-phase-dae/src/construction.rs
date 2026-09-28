@@ -422,6 +422,7 @@ fn lower_analysis_clocks<'dae>(
             .chain(event_intervals.iter().copied()),
     )?;
     clocks.issue_event_intervals(construction, event_intervals)?;
+    clocks.issue_tick_counters(construction)?;
     Ok(clocks)
 }
 

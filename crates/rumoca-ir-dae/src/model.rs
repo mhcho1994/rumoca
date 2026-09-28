@@ -159,7 +159,8 @@ pub(crate) use construction_checks::{
 /// 38 preserves source-call ownership for supplied derivative invocations.
 /// 39 records checked evaluability of `final` and `Evaluate=true` parameters.
 /// 40 carries each function's MLS §18.3 inline request on the wire.
-pub const DAE_SCHEMA_VERSION: u16 = 40;
+/// 41 adds the MLS §16.5.2 shifted event clock kind.
+pub const DAE_SCHEMA_VERSION: u16 = 41;
 
 pub use domains::Domains;
 pub(crate) use domains::insert_domain;

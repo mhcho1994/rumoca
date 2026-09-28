@@ -248,3 +248,43 @@ end ClockHub;
     assert_eq!(value_at(&result, "h.k[1].n", 0.9), 1.0);
     assert_eq!(value_at(&result, "h.k[2].n", 0.9), 1.0);
 }
+
+/// MLS §16.5.2: `shiftSample(c, 2)` of an event clock skips its first two
+/// ticks and then ticks with it, whether it shifts the clock itself or a value
+/// of its partition: of the ticks at 1/12 + j it keeps 2 1/12 and 3 1/12, and
+/// `y` carries `u` from the same tick.
+#[test]
+fn a_shifted_event_clock_skips_its_first_ticks() {
+    let source = r#"
+model ShiftedEventClock
+  Real s(start = 0, fixed = true);
+  Boolean b = sin(2 * 3.141592653589793 * time) > 0.5;
+  Clock c = Clock(b);
+  Clock c2 = shiftSample(c, 2);
+  Integer n(start = 0);
+  Integer m(start = 0);
+  Real u(start = 0);
+  Real y(start = -1);
+  Real held;
+equation
+  der(s) = 1;
+  when c then
+    n = previous(n) + 1;
+    u = sample(s);
+  end when;
+  when c2 then
+    m = previous(m) + 1;
+  end when;
+  y = shiftSample(u, 2);
+  held = hold(y);
+end ShiftedEventClock;
+"#;
+    let result = simulate(source, "ShiftedEventClock", 4.0);
+    for (time, ticks, shifted) in [(1.5, 2.0, 0.0), (2.5, 3.0, 1.0), (3.5, 4.0, 2.0)] {
+        assert_eq!(value_at(&result, "n", time), ticks, "n at {time}");
+        assert_eq!(value_at(&result, "m", time), shifted, "m at {time}");
+    }
+    assert_eq!(value_at(&result, "held", 1.5), -1.0);
+    assert!((value_at(&result, "held", 2.5) - (2.0 + 1.0 / 12.0)).abs() < 1.0e-6);
+    assert!((value_at(&result, "held", 3.5) - (3.0 + 1.0 / 12.0)).abs() < 1.0e-6);
+}

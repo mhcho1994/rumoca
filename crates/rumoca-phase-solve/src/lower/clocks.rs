@@ -90,7 +90,8 @@ pub(super) fn lower_clocks<'dae>(
     for (index, (_, clock)) in view.clocks().enumerate() {
         let schedule = match clock.operation() {
             dae::ClockOperation::Periodic(schedule) => schedule,
-            dae::ClockOperation::Triggered(condition) => {
+            dae::ClockOperation::Triggered(condition)
+            | dae::ClockOperation::Shifted { condition, .. } => {
                 dae_clocks.push(LoweredClock::Triggered(condition));
                 continue;
             }

@@ -338,22 +338,23 @@ impl SameTickExchange {
         definitions: &rumoca_phase_structural::SameTickDefinitions<'dae>,
         targets: &[GuardedTarget<'dae>],
     ) -> Self {
-        let event_clock_of = targets
+        let event_clocked = targets
             .iter()
-            .filter_map(|target| Some((target.variable.index(), target.event_clock?)))
-            .collect::<BTreeMap<_, _>>();
+            .filter(|target| target.event_clock.is_some())
+            .map(|target| target.variable.index())
+            .collect::<BTreeSet<_>>();
         let members = targets
             .iter()
             .map(|target| {
                 let (value_reads, condition_reads) =
                     guarded_group_same_tick_reads(std::slice::from_ref(target));
-                if let Some(event_clock) = target.event_clock {
+                if target.event_clock.is_some() {
                     return event_clock_member(
                         view,
                         definitions,
                         target,
                         (&value_reads, &condition_reads),
-                        |variable| event_clock_of.get(&variable) == Some(&event_clock),
+                        |variable| event_clocked.contains(&variable),
                     );
                 }
                 // MLS §8.5: an unclocked `when` fires on its conditions at the
@@ -428,17 +429,18 @@ impl SameTickExchange {
 /// The same-tick relation of one target of an MLS §16.3 event clock.
 ///
 /// The partition's values, and the conditions of `if` branches in its `when`
-/// bodies, are values of the tick: the target observes every target of its own
-/// event clock it reads. Any other coordinate reaches the partition only
-/// through `sample(u)` at its left limit (MLS §16.5.1) or as the tick condition
-/// (SOLVE-C58), so it and everything its definition reads is an entry read,
-/// which issues the target before those coordinates' producers.
+/// bodies, are values of the tick: the target observes every event-clock
+/// target it reads, of its own clock or, through an MLS §16.5.2 `shiftSample`,
+/// of the clock it is shifted from. Any other coordinate reaches the partition
+/// only through `sample(u)` at its left limit (MLS §16.5.1) or as the tick
+/// condition (SOLVE-C58), so it and everything its definition reads is an entry
+/// read, which issues the target before those coordinates' producers.
 fn event_clock_member<'dae>(
     view: dae::DaeView<'dae>,
     definitions: &rumoca_phase_structural::SameTickDefinitions<'dae>,
     target: &GuardedTarget<'dae>,
     (value_reads, condition_reads): (&[dae::ExprId<'dae>], &[dae::ConditionId<'dae>]),
-    same_clock: impl Fn(u32) -> bool,
+    event_clocked: impl Fn(u32) -> bool,
 ) -> SameTickExchangeMember {
     let mut direct = BTreeSet::new();
     for &value in value_reads {
@@ -449,7 +451,7 @@ fn event_clock_member<'dae>(
     }
     let (reads, sampled): (BTreeSet<u32>, BTreeSet<u32>) = direct
         .into_iter()
-        .partition(|&variable| same_clock(variable));
+        .partition(|&variable| event_clocked(variable));
     SameTickExchangeMember {
         targets: vec![target.variable.index()],
         reads,

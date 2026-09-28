@@ -26,6 +26,12 @@ pub(super) struct LoweredClocks<'dae> {
     /// MLS §16.3 event clocks whose tick conditions are reserved at clock
     /// lowering and defined once the condition coordinates exist.
     pending_events: Vec<(dae::ConditionId<'dae>, EventClockPlan)>,
+    /// MLS §16.5.2 shifted event clocks whose tick conditions are reserved
+    /// at clock lowering and defined once their base tick counters exist.
+    pending_shifts: Vec<PendingShift<'dae>>,
+    /// Per event clock with shifted clocks, the generated coordinate that
+    /// counts its ticks.
+    tick_counters: HashMap<dae::ClockId<'dae>, dae::DiscreteRealId<'dae>>,
     /// The constructor of every event clock.
     events: HashMap<dae::ClockId<'dae>, EventClockPlan>,
     /// MLS §16.10 `interval()` of an event clock: per clock, the `previous`
@@ -94,29 +100,70 @@ impl<'dae> LoweredClocks<'dae> {
     ) -> Result<(), dae::DaeConstructionError> {
         for (condition, event) in std::mem::take(&mut self.pending_events) {
             let provenance = dae::DaeProvenance::source(event.span)?;
-            let Some(Coordinate::DiscreteValue(variable)) =
-                coordinates.get(&event.condition).copied()
-            else {
-                return Err(dae::DaeConstructionError::InvalidVariableRole {
-                    name: event.condition,
-                    span: event.span,
-                });
-            };
-            let previous = construction.expressions(|expressions| {
+            let tick = event_condition(construction, coordinates, &event)?;
+            construction.conditions(|conditions| {
+                conditions.define(condition, dae::ConditionInput::Discrete(tick), provenance)
+            })?;
+        }
+        // MLS §16.5.2: a clock shifted by `skip` ticks of its base ticks with the
+        // base once the base has counted more than `skip` ticks. The tick
+        // programs of the shifted clock observe the base's tick counter at the
+        // same tick, so both clocks tick in the same event iteration.
+        for shift in std::mem::take(&mut self.pending_shifts) {
+            let provenance = dae::DaeProvenance::source(shift.event.span)?;
+            let counter = self.tick_counters.get(&shift.base).copied().ok_or(
+                dae::DaeConstructionError::MissingClockDomainOwner {
+                    span: shift.event.span,
+                },
+            )?;
+            let tick = event_condition(construction, coordinates, &shift.event)?;
+            let shifted = construction.expressions(|expressions| {
+                let count = expressions
+                    .at(provenance)
+                    .coordinate(dae::CoordinateInput::DiscreteReal(counter))?;
+                let skipped = expressions
+                    .at(provenance)
+                    .literal(dae::DaeLiteral::Real(f64::from(shift.skip) + 0.5))?;
+                let past = expressions.at(provenance).binary(
+                    dae::BinaryOperator::Greater,
+                    count,
+                    skipped,
+                )?;
                 expressions
                     .at(provenance)
-                    .coordinate(dae::CoordinateInput::DiscreteValue(variable))
+                    .binary(dae::BinaryOperator::And, tick, past)
             })?;
             construction.conditions(|conditions| {
                 conditions.define(
-                    condition,
-                    dae::ConditionInput::Discrete(previous),
+                    shift.condition,
+                    dae::ConditionInput::Discrete(shifted),
                     provenance,
                 )
             })?;
         }
         Ok(())
     }
+}
+
+/// The Boolean coordinate an event clock's condition names, read at the tick.
+fn event_condition<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    coordinates: &HashMap<VarName, Coordinate<'dae>>,
+    event: &EventClockPlan,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let provenance = dae::DaeProvenance::source(event.span)?;
+    let Some(Coordinate::DiscreteValue(variable)) = coordinates.get(&event.condition).copied()
+    else {
+        return Err(dae::DaeConstructionError::InvalidVariableRole {
+            name: event.condition.clone(),
+            span: event.span,
+        });
+    };
+    construction.expressions(|expressions| {
+        expressions
+            .at(provenance)
+            .coordinate(dae::CoordinateInput::DiscreteValue(variable))
+    })
 }
 
 pub(super) fn lower_clocks<'dae>(
@@ -134,6 +181,8 @@ pub(super) fn lower_clocks<'dae>(
         by_coordinate: HashMap::new(),
         first_ticks: HashMap::new(),
         pending_events: Vec::new(),
+        pending_shifts: Vec::new(),
+        tick_counters: HashMap::new(),
         events: HashMap::new(),
         last_ticks: HashMap::new(),
     };
@@ -177,7 +226,7 @@ impl<'dae> LoweredClocks<'dae> {
                 self.lattices.insert(periodic.index(), (periodic, lattice));
                 periodic.into()
             }
-            ClockSchedule::Event(source) => {
+            ClockSchedule::Event { source, skip } => {
                 let event = events.get(&source).cloned().ok_or(
                     dae::DaeConstructionError::MissingClockDomainOwner {
                         span: plan.constructor_span,
@@ -185,9 +234,24 @@ impl<'dae> LoweredClocks<'dae> {
                 )?;
                 let condition =
                     construction.conditions(|conditions| conditions.reserve(provenance))?;
-                let clock =
-                    construction.clocks(|clocks| clocks.triggered(condition, provenance))?;
-                self.pending_events.push((condition, event.clone()));
+                let clock = if skip == 0 {
+                    self.pending_events.push((condition, event.clone()));
+                    construction.clocks(|clocks| clocks.triggered(condition, provenance))?
+                } else {
+                    let base_plan = ClockPlan {
+                        schedule: ClockSchedule::Event { source, skip: 0 },
+                        constructor_span: plan.constructor_span,
+                    };
+                    let base = self.issue(construction, base_plan, events)?;
+                    self.pending_shifts.push(PendingShift {
+                        condition,
+                        base,
+                        skip,
+                        event: event.clone(),
+                    });
+                    construction
+                        .clocks(|clocks| clocks.shifted(base, skip, condition, provenance))?
+                };
                 self.events.insert(clock, event);
                 clock
             }
@@ -208,7 +272,7 @@ impl<'dae> LoweredClocks<'dae> {
         hosts: impl IntoIterator<Item = (ClockPlan, Span)>,
     ) -> Result<(), dae::DaeConstructionError> {
         for (clock, span) in self.host_clocks(hosts)? {
-            let previous = issue_clocked_indicator(
+            let (_, previous) = issue_clocked_indicator(
                 construction,
                 ClockedIndicator {
                     clock,
@@ -223,6 +287,37 @@ impl<'dae> LoweredClocks<'dae> {
         Ok(())
     }
 
+    /// Issue the tick counter of every event clock that a shifted clock
+    /// (MLS §16.5.2 `shiftSample`) skips ticks of: a generated clocked discrete
+    /// Real `n` with `start = 0` and the partition equation
+    /// `n = previous(n) + 1`, so `n` is the number of ticks so far.
+    pub(super) fn issue_tick_counters(
+        &mut self,
+        construction: &mut dae::DaeConstruction<'dae>,
+    ) -> Result<(), dae::DaeConstructionError> {
+        let mut bases = self
+            .pending_shifts
+            .iter()
+            .map(|shift| (shift.base, shift.event.span))
+            .collect::<Vec<_>>();
+        bases.sort_by_key(|(clock, _)| clock.index());
+        bases.dedup_by_key(|(clock, _)| *clock);
+        for (clock, span) in bases {
+            let (counter, _) = issue_clocked_indicator(
+                construction,
+                ClockedIndicator {
+                    clock,
+                    span,
+                    name: format!("tickCount(clock {})", clock.index()),
+                    start: 0.0,
+                    value: IndicatorValue::Count,
+                },
+            )?;
+            self.tick_counters.insert(clock, counter);
+        }
+        Ok(())
+    }
+
     /// Issue the tick-time coordinate of every event clock whose partition
     /// reads `interval()` (MLS §16.10 Operator 16.15): a generated clocked
     /// discrete Real `l` with the partition equation `l = time`, so
@@ -233,7 +328,7 @@ impl<'dae> LoweredClocks<'dae> {
         hosts: impl IntoIterator<Item = (ClockPlan, Span)>,
     ) -> Result<(), dae::DaeConstructionError> {
         for (clock, span) in self.host_clocks(hosts)? {
-            let previous = issue_clocked_indicator(
+            let (_, previous) = issue_clocked_indicator(
                 construction,
                 ClockedIndicator {
                     clock,
@@ -294,10 +389,21 @@ pub(super) struct EventInterval<'plan, 'dae> {
     pub(super) start_interval: Option<&'plan rumoca_core::Expression>,
 }
 
+/// A shifted event clock whose tick condition is defined once the tick counter
+/// of its base exists.
+struct PendingShift<'dae> {
+    condition: dae::ConditionId<'dae>,
+    base: dae::ClockId<'dae>,
+    skip: u32,
+    event: EventClockPlan,
+}
+
 /// The value a generated clocked indicator takes at every tick.
 enum IndicatorValue {
     Zero,
     Time,
+    /// One more than its own previous value: the number of ticks so far.
+    Count,
 }
 
 struct ClockedIndicator<'dae> {
@@ -309,12 +415,12 @@ struct ClockedIndicator<'dae> {
 }
 
 /// A generated clocked discrete Real owned by `indicator.clock`, starting at
-/// `indicator.start` and set to its value at every tick; returns its
+/// `indicator.start` and set to its value at every tick; returns it and its
 /// `previous`.
 fn issue_clocked_indicator<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     indicator: ClockedIndicator<'dae>,
-) -> Result<dae::PreviousId<'dae>, dae::DaeConstructionError> {
+) -> Result<(dae::DiscreteRealId<'dae>, dae::PreviousId<'dae>), dae::DaeConstructionError> {
     let ClockedIndicator {
         clock,
         span,
@@ -347,6 +453,8 @@ fn issue_clocked_indicator<'dae>(
         clocks.own_discrete_real(clock, variable, provenance)?;
         Ok(())
     })?;
+    let previous = construction
+        .temporal(|temporal| temporal.previous_discrete_real(clock, variable, provenance))?;
     let residual = construction.expressions(|expressions| {
         let current = expressions
             .at(provenance)
@@ -358,6 +466,17 @@ fn issue_clocked_indicator<'dae>(
             IndicatorValue::Time => expressions
                 .at(provenance)
                 .coordinate(dae::CoordinateInput::Time)?,
+            IndicatorValue::Count => {
+                let last = expressions
+                    .at(provenance)
+                    .coordinate(dae::CoordinateInput::Previous(previous))?;
+                let one = expressions
+                    .at(provenance)
+                    .literal(dae::DaeLiteral::Real(1.0))?;
+                expressions
+                    .at(provenance)
+                    .binary(dae::BinaryOperator::Add, last, one)?
+            }
         };
         expressions
             .at(provenance)
@@ -366,7 +485,7 @@ fn issue_clocked_indicator<'dae>(
     construction.discrete(|system| {
         system.real_equation(provenance, |equation| equation.residual(residual))
     })?;
-    construction.temporal(|temporal| temporal.previous_discrete_real(clock, variable, provenance))
+    Ok((variable, previous))
 }
 
 fn clocked_values_in_instance_order(

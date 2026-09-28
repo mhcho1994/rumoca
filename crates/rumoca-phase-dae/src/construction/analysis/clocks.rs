@@ -17,8 +17,9 @@ pub(in crate::construction) enum ClockSchedule {
     /// lattice.
     Periodic(ClockLattice),
     /// MLS §16.3 Operator 16.4: an event clock, identified by the clock
-    /// coordinate its `Clock(condition)` constructor defines.
-    Event(InstanceId),
+    /// coordinate its `Clock(condition)` constructor defines, without its
+    /// first `skip` ticks (MLS §16.5.2 `shiftSample`; 0 for the clock itself).
+    Event { source: InstanceId, skip: u32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,8 +43,43 @@ impl ClockPlan {
     pub(in crate::construction) const fn lattice(&self) -> Option<ClockLattice> {
         match self.schedule {
             ClockSchedule::Periodic(lattice) => Some(lattice),
-            ClockSchedule::Event(_) => None,
+            ClockSchedule::Event { .. } => None,
         }
+    }
+
+    /// The clock coordinate of the event clock `self` and the number of its
+    /// ticks it skips; `None` for a periodic clock.
+    pub(in crate::construction) const fn event(&self) -> Option<(InstanceId, u32)> {
+        match self.schedule {
+            ClockSchedule::Event { source, skip } => Some((source, skip)),
+            ClockSchedule::Periodic(_) => None,
+        }
+    }
+
+    /// MLS §16.5.2 `shiftSample(u, counter, resolution)` of the event clock
+    /// `self`: the same clock without its first `counter` more ticks. An
+    /// event clock cannot be super-sampled, so the resolution must be 1
+    /// (CLK-011); `None` for a periodic clock.
+    pub(in crate::construction) fn shift_event(
+        self,
+        counter: i64,
+        resolution: i64,
+        span: Span,
+    ) -> Option<Result<Self, ToDaeError>> {
+        let (source, skip) = self.event()?;
+        let shifted = u32::try_from(counter)
+            .ok()
+            .filter(|_| resolution == 1)
+            .and_then(|counter| skip.checked_add(counter));
+        Some(shifted.map_or_else(
+            || Err(event_clock_conversion("shiftSample", span)),
+            |skip| {
+                Ok(Self {
+                    schedule: ClockSchedule::Event { source, skip },
+                    constructor_span: self.constructor_span,
+                })
+            },
+        ))
     }
 }
 
@@ -175,7 +211,10 @@ pub(super) fn analyze_clocks(
             && let Some(event) = event_constructor(flat, rhs)?
         {
             let plan = ClockPlan {
-                schedule: ClockSchedule::Event(target.instance_id),
+                schedule: ClockSchedule::Event {
+                    source: target.instance_id,
+                    skip: 0,
+                },
                 constructor_span: event.span,
             };
             insert_plan(&mut plans, target, plan, equation.span)?;
@@ -290,7 +329,10 @@ fn derive_bound_clock_plans(
             };
             if let Some(event) = event_constructor(flat, binding)? {
                 let plan = ClockPlan {
-                    schedule: ClockSchedule::Event(variable.instance_id),
+                    schedule: ClockSchedule::Event {
+                        source: variable.instance_id,
+                        skip: 0,
+                    },
                     constructor_span: event.span,
                 };
                 insert_plan(plans, variable, plan, event.span)?;
@@ -309,6 +351,30 @@ fn derive_bound_clock_plans(
         }
     }
     Ok(())
+}
+
+/// A `Clock` binding converting the event clock `source`: only
+/// `shiftSample(u, counter)` with resolution 1 has an event clock as its
+/// result (MLS §16.5.2).
+fn shifted_event_binding(
+    source: ClockPlan,
+    function: BuiltinFunction,
+    args: &[Expression],
+    constants: &EvalContext,
+    span: Span,
+) -> Result<Option<ClockPlan>, ToDaeError> {
+    let operator = function.name();
+    let (counter, resolution) = match (function, args) {
+        (BuiltinFunction::ShiftSample, [_, counter]) => {
+            (clock_integer(counter, constants, operator, span)?, 1)
+        }
+        (BuiltinFunction::ShiftSample, [_, counter, resolution]) => (
+            clock_integer(counter, constants, operator, span)?,
+            clock_integer(resolution, constants, operator, span)?,
+        ),
+        _ => return Err(event_clock_conversion(operator, span)),
+    };
+    source.shift_event(counter, resolution, span).transpose()
 }
 
 fn bound_clock_plan(
@@ -351,6 +417,9 @@ fn bound_clock_plan(
     let Some(source_plan) = bound_clock_plan(source, constants, clocks, plans)? else {
         return Ok(None);
     };
+    if source_plan.event().is_some() {
+        return shifted_event_binding(source_plan, *function, args, constants, *span);
+    }
     let Some(source_lattice) = source_plan.lattice() else {
         return Err(event_clock_conversion(operator, *span));
     };
@@ -1633,11 +1702,12 @@ fn event_clock_condition(span: Span) -> ToDaeError {
     )
 }
 
-/// An event clock has no lattice, so no exact clock conversion of it exists.
-fn event_clock_conversion(operator: &str, span: Span) -> ToDaeError {
+/// An event clock has no lattice: its only exact conversion is a
+/// `shiftSample` by whole ticks (MLS §16.5.2).
+pub(in crate::construction) fn event_clock_conversion(operator: &str, span: Span) -> ToDaeError {
     ToDaeError::unsupported_runtime_operator(
         operator,
-        "an event clock has no periodic lattice to convert",
+        "an event clock has no periodic lattice; only shiftSample by whole ticks converts it",
         span,
     )
 }

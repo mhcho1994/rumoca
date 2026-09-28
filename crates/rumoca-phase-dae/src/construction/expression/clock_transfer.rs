@@ -152,14 +152,27 @@ fn expression_clock_plan(
         let Some(source) = expression_clock_plan(source, functions)? else {
             return Ok(None);
         };
-        // An event clock has no lattice, so no transfer of it is exact.
-        let source_lattice =
-            source
-                .lattice()
-                .ok_or(dae::DaeConstructionError::InvalidClockedOperand {
-                    operator: function.name(),
-                    span: *span,
-                })?;
+        let invalid = dae::DaeConstructionError::InvalidClockedOperand {
+            operator: function.name(),
+            span: *span,
+        };
+        // An event clock has no lattice: its only exact transfer is a
+        // `shiftSample` by whole ticks (MLS §16.5.2).
+        if source.event().is_some() {
+            let dae::ClockTransferKind::ShiftSample {
+                counter,
+                resolution,
+            } = kind
+            else {
+                return Err(invalid);
+            };
+            return source
+                .shift_event(counter, resolution, *span)
+                .and_then(Result::ok)
+                .map(Some)
+                .ok_or(invalid);
+        }
+        let source_lattice = source.lattice().ok_or(invalid)?;
         let lattice = match kind {
             dae::ClockTransferKind::SubSample { factor } => source_lattice.sub_sample(factor),
             dae::ClockTransferKind::SuperSample { factor } => source_lattice.super_sample(factor),

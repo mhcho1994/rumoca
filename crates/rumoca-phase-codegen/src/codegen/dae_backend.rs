@@ -1004,6 +1004,16 @@ fn project_clocks(view: dae::DaeView<'_>) -> Value {
                         "kind": "triggered",
                         "condition": condition.index(),
                     }),
+                    dae::ClockOperation::Shifted {
+                        base,
+                        counter,
+                        condition,
+                    } => json!({
+                        "kind": "shifted",
+                        "base": base.index(),
+                        "counter": counter,
+                        "condition": condition.index(),
+                    }),
                 };
                 json!({
                     "id": id.index(),

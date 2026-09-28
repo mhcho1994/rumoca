@@ -3530,6 +3530,13 @@ kind = 'Compile'
 outcome = 'Reject'
 
 [[cases]]
+contract_id = 'CLK-011'
+case_id = 'clk_011_shiftsample_on_event_clock_by_whole_ticks_accepted'
+test_file = 'tests/clk_contracts.rs'
+kind = 'Compile'
+outcome = 'Accept'
+
+[[cases]]
 contract_id = 'CLK-012'
 case_id = 'clk_012_backsample_on_event_clock_rejected'
 test_file = 'tests/clk_contracts.rs'
