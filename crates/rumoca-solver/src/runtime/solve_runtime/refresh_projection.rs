@@ -978,6 +978,10 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
         self.plan_validated
     }
 
+    fn unlocalizable_guards(&self) -> &[solve::UnlocalizableGuard] {
+        &self.runtime.model.problem.continuous.unlocalizable_guards
+    }
+
     fn target_name_for_row(&self, row_idx: usize) -> Option<&str> {
         self.runtime
             .model

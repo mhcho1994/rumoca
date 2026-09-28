@@ -96,7 +96,8 @@ impl Serialize for ContinuousSolveSystem {
             })
             .collect::<Result<Vec<_>, S::Error>>()?;
         let omit_charts = serializer.is_human_readable() && charts.is_empty();
-        let field_count = if omit_charts { 8 } else { 9 };
+        let omit_guards = serializer.is_human_readable() && self.unlocalizable_guards.is_empty();
+        let field_count = 8 + usize::from(!omit_charts) + usize::from(!omit_guards);
         let mut state = serializer.serialize_struct("ContinuousSolveSystem", field_count)?;
         state.serialize_field("implicit_rhs", &self.implicit_rhs)?;
         state.serialize_field("implicit_row_targets", &self.implicit_row_targets)?;
@@ -115,6 +116,9 @@ impl Serialize for ContinuousSolveSystem {
                 },
             )?;
         }
+        if !omit_guards {
+            state.serialize_field("unlocalizable_guards", &self.unlocalizable_guards)?;
+        }
         state.end()
     }
 }
@@ -131,6 +135,8 @@ struct ContinuousSolveSystemWire {
     refresh_owners: ContinuousRefreshOwners,
     #[serde(default)]
     reduced_chart_set: ChartSetWireOwned,
+    #[serde(default)]
+    unlocalizable_guards: Vec<crate::UnlocalizableGuard>,
 }
 
 impl<'de> Deserialize<'de> for ContinuousSolveSystem {
@@ -146,6 +152,7 @@ impl<'de> Deserialize<'de> for ContinuousSolveSystem {
             derivative_rhs: wire.derivative_rhs,
             refresh_owners: wire.refresh_owners,
             reduced_chart_set: ReducedChartSet::default(),
+            unlocalizable_guards: wire.unlocalizable_guards,
         };
         let charts = wire
             .reduced_chart_set

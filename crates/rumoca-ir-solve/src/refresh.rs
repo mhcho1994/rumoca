@@ -413,6 +413,38 @@ pub struct RefreshRemainderRelation {
     remainder: RefreshPlan,
 }
 
+/// Who orders the continuous-time evaluations of an executor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub enum RefreshExecutor {
+    /// An importer-driven component (FMU Model Exchange): trial evaluations
+    /// arrive in an order the model does not control.
+    ImporterDriven,
+    /// An integrator-driven run (native BDF or RK): the integrator fixes the
+    /// evaluation order.
+    #[default]
+    IntegratorDriven,
+}
+
+/// Where a continuous-time refresh starts its Newton solves (SPEC_0044
+/// ME-PROJ-005). Every executor reads this rule from the refresh owners
+/// instead of choosing its own warm start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RefreshSeedRule {
+    /// From the committed seed: the settled coordinate at Event Mode exit or,
+    /// after a completed integrator step, the derivative refresh at the
+    /// accepted point from the previous seed. The refresh is then a function of
+    /// (t, x, p, relation memory, committed seed), never of the trial
+    /// evaluations since the last accepted point.
+    ///
+    /// Known cost: one refresh per accepted step, which a run of many short
+    /// steps pays in full (CauerLowPassSC +24%); a seed predictor from
+    /// committed data is the open item that may recover it.
+    CommittedAcceptedPoint,
+    /// From the previous evaluation, whose order the integrator fixes, so
+    /// the run is deterministic for a fixed integrator.
+    IntegratorWarmStart,
+}
+
 /// Complete construction-issued continuous refresh inventory for one model.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ContinuousRefreshOwners {
@@ -596,6 +628,18 @@ impl<'de> Deserialize<'de> for ContinuousRefreshOwners {
 }
 
 impl ContinuousRefreshOwners {
+    /// The warm-start rule of one executor class: an importer-driven
+    /// component refreshes from the committed seed, since the order of its
+    /// trial evaluations is not the model's; an integrator-driven run keeps
+    /// its integrator's warm start, which that fixed order makes deterministic.
+    #[must_use]
+    pub const fn seed_rule(&self, executor: RefreshExecutor) -> RefreshSeedRule {
+        match executor {
+            RefreshExecutor::ImporterDriven => RefreshSeedRule::CommittedAcceptedPoint,
+            RefreshExecutor::IntegratorDriven => RefreshSeedRule::IntegratorWarmStart,
+        }
+    }
+
     /// Owners rebuilt from wire-visible plans through the same checked
     /// construction decoding uses.
     pub(crate) fn from_wire_plans(

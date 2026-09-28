@@ -49,7 +49,7 @@ mod functions;
 mod initial_pins;
 mod inline_calls;
 mod loop_guards;
-pub use loop_guards::own_loop_guarded_relations;
+pub use loop_guards::{UnlocalizableGuard, own_loop_guarded_relations, unlocalizable_loop_guards};
 mod observation;
 mod parameter_conditionals;
 mod reconstruction;

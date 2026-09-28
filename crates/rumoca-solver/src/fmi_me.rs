@@ -508,6 +508,11 @@ impl From<crate::runtime::solve_ops::RuntimeSolveError> for MeError {
             non_finite @ Runtime::NonFiniteValue { .. } => Self::Evaluation {
                 message: non_finite.to_string(),
             },
+            // The bracketed `[ES016]` code travels with the message, the
+            // SPEC_0008 delegation every host reads (`embedded_diagnostic_code`).
+            fold @ Runtime::UnlocalizableFold { .. } => Self::Evaluation {
+                message: fold.to_string(),
+            },
         }
     }
 }
@@ -532,6 +537,9 @@ pub struct MeInstanceConfig {
     start_time: f64,
     /// FMI `stopTime` (`stopTimeDefined = true`).
     stop_time: f64,
+    /// Who orders this instance's continuous-time evaluations, which selects
+    /// its refresh warm start (Solve IR `RefreshSeedRule`).
+    executor: rumoca_ir_solve::RefreshExecutor,
 }
 
 impl MeInstanceConfig {
@@ -567,7 +575,16 @@ impl MeInstanceConfig {
             tolerance: relative_tolerance,
             start_time,
             stop_time,
+            executor: rumoca_ir_solve::RefreshExecutor::IntegratorDriven,
         })
+    }
+
+    /// The same request for an importer-driven component, whose trial
+    /// evaluations arrive in an order the model does not control.
+    #[must_use]
+    pub const fn importer_driven(mut self) -> Self {
+        self.executor = rumoca_ir_solve::RefreshExecutor::ImporterDriven;
+        self
     }
 }
 

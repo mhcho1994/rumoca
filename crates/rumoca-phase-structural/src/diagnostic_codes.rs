@@ -83,6 +83,20 @@ pub const ES014_CONTRACT_VIOLATION: &str = "ES014";
 /// * **owner** `crate::dae_transform::constant_values::constant_call_plan`;
 /// * **evidence** `dae_transform::tests::constant_values`.
 pub const ES015_CONSTANT_CALL_EVALUATION: &str = "ES015";
+/// Warning and typed runtime failure, never a refusal: a relation under
+/// `noEvent` switches an algebraic loop on its own unknowns and owns no root.
+///
+/// * **warns** for a primitive relation written under `noEvent` in a residual of
+///   an algebraic loop or implicit scalar block that reads (scalar-exactly) an
+///   unknown of that block and owns no root; the Solve IR fact
+///   `UnlocalizableGuard` carries it, and a projection of the block that
+///   fails is the typed runtime error `UnlocalizableFold` with this code;
+/// * **does not warn** for the same relation without `noEvent` (it owns an
+///   event, ME-EVENT-008), a relation reading another scalar of a vector the
+///   block solves, and one inside a comprehension or a function;
+/// * **owner** `crate::dae_transform::loop_guards::unlocalizable_loop_guards`;
+/// * **evidence** `suite_core::loop_guarded_smooth_relations`.
+pub const ES016_UNLOCALIZABLE_LOOP_RELATION: &str = "ES016";
 
 /// Every structural diagnostic code, in numeric order.
 ///
@@ -98,6 +112,7 @@ pub const STRUCTURAL_DIAGNOSTIC_CODES: &[&str] = &[
     ES013_CONFLICTING_STATED_INITIAL_VALUES,
     ES014_CONTRACT_VIOLATION,
     ES015_CONSTANT_CALL_EVALUATION,
+    ES016_UNLOCALIZABLE_LOOP_RELATION,
 ];
 
 #[cfg(test)]
@@ -228,6 +243,7 @@ mod tests {
         assert_eq!(ES013_CONFLICTING_STATED_INITIAL_VALUES, "ES013");
         assert_eq!(ES014_CONTRACT_VIOLATION, "ES014");
         assert_eq!(ES015_CONSTANT_CALL_EVALUATION, "ES015");
+        assert_eq!(ES016_UNLOCALIZABLE_LOOP_RELATION, "ES016");
     }
 
     #[test]

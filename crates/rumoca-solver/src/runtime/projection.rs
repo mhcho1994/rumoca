@@ -135,6 +135,12 @@ pub(crate) trait ImplicitProjectionModel {
         false
     }
 
+    /// The ES016 facts of the Solve model (SPEC_0044 ME-EVENT-008): blocks
+    /// whose own unknowns a relation under `noEvent` switches.
+    fn unlocalizable_guards(&self) -> &[solve::UnlocalizableGuard] {
+        &[]
+    }
+
     /// Return the diagnostic name for a solver variable. Implementations may
     /// omit names without changing projection semantics.
     fn variable_name_for_y_index(&self, _y_index: usize) -> Option<&str> {
@@ -694,6 +700,15 @@ fn project_algebraics_with_plan_inner<M: ImplicitProjectionModel>(
         "selected algebraic projection",
     )?;
     let row_scales = algebraic_plan_row_scales(model, y, args.parameters, args.time, plan)?;
+    if let Some(fold) = unlocalizable_fold(
+        model.unlocalizable_guards(),
+        plan,
+        &rows,
+        (&residual, &row_scales),
+        args,
+    ) {
+        return Err(fold);
+    }
     if certify_coordinates {
         return Err(projection_error_for_rows(
             model,
@@ -1671,3 +1686,39 @@ pub(crate) use initial::{
     InitialHomotopySystem, project_initial_variables_with_homotopy,
     project_initial_variables_with_plan,
 };
+
+/// The typed ES016 failure when an unsettled row belongs to a block that a
+/// `noEvent` relation switches on its own unknowns (SPEC_0044 ME-EVENT-008):
+/// that block's projection ended at a fold of the relation.
+fn unlocalizable_fold(
+    guards: &[solve::UnlocalizableGuard],
+    plan: &solve::AlgebraicProjectionPlan,
+    rows: &[usize],
+    (residual, row_scales): (&[f64], &[f64]),
+    args: AlgebraicProjectionArgs<'_>,
+) -> Option<RuntimeSolveError> {
+    if guards.is_empty() {
+        return None;
+    }
+    let unsettled = rows
+        .iter()
+        .zip(residual.iter().zip(row_scales))
+        .filter(|(_, (value, scale))| {
+            !value.is_finite() || value.abs() > scaled_tolerance(args.tolerance, **scale)
+        })
+        .map(|(row, _)| *row)
+        .collect::<std::collections::BTreeSet<_>>();
+    plan.blocks
+        .iter()
+        .filter(|block| block.rows.iter().any(|row| unsettled.contains(row)))
+        .find_map(|block| {
+            block
+                .y_indices
+                .iter()
+                .find_map(|&y_index| solve::UnlocalizableGuard::covering(guards, y_index))
+        })
+        .map(|guard| RuntimeSolveError::UnlocalizableFold {
+            fold: guard.fold(),
+            time: args.time,
+        })
+}

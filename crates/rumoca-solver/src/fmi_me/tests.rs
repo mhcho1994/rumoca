@@ -5,6 +5,7 @@
 //! directional-derivative tests run a real component, because the operation's
 //! whole point is that the *component* owns the derivative.
 
+mod committed_seed;
 mod failure_atomicity;
 mod manifold;
 mod on_demand_derivatives;
@@ -1635,10 +1636,12 @@ fn the_step_path_neither_masks_nor_reprojects_the_root_vector() {
         "an indicator read settles the full algebraic coordinate at most once"
     );
     assert!(
-        evaluation
-            .contains("if self.indicator_plan.reads_deadlines() && settled_guess.is_none() {"),
-        "only a dynamic-time deadline needs a settled algebraic coordinate of its own; \
-         a root-only inventory keeps the root search's own restricted refresh"
+        evaluation.contains(
+            "let needs_settled = self.indicator_plan.reads_deadlines() || self.seed_active();"
+        ),
+        "only a dynamic-time deadline or the committed seed (SPEC_0044 ME-PROJ-005) needs a \
+         settled algebraic coordinate; a root-only inventory without a seed keeps the root \
+         search's own restricted refresh"
     );
     for signature in [
         "fn evaluate_inventory_indicators(",

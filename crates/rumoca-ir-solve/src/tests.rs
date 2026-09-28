@@ -640,6 +640,7 @@ fn representative_continuous_system() -> ContinuousSolveSystem {
         derivative_rhs: representative_derivative_rhs(),
         refresh_owners: ContinuousRefreshOwners::default(),
         reduced_chart_set: ReducedChartSet::default(),
+        unlocalizable_guards: Vec::new(),
     }
 }
 
@@ -2339,4 +2340,28 @@ fn nonempty_alternate_charts_are_serialized() {
         restored, block,
         "serialization round-trip must preserve the block"
     );
+}
+
+/// An ES016 fact is omitted from human-readable Solve IR when absent, and
+/// round-trips both ways when present.
+#[test]
+fn unlocalizable_guards_round_trip_and_are_omitted_when_empty() {
+    let empty = representative_continuous_system();
+    let json = serde_json::to_value(&empty).expect("serialize");
+    assert!(json.get("unlocalizable_guards").is_none());
+    let mut guarded = empty;
+    guarded.unlocalizable_guards = vec![UnlocalizableGuard {
+        y_indices: vec![0],
+        relation: "V0*v_in > vps".to_string(),
+        unknown_names: "`v_out`, `v_in`".to_string(),
+    }];
+    let text = serde_json::to_string(&guarded).expect("serialize");
+    let back: ContinuousSolveSystem = serde_json::from_str(&text).expect("deserialize");
+    assert_eq!(back.unlocalizable_guards, guarded.unlocalizable_guards);
+    assert_eq!(
+        UnlocalizableGuard::covering(&back.unlocalizable_guards, 0)
+            .map(|guard| guard.relation.as_str()),
+        Some("V0*v_in > vps")
+    );
+    assert!(UnlocalizableGuard::covering(&back.unlocalizable_guards, 1).is_none());
 }

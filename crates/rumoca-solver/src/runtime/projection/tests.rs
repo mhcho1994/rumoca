@@ -11,6 +11,7 @@ mod sensitivity_roundoff;
 mod sensitivity_scaling;
 mod singular_isolation;
 mod torn_roundoff;
+mod unlocalizable_fold;
 
 use std::cell::Cell;
 

@@ -954,6 +954,11 @@ impl BlockRecord {
     /// elimination's recovery matrix at its promotion capacity with its step
     /// flags and reduced row and tear lists, and one program's outputs and
     /// seeds.
+    /// Canonical index of the block in the continuous projection plan.
+    pub(super) const fn canonical(&self) -> usize {
+        self.canonical
+    }
+
     pub(super) const fn lane_max(&self) -> usize {
         self.lane_max
     }

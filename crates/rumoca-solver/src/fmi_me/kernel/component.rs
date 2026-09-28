@@ -73,11 +73,17 @@ impl SolveMeKernel {
         settled_guess: &mut Option<Vec<f64>>,
         indicators: &mut [f64],
     ) -> Result<(), MeError> {
-        let mut root_values = self.indicator_root_scratch.borrow_mut();
-        let mut deadlines = self.indicator_deadline_scratch.borrow_mut();
-        if self.indicator_plan.reads_deadlines() && settled_guess.is_none() {
+        // A dynamic-time deadline needs a settled coordinate of its own, and
+        // between events a root refresh starts from the committed seed
+        // (SPEC_0044 ME-PROJ-005), never from the declared start values; a
+        // root-only inventory without a seed keeps the root search's own
+        // restricted refresh.
+        let needs_settled = self.indicator_plan.reads_deadlines() || self.seed_active();
+        if needs_settled && settled_guess.is_none() {
             *settled_guess = Some(self.solver_y_at_parameters(time, params)?);
         }
+        let mut root_values = self.indicator_root_scratch.borrow_mut();
+        let mut deadlines = self.indicator_deadline_scratch.borrow_mut();
         if self.indicator_plan.reads_root_values() {
             root_values.fill(0.0);
             self.evaluate_root_conditions(time, params, settled_guess, &mut root_values)?;
@@ -564,6 +570,7 @@ impl SolveMeKernel {
             active_reference: None,
             pending_basis_change: None,
             solver_y_guess: RefCell::new(runtime.model.initial_y.clone()),
+            committed_seed: RefCell::default(),
             indicator_root_scratch: RefCell::new(scratch.indicator_root_scratch),
             indicator_deadline_scratch: RefCell::new(scratch.indicator_deadline_scratch),
             indicator_value_scratch: scratch.indicator_value_scratch,
@@ -578,6 +585,7 @@ impl SolveMeKernel {
             lifecycle: MeLifecycle::instantiated(configuration),
             tolerance: config.tolerance,
             stop_time: config.stop_time,
+            refresh_executor: config.executor,
             time: config.start_time,
             event_boundary: None,
             post_event_eval_time: None,
@@ -673,9 +681,17 @@ impl SolveMeKernel {
         Ok(solver_y)
     }
 
-    pub(super) fn with_callback_solver_y<R>(&self, f: impl FnOnce(&mut Vec<f64>) -> R) -> R {
+    /// Run one continuous-time refresh from the committed seed (SPEC_0044
+    /// ME-PROJ-005). `f` also receives the derivative already settled at
+    /// `time` when that is the resolved accepted point.
+    pub(super) fn with_callback_solver_y<T>(
+        &self,
+        time: f64,
+        f: impl FnOnce(&mut Vec<f64>, Option<&[f64]>) -> Result<T, MeError>,
+    ) -> Result<T, MeError> {
+        let settled = self.load_seed(time)?;
         self.invalidate_continuous_linearization();
-        f(&mut self.solver_y_guess.borrow_mut())
+        f(&mut self.solver_y_guess.borrow_mut(), settled.as_deref())
     }
 
     pub(super) fn directional_derivative_at_parameters(
@@ -710,7 +726,7 @@ impl SolveMeKernel {
                     .map_err(MeError::from);
             }
         }
-        self.with_callback_solver_y(|guess| {
+        self.with_callback_solver_y(time, |guess, _| {
             let result = self
                 .runtime
                 .eval_state_jacobian_v_ad_with_guess_into(
@@ -737,7 +753,12 @@ impl SolveMeKernel {
         settle: AlgebraicSettle,
         derivatives: &mut [f64],
     ) -> Result<(), MeError> {
-        self.with_callback_solver_y(|guess| {
+        self.with_callback_solver_y(time, |guess, settled| {
+            if let Some(settled) = settled {
+                derivatives.copy_from_slice(settled);
+                self.cache_continuous_linearization(time, &self.states, parameters, guess);
+                return Ok(());
+            }
             let result = self
                 .runtime
                 .eval_state_derivatives_with_guess_into(
@@ -898,7 +919,7 @@ impl SolveMeKernel {
 
     fn solver_y_at_parameters(&self, time: f64, params: &[f64]) -> Result<Vec<f64>, MeError> {
         let settle = self.numerics_settle();
-        self.with_callback_solver_y(|guess| {
+        self.with_callback_solver_y(time, |guess, _| {
             self.runtime
                 .full_solver_y_with_guess(
                     time,
@@ -919,7 +940,20 @@ impl SolveMeKernel {
         }
     }
 
+    /// Evaluate `f` under the delay-refreshed parameters at `(time, state)`.
+    /// A pending committed-seed refresh (SPEC_0044 ME-PROJ-005) runs first:
+    /// it needs the same scratch, so it cannot run once `f` holds it.
     pub(super) fn with_delay_evaluation_params<R>(
+        &self,
+        time: f64,
+        state: &[f64],
+        f: impl FnOnce(&[f64]) -> R,
+    ) -> Result<R, MeError> {
+        self.resolve_seed()?;
+        self.with_delay_params_unseeded(time, state, f)
+    }
+
+    pub(super) fn with_delay_params_unseeded<R>(
         &self,
         time: f64,
         state: &[f64],

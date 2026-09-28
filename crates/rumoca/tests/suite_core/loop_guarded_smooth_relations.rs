@@ -122,3 +122,84 @@ fn a_smooth_relation_over_states_owns_no_event() {
     assert_eq!(root_count(STATE_GUARD, "StateGuard"), 0);
     simulates(STATE_GUARD, "StateGuard", 2.0);
 }
+
+/// The same limiter loop with the strict `noEvent` guard of
+/// IdealizedOpAmpLimited(strict = true), as in OpAmps.Multivibrator: MLS 3.7.3
+/// forbids localizing the switch, and past the fold the loop has no branch the
+/// model states: construction records it (ES016) and the run fails with a
+/// typed fold error where the branch ends, instead of passing it by accident.
+const NO_EVENT_LIMITER_LOOP: &str = r#"
+model NoEventLimiterLoop
+  parameter Real V0 = 15000;
+  parameter Real vps = 15;
+  parameter Real vns = -15;
+  parameter Real k = 0.5;
+  Real v_in;
+  Real v_out;
+equation
+  v_in = k * v_out - 10 * sin(20 * time);
+  v_out = smooth(0, noEvent(if V0 * v_in > vps then vps else if V0 * v_in < vns then vns else V0 * v_in));
+end NoEventLimiterLoop;
+"#;
+
+/// A `noEvent` relation over an input of the block, not its own unknown:
+/// the block stays explicit in the guard, so it compiles and simulates.
+const NO_EVENT_OPEN_LIMITER: &str = r#"
+model NoEventOpenLimiter
+  Real v_in;
+  Real v_out;
+equation
+  v_in = 10 * sin(20 * time);
+  v_out = smooth(0, noEvent(if v_in > 1 then 1 else if v_in < -1 then -1 else v_in));
+end NoEventOpenLimiter;
+"#;
+
+#[test]
+fn a_no_event_guard_that_switches_its_own_loop_fails_with_a_typed_fold() {
+    let compiled = Compiler::new()
+        .model("NoEventLimiterLoop")
+        .compile_str(NO_EVENT_LIMITER_LOOP, "loop_guarded_smooth_relations.mo")
+        .unwrap();
+    let model = lower_dae_for_simulation(&compiled.dae, &SimOptions::default()).unwrap();
+    let guards = &model.problem.continuous.unlocalizable_guards;
+    assert_eq!(guards.len(), 1, "{guards:?}");
+    assert!(guards[0].warning().contains("noEvent"));
+    let options = SimOptions {
+        t_end: 1.0,
+        solver_mode: SimSolverMode::Auto,
+        ..SimOptions::default()
+    };
+    let Err(error) = simulate_dae_with_diagnostics(&compiled.dae, &options) else {
+        panic!("the loop has no stated branch past its fold");
+    };
+    let text = error.to_string();
+    assert!(text.contains("[ES016]") && text.contains("fold"), "{text}");
+}
+
+/// A `noEvent` guard over another scalar of the vector its block solves, as
+/// in SpacePhasors.Blocks.ToPolar: the block is explicit in the guard.
+const NO_EVENT_OTHER_SCALAR: &str = r#"
+model NoEventOtherScalar
+  Real u[2] = {sin(time), cos(time)};
+  Real y[2];
+equation
+  y[1] = sqrt(u[1]^2 + u[2]^2);
+  y[2] = if noEvent(y[1] <= 1e-12) then 0 else atan2(u[2], u[1]);
+end NoEventOtherScalar;
+"#;
+
+#[test]
+fn a_no_event_guard_over_another_scalar_of_its_vector_is_not_a_fact() {
+    let compiled = Compiler::new()
+        .model("NoEventOtherScalar")
+        .compile_str(NO_EVENT_OTHER_SCALAR, "loop_guarded_smooth_relations.mo")
+        .unwrap();
+    let model = lower_dae_for_simulation(&compiled.dae, &SimOptions::default()).unwrap();
+    assert!(model.problem.continuous.unlocalizable_guards.is_empty());
+    simulates(NO_EVENT_OTHER_SCALAR, "NoEventOtherScalar", 1.0);
+}
+
+#[test]
+fn a_no_event_guard_over_block_inputs_compiles() {
+    simulates(NO_EVENT_OPEN_LIMITER, "NoEventOpenLimiter", 1.0);
+}

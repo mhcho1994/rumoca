@@ -81,6 +81,7 @@ pub(super) fn alternate_problem(
         derivative_rhs: plan.derivative_rhs.clone(),
         refresh_owners: plan.refresh_owners.clone(),
         reduced_chart_set: solve::ReducedChartSet::default(),
+        unlocalizable_guards: problem.continuous.unlocalizable_guards.clone(),
     };
     alternate
 }

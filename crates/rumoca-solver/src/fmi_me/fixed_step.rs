@@ -32,14 +32,17 @@ pub struct FixedStepRun {
 }
 
 /// Drive `artifact` from time zero to `stop` in steps of `step`, with the
-/// component's default refresh tolerance as the FMI tolerance.
+/// component's default refresh tolerance as the FMI tolerance. The drive is an
+/// importer, so the component refreshes from its committed seed
+/// (`RefreshExecutor::ImporterDriven`, SPEC_0044 ME-PROJ-005), as the
+/// generated component it is compared with does.
 pub fn fixed_step_rk4(
     artifact: &MeModelArtifact,
     step: f64,
     stop: f64,
 ) -> Result<FixedStepRun, MeError> {
     let tolerance = rumoca_eval_solve::projection_policy::ALGEBRAIC_REFRESH_TOLERANCE;
-    let config = MeInstanceConfig::new("fixed-step", tolerance, 0.0, stop)?;
+    let config = MeInstanceConfig::new("fixed-step", tolerance, 0.0, stop)?.importer_driven();
     let mut kernel = SolveMeKernel::instantiate(artifact.source(), &config)?;
     kernel.enter_initialization_mode()?;
     kernel.exit_initialization_mode()?;

@@ -103,6 +103,8 @@ struct StructuralMatching<'dae> {
     rows: HashMap<usize, UnknownId<'dae>>,
     algebraic_blocks: Vec<AlgebraicBlockMatch<'dae>>,
     derivative_blocks: Vec<Vec<(usize, UnknownId<'dae>)>>,
+    /// ES016 facts: blocks whose own unknowns a `noEvent` relation switches.
+    unlocalizable_guards: Vec<structural::UnlocalizableGuard<'dae>>,
 }
 
 /// One algebraic projection block's matched `(equation row, unknown)` pairs,
@@ -134,6 +136,7 @@ fn structural_matching<'dae>(
             rows: HashMap::new(),
             algebraic_blocks: Vec::new(),
             derivative_blocks: Vec::new(),
+            unlocalizable_guards: Vec::new(),
         });
     }
     let sorted = sorted.expect("non-empty prepared DAE carries its structural analysis");
@@ -149,6 +152,7 @@ fn structural_matching<'dae>(
         rows,
         algebraic_blocks,
         derivative_blocks,
+        unlocalizable_guards: structural::unlocalizable_loop_guards(view, sorted),
     })
 }
 
@@ -571,7 +575,37 @@ fn lower_continuous<'dae>(
         )?,
         refresh_owners: solve::ContinuousRefreshOwners::default(),
         reduced_chart_set: solve::ReducedChartSet::default(),
+        unlocalizable_guards: lower_unlocalizable_guards(layout, &structural.unlocalizable_guards)?,
     })
+}
+
+/// Each ES016 fact over its block's solver unknowns (SPEC_0044 ME-EVENT-008).
+fn lower_unlocalizable_guards(
+    layout: &LoweredLayout<'_>,
+    guards: &[structural::UnlocalizableGuard<'_>],
+) -> Result<Vec<solve::UnlocalizableGuard>, LowerError> {
+    guards
+        .iter()
+        .map(|guard| {
+            let mut y_indices = Vec::with_capacity(guard.unknowns.len());
+            for unknown in &guard.unknowns {
+                let UnknownId::Algebraic { variable, scalar } = unknown else {
+                    continue;
+                };
+                if let solve::ScalarSlot::Y { index, .. } =
+                    variable_scalar_slot(layout, variable.index(), *scalar as usize, guard.span)?
+                {
+                    y_indices.push(index);
+                }
+            }
+            y_indices.sort_unstable();
+            Ok(solve::UnlocalizableGuard {
+                y_indices,
+                relation: guard.relation.clone(),
+                unknown_names: guard.unknown_names.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Rebind the reduced state-selection charts from finalized-DAE variable

@@ -48,6 +48,52 @@ pub struct ContinuousSolveSystem {
     /// still round-trips. Each alternate plan travels as a delta against this
     /// system (see `continuous_wire`).
     pub reduced_chart_set: ReducedChartSet,
+    /// Projection blocks whose own unknowns a relation under `noEvent`
+    /// switches, with no root to localize it (SPEC_0044 ME-EVENT-008, ES016).
+    /// Construction warns about each; a projection of such a block that
+    /// fails is a typed fold of the relation, never a generic failure.
+    pub unlocalizable_guards: Vec<UnlocalizableGuard>,
+}
+
+/// One ES016 fact: the solver unknowns of the block and the relation that
+/// switches them under `noEvent`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnlocalizableGuard {
+    /// Solver-Y indices of the block's unknowns.
+    pub y_indices: Vec<usize>,
+    /// The relation's source text.
+    pub relation: String,
+    /// The block's unknowns by name, as the warning states them.
+    pub unknown_names: String,
+}
+
+impl UnlocalizableGuard {
+    /// The ES016 failure every executor reports when the block's projection
+    /// fails: its branch ended at a fold of the relation.
+    #[must_use]
+    pub fn fold(&self) -> String {
+        format!(
+            "the algebraic loop over {} reached a fold of `{}`: the relation switches its own loop under `noEvent`, so no localized branch continues past it",
+            self.unknown_names, self.relation
+        )
+    }
+
+    /// The ES016 warning every executor states before it runs the model.
+    #[must_use]
+    pub fn warning(&self) -> String {
+        format!(
+            "the algebraic loop over {} switches on its own unknowns at `{}` under `noEvent`: MLS 3.7.3 forbids localizing that switch, so where the branch ends at a fold the simulation fails with a typed error; write the relation without `noEvent` so it owns an event, or give the switch hysteresis with events",
+            self.unknown_names, self.relation
+        )
+    }
+
+    /// The guard whose block contains solver unknown `y_index`, if any.
+    #[must_use]
+    pub fn covering(guards: &[Self], y_index: usize) -> Option<&Self> {
+        guards
+            .iter()
+            .find(|guard| guard.y_indices.contains(&y_index))
+    }
 }
 
 /// A bounded set of admissible reduced state-selection charts. Empty for every

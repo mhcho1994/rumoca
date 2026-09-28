@@ -67,6 +67,7 @@ fn decay_model() -> rumoca_ir_solve::SolveModel {
                 // slot Solve lowering fills.
                 refresh_owners: rumoca_ir_solve::ContinuousRefreshOwners::default(),
                 reduced_chart_set: rumoca_ir_solve::ReducedChartSet::default(),
+                unlocalizable_guards: Vec::new(),
             },
             initialization: InitializationSolveSystem::construct(
                 rumoca_ir_solve::InitializationSystemInput {
