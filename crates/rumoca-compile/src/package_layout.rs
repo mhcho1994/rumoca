@@ -150,7 +150,12 @@ fn top_level_name_entries(
     source_map: Option<&SourceMap>,
 ) -> Result<Vec<(String, Option<Span>)>> {
     let Some(definition) = docs_by_path.get(file_path) else {
-        bail!("missing parsed definition for '{}'", file_path.display());
+        // The file did not parse. The loader has already named it and the
+        // reason; layout has nothing further to say about a file it cannot
+        // read, and failing here would put back the whole-tree refusal that
+        // isolating parse failures exists to remove. It contributes no
+        // names, which is exactly what is known about it.
+        return Ok(Vec::new());
     };
     let mut entries = definition
         .classes
@@ -243,7 +248,14 @@ pub(crate) fn validate_source_root_package_layout(
         validate_package_root(root, &docs_by_path, None, &mut violations)?;
     }
 
-    if violations.is_empty() {
+    // Only an error refuses the tree. A warning is still reported by the
+    // second pass below when something else fails, but on its own it must
+    // not stop a library from compiling -- that asymmetry is the whole point
+    // of having two severities.
+    if !violations
+        .iter()
+        .any(|d| d.severity == rumoca_core::DiagnosticSeverity::Error)
+    {
         return Ok(());
     }
 
@@ -362,7 +374,24 @@ fn validate_directory(
     // MLS §13.4.1: directories participating in the package tree must carry
     // a `package.mo` node; MLS §13.4.3 requires child entities to match their
     // enclosing package via `within`.
-    let children = collect_directory_children(dir)?;
+    let mut children = collect_directory_children(dir)?;
+    // A malformed directory the enclosing package never names cannot affect
+    // any model: no name resolves through it. Report it, but do not let it
+    // answer for the library.
+    let (claimed, detached) = partition_detached(dir, children.invalid_modelica_child_dirs);
+    children.invalid_modelica_child_dirs = claimed;
+    for child in detached {
+        violations.push(CommonDiagnostic::global_warning(
+            "PKG-006",
+            format!(
+                "directory '{}' is missing package.mo; it is not listed in \
+                 '{}' either, so nothing in this package refers to it and it \
+                 is ignored",
+                child.display(),
+                dir.join("package.order").display()
+            ),
+        ));
+    }
     if children.has_subentities() && !children.has_package_file {
         violations.push(CommonDiagnostic::global_error(
             "PKG-006",
@@ -392,11 +421,7 @@ fn validate_directory(
         &mut owners_by_name,
         violations,
     )?;
-    register_invalid_child_dirs(
-        &children.invalid_modelica_child_dirs,
-        &mut owners_by_name,
-        violations,
-    );
+    register_invalid_child_dirs(&children.invalid_modelica_child_dirs, violations);
 
     for child in children.package_child_dirs {
         validate_directory(
@@ -566,6 +591,57 @@ fn register_file_children(
     Ok(())
 }
 
+/// The names a structured package lists in its `package.order`.
+///
+/// `None` when the directory has no `package.order`, which is different from
+/// an empty one: absent means "this package does not say", empty means "this
+/// package contains nothing".
+///
+/// MLS §13.4.2 makes `package.order` the package's own statement of what it
+/// contains. A subdirectory it does not name, and that carries no
+/// `package.mo` of its own, is not a Modelica entity — it is a directory
+/// that happens to sit inside the tree. Validating it anyway is what let a
+/// single leftover directory refuse four entire libraries; see
+/// docs/toolbugs/TOOLBUG-035.
+fn declared_child_names(dir: &Path) -> Option<BTreeSet<String>> {
+    let text = fs::read_to_string(dir.join("package.order")).ok()?;
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Split malformed child directories into those the package claims and those
+/// nothing refers to.
+fn partition_detached(
+    dir: &Path,
+    invalid_child_dirs: Vec<PathBuf>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let declared = declared_child_names(dir);
+    invalid_child_dirs.into_iter().partition(|child| {
+        let Some(name) = child.file_name().and_then(|name| name.to_str()) else {
+            return true;
+        };
+        // A sibling `<name>.mo` already provides this name. The directory is
+        // a leftover from a conversion between the one-file and the
+        // one-directory layout, and nothing resolves to it: a directory with
+        // no `package.mo` is not a package (MLS §13.4.1), so it cannot be
+        // what `package.order` is naming.
+        if dir.join(format!("{name}.mo")).is_file() {
+            return false;
+        }
+        match &declared {
+            // No `package.order`: the package makes no claim either way, so
+            // the child stays in scope and the stricter reading applies.
+            None => true,
+            Some(declared) => declared.contains(name),
+        }
+    })
+}
+
 fn classify_child_dirs(child_dirs: Vec<PathBuf>) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut package_child_dirs = Vec::new();
     let mut invalid_modelica_child_dirs = Vec::new();
@@ -609,9 +685,15 @@ fn register_package_child_dirs(
     Ok(())
 }
 
+/// Report malformed child directories.
+///
+/// Takes no owner map on purpose. A directory without `package.mo` is not a
+/// package (MLS §13.4.1), so it declares no class and cannot own a name.
+/// Registering it as an owner invented a duplicate against the sibling file
+/// that really does declare that name, and reported PKG-008 for an ambiguity
+/// the library does not have.
 fn register_invalid_child_dirs(
     invalid_modelica_child_dirs: &[PathBuf],
-    owners_by_name: &mut BTreeMap<String, (String, Option<Span>)>,
     violations: &mut Vec<CommonDiagnostic>,
 ) {
     for child in invalid_modelica_child_dirs {
@@ -619,12 +701,6 @@ fn register_invalid_child_dirs(
             "PKG-006",
             format!("directory '{}' is missing package.mo", child.display()),
         ));
-        let entity = child.display().to_string();
-        let name = child
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("<unknown>");
-        record_child_name(name, &entity, None, owners_by_name, violations);
     }
 }
 

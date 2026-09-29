@@ -1155,42 +1155,22 @@ fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunctio
 }
 
 fn export_domains(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcDomain> {
-    // Reached from the families rather than enumerated: the DAE view exposes
-    // `domain(id)` but no index-based iterator, and the domains that matter are
-    // exactly the ones a family names. Parent chains are followed so a nested
-    // `for` keeps its enclosing domain.
-    let mut wanted: Vec<dae::DomainId<'_>> = Vec::new();
-    let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    let mut frontier: Vec<dae::DomainId<'_>> = Vec::new();
-
-    for index in 0..view.continuous_family_count() {
-        if let Some(family) = view.continuous_family(index) {
-            frontier.push(family.domain());
-        }
-    }
-    for index in 0..view.initialization_family_count() {
-        if let Some(family) = view.initialization_family(index) {
-            frontier.push(family.domain());
-        }
-    }
-    while let Some(id) = frontier.pop() {
-        if !seen.insert(id.index()) {
-            continue;
-        }
-        wanted.push(id);
-        if let Some(domain) = view.domain(id)
-            && let Some(parent) = domain.parent()
-        {
-            frontier.push(parent);
-        }
-    }
-
-    wanted.sort_by_key(|id| id.index());
-    let mut out = Vec::with_capacity(wanted.len());
-    for id in wanted {
-        let Some(domain) = view.domain(id) else {
-            continue;
-        };
+    // Every domain, not the ones reachable from equation families.
+    //
+    // Collecting by reachability had two consequences, and the artifact was
+    // invalid under both. Domains named only from an expression — a
+    // `Comprehension`, a `Binder` coordinate — were never emitted, so the
+    // artifact referenced domains it did not declare. And the survivors kept
+    // their original DAE indices, so the table was sparse where the
+    // validator requires `entry at position N` to declare id N. One measured
+    // artifact carried 127 domains numbered 3..156.
+    //
+    // DAE domain ids are dense indices into storage, so emitting all of them
+    // keeps every existing reference correct with no remapping: the exported
+    // id *is* the DAE index. Unreferenced domains are cheap; a dangling
+    // reference is not.
+    let mut out = Vec::with_capacity(view.domain_count());
+    for (id, domain) in view.domains() {
         out.push(RbcDomain {
             id: DomainId(id.index()),
             binders: domain

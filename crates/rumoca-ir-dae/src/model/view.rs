@@ -203,6 +203,20 @@ impl<'dae> DaeView<'dae> {
         delay_id => (DelayId, delays),
     }
 
+    /// Every domain, in id order.
+    ///
+    /// Exposed because a consumer that must reproduce the whole table — the
+    /// bitcode exporter — otherwise has to reach domains by walking
+    /// referents, and anything that walk misses becomes a dangling reference
+    /// in the artifact it writes. Ids stay dense only if every entry is
+    /// emitted, so enumeration has to be possible.
+    pub fn domains(self) -> impl Iterator<Item = (DomainId<'dae>, DomainView<'dae>)> {
+        (0..self.dae.storage.domains.len() as u32).filter_map(move |raw| {
+            let id = DomainId::from_raw(raw);
+            self.domain(id).map(|domain| (id, domain))
+        })
+    }
+
     pub fn domain(self, id: DomainId<'dae>) -> Option<DomainView<'dae>> {
         Some(DomainView {
             entry: self.dae.storage.domains.get(id.index() as usize)?,

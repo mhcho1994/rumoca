@@ -183,6 +183,17 @@ impl Session {
                 };
             }
         };
+        // Files that parsed, not files that were found. Before parse
+        // failures were isolated the two were always equal, because one bad
+        // file failed the whole load; now a source root can yield fewer
+        // documents than it has files, and reporting the larger number would
+        // claim coverage the session does not have.
+        let parsed_file_count = parsed.documents.len();
+        let diagnostics: Vec<String> = parsed
+            .unreadable
+            .iter()
+            .map(|(file, reason)| format!("Failed to parse '{}': {reason}", file.display()))
+            .collect();
         let inserted_file_count =
             self.replace_parsed_source_set(source_set_id, kind, parsed.documents, exclude_uri);
         let _ = self.sync_source_root_semantic_summary_cache(
@@ -193,12 +204,12 @@ impl Session {
         SourceRootLoadReport {
             source_set_id: source_set_id.to_string(),
             source_root_path: source_root_path_string,
-            parsed_file_count: parsed.file_count,
+            parsed_file_count,
             inserted_file_count,
             cache_status: Some(parsed.cache_status),
             cache_key: Some(parsed.cache_key),
             cache_file: parsed.cache_file,
-            diagnostics: Vec::new(),
+            diagnostics,
         }
     }
 

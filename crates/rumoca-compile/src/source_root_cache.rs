@@ -26,6 +26,14 @@ pub enum SourceRootCacheStatus {
 #[derive(Debug, Clone)]
 pub struct ParsedSourceRoot {
     pub documents: Vec<(String, StoredDefinition)>,
+    /// Files that did not parse, with the reason, in path order.
+    ///
+    /// Carried rather than raised. A source root is a *library*, and a
+    /// library that a compiler cannot fully read is still usable for every
+    /// model that does not reach the unreadable part. Failing the whole load
+    /// let one stray byte refuse thousands of unrelated models; see
+    /// docs/toolbugs/TOOLBUG-036.
+    pub unreadable: Vec<(PathBuf, String)>,
     pub file_count: usize,
     pub cache_status: SourceRootCacheStatus,
     pub cache_key: String,
@@ -385,25 +393,46 @@ fn usable_cache_dir(cache_dir: Option<PathBuf>) -> Option<PathBuf> {
     Some(cache_dir)
 }
 
+type LoadedDocuments = (
+    Vec<(String, StoredDefinition)>,
+    bool,
+    Vec<(PathBuf, String)>,
+);
+
+/// Parse every file, keeping what parsed and recording what did not.
+///
+/// Deliberately not `collect::<Result<_>>()?`: that stops at the first bad
+/// file, discards every good one, and reports a context message naming the
+/// root rather than the file. One unparseable file then answers for the
+/// whole library.
 fn load_source_root_documents_from_artifact_cache(
     files: &[HashedSourceRootFile],
     cache_dir: Option<&Path>,
-) -> Result<(Vec<(String, StoredDefinition)>, bool)> {
-    let docs = files
+) -> Result<LoadedDocuments> {
+    let outcomes: Vec<_> = files
         .par_iter()
         .map(|file| {
-            parse_file_with_precomputed_hash_status(&file.path, &file.source_hash, cache_dir)
+            (
+                file.path.clone(),
+                parse_file_with_precomputed_hash_status(&file.path, &file.source_hash, cache_dir),
+            )
         })
-        .collect::<Result<Vec<_>>>()?;
-    let all_hits = docs.iter().all(|(_, _, status)| {
-        *status == crate::parsed_artifact_cache::ParsedArtifactCacheStatus::Hit
-    });
-    Ok((
-        docs.into_iter()
-            .map(|(uri, definition, _)| (uri, definition))
-            .collect(),
-        all_hits,
-    ))
+        .collect();
+
+    let mut docs = Vec::with_capacity(outcomes.len());
+    let mut unreadable = Vec::new();
+    let mut all_hits = true;
+    for (path, outcome) in outcomes {
+        match outcome {
+            Ok((uri, definition, status)) => {
+                all_hits &= status == crate::parsed_artifact_cache::ParsedArtifactCacheStatus::Hit;
+                docs.push((uri, definition));
+            }
+            Err(error) => unreadable.push((path, format!("{error:#}"))),
+        }
+    }
+    unreadable.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((docs, all_hits, unreadable))
 }
 
 pub fn parse_source_root_with_cache_in(
@@ -425,11 +454,20 @@ pub fn parse_source_root_with_cache_in(
     let parsed_artifact_cache_dir =
         usable_cache_dir(resolve_parsed_artifact_cache_dir_from_root(cache_dir));
     let load_started = Instant::now();
-    let (docs, all_hits) = load_source_root_documents_from_artifact_cache(
+    let (docs, all_hits, unreadable) = load_source_root_documents_from_artifact_cache(
         &input_hash.files,
         parsed_artifact_cache_dir.as_deref(),
     )
     .with_context(|| format!("parse source-root files under {}", path.display()))?;
+    for (file, reason) in &unreadable {
+        // Named individually, and all of them, so one run enumerates a
+        // library's problems instead of surfacing them one bisection at a
+        // time (docs/toolbugs/TOOLBUG-034).
+        eprintln!(
+            "warning: skipping unreadable source file {}: {reason}",
+            file.display()
+        );
+    }
     let load_ms = elapsed_ms(load_started);
     if cache_dir.is_some() {
         if all_hits {
@@ -463,6 +501,7 @@ pub fn parse_source_root_with_cache_in(
     timing.total_ms = elapsed_ms(total_started);
     Ok(ParsedSourceRoot {
         documents: docs,
+        unreadable,
         file_count: files.len(),
         cache_status,
         cache_key: input_hash.cache_key,

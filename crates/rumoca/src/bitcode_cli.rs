@@ -314,18 +314,46 @@ fn run_dump(path: &Path, output: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// Expression nodes carrying a form the schema could not represent.
+fn count_unsupported_nodes(model: &rumoca_bitcode::schema::RbcModel) -> usize {
+    model
+        .expressions
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression.node,
+                rumoca_bitcode::schema::RbcExprNode::Unsupported { .. }
+            )
+        })
+        .count()
+}
+
 fn run_check(path: &Path, strict: bool, connections: bool) -> Result<()> {
     let (file, _) = rumoca_bitcode::read_file(path).map_err(anyhow::Error::from)?;
     if file.execution.is_some() {
         crate::bitcode_execution::check(&file)?;
     }
+    // `Unsupported` is a faithful carrier, not a corruption: the compiler
+    // wrote it because bitcode v2 cannot express that expression form, and
+    // it round-trips unchanged. Rejecting it *here* made such an artifact
+    // readable but unwritable, so no external pass could ever instrument
+    // the model -- which is the interchange promise the format exists for.
+    // `compile-bitcode` still refuses it, because rebuilding a DAE from a
+    // node whose meaning was never captured genuinely cannot be done.
     let mut options = rumoca_bitcode::validate::ValidateOptions::default();
-    options.reject_unsupported = strict;
+    options.reject_unsupported = false;
+    let unsupported = count_unsupported_nodes(&file.model);
     let checked = if connections {
         rumoca_bitcode::validate::validate_connection_contracts(&file.model, &options)
     } else {
         rumoca_bitcode::validate(&file.model, &options)
     };
+    if strict && unsupported > 0 {
+        eprintln!(
+            "warning: {unsupported} expression node(s) record a form bitcode v2 cannot \
+             express; the artifact round-trips, but `compile-bitcode` will refuse it"
+        );
+    }
     match checked {
         Ok(()) => {
             println!(
