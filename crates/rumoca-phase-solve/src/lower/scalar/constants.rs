@@ -96,7 +96,11 @@ impl<'dae> ScalarSelector<'dae> {
         }
         variable.binding().ok_or_else(|| {
             LowerError::non_computable(
-                "affine derivative coefficient parameter has no static binding",
+                format!(
+                    "parameter `{}` has no static binding, but its value is needed at \
+                     translation time",
+                    variable.name()
+                ),
                 span,
             )
         })

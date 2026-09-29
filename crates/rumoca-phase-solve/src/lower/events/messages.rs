@@ -109,6 +109,23 @@ fn lower_message_parts<'dae>(
             });
             Ok(())
         }
+        // A String parameter (CDL `Utilities.Assert`'s `message`) is fixed at
+        // translation time -- Solve has no String storage to tune -- so the
+        // message is its binding.
+        dae::ExpressionOperation::Coordinate(dae::CoordinateView::Parameter(parameter))
+            if expression.value_type().scalar_type() == dae::ScalarType::String =>
+        {
+            let binding = view
+                .variable(parameter.into())
+                .and_then(|variable| variable.binding())
+                .ok_or_else(|| {
+                    LowerError::unsupported(
+                        "event message String parameter has no binding",
+                        expression.provenance().span(),
+                    )
+                })?;
+            lower_message_parts(view, layout, binding, parts)
+        }
         _ => Err(LowerError::unsupported(
             "Solve event messages require String literals, concatenation, or checked String conversions",
             expression.provenance().span(),
