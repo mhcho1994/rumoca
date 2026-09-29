@@ -369,6 +369,33 @@ fn checked_assertion_fails_with_its_source_message() {
 }
 
 #[test]
+fn inclusive_relation_holds_at_its_boundary_without_event_chattering() {
+    // `0 >= time` is true at t = 0 exactly and false after it.
+    let dae = compile(
+        concat!(
+            "model Inclusive\n",
+            "  Boolean y;\n",
+            "  Real z;\n",
+            "equation\n",
+            "  y = 0 >= time;\n",
+            "  z = if y then 1 else -1;\n",
+            "end Inclusive;\n",
+        ),
+        "Inclusive",
+    );
+    let options = SimOptions {
+        t_end: 1.0,
+        dt: Some(0.05),
+        ..SimOptions::default()
+    };
+    let result = simulate_dae(&dae, &options)
+        .expect("a relation exactly at its boundary must settle its event iteration");
+    let z = result.names.iter().position(|name| name == "z").expect("z column");
+    assert_eq!(result.data[z].first().copied(), Some(1.0), "0 >= 0 holds");
+    assert_eq!(result.data[z].last().copied(), Some(-1.0), "0 >= 1 does not");
+}
+
+#[test]
 fn warning_level_assertion_reports_and_continues_while_error_level_stops() {
     let source = |level: &str| {
         format!(

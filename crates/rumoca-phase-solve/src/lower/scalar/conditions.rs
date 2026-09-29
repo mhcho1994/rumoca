@@ -95,6 +95,28 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         Ok(self.ops)
     }
 
+    /// A relation's root is negative exactly when the relation holds: the
+    /// runtime refreshes relation memory as `root < 0`. For `a <= b` the root
+    /// `a - b` is zero at equality, where the relation is true, so an exact
+    /// zero becomes the smallest negative value. Crossing detection is
+    /// unchanged; without this, the memory said false at equality while the
+    /// discrete rows' literal evaluation said true, and the event iteration
+    /// flipped between them forever (`y = 0 >= time` at t = 0).
+    fn inclusive_root(
+        &mut self,
+        inclusive: bool,
+        root: solve::Reg,
+        span: Span,
+    ) -> Result<solve::Reg, LowerError> {
+        if !inclusive {
+            return Ok(root);
+        }
+        let zero = self.constant(0.0, span)?;
+        let at_boundary = self.binary(dae::BinaryOperator::Equal, root, zero, span)?;
+        let holds = self.constant(-f64::MIN_POSITIVE, span)?;
+        self.select(at_boundary, holds, root, span)
+    }
+
     fn root_expression(
         &mut self,
         expression: dae::ExprId<'dae>,
@@ -103,22 +125,25 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let node = self.node(expression);
         let output = match node.operation() {
             dae::ExpressionOperation::Binary {
-                operator: dae::BinaryOperator::Less | dae::BinaryOperator::LessEqual,
+                operator: operator @ (dae::BinaryOperator::Less | dae::BinaryOperator::LessEqual),
                 lhs,
                 rhs,
             } => {
                 let lhs = self.expression(lhs, 0)?;
                 let rhs = self.expression(rhs, 0)?;
-                self.binary(dae::BinaryOperator::Subtract, lhs, rhs, span)?
+                let root = self.binary(dae::BinaryOperator::Subtract, lhs, rhs, span)?;
+                self.inclusive_root(operator == dae::BinaryOperator::LessEqual, root, span)?
             }
             dae::ExpressionOperation::Binary {
-                operator: dae::BinaryOperator::Greater | dae::BinaryOperator::GreaterEqual,
+                operator:
+                    operator @ (dae::BinaryOperator::Greater | dae::BinaryOperator::GreaterEqual),
                 lhs,
                 rhs,
             } => {
                 let lhs = self.expression(lhs, 0)?;
                 let rhs = self.expression(rhs, 0)?;
-                self.binary(dae::BinaryOperator::Subtract, rhs, lhs, span)?
+                let root = self.binary(dae::BinaryOperator::Subtract, rhs, lhs, span)?;
+                self.inclusive_root(operator == dae::BinaryOperator::GreaterEqual, root, span)?
             }
             _ => {
                 let condition = self.expression(expression, 0)?;
