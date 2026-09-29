@@ -154,6 +154,11 @@ fn binary(value: RbcBinaryOp) -> &'static str {
         GreaterEqual => "ge",
         And => "and",
         Or => "or",
+        ElementwiseAdd => "eadd",
+        ElementwiseSubtract => "esub",
+        ElementwiseMultiply => "emul",
+        ElementwiseDivide => "ediv",
+        ElementwisePower => "epow",
     }
 }
 
@@ -175,6 +180,10 @@ fn coordinate(value: RbcCoordinate) -> String {
         Binder { domain, ordinal } => format!("binder &{} {ordinal}", domain.0),
         Condition { condition } => format!("cond ?{}", condition.0),
         FunctionParameter { function, ordinal } => format!("fnparam ~{} {ordinal}", function.0),
+        ClockInterval { clock } => format!("clockint {}", clock.0),
+        Delay { delay } => format!("delay {}", delay.0),
+        Previous { previous } => format!("previous {}", previous.0),
+        Terminal { terminal } => format!("terminal {}", terminal.0),
     }
 }
 
@@ -294,7 +303,9 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
                 .join(" ");
             let body = match &function.body {
                 RbcFunctionBody::ElidedModelica => "body elided".to_string(),
-                RbcFunctionBody::External { language, symbol } => {
+                RbcFunctionBody::External {
+                    language, symbol, ..
+                } => {
                     format!("body external {} {}", quote(language), quote(symbol))
                 }
                 // The text profile is a declared subset and already refuses
@@ -572,6 +583,29 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
                 RbcExprNode::FunctionValue { .. }
                 | RbcExprNode::FunctionFoldParameter { .. }
                 | RbcExprNode::FunctionFoldOutput { .. } => "function-body-value".to_string(),
+                RbcExprNode::ClockTransfer {
+                    transfer: kind,
+                    source,
+                    source_clock,
+                    target_clock,
+                } => {
+                    let kind = match kind {
+                        RbcClockTransferKind::SubSample { factor } => format!("sub {factor}"),
+                        RbcClockTransferKind::SuperSample { factor } => format!("super {factor}"),
+                        RbcClockTransferKind::ShiftSample {
+                            counter,
+                            resolution,
+                        } => format!("shift {counter} {resolution}"),
+                        RbcClockTransferKind::BackSample {
+                            counter,
+                            resolution,
+                        } => format!("back {counter} {resolution}"),
+                    };
+                    format!(
+                        "ctransfer {kind} ^{} clocks {} {}",
+                        source.0, source_clock.0, target_clock.0
+                    )
+                }
                 RbcExprNode::Unsupported { detail } => format!("unsupported {}", quote(detail)),
             };
             let _ = writeln!(

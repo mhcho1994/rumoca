@@ -219,6 +219,7 @@ fn map_fixture() -> (RbcModel, RbcModel) {
     });
     input.functions.push(RbcFunction {
         folds: Vec::new(),
+        values: Vec::new(),
         calls: Vec::new(),
         id: FunctionId(0),
         name: "f".into(),
@@ -228,6 +229,10 @@ fn map_fixture() -> (RbcModel, RbcModel) {
         body: RbcFunctionBody::External {
             language: "C".into(),
             symbol: "external_f".into(),
+            purity: RbcPurity::Impure,
+            arguments: Vec::new(),
+            result: None,
+            linkage: RbcExternalLinkage::default(),
         },
         declaration: provenance,
     });
@@ -441,18 +446,24 @@ fn relocates_all_metadata_and_separate_equation_id_spaces() {
     ];
     m.functions.push(RbcFunction {
         folds: Vec::new(),
+        values: Vec::new(),
         calls: Vec::new(),
         id: FunctionId(0),
         name: "f".into(),
         parameters: vec![RbcFunctionParameter {
             name: "p".into(),
             value_type: TypeId(0),
+            declaration: None,
         }],
         results: vec![TypeId(0)],
         inline: RbcInline::Never,
         body: RbcFunctionBody::External {
             language: "C".into(),
             symbol: "f_external".into(),
+            purity: RbcPurity::Impure,
+            arguments: Vec::new(),
+            result: None,
+            linkage: RbcExternalLinkage::default(),
         },
         declaration: p,
     });

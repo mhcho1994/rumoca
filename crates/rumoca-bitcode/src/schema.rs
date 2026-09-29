@@ -130,7 +130,8 @@ pub struct RbcModel {
     /// Values discrete-valued variables take at the initialization instant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initial_discrete_values: Vec<RbcInitialDiscreteValue>,
-    /// Function declarations named by `RbcExprNode::Call`, without bodies.
+    /// Function declarations named by `RbcExprNode::Call`, with their
+    /// bodies when this artifact carries them (`RbcFunctionBody`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub functions: Vec<RbcFunction>,
     /// Array/`for` equations, which `equations` does not contain.
@@ -174,9 +175,121 @@ pub struct RbcModel {
     /// reconstruction rejects the artifact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discrete_definitions: Vec<RbcDiscreteDefinition>,
+    /// Discrete variables defined together by one event-guarded algorithm or
+    /// `when` clause (MLS §8.3.5, §11.1.2): each transaction owns its targets,
+    /// and every target is defined by at least one of its steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_event_transactions: Vec<RbcModelEventTransaction>,
+    /// MLS §16.5 `previous(v)` coordinates, each owned by one clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_values: Vec<RbcPreviousValue>,
+    /// The MLS §8.3.6 `terminal()` observation, when the model reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminals: Vec<RbcTerminal>,
+    /// Tensor-native families of root surfaces over a compact domain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structured_roots: Vec<RbcStructuredRoot>,
+    /// MLS §3.7.4.1 `delay` owners, in the order their coordinates occur in
+    /// the expression arena; each is read by exactly one `Delay` coordinate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delays: Vec<RbcDelay>,
     /// Counts a consumer can check against the collections above. Present so a
     /// truncated or partially-written artifact fails loudly.
     pub summary: RbcSummary,
+}
+
+/// Identifies one `previous` coordinate owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PreviousId(pub u32);
+
+/// Identifies the `terminal()` observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TerminalId(pub u32);
+
+/// Identifies one delay owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DelayId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RbcPreviousValue {
+    /// A discrete-Real or discrete-valued variable owned by `clock`.
+    pub variable: VariableId,
+    pub clock: ClockId,
+    pub provenance: RbcProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RbcTerminal {
+    pub provenance: RbcProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RbcStructuredRoot {
+    pub domain: DomainId,
+    pub expression: ExprId,
+    pub provenance: RbcProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RbcDelay {
+    /// The delayed expression.
+    pub source: ExprId,
+    pub delay: RbcDelayKind,
+    pub provenance: RbcProvenance,
+}
+
+/// A fixed delay time known at translation, or a varying one with a fixed
+/// bound; either way the runtime buffer has a size known before it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RbcDelayKind {
+    Parameter {
+        delay_time: RbcPositiveParameter,
+    },
+    Bounded {
+        delay_time: ExprId,
+        maximum: RbcPositiveParameter,
+    },
+}
+
+/// A positive parameter-variability Real, with the value the compiler proved.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RbcPositiveParameter {
+    pub expression: ExprId,
+    pub value: f64,
+    pub provenance: RbcProvenance,
+}
+
+/// One model event transaction: the discrete variables it owns and the
+/// guarded steps that assign them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RbcModelEventTransaction {
+    /// Discrete-Real or discrete-valued variables this transaction owns.
+    pub targets: Vec<VariableId>,
+    pub steps: Vec<RbcModelEventStep>,
+    pub provenance: RbcProvenance,
+}
+
+/// One activation of a transaction: when `trigger` fires and `guard` holds
+/// (on `clock`, for a clocked step), each definition takes its value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RbcModelEventStep {
+    pub trigger: ConditionId,
+    pub guard: ConditionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<ClockId>,
+    pub definitions: Vec<RbcModelEventDefinition>,
+    pub provenance: RbcProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RbcModelEventDefinition {
+    pub target: VariableId,
+    pub value: ExprId,
+    pub provenance: RbcProvenance,
 }
 
 /// Denormalised counts, for cheap validation and for `bitcode inspect`.
@@ -704,11 +817,30 @@ pub struct RbcExpr {
     pub provenance: RbcProvenance,
 }
 
+/// How a clock conversion derives its target clock (MLS §16.5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RbcClockTransferKind {
+    SubSample { factor: i64 },
+    SuperSample { factor: i64 },
+    ShiftSample { counter: i64, resolution: i64 },
+    BackSample { counter: i64, resolution: i64 },
+}
+
 /// Expression node. Operands always reference nodes with a **lower** [`ExprId`],
 /// so the arena is a DAG in topological order and can be evaluated in one pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RbcExprNode {
+    /// MLS §16.5.2 clock conversion: the last value of `source` on
+    /// `source_clock`, carried onto `target_clock`, which must be exactly the
+    /// clock `transfer` derives from the source clock (the DAE re-checks it).
+    ClockTransfer {
+        transfer: RbcClockTransferKind,
+        source: ExprId,
+        source_clock: ClockId,
+        target_clock: ClockId,
+    },
     /// The predefined MLS scalar-to-String operation, never an arbitrary call
     /// whose display name happens to be String.
     StringConversion {
@@ -975,6 +1107,22 @@ pub enum RbcCoordinate {
         condition: ConditionId,
     },
     /// A function's formal parameter, read from inside that function's body.
+    /// `interval(c)` of a periodic clock.
+    ClockInterval {
+        clock: ClockId,
+    },
+    /// The value a `delay` owner produces.
+    Delay {
+        delay: DelayId,
+    },
+    /// The value a `previous` owner reads.
+    Previous {
+        previous: PreviousId,
+    },
+    /// `terminal()`.
+    Terminal {
+        terminal: TerminalId,
+    },
     FunctionParameter {
         function: FunctionId,
         ordinal: u32,
@@ -999,7 +1147,11 @@ impl RbcCoordinate {
             Self::Time
             | Self::Binder { .. }
             | Self::Condition { .. }
-            | Self::FunctionParameter { .. } => None,
+            | Self::FunctionParameter { .. }
+            | Self::ClockInterval { .. }
+            | Self::Delay { .. }
+            | Self::Previous { .. }
+            | Self::Terminal { .. } => None,
         }
     }
 }
@@ -1035,6 +1187,14 @@ pub enum RbcBinaryOp {
     GreaterEqual,
     And,
     Or,
+    /// MLS §10.6 element-wise operators (`.+ .- .* ./ .^`). Distinct from
+    /// their scalar spellings because on arrays they mean something else:
+    /// `A * B` is a matrix product, `A .* B` is not.
+    ElementwiseAdd,
+    ElementwiseSubtract,
+    ElementwiseMultiply,
+    ElementwiseDivide,
+    ElementwisePower,
 }
 
 // ── Equations ────────────────────────────────────────────────────────────────
@@ -1076,13 +1236,14 @@ pub struct RbcDomain {
     pub provenance: RbcProvenance,
 }
 
-/// One function declaration, without its body.
+/// One function declaration, and its body when the artifact carries it.
 ///
 /// The signature is what a *call site* needs: which function, how many
-/// arguments, what they mean. The body is a separate IR — SSA definitions,
-/// loop transitions, conditionals, external interfaces — and bitcode v2 does
-/// not carry it, which `body` records explicitly so an absent body is never
-/// mistaken for an empty one.
+/// arguments, what they mean. The body -- SSA definitions, loop transitions,
+/// conditionals, or an external interface -- is `body`, with the value
+/// table and folds its statements address; `ElidedModelica` records a body
+/// that exists and is not here (a recursive function), so an absent body is
+/// never mistaken for an empty one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RbcFunction {
     pub id: FunctionId,
@@ -1094,27 +1255,24 @@ pub struct RbcFunction {
     /// The MLS §18.3 `Inline`/`LateInline` request the declaration wrote.
     pub inline: RbcInline,
     pub body: RbcFunctionBody,
+    /// Output and local values, in owner-local ordinal order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<RbcFunctionValue>,
     /// Bounded loops this body contains, addressed by owner-local ordinal.
     ///
     /// Beside the statements rather than inside them so a nested fold can
     /// name its parent by ordinal, which is how the DAE addresses them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folds: Vec<RbcFunctionFold>,
-    /// Functions this one calls, in first-seen order.
+    /// Functions this one calls, sorted by id.
     ///
-    /// A call inside an *equation* is already visible: `RbcExprNode::Call`
-    /// names its callee, so a consumer can read those edges off the
-    /// expression arena. A call inside a *function body* is not, because the
-    /// body is elided (`RbcFunctionBody::ElidedModelica`). Without this field
-    /// the call graph stops at the first function, and every consumer that
-    /// needs reachability over callables -- dead-code elimination, coverage,
-    /// "is this function used" -- either rebuilds it wrongly or gives up.
-    ///
-    /// Carrying the edges rather than the bodies keeps the property the
-    /// elision exists for: an edge list is a finite graph, not a program, so
-    /// nothing here reintroduces recursion as something the IR can *execute*.
-    /// A cycle in these edges is representable and is exactly what a
-    /// recursion check would look for.
+    /// The call graph, carried whether or not the bodies are. When a body is
+    /// elided -- a recursive function, or an exporter that does not carry
+    /// bodies -- the calls inside it are not visible in the arena, and
+    /// without this field the graph would stop at the first function.
+    /// Consumers that need reachability over callables (dead-code
+    /// elimination, coverage, "is this function used") read it here, and
+    /// validation checks it acyclic over carried bodies (SPEC §9a).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<FunctionId>,
     pub declaration: RbcProvenance,
@@ -1124,6 +1282,75 @@ pub struct RbcFunction {
 pub struct RbcFunctionParameter {
     pub name: String,
     pub value_type: TypeId,
+    /// Where the parameter was declared. Absent in artifacts written before
+    /// bodies were carried; a rebuild then anchors it at the function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<RbcProvenance>,
+}
+
+/// One output or local value of a function, in owner-local ordinal order.
+///
+/// The table `FunctionValue`, `AssignmentGroup` and the fold transitions
+/// address by ordinal. Without it an artifact names value 3 of a function
+/// and says nothing about what value 3 *is*, so a reader can print the body
+/// but not rebuild it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RbcFunctionValue {
+    pub name: String,
+    pub value_type: TypeId,
+    pub role: RbcFunctionValueRole,
+    pub declaration: RbcProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RbcFunctionValueRole {
+    /// Returned to the caller; its position among outputs is its result index.
+    Output,
+    /// Internal to the body.
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RbcPurity {
+    Pure,
+    #[default]
+    Impure,
+}
+
+/// One ordered ABI position of an external call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RbcExternalArgument {
+    /// An expression the external body reads, closed over the function's
+    /// own parameters.
+    Input { expression: ExprId },
+    /// An output the external body writes through this position.
+    Output { value: u32 },
+}
+
+/// Where an external symbol is found. Carried so a rebuilt model links the
+/// same code the source named.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RbcExternalLinkage {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_directory: Option<String>,
+}
+
+impl RbcExternalLinkage {
+    pub fn is_empty(&self) -> bool {
+        self.libraries.is_empty()
+            && self.include.is_none()
+            && self.include_directory.is_none()
+            && self.library_directory.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1161,7 +1388,24 @@ pub enum RbcFunctionBody {
     /// An MLS §12.9 external body, named by language and symbol. Carried
     /// because it is the whole of what the function does: there is no
     /// Modelica body that could be elided.
-    External { language: String, symbol: String },
+    External {
+        language: String,
+        symbol: String,
+        /// MLS 3.7 §12.3. A bare external declaration is impure, so that is
+        /// the default an artifact written before this field existed reads.
+        #[serde(default)]
+        purity: RbcPurity,
+        /// Ordered ABI positions. Without them the call cannot be rebuilt:
+        /// language and symbol say *what* to call, not *with what*.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        arguments: Vec<RbcExternalArgument>,
+        /// Output bound by the §12.9 `output = symbol(...)` return form, by
+        /// owner-local value ordinal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<u32>,
+        #[serde(default, skip_serializing_if = "RbcExternalLinkage::is_empty")]
+        linkage: RbcExternalLinkage,
+    },
 }
 
 /// One statement of a lowered function body.
@@ -1177,9 +1421,14 @@ pub enum RbcFunctionStatement {
         /// Owner-local ordinal of the value this defines.
         value: u32,
         expression: ExprId,
+        provenance: RbcProvenance,
     },
     /// An MLS §8.3.7 assertion inside the body.
-    Assertion { condition: ExprId, message: ExprId },
+    Assertion {
+        condition: ExprId,
+        message: ExprId,
+        provenance: RbcProvenance,
+    },
     /// Several values defined together, optionally under a shared branch.
     ///
     /// One statement rather than a run of assignments because the branch
@@ -1192,10 +1441,15 @@ pub enum RbcFunctionStatement {
         /// Absent when the group is unconditional.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         conditional: Option<RbcFunctionConditional>,
-        /// One expression per value when unconditional; empty when the
-        /// values come from `conditional` instead.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        /// One expression per value: the value it takes.
+        ///
+        /// Carried for conditional groups too. There each is the join of the
+        /// branches for that value, which already exists in the arena and
+        /// which the expressions after it may read; `conditional` records
+        /// that the joins share one branch selection, not a second way of
+        /// computing them.
         expressions: Vec<ExprId>,
+        provenance: RbcProvenance,
     },
     /// A bounded loop. `fold` is an owner-local ordinal into the function's
     /// fold table, which carries the transition; the body is here, because
@@ -1204,6 +1458,8 @@ pub enum RbcFunctionStatement {
     For {
         fold: u32,
         statements: Vec<RbcFunctionStatement>,
+        /// Where the loop closes; the fold carries where it opens.
+        provenance: RbcProvenance,
     },
 }
 
@@ -1234,6 +1490,8 @@ pub struct RbcFunctionFold {
     pub initial: Vec<RbcFunctionDefinition>,
     pub update: Vec<RbcFunctionDefinition>,
     pub output: Vec<RbcFunctionDefinition>,
+    /// Where the loop opens.
+    pub provenance: RbcProvenance,
 }
 
 /// One SSA definition inside a fold's transition.

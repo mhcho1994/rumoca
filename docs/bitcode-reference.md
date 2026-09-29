@@ -8,14 +8,14 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 
 **Compatibility** is per member. `additive` means a reader of an artifact written before the member existed still works, because the member is optional or defaulted; `required` means adding it is a version break.
 
-66 types.
+85 types.
 
 | Type | Kind | Members |
 |---|---|---:|
-| [`RbcModel`](#rbcmodel) | struct | 28 |
+| [`RbcModel`](#rbcmodel) | struct | 33 |
 | [`RbcSummary`](#rbcsummary) | struct | 29 |
 | [`RbcAction`](#rbcaction) | enum | 3 |
-| [`RbcBinaryOp`](#rbcbinaryop) | enum | 13 |
+| [`RbcBinaryOp`](#rbcbinaryop) | enum | 18 |
 | [`RbcBinder`](#rbcbinder) | struct | 5 |
 | [`RbcBranch`](#rbcbranch) | struct | 2 |
 | [`RbcCausality`](#rbccausality) | enum | 6 |
@@ -24,6 +24,7 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcClockNode`](#rbcclocknode) | enum | 2 |
 | [`RbcClockOwnership`](#rbcclockownership) | struct | 4 |
 | [`RbcClockRational`](#rbcclockrational) | struct | 2 |
+| [`RbcClockTransferKind`](#rbcclocktransferkind) | enum | 4 |
 | [`RbcComponent`](#rbccomponent) | struct | 3 |
 | [`RbcCondition`](#rbccondition) | struct | 3 |
 | [`RbcConditionNode`](#rbcconditionnode) | enum | 10 |
@@ -34,7 +35,9 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcConnectorInstance`](#rbcconnectorinstance) | struct | 7 |
 | [`RbcConnectorMember`](#rbcconnectormember) | struct | 2 |
 | [`RbcConnectorType`](#rbcconnectortype) | struct | 4 |
-| [`RbcCoordinate`](#rbccoordinate) | enum | 15 |
+| [`RbcCoordinate`](#rbccoordinate) | enum | 19 |
+| [`RbcDelay`](#rbcdelay) | struct | 3 |
+| [`RbcDelayKind`](#rbcdelaykind) | enum | 2 |
 | [`RbcDiscreteActivation`](#rbcdiscreteactivation) | enum | 2 |
 | [`RbcDiscreteBranch`](#rbcdiscretebranch) | struct | 3 |
 | [`RbcDiscreteDefinition`](#rbcdiscretedefinition) | struct | 3 |
@@ -45,19 +48,33 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcEquationFamily`](#rbcequationfamily) | struct | 10 |
 | [`RbcEventAction`](#rbceventaction) | struct | 5 |
 | [`RbcExpr`](#rbcexpr) | struct | 4 |
-| [`RbcExprNode`](#rbcexprnode) | enum | 16 |
+| [`RbcExprNode`](#rbcexprnode) | enum | 20 |
+| [`RbcExternalArgument`](#rbcexternalargument) | enum | 2 |
+| [`RbcExternalLinkage`](#rbcexternallinkage) | struct | 4 |
 | [`RbcFile`](#rbcfile) | struct | 5 |
 | [`RbcFlowBalance`](#rbcflowbalance) | struct | 2 |
 | [`RbcFlowTerm`](#rbcflowterm) | struct | 2 |
-| [`RbcFunction`](#rbcfunction) | struct | 8 |
-| [`RbcFunctionBody`](#rbcfunctionbody) | enum | 2 |
-| [`RbcFunctionParameter`](#rbcfunctionparameter) | struct | 2 |
+| [`RbcFunction`](#rbcfunction) | struct | 10 |
+| [`RbcFunctionBody`](#rbcfunctionbody) | enum | 3 |
+| [`RbcFunctionConditional`](#rbcfunctionconditional) | struct | 3 |
+| [`RbcFunctionDefinition`](#rbcfunctiondefinition) | struct | 2 |
+| [`RbcFunctionFold`](#rbcfunctionfold) | struct | 10 |
+| [`RbcFunctionParameter`](#rbcfunctionparameter) | struct | 3 |
+| [`RbcFunctionStatement`](#rbcfunctionstatement) | enum | 4 |
+| [`RbcFunctionValue`](#rbcfunctionvalue) | struct | 4 |
+| [`RbcFunctionValueRole`](#rbcfunctionvaluerole) | enum | 2 |
 | [`RbcGeneration`](#rbcgeneration) | enum | 25 |
 | [`RbcInitialDiscreteValue`](#rbcinitialdiscretevalue) | struct | 3 |
 | [`RbcInline`](#rbcinline) | enum | 3 |
 | [`RbcLiteral`](#rbcliteral) | enum | 5 |
+| [`RbcModelEventDefinition`](#rbcmodeleventdefinition) | struct | 3 |
+| [`RbcModelEventStep`](#rbcmodeleventstep) | struct | 5 |
+| [`RbcModelEventTransaction`](#rbcmodeleventtransaction) | struct | 3 |
 | [`RbcOrigin`](#rbcorigin) | enum | 2 |
+| [`RbcPositiveParameter`](#rbcpositiveparameter) | struct | 3 |
+| [`RbcPreviousValue`](#rbcpreviousvalue) | struct | 3 |
 | [`RbcProvenance`](#rbcprovenance) | struct | 2 |
+| [`RbcPurity`](#rbcpurity) | enum | 2 |
 | [`RbcQuantityKind`](#rbcquantitykind) | enum | 3 |
 | [`RbcRecord`](#rbcrecord) | struct | 2 |
 | [`RbcRecordField`](#rbcrecordfield) | struct | 2 |
@@ -70,8 +87,10 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcSource`](#rbcsource) | struct | 3 |
 | [`RbcSpan`](#rbcspan) | struct | 5 |
 | [`RbcStringConversionFormat`](#rbcstringconversionformat) | enum | 2 |
+| [`RbcStructuredRoot`](#rbcstructuredroot) | struct | 3 |
 | [`RbcSubscript`](#rbcsubscript) | enum | 3 |
 | [`RbcSymbolContract`](#rbcsymbolcontract) | struct | 9 |
+| [`RbcTerminal`](#rbcterminal) | struct | 1 |
 | [`RbcTimeEvent`](#rbctimeevent) | struct | 3 |
 | [`RbcTracePoint`](#rbctracepoint) | struct | 8 |
 | [`RbcType`](#rbctype) | struct | 4 |
@@ -97,7 +116,7 @@ A compiled Modelica model in public form.
 | `domains` | `Vec<RbcDomain>` | additive | Iteration domains referenced by the equation families. |
 | `discrete_real_equations` | `Vec<RbcDiscreteRealEquation>` | additive | MLS Appendix B.1b coupled discrete-Real equations, which `equations` does not contain. |
 | `initial_discrete_values` | `Vec<RbcInitialDiscreteValue>` | additive | Values discrete-valued variables take at the initialization instant. |
-| `functions` | `Vec<RbcFunction>` | additive | Function declarations named by `RbcExprNode::Call`, without bodies. |
+| `functions` | `Vec<RbcFunction>` | additive | Function declarations named by `RbcExprNode::Call`, with their bodies when this artifact carries them (`RbcFunctionBody`). |
 | `equation_families` | `Vec<RbcEquationFamily>` | additive | Array/`for` equations, which `equations` does not contain. |
 | `initial_equation_families` | `Vec<RbcEquationFamily>` | additive | — |
 | `relations` | `Vec<RbcRelation>` | required | Primitive comparisons that can generate events. |
@@ -112,6 +131,11 @@ A compiled Modelica model in public form.
 | `components` | `Vec<RbcComponent>` | required | Component instances referenced by connections and variables. |
 | `trace_points` | `Vec<RbcTracePoint>` | additive | Observation requests. Empty on export; a transformation pass adds these. |
 | `discrete_definitions` | `Vec<RbcDiscreteDefinition>` | additive | MLS Appendix B.1c definitions: what each discrete-valued variable (Boolean, Integer, enumeration) is equal to, and under what activation. Separate from `equations`, which carries only continuous residuals, and from `events`, which carries reinit/assert/terminate actions. Without this a `discrete_value` variable is declared and never defined, and reconstruction rejects the artifact. |
+| `model_event_transactions` | `Vec<RbcModelEventTransaction>` | additive | Discrete variables defined together by one event-guarded algorithm or `when` clause (MLS §8.3.5, §11.1.2): each transaction owns its targets, and every target is defined by at least one of its steps. |
+| `previous_values` | `Vec<RbcPreviousValue>` | additive | MLS §16.5 `previous(v)` coordinates, each owned by one clock. |
+| `terminals` | `Vec<RbcTerminal>` | additive | The MLS §8.3.6 `terminal()` observation, when the model reads it. |
+| `structured_roots` | `Vec<RbcStructuredRoot>` | additive | Tensor-native families of root surfaces over a compact domain. |
+| `delays` | `Vec<RbcDelay>` | additive | MLS §3.7.4.1 `delay` owners, in the order their coordinates occur in the expression arena; each is read by exactly one `Delay` coordinate. |
 | `summary` | `RbcSummary` | required | Counts a consumer can check against the collections above. Present so a truncated or partially-written artifact fails loudly. |
 
 ## RbcSummary
@@ -179,6 +203,11 @@ _No description._
 | `GreaterEqual` | — |
 | `And` | — |
 | `Or` | — |
+| `ElementwiseAdd` | MLS §10.6 element-wise operators (`.+ .- .* ./ .^`). Distinct from their scalar spellings because on arrays they mean something else: `A * B` is a matrix product, `A .* B` is not. |
+| `ElementwiseSubtract` | — |
+| `ElementwiseMultiply` | — |
+| `ElementwiseDivide` | — |
+| `ElementwisePower` | — |
 
 ## RbcBinder
 
@@ -261,6 +290,17 @@ Exact clock rational. Decimal strings preserve 128-bit integers in both CBOR and
 |---|---|---|---|
 | `numerator` | `String` | required | — |
 | `denominator` | `String` | required | — |
+
+## RbcClockTransferKind
+
+How a clock conversion derives its target clock (MLS §16.5.2).
+
+| Variant | Meaning |
+|---|---|
+| `SubSample` | — |
+| `SuperSample` | — |
+| `ShiftSample` | — |
+| `BackSample` | — |
 
 ## RbcComponent
 
@@ -404,7 +444,30 @@ A leaf referencing a model quantity. This is how expressions name variables — 
 | `Time` | Simulation time. |
 | `Binder` | A family's iteration binder — the `i` in `x[i] = i`. Without this a family body cannot be expressed, so exporting families without it produced artifacts that failed their own import. |
 | `Condition` | A condition's value used inside an expression, such as `initial()`. |
-| `FunctionParameter` | A function's formal parameter, read from inside that function's body. |
+| `ClockInterval` | A function's formal parameter, read from inside that function's body. `interval(c)` of a periodic clock. |
+| `Delay` | The value a `delay` owner produces. |
+| `Previous` | The value a `previous` owner reads. |
+| `Terminal` | `terminal()`. |
+| `FunctionParameter` | — |
+
+## RbcDelay
+
+_No description._
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `source` | `ExprId` | required | The delayed expression. |
+| `delay` | `RbcDelayKind` | required | — |
+| `provenance` | `RbcProvenance` | required | — |
+
+## RbcDelayKind
+
+A fixed delay time known at translation, or a varying one with a fixed bound; either way the runtime buffer has a size known before it starts.
+
+| Variant | Meaning |
+|---|---|
+| `Parameter` | — |
+| `Bounded` | — |
 
 ## RbcDiscreteActivation
 
@@ -530,6 +593,7 @@ Expression node. Operands always reference nodes with a **lower** [`ExprId`], so
 
 | Variant | Meaning |
 |---|---|
+| `ClockTransfer` | MLS §16.5.2 clock conversion: the last value of `source` on `source_clock`, carried onto `target_clock`, which must be exactly the clock `transfer` derives from the source clock (the DAE re-checks it). |
 | `StringConversion` | The predefined MLS scalar-to-String operation, never an arbitrary call whose display name happens to be String. |
 | `Literal` | — |
 | `Coordinate` | — |
@@ -545,7 +609,30 @@ Expression node. Operands always reference nodes with a **lower** [`ExprId`], so
 | `Index` | `base[s1, s2, ...]`. |
 | `ArrayUpdate` | A functional array update: `base` with `subscripts` replaced by `value`. |
 | `Call` | One result projection of a function call. `owner` is the first projection of this call occurrence, and equals the node's own id for a single-output call. Two projections of one call share it, so a consumer knows `(a, b) = f(x)` is one evaluation of `f` and not two. |
+| `FunctionValue` | Read a value defined inside a function body. Representable only because bodies are now carried: the value this names is one of `RbcFunction::body`'s definitions, addressed by the owner-local ordinal the DAE uses. While bodies were elided there was nothing for it to refer to, which is why it was `Unsupported` -- and why 97% of unrepresentable nodes across eleven libraries were this one form. |
+| `FunctionFoldParameter` | Read a fold's carried parameter at the current iteration. |
+| `FunctionFoldOutput` | Read a fold's carried output after the last iteration. |
 | `Unsupported` | A node this schema version cannot represent. A consumer must treat the containing model as not fully understood rather than assume a default. Producers only emit this when explicitly asked to tolerate gaps. |
+
+## RbcExternalArgument
+
+One ordered ABI position of an external call.
+
+| Variant | Meaning |
+|---|---|
+| `Input` | An expression the external body reads, closed over the function's own parameters. |
+| `Output` | An output the external body writes through this position. |
+
+## RbcExternalLinkage
+
+Where an external symbol is found. Carried so a rebuilt model links the same code the source named.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `libraries` | `Vec<String>` | additive | — |
+| `include` | `Option<String>` | additive | — |
+| `include_directory` | `Option<String>` | additive | — |
+| `library_directory` | `Option<String>` | additive | — |
 
 ## RbcFile
 
@@ -579,7 +666,7 @@ One flow member of a connection set, with the sign the balance gives it.
 
 ## RbcFunction
 
-One function declaration, without its body. The signature is what a *call site* needs: which function, how many arguments, what they mean. The body is a separate IR — SSA definitions, loop transitions, conditionals, external interfaces — and bitcode v2 does not carry it, which `body` records explicitly so an absent body is never mistaken for an empty one.
+One function declaration, and its body when the artifact carries it. The signature is what a *call site* needs: which function, how many arguments, what they mean. The body -- SSA definitions, loop transitions, conditionals, or an external interface -- is `body`, with the value table and folds its statements address; `ElidedModelica` records a body that exists and is not here (a recursive function), so an absent body is never mistaken for an empty one.
 
 | Member | Type | Compatibility | Meaning |
 |---|---|---|---|
@@ -589,7 +676,9 @@ One function declaration, without its body. The signature is what a *call site* 
 | `results` | `Vec<TypeId>` | required | Result types in declaration order; a call names one by ordinal. |
 | `inline` | `RbcInline` | required | The MLS §18.3 `Inline`/`LateInline` request the declaration wrote. |
 | `body` | `RbcFunctionBody` | required | — |
-| `calls` | `Vec<FunctionId>` | additive | Functions this one calls, in first-seen order. A call inside an *equation* is already visible: `RbcExprNode::Call` names its callee, so a consumer can read those edges off the expression arena. A call inside a *function body* is not, because the body is elided (`RbcFunctionBody::ElidedModelica`). Without this field the call graph stops at the first function, and every consumer that needs reachability over callables -- dead-code elimination, coverage, "is this function used" -- either rebuilds it wrongly or gives up. Carrying the edges rather than the bodies keeps the property the elision exists for: an edge list is a finite graph, not a program, so nothing here reintroduces recursion as something the IR can *execute*. A cycle in these edges is representable and is exactly what a recursion check would look for. |
+| `values` | `Vec<RbcFunctionValue>` | additive | Output and local values, in owner-local ordinal order. |
+| `folds` | `Vec<RbcFunctionFold>` | additive | Bounded loops this body contains, addressed by owner-local ordinal. Beside the statements rather than inside them so a nested fold can name its parent by ordinal, which is how the DAE addresses them. |
+| `calls` | `Vec<FunctionId>` | additive | Functions this one calls, sorted by id. The call graph, carried whether or not the bodies are. When a body is elided -- a recursive function, or an exporter that does not carry bodies -- the calls inside it are not visible in the arena, and without this field the graph would stop at the first function. Consumers that need reachability over callables (dead-code elimination, coverage, "is this function used") read it here, and validation checks it acyclic over carried bodies (SPEC §9a). |
 | `declaration` | `RbcProvenance` | required | — |
 
 ## RbcFunctionBody
@@ -598,8 +687,45 @@ What kind of body the declaration has, and whether this artifact carries it.
 
 | Variant | Meaning |
 |---|---|
-| `ElidedModelica` | A Modelica body exists but is not in this artifact. |
+| `ElidedModelica` | A Modelica body exists but is not in this artifact. Still valid, and still the right answer for a producer that cannot or need not carry bodies. An artifact that elides every body is total by the argument in SPEC_RUMOCA_BITCODE §9a as originally written; one that carries them is total by the acyclic call-graph check over [`RbcFunction::calls`]. Which applies is readable here. |
+| `Modelica` | A Modelica body, in the bounded form the DAE holds. Not Modelica statements: by the time a body reaches the DAE it has been lowered to assignment, grouped assignment, assertion and a fold over a compact domain. There is no `while`, no `break` and no `return`, so the body itself cannot express unbounded iteration — the only route to non-termination is a call cycle, which `RbcFunction::calls` makes checkable. |
 | `External` | An MLS §12.9 external body, named by language and symbol. Carried because it is the whole of what the function does: there is no Modelica body that could be elided. |
+
+## RbcFunctionConditional
+
+Shared branch correlation for one grouped assignment. `conditions[i]` selects `branches[i]`; `fallback` is the `else`. Each branch supplies one expression per value in the group, so the arity is checked rather than assumed.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `conditions` | `Vec<ExprId>` | required | — |
+| `branches` | `Vec<Vec<ExprId>>` | required | — |
+| `fallback` | `Vec<ExprId>` | required | — |
+
+## RbcFunctionDefinition
+
+One SSA definition inside a fold's transition.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `value` | `u32` | required | Owner-local ordinal of the value defined. |
+| `expression` | `ExprId` | required | — |
+
+## RbcFunctionFold
+
+A fold over a compact domain: the bounded loop a function body can hold. Not a general loop. The domain fixes the trip count before evaluation, exactly as `RbcExprNode::Comprehension` does, which is why carrying a body does not reintroduce unbounded iteration. The four definition groups are the transition: `parameters` bind the binder values, `initial` seeds the carried tuple, `update` produces the next one, and `output` reads the result out after the last iteration.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `ordinal` | `u32` | required | Owner-local ordinal, so a nested fold can name its parent. |
+| `domain` | `DomainId` | required | The compact domain iterated; fixes the trip count. |
+| `parent` | `Option<u32>` | additive | Owner-local ordinal of the lexically enclosing fold, when nested. |
+| `targets` | `Vec<u32>` | required | Values carried from one iteration to the next. |
+| `iteration_locals` | `Vec<u32>` | additive | Values defined afresh each iteration: in the transition region, but neither seeded from nor returned in the carried tuple. |
+| `parameters` | `Vec<RbcFunctionDefinition>` | required | — |
+| `initial` | `Vec<RbcFunctionDefinition>` | required | — |
+| `update` | `Vec<RbcFunctionDefinition>` | required | — |
+| `output` | `Vec<RbcFunctionDefinition>` | required | — |
+| `provenance` | `RbcProvenance` | required | Where the loop opens. |
 
 ## RbcFunctionParameter
 
@@ -609,6 +735,38 @@ _No description._
 |---|---|---|---|
 | `name` | `String` | required | — |
 | `value_type` | `TypeId` | required | — |
+| `declaration` | `Option<RbcProvenance>` | additive | Where the parameter was declared. Absent in artifacts written before bodies were carried; a rebuild then anchors it at the function. |
+
+## RbcFunctionStatement
+
+One statement of a lowered function body. The four forms `rumoca_ir_dae::FunctionStatementView` distinguishes. A consumer that only needs to *read* a body — reachability, coverage, a constant-folding pass — works from these without reconstructing a DAE.
+
+| Variant | Meaning |
+|---|---|
+| `Assignment` | One SSA definition: `value := expression`. |
+| `Assertion` | An MLS §8.3.7 assertion inside the body. |
+| `AssignmentGroup` | Several values defined together, optionally under a shared branch. One statement rather than a run of assignments because the branch correlation is shared: every value takes its result from the *same* selected branch. Splitting them would let a consumer pick different branches for different values, which is a different program. |
+| `For` | A bounded loop. `fold` is an owner-local ordinal into the function's fold table, which carries the transition; the body is here, because that is where the DAE keeps it and a second home would let the two disagree about what the loop runs. |
+
+## RbcFunctionValue
+
+One output or local value of a function, in owner-local ordinal order. The table `FunctionValue`, `AssignmentGroup` and the fold transitions address by ordinal. Without it an artifact names value 3 of a function and says nothing about what value 3 *is*, so a reader can print the body but not rebuild it.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `name` | `String` | required | — |
+| `value_type` | `TypeId` | required | — |
+| `role` | `RbcFunctionValueRole` | required | — |
+| `declaration` | `RbcProvenance` | required | — |
+
+## RbcFunctionValueRole
+
+_No description._
+
+| Variant | Meaning |
+|---|---|
+| `Output` | Returned to the caller; its position among outputs is its result index. |
+| `Local` | Internal to the body. |
 
 ## RbcGeneration
 
@@ -674,6 +832,38 @@ _No description._
 | `Boolean` | — |
 | `String` | — |
 
+## RbcModelEventDefinition
+
+_No description._
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `target` | `VariableId` | required | — |
+| `value` | `ExprId` | required | — |
+| `provenance` | `RbcProvenance` | required | — |
+
+## RbcModelEventStep
+
+One activation of a transaction: when `trigger` fires and `guard` holds (on `clock`, for a clocked step), each definition takes its value.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `trigger` | `ConditionId` | required | — |
+| `guard` | `ConditionId` | required | — |
+| `clock` | `Option<ClockId>` | additive | — |
+| `definitions` | `Vec<RbcModelEventDefinition>` | required | — |
+| `provenance` | `RbcProvenance` | required | — |
+
+## RbcModelEventTransaction
+
+One model event transaction: the discrete variables it owns and the guarded steps that assign them.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `targets` | `Vec<VariableId>` | required | Discrete-Real or discrete-valued variables this transaction owns. |
+| `steps` | `Vec<RbcModelEventStep>` | required | — |
+| `provenance` | `RbcProvenance` | required | — |
+
 ## RbcOrigin
 
 Whether an object was written by the author or produced by lowering. `Generated` carries the lowering kind so a consumer can distinguish a connection equation from a flow balance without guessing from shape.
@@ -683,6 +873,26 @@ Whether an object was written by the author or produced by lowering. `Generated`
 | `Source` | Written in the source at `span`. |
 | `Generated` | Produced by the compiler; `span` names the nearest responsible source. |
 
+## RbcPositiveParameter
+
+A positive parameter-variability Real, with the value the compiler proved.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `expression` | `ExprId` | required | — |
+| `value` | `f64` | required | — |
+| `provenance` | `RbcProvenance` | required | — |
+
+## RbcPreviousValue
+
+_No description._
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `variable` | `VariableId` | required | A discrete-Real or discrete-valued variable owned by `clock`. |
+| `clock` | `ClockId` | required | — |
+| `provenance` | `RbcProvenance` | required | — |
+
 ## RbcProvenance
 
 Why a model object exists and where it came from.
@@ -691,6 +901,15 @@ Why a model object exists and where it came from.
 |---|---|---|---|
 | `origin` | `RbcOrigin` | required | — |
 | `span` | `RbcSpan` | required | — |
+
+## RbcPurity
+
+_No description._
+
+| Variant | Meaning |
+|---|---|
+| `Pure` | — |
+| `Impure` | — |
 
 ## RbcQuantityKind
 
@@ -819,6 +1038,16 @@ Optional operands of the predefined String conversion (MLS §3.7.1).
 | `Options` | — |
 | `Format` | — |
 
+## RbcStructuredRoot
+
+_No description._
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `domain` | `DomainId` | required | — |
+| `expression` | `ExprId` | required | — |
+| `provenance` | `RbcProvenance` | required | — |
+
 ## RbcSubscript
 
 One subscript position of an index or array-update node. `Index` selects a single element and drops the dimension; `Slice` selects several and keeps it; `Whole` is a bare `:`.
@@ -844,6 +1073,14 @@ What a declaration promises about a symbol. Carried per symbol and preserved thr
 | `binding_depends_on` | `Vec<VariableId>` | additive | Symbols the binding reads. Empty for a literal binding or none at all. |
 | `binding_from_modification` | `bool` | additive | Whether the binding came from a modifier rather than the declaration. |
 | `declared_in` | `Option<String>` | additive | The class that declared this symbol, and the declaration's own span. |
+
+## RbcTerminal
+
+_No description._
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `provenance` | `RbcProvenance` | required | — |
 
 ## RbcTimeEvent
 

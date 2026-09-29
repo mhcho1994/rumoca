@@ -22,6 +22,16 @@ impl Shift for RbcExprNode {
                 }
             }
             Self::Literal { .. } => {}
+            Self::ClockTransfer {
+                source,
+                source_clock,
+                target_clock,
+                ..
+            } => {
+                source.shift(m)?;
+                source_clock.shift(m)?;
+                target_clock.shift(m)?;
+            }
             // `value`, `fold`, `carried` and `definition` are owner-local
             // ordinals *within* a function, so linking must not rebase them.
             // Only the owning `FunctionId` moves, and shifting it is what
@@ -124,6 +134,10 @@ impl Shift for RbcCoordinate {
             Self::Binder { domain, .. } => domain.shift(m),
             Self::Condition { condition } => condition.shift(m),
             Self::FunctionParameter { function, .. } => function.shift(m),
+            Self::ClockInterval { clock } => clock.shift(m),
+            Self::Delay { delay } => delay.shift(m),
+            Self::Previous { previous } => previous.shift(m),
+            Self::Terminal { terminal } => terminal.shift(m),
         }
     }
 }

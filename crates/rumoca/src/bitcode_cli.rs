@@ -385,9 +385,16 @@ fn run_check(path: &Path, strict: bool, connections: bool) -> Result<()> {
 
 fn run_emit_text(input: &Path, output: Option<&Path>, sources: bool) -> Result<()> {
     let (file, _) = rumoca_bitcode::read_file(input).map_err(anyhow::Error::from)?;
-    if file.execution.is_some() || !file.model.connectors.is_empty() {
+    if file.execution.is_some()
+        || !file.model.connectors.is_empty()
+        || !file.model.model_event_transactions.is_empty()
+        || !file.model.previous_values.is_empty()
+        || !file.model.terminals.is_empty()
+        || !file.model.structured_roots.is_empty()
+        || !file.model.delays.is_empty()
+    {
         bail!(
-            "text profile does not carry execution/connector declarations; use bitcode dump or convert"
+            "text profile does not carry execution, connector or model-event-transaction declarations; use bitcode dump or convert"
         );
     }
     let text =
@@ -574,6 +581,47 @@ fn compare(left: &RbcModel, right: &RbcModel) -> Vec<String> {
             format!("{:?}", b.reads),
         );
     }
+    // Function bodies are carried, so a round trip that loses or reorders
+    // a statement, a value or a fold is as much a failure as one that
+    // changes an equation.
+    check(
+        "functions",
+        format!("{:?}", left.functions.len()),
+        format!("{:?}", right.functions.len()),
+    );
+    let (left_types, right_types) = structural_type_ids(left, right);
+    for (a, b) in left.functions.iter().zip(&right.functions) {
+        check(
+            &format!("function {} ({})", a.id.0, a.name),
+            format!("{:?}", with_type_ids(a, &left_types)),
+            format!("{:?}", with_type_ids(b, &right_types)),
+        );
+    }
+    check(
+        "model event transactions",
+        format!("{:?}", left.model_event_transactions),
+        format!("{:?}", right.model_event_transactions),
+    );
+    check(
+        "previous values",
+        format!("{:?}", left.previous_values),
+        format!("{:?}", right.previous_values),
+    );
+    check(
+        "terminals",
+        format!("{:?}", left.terminals),
+        format!("{:?}", right.terminals),
+    );
+    check(
+        "structured roots",
+        format!("{:?}", left.structured_roots),
+        format!("{:?}", right.structured_roots),
+    );
+    check(
+        "delays",
+        format!("{:?}", left.delays),
+        format!("{:?}", right.delays),
+    );
     for (a, b) in left.events.iter().zip(&right.events) {
         check(
             &format!("event {} action", a.id),
@@ -582,6 +630,48 @@ fn compare(left: &RbcModel, right: &RbcModel) -> Vec<String> {
         );
     }
     differences
+}
+
+/// Type ids renumbered by structure, one table per side.
+///
+/// Import rebuilds types through the DAE's interning constructor, which
+/// merges structurally identical entries, so a type table with four equal
+/// `Real` entries comes back with one and every later id shifts. That is a
+/// renumbering, not a change: two functions are the same when their types
+/// are the same *types*, whatever ordinal each table gave them.
+fn structural_type_ids(left: &RbcModel, right: &RbcModel) -> (Vec<u32>, Vec<u32>) {
+    let key = |ty: &rumoca_bitcode::schema::RbcType| {
+        format!("{:?}{:?}{:?}", ty.scalar, ty.dimensions, ty.record)
+    };
+    let mut keys: Vec<String> = left.types.iter().chain(&right.types).map(key).collect();
+    keys.sort();
+    keys.dedup();
+    let index = |ty: &rumoca_bitcode::schema::RbcType| {
+        keys.binary_search(&key(ty)).unwrap_or(usize::MAX) as u32
+    };
+    (
+        left.types.iter().map(index).collect(),
+        right.types.iter().map(index).collect(),
+    )
+}
+
+fn with_type_ids(
+    function: &rumoca_bitcode::schema::RbcFunction,
+    ids: &[u32],
+) -> rumoca_bitcode::schema::RbcFunction {
+    use rumoca_bitcode::schema::TypeId;
+    let map = |ty: TypeId| TypeId(ids.get(ty.0 as usize).copied().unwrap_or(u32::MAX));
+    let mut function = function.clone();
+    for parameter in &mut function.parameters {
+        parameter.value_type = map(parameter.value_type);
+    }
+    for result in &mut function.results {
+        *result = map(*result);
+    }
+    for value in &mut function.values {
+        value.value_type = map(value.value_type);
+    }
+    function
 }
 
 /// Read bitcode back into a checked DAE and continue compilation.

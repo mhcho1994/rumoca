@@ -25,6 +25,9 @@ use rumoca_ir_flat as flat;
 use crate::schema::*;
 
 mod function_body;
+mod syntactic_reads;
+mod temporal;
+mod transactions;
 use function_body::export_function_body;
 
 #[derive(Debug, thiserror::Error)]
@@ -205,7 +208,15 @@ fn build(
     let time_events = export_time_events(view, &mut ctx)?;
     let connections = export_connections(flat, &variables, &equations, &mut ctx);
     let connection_sets = export_connection_sets(flat, &variables, &equations, &mut ctx);
+    let discrete_real_equations = export_discrete_real_equations(view, &mut ctx, options)?;
+    let initial_discrete_values = export_initial_discrete_values(view, &mut ctx);
+    let functions = export_functions(view, &mut ctx);
+    let model_event_transactions = transactions::export_model_event_transactions(view, &mut ctx);
+    let temporal = temporal::export(view, &mut ctx);
 
+    // Last, after every table that can register a source through a span.
+    // Collected earlier, a span first seen in a function body or a discrete
+    // equation named a source the artifact did not contain.
     let sources = ctx
         .names
         .iter()
@@ -219,9 +230,6 @@ fn build(
                 .filter(|text| !text.is_empty()),
         })
         .collect();
-
-    let discrete_real_equations = export_discrete_real_equations(view, &mut ctx, options)?;
-    let initial_discrete_values = export_initial_discrete_values(view, &mut ctx);
 
     let mut summary = summarize(
         &variables,
@@ -256,7 +264,7 @@ fn build(
         equations,
         initial_equations,
         domains,
-        functions: export_functions(view, &mut ctx),
+        functions,
         discrete_real_equations,
         initial_discrete_values,
         equation_families,
@@ -269,6 +277,11 @@ fn build(
         events,
         time_events,
         discrete_definitions,
+        model_event_transactions,
+        previous_values: temporal.previous_values,
+        terminals: temporal.terminals,
+        structured_roots: temporal.structured_roots,
+        delays: temporal.delays,
         connections,
         connection_sets,
         components,
@@ -734,19 +747,23 @@ fn expression_node(
             value: check(value)?,
             subscripts: subscripts_of(subscripts, &check)?,
         },
+        dae::ExpressionOperation::ClockTransfer {
+            kind,
+            source,
+            source_clock,
+            target_clock,
+        } => RbcExprNode::ClockTransfer {
+            transfer: clocks::transfer_kind(kind),
+            source: check(source)?,
+            source_clock: ClockId(source_clock.index()),
+            target_clock: ClockId(target_clock.index()),
+        },
         // Values inside a function body: see `function_body`.
         ref inner @ (dae::ExpressionOperation::FunctionValue { .. }
         | dae::ExpressionOperation::FunctionFoldParameter { .. }
         | dae::ExpressionOperation::FunctionFoldOutput { .. }) => {
             function_body::function_node(inner)?
         }
-        other => unsupported(
-            &format!(
-                "expression form {} not in bitcode v2",
-                operation_name(&other)
-            ),
-            options,
-        )?,
     };
     Ok(node)
 }
@@ -769,31 +786,6 @@ fn subscripts_of(
             })
         })
         .collect()
-}
-
-fn operation_name(operation: &dae::ExpressionOperation<'_>) -> &'static str {
-    use dae::ExpressionOperation as O;
-    match operation {
-        O::Literal(_) => "literal",
-        O::Coordinate(_) => "coordinate",
-        O::Unary { .. } => "unary",
-        O::Binary { .. } => "binary",
-        O::Conditional(_) => "conditional",
-        O::Array(_) => "array",
-        O::Record(_) => "record",
-        O::Field { .. } => "field",
-        O::Range(_) => "range",
-        O::Comprehension { .. } => "comprehension",
-        O::Index { .. } => "index",
-        O::ArrayUpdate { .. } => "array_update",
-        O::Builtin { .. } => "builtin",
-        O::Call { .. } => "call",
-        O::StringConversion { .. } => "string_conversion",
-        O::ClockTransfer { .. } => "clock_transfer",
-        O::FunctionValue { .. } => "function_value",
-        O::FunctionFoldParameter { .. } => "function_fold_parameter",
-        O::FunctionFoldOutput { .. } => "function_fold_output",
-    }
 }
 
 fn coordinate_kind_name(coordinate: dae::CoordinateView<'_>) -> &'static str {
@@ -892,7 +884,18 @@ fn coordinate_of(coordinate: dae::CoordinateView<'_>) -> Option<RbcCoordinate> {
             domain: DomainId(binder.domain().index()),
             ordinal: binder.ordinal(),
         },
-        _ => return None,
+        C::ClockInterval(clock) => RbcCoordinate::ClockInterval {
+            clock: ClockId(dae::ClockId::from(clock).index()),
+        },
+        C::Delay(delay) => RbcCoordinate::Delay {
+            delay: DelayId(delay.index()),
+        },
+        C::Previous(previous) => RbcCoordinate::Previous {
+            previous: PreviousId(previous.index()),
+        },
+        C::Terminal(terminal) => RbcCoordinate::Terminal {
+            terminal: TerminalId(terminal.index()),
+        },
     })
 }
 
@@ -977,7 +980,11 @@ fn binary_of(operator: dae::BinaryOperator) -> Option<RbcBinaryOp> {
         B::GreaterEqual => RbcBinaryOp::GreaterEqual,
         B::And => RbcBinaryOp::And,
         B::Or => RbcBinaryOp::Or,
-        _ => return None,
+        B::ElementwiseAdd => RbcBinaryOp::ElementwiseAdd,
+        B::ElementwiseSubtract => RbcBinaryOp::ElementwiseSubtract,
+        B::ElementwiseMultiply => RbcBinaryOp::ElementwiseMultiply,
+        B::ElementwiseDivide => RbcBinaryOp::ElementwiseDivide,
+        B::ElementwisePower => RbcBinaryOp::ElementwisePower,
     })
 }
 
@@ -1122,6 +1129,7 @@ fn call_graph(view: dae::DaeView<'_>) -> Vec<Vec<FunctionId>> {
 
 fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunction> {
     let edges = call_graph(view);
+    let recursive = function_body::recursive_functions(&edges);
     (0..view.function_count())
         .filter_map(|index| {
             let id = view.function_id(index)?;
@@ -1131,6 +1139,7 @@ fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunctio
                 .map(|parameter| RbcFunctionParameter {
                     name: parameter.name().to_string(),
                     value_type: TypeId(parameter.value_type().index()),
+                    declaration: Some(ctx.provenance(parameter.declaration())),
                 })
                 .collect();
             let results = function
@@ -1139,18 +1148,15 @@ fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunctio
                 .map(|ty| TypeId(ty.index()))
                 .collect();
             let (body, folds) = match function.external() {
-                Some(external) => (
-                    RbcFunctionBody::External {
-                        language: format!("{:?}", external.language()).to_lowercase(),
-                        symbol: external.symbol().to_string(),
-                    },
-                    Vec::new(),
-                ),
+                Some(external) => (function_body::external_body(external), Vec::new()),
                 // A Modelica body is carried when every statement in it is a
                 // form this schema version holds. Partial bodies are not
                 // emitted: half a body is worse than none, because a
                 // consumer cannot tell which half is missing.
-                None => export_function_body(view, function),
+                // A recursive body stays elided: the artifact's totality
+                // argument is an acyclic call graph over carried bodies.
+                None if recursive[index] => (RbcFunctionBody::ElidedModelica, Vec::new()),
+                None => export_function_body(view, function, ctx),
             };
             Some(RbcFunction {
                 id: FunctionId(index as u32),
@@ -1163,6 +1169,7 @@ fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunctio
                     rumoca_core::InlineAnnotation::Requested => RbcInline::Requested,
                     rumoca_core::InlineAnnotation::Never => RbcInline::Never,
                 },
+                values: function_body::value_table(function, ctx),
                 body,
                 folds,
                 declaration: ctx.provenance(function.declaration()),
@@ -1319,11 +1326,17 @@ fn dependencies<'dae>(
     residual: dae::ExprId<'dae>,
 ) -> Result<Reads, ExportError> {
     let mut reads = Reads::default();
-    rumoca_eval_dae::for_each_scalar_coordinate(view, residual, 0, None, |coordinate, _| {
+    match rumoca_eval_dae::for_each_scalar_coordinate(view, residual, 0, None, |coordinate, _| {
         reads.visit(coordinate);
-    })
-    .map_err(|error| ExportError::Projection(error.to_string()))?;
-    Ok(reads)
+    }) {
+        Ok(()) => Ok(reads),
+        Err(
+            error @ (rumoca_eval_dae::ProjectionError::ExternalFunction { .. }
+            | rumoca_eval_dae::ProjectionError::UnsupportedRecordOperation { .. }),
+        ) => syntactic_reads::syntactic(view, residual)
+            .ok_or_else(|| ExportError::Projection(error.to_string())),
+        Err(error) => Err(ExportError::Projection(error.to_string())),
+    }
 }
 
 /// What one residual reads, split by *how* it reads it.

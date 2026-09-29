@@ -38,6 +38,28 @@ record!(RbcRoot: id, relation, activation, provenance);
 record!(RbcEventAction: id, trigger, guard, action, provenance);
 record!(RbcInitialDiscreteValue: target, value, provenance);
 record!(RbcDiscreteDefinition: targets, branches, provenance);
+record!(RbcModelEventTransaction: targets, steps, provenance);
+record!(RbcModelEventStep: trigger, guard, clock, definitions, provenance);
+record!(RbcModelEventDefinition: target, value, provenance);
+record!(RbcPreviousValue: variable, clock, provenance);
+record!(RbcTerminal: provenance);
+record!(RbcStructuredRoot: domain, expression, provenance);
+record!(RbcDelay: source, delay, provenance);
+record!(RbcPositiveParameter: expression, provenance);
+impl Shift for RbcDelayKind {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        match self {
+            Self::Parameter { delay_time } => delay_time.shift(m),
+            Self::Bounded {
+                delay_time,
+                maximum,
+            } => {
+                delay_time.shift(m)?;
+                maximum.shift(m)
+            }
+        }
+    }
+}
 
 impl Shift for RbcProvenance {
     fn shift(&mut self, m: &Map<'_>) -> Result<()> {
@@ -98,12 +120,110 @@ impl Shift for RbcDomain {
 }
 impl Shift for RbcFunction {
     fn shift(&mut self, m: &Map<'_>) -> Result<()> {
-        fields!(self, m, id, results, declaration);
+        fields!(
+            self,
+            m,
+            id,
+            results,
+            declaration,
+            calls,
+            values,
+            folds,
+            body
+        );
         for p in &mut self.parameters {
             p.value_type.shift(m)?;
+            p.declaration.shift(m)?;
         }
         m.qualify(&mut self.name);
         Ok(())
+    }
+}
+
+// A carried body names arena expressions, types, domains and sources like any
+// other table. Owner-local ordinals -- values, folds, definitions -- are
+// addresses *within* the function and never move.
+impl Shift for RbcFunctionValue {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        fields!(self, m, value_type, declaration);
+        Ok(())
+    }
+}
+impl Shift for RbcFunctionDefinition {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        self.expression.shift(m)
+    }
+}
+impl Shift for RbcFunctionFold {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        fields!(
+            self, m, domain, parameters, initial, update, output, provenance
+        );
+        Ok(())
+    }
+}
+impl Shift for RbcFunctionConditional {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        fields!(self, m, conditions, branches, fallback);
+        Ok(())
+    }
+}
+impl Shift for RbcFunctionStatement {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        match self {
+            Self::Assignment {
+                expression,
+                provenance,
+                ..
+            } => {
+                expression.shift(m)?;
+                provenance.shift(m)
+            }
+            Self::Assertion {
+                condition,
+                message,
+                provenance,
+            } => {
+                condition.shift(m)?;
+                message.shift(m)?;
+                provenance.shift(m)
+            }
+            Self::AssignmentGroup {
+                conditional,
+                expressions,
+                provenance,
+                ..
+            } => {
+                conditional.shift(m)?;
+                expressions.shift(m)?;
+                provenance.shift(m)
+            }
+            Self::For {
+                statements,
+                provenance,
+                ..
+            } => {
+                statements.shift(m)?;
+                provenance.shift(m)
+            }
+        }
+    }
+}
+impl Shift for RbcExternalArgument {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        match self {
+            Self::Input { expression } => expression.shift(m),
+            Self::Output { .. } => Ok(()),
+        }
+    }
+}
+impl Shift for RbcFunctionBody {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        match self {
+            Self::ElidedModelica => Ok(()),
+            Self::Modelica { statements } => statements.shift(m),
+            Self::External { arguments, .. } => arguments.shift(m),
+        }
     }
 }
 impl Map<'_> {

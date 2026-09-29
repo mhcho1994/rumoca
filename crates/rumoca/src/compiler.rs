@@ -297,6 +297,9 @@ pub struct Compiler {
     /// `SessionConfig::fold_parameter_declaration_bindings`.
     no_fold_parameter_bindings: bool,
     freeze_parameters: bool,
+    /// Bitcode passes to run between the frontend's DAE and everything
+    /// downstream of it; empty skips the stage.
+    passes: Vec<String>,
 }
 
 impl Compiler {
@@ -328,6 +331,18 @@ impl Compiler {
     pub fn no_fold_parameter_bindings(mut self, no_fold: bool) -> Self {
         self.no_fold_parameter_bindings = no_fold;
         self
+    }
+
+    /// Run these bitcode passes over the compiled DAE (`DAE -> RBC ->
+    /// [passes] -> DAE`) before anything consumes it.
+    pub fn passes(mut self, passes: &[String]) -> Self {
+        self.passes = passes.to_vec();
+        self
+    }
+
+    /// The passes to run, as requested.
+    fn requested_passes(&self) -> Vec<String> {
+        self.passes.clone()
     }
 
     /// Build an artifact specialized to the declared fixed parameter values.
@@ -580,8 +595,18 @@ impl Compiler {
                 source_map: report.source_map.map(Box::new),
             }
         })?;
-        let (result, resolved) = compilation.into_parts();
+        let (mut result, resolved) = compilation.into_parts();
         report_compile_warnings(&mut session, model_name);
+        let passes = self.requested_passes();
+        if !passes.is_empty() {
+            result.dae = crate::pass_stage::apply(
+                &result.dae,
+                &result.flat,
+                model_name,
+                &passes,
+                self.verbose,
+            )?;
+        }
 
         if self.verbose {
             eprintln!("[rumoca] Compilation complete.");
@@ -698,6 +723,17 @@ impl Compiler {
             };
 
         report_compile_warnings(&mut session, model_name);
+        let mut result = result;
+        let passes = self.requested_passes();
+        if !passes.is_empty() {
+            result.dae = crate::pass_stage::apply(
+                &result.dae,
+                &result.flat,
+                model_name,
+                &passes,
+                self.verbose,
+            )?;
+        }
 
         if self.verbose {
             eprintln!("[rumoca] DAE compilation complete.");

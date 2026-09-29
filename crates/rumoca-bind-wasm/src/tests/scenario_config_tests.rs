@@ -7,6 +7,8 @@ use crate::{
 
 #[test]
 fn scenario_get_simulation_config_reads_in_memory_scenario_toml() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = super::session_test_guard();
     let sources = serde_json::json!({
         "rumoca-scenario.Ball.toml": "[rumoca]\nversion = \"1\"\ntask = \"simulate\"\n\n[model]\nname = \"Ball\"\n\n[sim]\nsolver = \"bdf\"\nt_end = 9.0\n",
         "Ball.mo": "model Ball end Ball;",
@@ -35,6 +37,8 @@ fn scenario_get_simulation_config_reads_in_memory_scenario_toml() {
 
 #[test]
 fn scenario_codegen_config_round_trips_in_model_scenario() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = super::session_test_guard();
     let sources = serde_json::json!({
         "src/rumoca-scenario.Ball.toml": "source_roots = [\"lib\"]\n\n[rumoca]\nversion = \"1\"\ntask = \"codegen\"\n\n[model]\nname = \"Ball\"\n\n[codegen]\ntarget = \"c-ode\"\n",
         "src/Ball.mo": "model Ball end Ball;",
@@ -81,6 +85,8 @@ fn scenario_codegen_config_round_trips_in_model_scenario() {
 
 #[test]
 fn scenario_task_configs_do_not_collide_for_same_model() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = super::session_test_guard();
     let sources = serde_json::json!({
         "src/rumoca-scenario.Ball.toml": "[rumoca]\nversion = \"1\"\ntask = \"simulate\"\n\n[model]\nname = \"Ball\"\n\n[sim]\nsolver = \"bdf\"\nt_end = 7.0\n",
         "src/rumoca-scenario.Ball.codegen.toml": "[rumoca]\nversion = \"1\"\ntask = \"codegen\"\n\n[model]\nname = \"Ball\"\n\n[codegen]\ntarget = \"c-ode\"\n",
@@ -101,6 +107,8 @@ fn scenario_task_configs_do_not_collide_for_same_model() {
 
 #[test]
 fn scenario_config_full_round_trips_interactive_io() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = super::session_test_guard();
     let scenario_toml = r#"[rumoca]
 version = "1"
 task = "simulate"
@@ -154,6 +162,8 @@ theta = "model:theta"
 
 #[test]
 fn default_scenario_config_creates_minimal_scenario_toml() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = super::session_test_guard();
     let sources = serde_json::json!({ "models/Rover.mo": "model Rover end Rover;" }).to_string();
     let response = scenario_default_scenario_config(&sources, "Rover", "").expect("default config");
     let parsed: serde_json::Value = serde_json::from_str(&response).expect("json");

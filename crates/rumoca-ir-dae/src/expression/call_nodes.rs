@@ -180,7 +180,7 @@ impl<'dae> ExpressionAt<'_, 'dae> {
         self.insert_call_projection(owner, function, output)
     }
 
-    pub(crate) fn replay_call_projection(
+    pub fn replay_call_projection(
         self,
         owner: ExprId<'dae>,
         function: FunctionId<'dae>,

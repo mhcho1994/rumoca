@@ -66,7 +66,7 @@ impl<'dae> Functions<'_, 'dae> {
     /// A vacuous conditional stores no assignment group, so no wire ever
     /// replays one; the empty list is still accepted here so replay accepts
     /// exactly the correlations construction can issue.
-    pub(crate) fn replay_conditional_all(
+    pub fn replay_conditional_all(
         &mut self,
         body: &mut FunctionBody<'dae>,
         assignments: &[(FunctionValueId<'dae>, ExprId<'dae>)],
@@ -121,7 +121,7 @@ impl<'dae> Functions<'_, 'dae> {
         )
     }
 
-    pub(crate) fn replay_conditional_all_loop(
+    pub fn replay_conditional_all_loop(
         &mut self,
         loop_body: &mut FunctionLoop<'dae>,
         assignments: &[(FunctionValueId<'dae>, ExprId<'dae>)],

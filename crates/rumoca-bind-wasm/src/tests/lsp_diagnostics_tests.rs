@@ -2,6 +2,8 @@ use super::*;
 
 #[test]
 fn test_lsp_diagnostics_reports_unknown_builtin_modifier_with_multiple_classes() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     package Lib
@@ -38,6 +40,8 @@ fn test_lsp_diagnostics_reports_unknown_builtin_modifier_with_multiple_classes()
 
 #[test]
 fn test_lsp_diagnostics_reports_unknown_builtin_modifier_startdt() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model M
@@ -66,6 +70,8 @@ fn test_lsp_diagnostics_reports_unknown_builtin_modifier_startdt() {
 
 #[test]
 fn test_lsp_code_actions_returns_unknown_modifier_fix() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model M
@@ -133,6 +139,8 @@ fn test_lsp_code_actions_returns_unknown_modifier_fix() {
 
 #[test]
 fn test_lsp_code_actions_returns_missing_semicolon_fix() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model M
@@ -207,6 +215,8 @@ fn test_lsp_code_actions_returns_missing_semicolon_fix() {
 
 #[test]
 fn test_lsp_code_actions_returns_did_you_mean_type_fix() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model Ball
@@ -281,6 +291,8 @@ fn test_lsp_code_actions_returns_did_you_mean_type_fix() {
 
 #[test]
 fn test_lsp_diagnostics_reports_builtin_modifier_type_mismatch() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model M

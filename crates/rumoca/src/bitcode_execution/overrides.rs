@@ -76,7 +76,7 @@ fn depends(model: &RbcModel, root: Option<ExprId>, changed: VariableId) -> bool 
         {
             return true;
         }
-        pending.extend(rumoca_bitcode::build::operands(node));
+        pending.extend(rumoca_bitcode::build::references(id, node));
     }
     false
 }

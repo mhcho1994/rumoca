@@ -25,8 +25,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use rumoca_bitcode::schema::{
-    ExprId, RbcAction, RbcBinaryOp, RbcCoordinate, RbcExprNode, RbcLiteral, RbcModel,
-    RbcStringConversionFormat, RbcUnaryOp, VariableId,
+    ExprId, RbcAction, RbcBinaryOp, RbcClockTransferKind, RbcCoordinate, RbcExprNode, RbcLiteral,
+    RbcModel, RbcStringConversionFormat, RbcUnaryOp, VariableId,
 };
 
 /// What to include beyond the default variable and equation listing.
@@ -227,6 +227,33 @@ impl<'a> Listing<'a> {
             } => {
                 format!("foldout ${}#{}[{}]", function.0, fold, carried)
             }
+            RbcExprNode::ClockTransfer {
+                transfer: kind,
+                source,
+                source_clock,
+                target_clock,
+            } => {
+                let name = match kind {
+                    RbcClockTransferKind::SubSample { factor } => format!("subSample({factor})"),
+                    RbcClockTransferKind::SuperSample { factor } => {
+                        format!("superSample({factor})")
+                    }
+                    RbcClockTransferKind::ShiftSample {
+                        counter,
+                        resolution,
+                    } => format!("shiftSample({counter}/{resolution})"),
+                    RbcClockTransferKind::BackSample {
+                        counter,
+                        resolution,
+                    } => format!("backSample({counter}/{resolution})"),
+                };
+                format!(
+                    "{name}[clock {} -> {}]({})",
+                    source_clock.0,
+                    target_clock.0,
+                    self.expression(*source)
+                )
+            }
             RbcExprNode::Unsupported { detail } => format!("<unsupported: {detail}>"),
         }
     }
@@ -343,6 +370,11 @@ fn binary(op: RbcBinaryOp) -> &'static str {
         RbcBinaryOp::GreaterEqual => ">=",
         RbcBinaryOp::And => "and",
         RbcBinaryOp::Or => "or",
+        RbcBinaryOp::ElementwiseAdd => ".+",
+        RbcBinaryOp::ElementwiseSubtract => ".-",
+        RbcBinaryOp::ElementwiseMultiply => ".*",
+        RbcBinaryOp::ElementwiseDivide => "./",
+        RbcBinaryOp::ElementwisePower => ".^",
     }
 }
 

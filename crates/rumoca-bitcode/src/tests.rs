@@ -995,6 +995,8 @@ fn cost_of_node(node: &RbcExprNode) -> Cost {
     match node {
         RbcExprNode::Literal { .. } => Cost::Bounded,
         RbcExprNode::StringConversion { .. } => Cost::Bounded,
+        // One value read from a clock the artifact declares.
+        RbcExprNode::ClockTransfer { .. } => Cost::Bounded,
         RbcExprNode::Coordinate { .. } => Cost::Bounded,
         RbcExprNode::Unary { .. } => Cost::Bounded,
         RbcExprNode::Binary { .. } => Cost::Bounded,
@@ -1028,26 +1030,33 @@ fn cost_of_body(body: &RbcFunctionBody) -> Cost {
         // recurse: a call is a leaf as far as this IR is concerned.
         RbcFunctionBody::ElidedModelica => Cost::Opaque,
         RbcFunctionBody::External { .. } => Cost::Opaque,
-        // A carried body is bounded *per body*: its statement forms are
-        // assignment and assertion, which evaluate expressions once each,
-        // and neither can iterate. What a carried body does change is that
-        // a call is no longer a leaf -- the callee's body is now here to
-        // follow. Termination therefore stops resting on the body being
-        // absent and rests on `check_call_graph_acyclic` instead, which is
-        // enforced for any artifact that carries one.
+        // A carried body is bounded *per body*: every statement form is
+        // bounded, checked exhaustively below. What a carried body changes
+        // is that a call is no longer a leaf -- the callee's body is now here
+        // to follow -- so termination across calls rests on
+        // `check_call_graph_acyclic`, enforced for any artifact that carries
+        // one, rather than on bodies being absent.
         RbcFunctionBody::Modelica { statements } => {
-            if statements.iter().all(|statement| {
-                matches!(
-                    statement,
-                    RbcFunctionStatement::Assignment { .. }
-                        | RbcFunctionStatement::Assertion { .. }
-                )
-            }) {
+            if statements.iter().all(statement_is_bounded) {
                 Cost::Bounded
             } else {
                 Cost::Opaque
             }
         }
+    }
+}
+
+/// Exhaustive on purpose: a fifth statement form fails to compile here until
+/// someone decides whether it can iterate without a bound.
+fn statement_is_bounded(statement: &RbcFunctionStatement) -> bool {
+    match statement {
+        // Evaluate their expressions once each.
+        RbcFunctionStatement::Assignment { .. }
+        | RbcFunctionStatement::Assertion { .. }
+        | RbcFunctionStatement::AssignmentGroup { .. } => true,
+        // A fold over a compact domain: the trip count is the domain's,
+        // fixed before evaluation exactly as for `Comprehension`.
+        RbcFunctionStatement::For { statements, .. } => statements.iter().all(statement_is_bounded),
     }
 }
 
@@ -1106,21 +1115,29 @@ fn the_expression_arena_cannot_hold_a_cycle() {
 }
 
 #[test]
-fn a_function_body_is_never_carried_so_nothing_can_recurse() {
-    // If a Modelica body were ever inlined into the artifact, recursion would
-    // become expressible and this whole argument would need redoing. The
-    // exhaustive match in `cost_of_body` is the guard; this pins the reason.
-    let variants = [
-        RbcFunctionBody::ElidedModelica,
-        RbcFunctionBody::External {
-            language: "C".into(),
-            symbol: "f".into(),
-        },
-    ];
-    assert_eq!(
-        variants.len(),
-        2,
-        "a third body kind means re-deriving the totality argument"
+fn a_carried_function_body_cannot_recurse_through_the_call_graph() {
+    // Bodies are carried now, so recursion is no longer ruled out by their
+    // absence. It is ruled out by `check_call_graph_acyclic`: a function
+    // that calls itself is rejected before any consumer can evaluate it.
+    let mut model = decay_model();
+    let real = model.variables[0].value_type;
+    model.functions.push(RbcFunction {
+        folds: Vec::new(),
+        values: Vec::new(),
+        calls: vec![FunctionId(0)],
+        id: FunctionId(0),
+        name: "f".into(),
+        parameters: vec![],
+        results: vec![real],
+        inline: RbcInline::Unstated,
+        body: RbcFunctionBody::Modelica { statements: vec![] },
+        declaration: source_provenance(),
+    });
+    recompute_summary(&mut model);
+    let errors = errors(&model);
+    assert!(
+        errors.iter().any(|e| e.to_string().contains("acyclic")),
+        "{errors:?}"
     );
 }
 
@@ -1241,6 +1258,47 @@ fn operands_lists_every_child_of_every_node_kind() {
     assert!(
         crate::build::operands(node).is_empty(),
         "a literal is a leaf"
+    );
+}
+
+#[test]
+fn a_subscript_is_an_operand() {
+    // `x[i]` reads `i`. A walk that skipped subscripts computed read sets
+    // and override dependencies that missed every variable used only as an
+    // index.
+    let mut builder = Builder::new("Subscripts");
+    let base = builder.real(1.0);
+    let index = builder.real(2.0);
+    let node = RbcExprNode::Index {
+        base,
+        subscripts: vec![
+            RbcSubscript::Index { expression: index },
+            RbcSubscript::Whole,
+        ],
+    };
+    assert_eq!(crate::build::operands(&node), vec![base, index]);
+}
+
+#[test]
+fn a_call_projection_depends_on_its_head() {
+    let head = ExprId(4);
+    let projection = RbcExprNode::Call {
+        owner: head,
+        function: FunctionId(0),
+        output: 1,
+        arguments: vec![],
+    };
+    assert_eq!(crate::build::references(ExprId(5), &projection), vec![head]);
+    let own_head = RbcExprNode::Call {
+        owner: head,
+        function: FunctionId(0),
+        output: 0,
+        arguments: vec![ExprId(1)],
+    };
+    assert_eq!(
+        crate::build::references(head, &own_head),
+        vec![ExprId(1)],
+        "a head names itself as owner, which is not a dependency"
     );
 }
 

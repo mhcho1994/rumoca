@@ -61,7 +61,7 @@ use function_param_alias::function_param_type_alias_dims;
 use function_requests::{FunctionIdentitySet, same_function_request};
 pub(crate) use function_requests::{FunctionRequest, FunctionRequests};
 pub(crate) use higher_order::specialize_function_inputs;
-pub(crate) use pure_constants::fold_pure_constant_calls;
+pub(crate) use pure_constants::check_settled_binding_bounds;
 
 use crate::algorithms;
 use crate::ast_lower;

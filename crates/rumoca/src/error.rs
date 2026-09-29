@@ -63,6 +63,14 @@ pub enum CompilerError {
         source_map: Option<Box<SourceMap>>,
     },
 
+    /// A requested bitcode pass, or the export/rebuild around it, failed.
+    #[error("bitcode pass stage failed: {0}")]
+    #[diagnostic(
+        code(rumoca::compiler::E014),
+        help("run without --pass to compile the model the frontend produced")
+    )]
+    BitcodePassError(String),
+
     /// Structured source-backed diagnostics that should render directly in the CLI.
     #[error("{summary}")]
     #[diagnostic(code(rumoca::compiler::E013))]

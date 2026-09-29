@@ -19,8 +19,9 @@ pub(super) fn rebuild<'dae>(
     ctx: &Rebuild<'_>,
     variables: &[VariableSlot<'dae>],
     conditions: &[dae::ConditionId<'dae>],
-) -> Result<Vec<dae::ClockId<'dae>>, dae::DaeConstructionError> {
+) -> Result<RebuiltClocks<'dae>, dae::DaeConstructionError> {
     let mut ids = Vec::with_capacity(ctx.model.clocks.len());
+    let mut periodic = Vec::with_capacity(ctx.model.clocks.len());
     for clock in &ctx.model.clocks {
         let at = ctx.provenance(clock.provenance)?;
         let id = construction.clocks(|owner| match &clock.node {
@@ -38,13 +39,16 @@ pub(super) fn rebuild<'dae>(
                     }
                 }
                 .map_err(|error| ctx.unsupported(error.to_string()))?;
-                owner.scheduled(schedule, at).map(Into::into)
+                owner
+                    .scheduled(schedule, at)
+                    .map(|id| (id.into(), Some(id)))
             }
-            RbcClockNode::Triggered { condition } => {
-                owner.triggered(resolve(conditions, condition.0, "condition", ctx)?, at)
-            }
+            RbcClockNode::Triggered { condition } => owner
+                .triggered(resolve(conditions, condition.0, "condition", ctx)?, at)
+                .map(|id| (id, None)),
         })?;
-        ids.push(id);
+        ids.push(id.0);
+        periodic.push(id.1);
     }
     for ownership in &ctx.model.clock_ownerships {
         let at = ctx.provenance(ownership.provenance)?;
@@ -62,5 +66,36 @@ pub(super) fn rebuild<'dae>(
             _ => Err(ctx.unsupported("clock ownership requires a discrete variable")),
         })?;
     }
-    Ok(ids)
+    Ok(RebuiltClocks { ids, periodic })
+}
+
+/// Clocks by artifact index, and the periodic identity of those that are
+/// periodic (an `interval(c)` coordinate needs that one).
+pub(super) struct RebuiltClocks<'dae> {
+    pub(super) ids: Vec<dae::ClockId<'dae>>,
+    pub(super) periodic: Vec<Option<dae::PeriodicClockId<'dae>>>,
+}
+
+/// The DAE's clock-conversion derivation for an artifact's.
+pub(super) fn transfer_kind(kind: RbcClockTransferKind) -> dae::ClockTransferKind {
+    match kind {
+        RbcClockTransferKind::SubSample { factor } => dae::ClockTransferKind::SubSample { factor },
+        RbcClockTransferKind::SuperSample { factor } => {
+            dae::ClockTransferKind::SuperSample { factor }
+        }
+        RbcClockTransferKind::ShiftSample {
+            counter,
+            resolution,
+        } => dae::ClockTransferKind::ShiftSample {
+            counter,
+            resolution,
+        },
+        RbcClockTransferKind::BackSample {
+            counter,
+            resolution,
+        } => dae::ClockTransferKind::BackSample {
+            counter,
+            resolution,
+        },
+    }
 }

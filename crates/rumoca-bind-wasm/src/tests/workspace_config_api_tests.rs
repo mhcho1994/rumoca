@@ -2,6 +2,8 @@ use super::*;
 
 #[test]
 fn workspace_effective_source_roots_uses_in_memory_workspace_config() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let root_config = [
         r#"source_roots = ["vendor/Modelica"]"#,
         "",

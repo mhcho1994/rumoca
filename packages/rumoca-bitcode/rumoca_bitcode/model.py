@@ -396,6 +396,9 @@ class BinaryOp(Expression):
         "add": "+", "subtract": "-", "multiply": "*", "divide": "/", "power": "^",
         "equal": "==", "not_equal": "<>", "less": "<", "less_equal": "<=",
         "greater": ">", "greater_equal": ">=", "and": "and", "or": "or",
+        "elementwise_add": ".+", "elementwise_subtract": ".-",
+        "elementwise_multiply": ".*", "elementwise_divide": "./",
+        "elementwise_power": ".^",
     }
 
     def __repr__(self) -> str:

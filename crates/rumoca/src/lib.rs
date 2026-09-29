@@ -27,6 +27,7 @@
 
 mod compiler;
 mod error;
+mod pass_stage;
 
 // The CLI surface — argument parsing/dispatch (`cli`) plus the per-command
 // implementations below — depends on the scheduled simulation feature

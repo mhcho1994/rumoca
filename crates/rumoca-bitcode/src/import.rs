@@ -20,7 +20,11 @@ use rumoca_core::{SourceMap, Span};
 use rumoca_ir_dae as dae;
 
 mod clocks;
+mod functions;
+mod quotients;
 mod strings;
+mod temporal;
+mod transactions;
 
 use crate::schema::*;
 use crate::validate::{ValidateOptions, ValidationError, validate};
@@ -116,6 +120,17 @@ fn rebuild_source_map(model: &RbcModel) -> (SourceMap, Vec<rumoca_core::SourceId
     }
     for connection in &model.connections {
         note(connection.provenance.span);
+    }
+    // A carried function body anchors its values, statements and loops in
+    // the source too, often further into a file than any equation does.
+    for span in crate::validate::function_spans(model) {
+        note(span);
+    }
+    for span in transactions::spans(model) {
+        note(span);
+    }
+    for span in temporal::spans(model) {
+        note(span);
     }
 
     let mut map = SourceMap::new();
@@ -266,7 +281,9 @@ fn rebuild(
     // reservation is what breaks the cycle, and it is the same order the
     // compiler's own lowering uses.
     let conditions = reserve_conditions(construction, &ctx)?;
-    let clocks = clocks::rebuild(construction, &ctx, &variables, &conditions)?;
+    let rebuilt_clocks = clocks::rebuild(construction, &ctx, &variables, &conditions)?;
+    let clocks = rebuilt_clocks.ids;
+    let owners = temporal::rebuild_owners(construction, &ctx, &variables, &clocks)?;
     if model
         .expressions
         .iter()
@@ -280,15 +297,38 @@ fn rebuild(
         binders: &binders,
         types: &types,
         conditions: &conditions,
+        functions: &[],
+        parameters: &[],
+        clocks: &clocks,
+        periodic: &rebuilt_clocks.periodic,
+        previous: &owners.previous,
+        terminals: &owners.terminals,
     };
-    let expressions = rebuild_expressions(construction, &ctx, &tables)?;
-    define_variables(construction, &ctx, &expressions, reservations)?;
-    define_conditions(construction, &ctx, &expressions, &conditions, &clocks)?;
+    let arena = functions::rebuild_arena(construction, &ctx, &tables, reservations)?;
+    let expressions = arena.expressions;
+    define_variables(construction, &ctx, &expressions, arena.reservations)?;
+    quotients::define_conditions(
+        construction,
+        &ctx,
+        &expressions,
+        &conditions,
+        &clocks,
+        arena.quotients,
+    )?;
+    temporal::rebuild_structured_roots(construction, &ctx, &expressions, &domains)?;
     rebuild_equations(construction, &ctx, &expressions)?;
     rebuild_families(construction, &ctx, &expressions, &domains)?;
     rebuild_discrete_real(construction, &ctx, &expressions, &variables, &conditions)?;
     rebuild_events(construction, &ctx, &expressions, &variables, &conditions)?;
-    rebuild_discrete_definitions(construction, &ctx, &expressions, &variables, &conditions)
+    rebuild_discrete_definitions(construction, &ctx, &expressions, &variables, &conditions)?;
+    transactions::rebuild(
+        construction,
+        &ctx,
+        &expressions,
+        &variables,
+        &conditions,
+        &clocks,
+    )
 }
 
 /// Replay the MLS Appendix B.1c topology: every discrete-valued variable and
@@ -368,7 +408,14 @@ fn rebuild_types<'dae>(
         .first()
         .map(|variable| variable.declaration)
         .or_else(|| ctx.model.expressions.first().map(|e| e.provenance))
-        .ok_or_else(|| ctx.unsupported("bitcode has no object to anchor type provenance"))?;
+        .or_else(|| ctx.model.functions.first().map(|f| f.declaration));
+    // A model with no variable, expression or function -- `model Empty end
+    // Empty;` -- has nothing that could name a type, so there are no types
+    // to rebuild and nothing to anchor them to. Refusing it would turn an
+    // empty model into an import error.
+    let Some(anchor) = anchor else {
+        return Ok(Vec::new());
+    };
     let anchor = ctx.provenance(anchor)?;
 
     let mut types = Vec::with_capacity(ctx.model.types.len());
@@ -464,31 +511,20 @@ fn reserve_variables<'dae>(
 }
 
 /// Everything an expression node may name that was rebuilt before it.
+#[derive(Clone, Copy)]
 struct Tables<'a, 'dae> {
     variables: &'a [VariableSlot<'dae>],
     domains: &'a [dae::DomainId<'dae>],
     binders: &'a BinderTable<'dae>,
     types: &'a [dae::ValueTypeId<'dae>],
     conditions: &'a [dae::ConditionId<'dae>],
-}
-
-fn rebuild_expressions<'dae>(
-    construction: &mut dae::DaeConstruction<'dae>,
-    ctx: &Rebuild<'_>,
-    tables: &Tables<'_, 'dae>,
-) -> Result<Vec<dae::ExprId<'dae>>, dae::DaeConstructionError> {
-    let mut built: Vec<dae::ExprId<'dae>> = Vec::with_capacity(ctx.model.expressions.len());
-    construction.expressions(|owner| {
-        for expression in &ctx.model.expressions {
-            // Validation already proved operands reference strictly earlier
-            // nodes, so one forward pass suffices.
-            let at = ctx.provenance(expression.provenance)?;
-            let node = build_expression(owner, ctx, expression, &built, tables, at)?;
-            built.push(node);
-        }
-        Ok(())
-    })?;
-    Ok(built)
+    /// Functions rebuilt so far; `None` where the artifact elides the body.
+    functions: &'a [Option<dae::FunctionId<'dae>>],
+    parameters: &'a [Vec<dae::FunctionParameterId<'dae>>],
+    clocks: &'a [dae::ClockId<'dae>],
+    periodic: &'a [Option<dae::PeriodicClockId<'dae>>],
+    previous: &'a [dae::PreviousId<'dae>],
+    terminals: &'a [dae::TerminalId<'dae>],
 }
 
 fn build_expression<'dae>(
@@ -500,22 +536,32 @@ fn build_expression<'dae>(
     at: dae::DaeProvenance,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
     Ok(match &expression.node {
-        // Carried by the artifact, not yet rebuilt into a DAE.
-        //
-        // These name a value inside a function body, so reconstructing one
-        // means driving the DAE's function-body construction from the
-        // artifact -- the remaining step of
-        // docs/design/carry-function-bodies.md. Refusing here is the honest
-        // outcome: the alternative is inventing a node whose meaning is not
-        // what the source said.
+        // Issued by the body replay in `functions`, never built directly: a
+        // read has to see the definition the artifact names, and a loop
+        // value is created by opening or closing its loop.
         RbcExprNode::FunctionValue { .. }
         | RbcExprNode::FunctionFoldParameter { .. }
         | RbcExprNode::FunctionFoldOutput { .. } => {
-            return Err(ctx.unsupported(
-                "function-body value: the artifact carries it, but rebuilding a \
-                 DAE from a carried body is not implemented yet",
-            ));
+            return Err(ctx.unsupported(format!(
+                "expression {} reads a function body outside that body's replay",
+                expression.id.0
+            )));
         }
+        RbcExprNode::Call { .. }
+        | RbcExprNode::Coordinate {
+            coordinate: RbcCoordinate::FunctionParameter { .. },
+        } => functions::function_node(owner, ctx, expression, built, tables, at)?,
+        RbcExprNode::ClockTransfer {
+            transfer: kind,
+            source,
+            source_clock,
+            target_clock,
+        } => owner.at(at).clock_transfer(
+            clocks::transfer_kind(*kind),
+            resolve(built, source.0, "expression", ctx)?,
+            resolve(tables.clocks, source_clock.0, "clock", ctx)?,
+            resolve(tables.clocks, target_clock.0, "clock", ctx)?,
+        )?,
         RbcExprNode::StringConversion { value, format } => {
             let value = resolve(built, value.0, "expression", ctx)?;
             owner.at(at).string_conversion(
@@ -543,6 +589,39 @@ fn build_expression<'dae>(
                 .ok_or_else(|| ctx.unsupported("binder names an unknown domain"))?;
             owner.at(at).binder(binder)?
         }
+        RbcExprNode::Coordinate {
+            coordinate: RbcCoordinate::ClockInterval { clock },
+        } => {
+            let clock = tables
+                .periodic
+                .get(clock.0 as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| ctx.unsupported("interval() names a clock that is not periodic"))?;
+            owner
+                .at(at)
+                .coordinate(dae::CoordinateInput::ClockInterval(clock))?
+        }
+        RbcExprNode::Coordinate {
+            coordinate: RbcCoordinate::Previous { previous },
+        } => owner
+            .at(at)
+            .coordinate(dae::CoordinateInput::Previous(resolve(
+                tables.previous,
+                previous.0,
+                "previous value",
+                ctx,
+            )?))?,
+        RbcExprNode::Coordinate {
+            coordinate: RbcCoordinate::Terminal { terminal },
+        } => owner
+            .at(at)
+            .coordinate(dae::CoordinateInput::Terminal(resolve(
+                tables.terminals,
+                terminal.0,
+                "terminal",
+                ctx,
+            )?))?,
         RbcExprNode::Coordinate {
             coordinate: RbcCoordinate::Condition { condition },
         } => {
@@ -645,22 +724,6 @@ fn build_expression<'dae>(
             let subscripts = subscripts_of(subscripts, built, ctx, at)?;
             owner.at(at).array_update(base, value, subscripts)?
         }
-        // A call needs the callee's *body* to rebuild, and bitcode v2 carries
-        // only the declaration. Refusing here is the same choice import makes
-        // everywhere else: a DAE missing a function is not the model.
-        RbcExprNode::Call { function, .. } => {
-            let name = ctx
-                .model
-                .functions
-                .get(function.0 as usize)
-                .map(|f| f.name.as_str())
-                .unwrap_or("<unknown>");
-            return Err(ctx.unsupported(format!(
-                "expression {} calls `{name}`, and bitcode v2 carries function \
-                 declarations but not their bodies",
-                expression.id
-            )));
-        }
         RbcExprNode::Unsupported { detail } => {
             return Err(ctx.unsupported(format!(
                 "expression {} is unsupported: {detail}",
@@ -674,37 +737,51 @@ fn define_variables<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     ctx: &Rebuild<'_>,
     expressions: &[dae::ExprId<'dae>],
-    reservations: Reservations<'dae>,
+    mut reservations: Vec<Option<dae::VariableReservation<'dae>>>,
 ) -> Result<(), dae::DaeConstructionError> {
     construction.variables(|owner| {
-        for (variable, reservation) in ctx.model.variables.iter().zip(reservations) {
-            let at = ctx.provenance(variable.declaration)?;
-            let attribute = |id: Option<ExprId>| match id {
-                Some(id) => resolve(expressions, id.0, "expression", ctx).map(Some),
-                None => Ok(None),
-            };
-            let attributes = dae::VariableAttributes {
-                causality: causality_of(variable.causality),
-                unit: variable.unit.clone(),
-                description: variable.description.clone(),
-                fixed: variable.fixed,
-                is_tunable: variable.tunable,
-                origin: if variable.from_source {
-                    dae::VariableOrigin::Source
-                } else {
-                    dae::VariableOrigin::Generated
-                },
-                binding: attribute(variable.binding)?,
-                start: attribute(variable.start)?,
-                min: attribute(variable.min)?,
-                max: attribute(variable.max)?,
-                nominal: attribute(variable.nominal)?,
-                ..Default::default()
-            };
-            owner.define(reservation, attributes, at)?;
+        for (variable, slot) in ctx.model.variables.iter().zip(&mut reservations) {
+            // Parameters whose attributes were ready early were defined
+            // during the arena pass; see `functions::define_ready`.
+            if let Some(reservation) = slot.take() {
+                define_variable(owner, ctx, variable, reservation, expressions)?;
+            }
         }
         Ok(())
     })
+}
+
+fn define_variable<'dae>(
+    owner: &mut dae::Variables<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    variable: &RbcVariable,
+    reservation: dae::VariableReservation<'dae>,
+    expressions: &[dae::ExprId<'dae>],
+) -> Result<(), dae::DaeConstructionError> {
+    let at = ctx.provenance(variable.declaration)?;
+    let attribute = |id: Option<ExprId>| match id {
+        Some(id) => resolve(expressions, id.0, "expression", ctx).map(Some),
+        None => Ok(None),
+    };
+    let attributes = dae::VariableAttributes {
+        causality: causality_of(variable.causality),
+        unit: variable.unit.clone(),
+        description: variable.description.clone(),
+        fixed: variable.fixed,
+        is_tunable: variable.tunable,
+        origin: if variable.from_source {
+            dae::VariableOrigin::Source
+        } else {
+            dae::VariableOrigin::Generated
+        },
+        binding: attribute(variable.binding)?,
+        start: attribute(variable.start)?,
+        min: attribute(variable.min)?,
+        max: attribute(variable.max)?,
+        nominal: attribute(variable.nominal)?,
+        ..Default::default()
+    };
+    owner.define(reservation, attributes, at)
 }
 
 /// Reserve every condition, so an expression can name one before it is defined.
@@ -724,37 +801,6 @@ fn reserve_conditions<'dae>(
         Ok(())
     })?;
     Ok(conditions)
-}
-
-fn define_conditions<'dae>(
-    construction: &mut dae::DaeConstruction<'dae>,
-    ctx: &Rebuild<'_>,
-    expressions: &[dae::ExprId<'dae>],
-    conditions: &[dae::ConditionId<'dae>],
-    clocks: &[dae::ClockId<'dae>],
-) -> Result<(), dae::DaeConstructionError> {
-    let mut relations = Vec::with_capacity(ctx.model.relations.len());
-    construction.conditions(|owner| {
-        for relation in &ctx.model.relations {
-            let at = ctx.provenance(relation.provenance)?;
-            let expression = resolve(expressions, relation.expression.0, "expression", ctx)?;
-            relations.push(owner.relation(expression, at)?);
-        }
-        for (condition, id) in ctx.model.conditions.iter().zip(conditions) {
-            let at = ctx.provenance(condition.provenance)?;
-            let input =
-                condition_input(ctx, condition, &relations, conditions, expressions, clocks)?;
-            owner.define(*id, input, at)?;
-        }
-        for root in &ctx.model.roots {
-            let at = ctx.provenance(root.provenance)?;
-            let relation = resolve(&relations, root.relation.0, "relation", ctx)?;
-            let activation = resolve(conditions, root.activation.0, "condition", ctx)?;
-            owner.root(relation, activation, at)?;
-        }
-        Ok(())
-    })?;
-    Ok(())
 }
 
 fn condition_input<'dae>(
@@ -1185,8 +1231,13 @@ fn coordinate_of<'dae>(
         // Both are handled by `build_expression`, which holds the domain and
         // condition tables that `variables` alone cannot resolve.
         RbcCoordinate::Binder { .. } | RbcCoordinate::Condition { .. } => return None,
-        // Only meaningful inside a function body, which v2 does not carry.
-        RbcCoordinate::FunctionParameter { .. } => return None,
+        // Handled by `build_expression` and the arena replay, which hold
+        // the function, clock and temporal-owner tables these name.
+        RbcCoordinate::FunctionParameter { .. }
+        | RbcCoordinate::ClockInterval { .. }
+        | RbcCoordinate::Delay { .. }
+        | RbcCoordinate::Previous { .. }
+        | RbcCoordinate::Terminal { .. } => return None,
     })
 }
 
@@ -1288,6 +1339,11 @@ fn binary_of(op: RbcBinaryOp) -> dae::BinaryOperator {
         RbcBinaryOp::GreaterEqual => dae::BinaryOperator::GreaterEqual,
         RbcBinaryOp::And => dae::BinaryOperator::And,
         RbcBinaryOp::Or => dae::BinaryOperator::Or,
+        RbcBinaryOp::ElementwiseAdd => dae::BinaryOperator::ElementwiseAdd,
+        RbcBinaryOp::ElementwiseSubtract => dae::BinaryOperator::ElementwiseSubtract,
+        RbcBinaryOp::ElementwiseMultiply => dae::BinaryOperator::ElementwiseMultiply,
+        RbcBinaryOp::ElementwiseDivide => dae::BinaryOperator::ElementwiseDivide,
+        RbcBinaryOp::ElementwisePower => dae::BinaryOperator::ElementwisePower,
     }
 }
 

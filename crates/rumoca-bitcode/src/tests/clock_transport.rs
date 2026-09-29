@@ -348,7 +348,10 @@ fn triggered_clock_retains_condition_identity() {
 }
 
 #[test]
-fn unrepresented_semantic_owner_is_never_silently_discarded() {
+fn a_terminal_owner_is_carried_not_discarded() {
+    // `terminal()` used to be refused as an owner table bitcode could not
+    // represent. It is carried now; what must still hold is that it is never
+    // silently dropped: export keeps it and import rebuilds it.
     use rumoca_ir_dae as dae;
     let mut sources = rumoca_core::SourceMap::new();
     let source = sources.add("terminal.mo", "terminal()");
@@ -359,9 +362,6 @@ fn unrepresented_semantic_owner_is_never_silently_discarded() {
         Ok(())
     })
     .unwrap();
-    let error = crate::export(&model, None, "Terminal", &Default::default()).unwrap_err();
-    assert!(matches!(
-        error,
-        crate::export::ExportError::UnsupportedOwner("terminals")
-    ));
+    let file = crate::export(&model, None, "Terminal", &Default::default()).unwrap();
+    assert_eq!(file.model.terminals.len(), 1, "the owner is exported");
 }

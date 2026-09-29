@@ -1088,7 +1088,10 @@ pub(crate) fn finalize_flat_model(
     // the source calls it -- which emptied the collected table for every
     // fixture whose calls take literal arguments.
     functions::prune_unreachable_functions(flat);
-    functions::fold_pure_constant_calls(flat)?;
+    // Pure calls with settled inputs are folded by the `fold-pure-calls`
+    // bitcode pass, not here; the frontend only proves their bindings in
+    // bounds.
+    functions::check_settled_binding_bounds(flat)?;
     functions::validate_flat_function_bindings(flat)?;
     ctx.refresh_enum_parameter_lookup(flat);
     enum_literals::canonicalize_flat_enum_literals(flat, tree, &ctx.enum_parameter_values);

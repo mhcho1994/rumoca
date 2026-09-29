@@ -109,3 +109,49 @@ separate optional section whose presence is what makes an artifact non-total.
 
 Stage 3 is the only part that trades away something real, and it should be
 decided deliberately rather than arrived at.
+
+## Status and measured reclassification (2026-09-29)
+
+**The stage exists.** `rumoca compile --pass NAME` routes the frontend's DAE
+through `DAE -> RBC -> [passes] -> DAE` (`crates/rumoca/src/pass_stage.rs`,
+`crates/rumoca-bitcode/src/passes.rs`). Passes today: `prune-functions`,
+`fold-constants`, `dead-expressions`; `default` runs all, `none` round-trips
+with no rewrite. The pipeline removes dead expressions, revalidates and
+rebuilds through the checked constructors after every pass. Stage 2 (call
+edges) and Stage 3 (bodies, including import) are done; see
+[carry-function-bodies.md](carry-function-bodies.md).
+
+**The stage is opt-in, for a measured reason.** Routing the whole test suite
+through it (`--pass none`, every compile) left ~50 tests failing beyond the 4
+known, and every one is an explicit refusal, not a wrong result: owner tables
+bitcode v2 does not carry (`model_event_transactions`, `previous_values`,
+`delays`, `structured_roots`), plus element-wise operators and
+`clock_transfer`, both since added (TOOLBUG-042 and this change). Until the
+four owner tables are carried, a default-on stage would refuse models the
+frontend compiles.
+
+**The inventory above was wrong about three of its seven rows.** Each step
+was switched off in turn and 1338 tests (flatten, compile and DAE crates;
+MSL-simulation, example, heavy-solve and template suites) were run:
+
+| Step | Failures when off | What it actually is |
+|---|---:|---|
+| `fold_pure_constant_calls` | 0 | optimization -- **moved**: now the `fold-pure-calls` pass; its one diagnostic (EF032, a settled binding indexing out of bounds) stays in the frontend as `check_settled_binding_bounds` |
+| `inject_referenced_qualified_class_constants` (late) | 2 | lowering: package constants must be materialized |
+| `fold_structural_initial_asserts` | 4 | the EF030 translation diagnostic, plus folding of proven-true asserts |
+| `substitute_known_constants_in_flat` | 7 | **lowering**: without it DAE construction fails, `ED008 unresolved Flat reference P.Constants.pi` |
+| `specialize_function_inputs` | 9 | **lowering**: a function-typed input cannot reach a DAE ("reachable function apply retains a functional input") |
+| `prune_unreachable_functions` | 17 | **lowering**: the functions it drops are the higher-order and package-constant templates specialization superseded, which the DAE cannot hold; the `prune-functions` pass repeats it after folding, where it is an optimization |
+
+So the minimal frontend keeps constant materialization, constant
+substitution, higher-order specialization and template pruning: they make
+the model *representable*, which is the frontend's job by this document's
+own test. Pure-call folding has moved. What remains in the frontend that is
+purely an optimization is the proven-true half of structural assert folding,
+which is entangled with the EF030 diagnostic that must stay.
+
+`fold-pure-calls` is narrower than the frontend step was: it folds scalar
+results of calls whose arguments are literals, where the frontend also
+folded array results and used frozen parameter values. The model is the same
+either way -- an unfolded binding is evaluated at initialization -- and the
+evaluator (`passes/evaluate.rs`) fails closed on anything it does not model.

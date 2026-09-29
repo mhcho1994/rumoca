@@ -3,6 +3,7 @@
 //! Separate from `export.rs` because it grows with each statement form the
 //! schema learns to carry, and because the all-or-nothing rule below is a
 //! decision worth stating once in a place that holds only it.
+use super::Ctx;
 use crate::schema::*;
 use rumoca_ir_dae as dae;
 
@@ -25,6 +26,7 @@ fn definitions_of(values: dae::FunctionDefinitionValues<'_>) -> Vec<RbcFunctionD
 pub(super) fn export_folds<'dae>(
     view: dae::DaeView<'dae>,
     function: dae::FunctionView<'dae>,
+    ctx: &mut Ctx<'_>,
 ) -> Option<Vec<RbcFunctionFold>> {
     let mut folds = Vec::new();
     for index in 0..function.fold_count() {
@@ -43,6 +45,7 @@ pub(super) fn export_folds<'dae>(
             initial: definitions_of(fold.initial_values()),
             update: definitions_of(fold.update_values()),
             output: definitions_of(fold.output_values()),
+            provenance: ctx.provenance(fold.provenance()),
         });
     }
     Some(folds)
@@ -50,8 +53,8 @@ pub(super) fn export_folds<'dae>(
 
 /// Project one statement list, or `None` if it holds a form not carried.
 fn statements_of<'dae>(
-    view: dae::DaeView<'dae>,
     source: dae::FunctionStatements<'dae>,
+    ctx: &mut Ctx<'_>,
 ) -> Option<Vec<RbcFunctionStatement>> {
     let mut statements = Vec::new();
     for statement in source {
@@ -60,14 +63,18 @@ fn statements_of<'dae>(
                 statements.push(RbcFunctionStatement::Assignment {
                     value: definition.target().ordinal(),
                     expression: ExprId(definition.rhs().index()),
+                    provenance: ctx.provenance(definition.provenance()),
                 });
             }
             dae::FunctionStatementView::Assertion {
-                condition, message, ..
+                condition,
+                message,
+                provenance,
             } => {
                 statements.push(RbcFunctionStatement::Assertion {
                     condition: ExprId(condition.index()),
                     message: ExprId(message.index()),
+                    provenance: ctx.provenance(provenance),
                 });
             }
             dae::FunctionStatementView::AssignmentGroup {
@@ -78,53 +85,47 @@ fn statements_of<'dae>(
                     .iter()
                     .map(|definition| definition.target().ordinal())
                     .collect();
-                // Unconditional groups carry one expression per value;
-                // conditional ones take their values from the branches, so
-                // carrying both would state the same thing twice and let
-                // the two disagree.
-                let (conditional, expressions) = match conditional {
-                    Some(correlation) => (
-                        Some(RbcFunctionConditional {
-                            conditions: correlation
-                                .conditions()
-                                .map(|id| ExprId(id.index()))
-                                .collect(),
-                            branches: (0..correlation.branch_count())
-                                .filter_map(|ordinal| {
-                                    correlation
-                                        .branch(ordinal)
-                                        .map(|values| values.map(|id| ExprId(id.index())).collect())
-                                })
-                                .collect(),
-                            fallback: correlation
-                                .fallback()
-                                .map(|id| ExprId(id.index()))
-                                .collect(),
-                        }),
-                        Vec::new(),
-                    ),
-                    None => (
-                        None,
-                        definitions
-                            .iter()
-                            .map(|definition| ExprId(definition.rhs().index()))
-                            .collect(),
-                    ),
-                };
+                let expressions = definitions
+                    .iter()
+                    .map(|definition| ExprId(definition.rhs().index()))
+                    .collect();
+                // The DAE gives every definition of a group one provenance,
+                // so the first stands for all of them.
+                let first = definitions.iter().next()?;
+                let provenance = ctx.provenance(first.provenance());
+                let conditional = conditional.map(|correlation| RbcFunctionConditional {
+                    conditions: correlation
+                        .conditions()
+                        .map(|id| ExprId(id.index()))
+                        .collect(),
+                    branches: (0..correlation.branch_count())
+                        .filter_map(|ordinal| {
+                            correlation
+                                .branch(ordinal)
+                                .map(|values| values.map(|id| ExprId(id.index())).collect())
+                        })
+                        .collect(),
+                    fallback: correlation
+                        .fallback()
+                        .map(|id| ExprId(id.index()))
+                        .collect(),
+                });
                 statements.push(RbcFunctionStatement::AssignmentGroup {
                     values,
                     conditional,
                     expressions,
+                    provenance,
                 });
             }
             dae::FunctionStatementView::For {
                 fold,
                 statements: body,
-                ..
+                provenance,
             } => {
                 statements.push(RbcFunctionStatement::For {
                     fold: fold.ordinal(),
-                    statements: statements_of(view, body)?,
+                    statements: statements_of(body, ctx)?,
+                    provenance: ctx.provenance(provenance),
                 });
             }
         }
@@ -143,11 +144,12 @@ fn statements_of<'dae>(
 pub(super) fn export_function_body<'dae>(
     view: dae::DaeView<'dae>,
     function: dae::FunctionView<'dae>,
+    ctx: &mut Ctx<'_>,
 ) -> (RbcFunctionBody, Vec<RbcFunctionFold>) {
-    let Some(statements) = statements_of(view, function.statements()) else {
+    let Some(statements) = statements_of(function.statements(), ctx) else {
         return (RbcFunctionBody::ElidedModelica, Vec::new());
     };
-    let Some(folds) = export_folds(view, function) else {
+    let Some(folds) = export_folds(view, function, ctx) else {
         return (RbcFunctionBody::ElidedModelica, Vec::new());
     };
     (RbcFunctionBody::Modelica { statements }, folds)
@@ -197,4 +199,93 @@ pub(super) fn function_node(
             ));
         }
     })
+}
+
+/// The function's output and local values, in owner-local ordinal order.
+///
+/// The index into this list *is* the ordinal every body reference uses, so
+/// it is emitted for every function that has values, external or Modelica.
+pub(super) fn value_table(
+    function: dae::FunctionView<'_>,
+    ctx: &mut Ctx<'_>,
+) -> Vec<RbcFunctionValue> {
+    function
+        .values()
+        .map(|value| RbcFunctionValue {
+            name: value.name().to_string(),
+            value_type: TypeId(value.value_type().index()),
+            role: match value.role() {
+                dae::FunctionValueRole::Output => RbcFunctionValueRole::Output,
+                dae::FunctionValueRole::Local => RbcFunctionValueRole::Local,
+            },
+            declaration: ctx.provenance(value.declaration()),
+        })
+        .collect()
+}
+
+/// An external body, with the ABI a rebuild needs.
+///
+/// Language and symbol alone say what to call and not with what. The
+/// argument positions, the return binding, purity and linkage are the rest of
+/// the call, and an artifact that drops them can be printed but not run.
+pub(super) fn external_body(external: dae::ExternalFunctionView<'_>) -> RbcFunctionBody {
+    let linkage = external.linkage();
+    RbcFunctionBody::External {
+        // Encoding kept as it was before this field set grew, so artifacts
+        // written earlier still name their language the same way.
+        language: format!("{:?}", external.language()).to_lowercase(),
+        symbol: external.symbol().to_string(),
+        purity: if external.purity().is_pure() {
+            RbcPurity::Pure
+        } else {
+            RbcPurity::Impure
+        },
+        arguments: external
+            .arguments()
+            .map(|argument| match argument {
+                dae::ExternalArgumentView::Input(expression) => RbcExternalArgument::Input {
+                    expression: ExprId(expression.index()),
+                },
+                dae::ExternalArgumentView::Output(value) => RbcExternalArgument::Output {
+                    value: value.ordinal(),
+                },
+            })
+            .collect(),
+        result: external.result().map(|value| value.ordinal()),
+        linkage: RbcExternalLinkage {
+            libraries: linkage.libraries().to_vec(),
+            include: linkage.include().map(str::to_string),
+            include_directory: linkage.include_directory().map(str::to_string),
+            library_directory: linkage.library_directory().map(str::to_string),
+        },
+    }
+}
+
+/// Which functions sit on a call cycle, by function index.
+///
+/// The DAE admits a proven-recursive group of functions; the artifact does
+/// not carry one. SPEC_RUMOCA_BITCODE §9a rests termination on the call
+/// graph over carried bodies being acyclic, so a recursive function's body is
+/// elided, exactly as a body the schema cannot hold is: the declaration and
+/// its `calls` edges stay, and nothing claims a body that is not there.
+pub(super) fn recursive_functions(edges: &[Vec<FunctionId>]) -> Vec<bool> {
+    let dependencies: Vec<Vec<usize>> = edges
+        .iter()
+        .map(|callees| {
+            callees
+                .iter()
+                .map(|callee| callee.0 as usize)
+                .filter(|callee| *callee < edges.len())
+                .collect()
+        })
+        .collect();
+    let mut recursive = vec![false; edges.len()];
+    if let Ok(components) = rumoca_core::dependency_first_sccs(&dependencies) {
+        for component in components.iter().filter(|component| component.recursive) {
+            for &member in component.members.iter() {
+                recursive[member] = true;
+            }
+        }
+    }
+    recursive
 }

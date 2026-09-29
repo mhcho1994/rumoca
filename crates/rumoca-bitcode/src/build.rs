@@ -95,6 +95,11 @@ impl Builder {
             connection_sets: Vec::new(),
             components: Vec::new(),
             discrete_definitions: Vec::new(),
+            model_event_transactions: Vec::new(),
+            previous_values: Vec::new(),
+            terminals: Vec::new(),
+            structured_roots: Vec::new(),
+            delays: Vec::new(),
             trace_points: Vec::new(),
             summary: RbcSummary::default(),
         };
@@ -243,7 +248,7 @@ impl Builder {
     /// runs much later and names a node id, where this names the call.
     pub fn expr(&mut self, node: RbcExprNode) -> ExprId {
         let index = self.model.expressions.len() as u32;
-        for operand in operands(&node) {
+        for operand in references(ExprId(index), &node) {
             assert!(
                 operand.0 < index,
                 "node {index} would reference operand {}, which is not strictly \
@@ -441,7 +446,7 @@ impl Builder {
                     _ => {}
                 }
             }
-            stack.extend(operands(&entry.node));
+            stack.extend(references(id, &entry.node));
         }
         for list in [&mut reads, &mut derivatives, &mut previous] {
             list.sort_by_key(|variable| variable.0);
@@ -471,6 +476,7 @@ pub fn operands(node: &RbcExprNode) -> Vec<ExprId> {
             found
         }
         RbcExprNode::Literal { .. } | RbcExprNode::Coordinate { .. } => Vec::new(),
+        RbcExprNode::ClockTransfer { source, .. } => vec![*source],
         RbcExprNode::Unary { operand, .. } => vec![*operand],
         RbcExprNode::Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
         RbcExprNode::Conditional { branches, fallback } => {
@@ -491,8 +497,20 @@ pub fn operands(node: &RbcExprNode) -> Vec<ExprId> {
             found
         }
         RbcExprNode::Comprehension { body, .. } => vec![*body],
-        RbcExprNode::Index { base, .. } => vec![*base],
-        RbcExprNode::ArrayUpdate { base, value, .. } => vec![*base, *value],
+        // A subscript is an expression like any other operand: `x[i]` reads
+        // `i`. Leaving subscripts out made a variable used only as an index
+        // invisible to every walk built on this function.
+        RbcExprNode::Index { base, subscripts } => std::iter::once(*base)
+            .chain(subscripts.iter().filter_map(|s| s.expression()))
+            .collect(),
+        RbcExprNode::ArrayUpdate {
+            base,
+            value,
+            subscripts,
+        } => [*base, *value]
+            .into_iter()
+            .chain(subscripts.iter().filter_map(|s| s.expression()))
+            .collect(),
         RbcExprNode::Call { arguments, .. } => arguments.clone(),
         // Leaves: each names a value inside a function body by owner-local
         // ordinal, not by expression id, so there is no operand to walk.
@@ -501,4 +519,21 @@ pub fn operands(node: &RbcExprNode) -> Vec<ExprId> {
         | RbcExprNode::FunctionFoldOutput { .. } => Vec::new(),
         RbcExprNode::Unsupported { .. } => Vec::new(),
     }
+}
+
+/// Every expression the node at `id` depends on: its operands, plus the head
+/// of the call when the node is a further result of one.
+///
+/// A call projection carries no arguments of its own; it shares the head's
+/// one evaluation, so what the head reads the projection reads too. That
+/// edge needs the node's own id to tell a head (which names itself as
+/// owner) from a projection, which is why it is not in [`operands`].
+pub fn references(id: ExprId, node: &RbcExprNode) -> Vec<ExprId> {
+    let mut found = operands(node);
+    if let RbcExprNode::Call { owner, .. } = node
+        && *owner != id
+    {
+        found.push(*owner);
+    }
+    found
 }

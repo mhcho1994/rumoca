@@ -106,31 +106,69 @@ fn check_input(input: &LinkInput<'_>, discard: bool, names: &mut BTreeSet<String
     check_model(&input.file.model).map_err(|e| LinkError(format!("{ns}: {e}")))
 }
 
+/// How one table's ids move.
+///
+/// Linking offsets every table. A pass that deletes entries renumbers the
+/// survivors through a map, and one that needs to know what is referenced
+/// records ids without moving them. All three walk the same exhaustive
+/// visitor, so a table or a reference added to the schema is handled by
+/// every one of them or by none.
 #[derive(Clone, Copy)]
-struct Range {
-    start: u32,
-    len: u32,
-    table: &'static str,
+enum Range<'a> {
+    Offset {
+        start: u32,
+        len: u32,
+        table: &'static str,
+    },
+    /// Old id to new id; `None` for an entry the rewrite removed.
+    Remap {
+        map: &'a [Option<u32>],
+        table: &'static str,
+    },
+    /// Mark every id seen and leave it where it is.
+    Collect {
+        seen: &'a std::cell::RefCell<Vec<bool>>,
+        table: &'static str,
+    },
 }
 
-impl Range {
+impl Range<'_> {
     fn new(start: usize, len: usize, table: &'static str) -> Result<Self> {
         let start = u32::try_from(start).map_err(|_| LinkError(format!("{table}: ID overflow")))?;
         let len = u32::try_from(len).map_err(|_| LinkError(format!("{table}: ID overflow")))?;
         start
             .checked_add(len)
             .ok_or_else(|| LinkError(format!("{table}: ID overflow")))?;
-        Ok(Self { start, len, table })
+        Ok(Self::Offset { start, len, table })
     }
 
     fn shift(self, id: &mut u32) -> Result<()> {
-        if *id >= self.len {
-            return Err(LinkError(format!(
-                "{} reference {} out of bounds ({})",
-                self.table, id, self.len
-            )));
+        let out_of_bounds = |table: &str, len: usize| {
+            LinkError(format!("{table} reference {id} out of bounds ({len})"))
+        };
+        match self {
+            Self::Offset { start, len, table } => {
+                if *id >= len {
+                    return Err(out_of_bounds(table, len as usize));
+                }
+                *id += start;
+            }
+            Self::Remap { map, table } => {
+                let moved = map
+                    .get(*id as usize)
+                    .ok_or_else(|| out_of_bounds(table, map.len()))?;
+                *id = moved.ok_or_else(|| {
+                    LinkError(format!("{table} {id} was removed but is still referenced"))
+                })?;
+            }
+            Self::Collect { seen, table } => {
+                let mut seen = seen.borrow_mut();
+                let len = seen.len();
+                *seen
+                    .get_mut(*id as usize)
+                    .ok_or_else(|| out_of_bounds(table, len))? = true;
+            }
         }
-        *id += self.start;
         Ok(())
     }
 }
@@ -140,10 +178,14 @@ impl Range {
 // spaces even though the schema reuses their Rust newtype.
 macro_rules! tables {
     ($($field:ident),+ $(,)?) => {
-        struct Map<'a> { namespace: &'a str, $($field: Range,)+ }
+        struct Map<'a> { namespace: Option<&'a str>, $($field: Range<'a>,)+ }
         impl<'a> Map<'a> {
             fn new(out: &RbcModel, input: &RbcModel, namespace: &'a str) -> Result<Self> {
-                Ok(Self { namespace, $($field: Range::new(out.$field.len(), input.$field.len(), stringify!($field))?,)+ })
+                Ok(Self { namespace: Some(namespace), $($field: Range::new(out.$field.len(), input.$field.len(), stringify!($field))?,)+ })
+            }
+            /// Every table left where it is, names unqualified.
+            fn identity(model: &RbcModel) -> Result<Self> {
+                Ok(Self { namespace: None, $($field: Range::new(0, model.$field.len(), stringify!($field))?,)+ })
             }
         }
         fn append(out: &mut RbcModel, input: RbcModel) {
@@ -178,9 +220,64 @@ tables!(
     components,
     trace_points,
     discrete_definitions,
+    model_event_transactions,
+    previous_values,
+    terminals,
+    structured_roots,
+    delays,
     connector_types,
     connectors
 );
+
+/// Every expression referenced from outside the expression arena: equation
+/// residuals, attributes, conditions, function bodies, events, and so on.
+///
+/// Operands are deliberately not walked; a caller closes over them with
+/// [`crate::build::references`]. Visiting is by the same exhaustive walk
+/// linking uses, so no table can be forgotten here without being forgotten
+/// by the linker too.
+pub(crate) fn expression_roots(model: &RbcModel) -> Result<Vec<bool>> {
+    let seen = std::cell::RefCell::new(vec![false; model.expressions.len()]);
+    let mut outside = model.clone();
+    outside.expressions.clear();
+    let mut map = Map::identity(model)?;
+    map.expressions = Range::Collect {
+        seen: &seen,
+        table: "expressions",
+    };
+    map.relocate(&mut outside)?;
+    Ok(seen.into_inner())
+}
+
+/// Drop removed expressions and functions and renumber every reference to
+/// the survivors. `expressions` and `functions` map old ids to new; `None`
+/// removes the entry, and a remaining reference to one is an error.
+pub(crate) fn renumber(
+    model: &mut RbcModel,
+    expressions: &[Option<u32>],
+    functions: &[Option<u32>],
+) -> Result<()> {
+    let mut index = 0;
+    model.expressions.retain(|_| {
+        index += 1;
+        expressions.get(index - 1).copied().flatten().is_some()
+    });
+    let mut index = 0;
+    model.functions.retain(|_| {
+        index += 1;
+        functions.get(index - 1).copied().flatten().is_some()
+    });
+    let mut map = Map::identity(model)?;
+    map.expressions = Range::Remap {
+        map: expressions,
+        table: "expressions",
+    };
+    map.functions = Range::Remap {
+        map: functions,
+        table: "functions",
+    };
+    map.relocate(model)
+}
 
 trait Shift {
     fn shift(&mut self, map: &Map<'_>) -> Result<()>;
@@ -210,7 +307,8 @@ ids!(SourceId=>sources, TypeId=>types, VariableId=>variables, ExprId=>expression
     RootId=>roots, EventId=>events, ConnectionId=>connections,
     ConnectionSetId=>connection_sets, ComponentId=>components,
     TracePointId=>trace_points, DomainId=>domains, FunctionId=>functions,
-    FamilyId=>equation_families, ClockId=>clocks);
+    FamilyId=>equation_families, ClockId=>clocks, PreviousId=>previous_values,
+    TerminalId=>terminals, DelayId=>delays);
 
 macro_rules! fields {
     ($value:ident, $map:ident, $($field:ident),+ $(,)?) => { $( $value.$field.shift($map)?; )+ }
@@ -219,10 +317,13 @@ use fields;
 
 impl Map<'_> {
     fn qualify(&self, value: &mut String) {
+        let Some(namespace) = self.namespace else {
+            return;
+        };
         *value = if value.is_empty() {
-            self.namespace.to_owned()
+            namespace.to_owned()
         } else {
-            format!("{}.{}", self.namespace, value)
+            format!("{namespace}.{value}")
         };
     }
 
@@ -246,6 +347,11 @@ impl Map<'_> {
         m.discrete_real_equations.shift(self)?;
         m.initial_discrete_values.shift(self)?;
         m.discrete_definitions.shift(self)?;
+        m.model_event_transactions.shift(self)?;
+        m.previous_values.shift(self)?;
+        m.terminals.shift(self)?;
+        m.structured_roots.shift(self)?;
+        m.delays.shift(self)?;
         m.relations.shift(self)?;
         m.conditions.shift(self)?;
         m.clocks.shift(self)?;
@@ -263,6 +369,8 @@ impl Map<'_> {
         let _ = (
             self.initial_discrete_values,
             self.discrete_definitions,
+            self.model_event_transactions,
+            self.structured_roots,
             self.clock_ownerships,
         );
         Ok(())

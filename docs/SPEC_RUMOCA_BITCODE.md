@@ -525,8 +525,21 @@ loop. The only iteration is `Comprehension` over a `DomainId` and
 `RbcEquationFamily` over extents the artifact carries as constants, so every
 trip count is known before evaluation starts.
 
-**Function bodies are not carried.** `RbcFunctionBody` is `ElidedModelica` or
-`External`; neither holds a body, so recursion is not expressible.
+**Carried function bodies cannot iterate without a bound or recurse.** A
+body (`RbcFunctionBody::Modelica`) has four statement forms: assignment,
+grouped assignment, assertion, and `For` -- a fold over a compact `DomainId`
+whose trip count is fixed before evaluation, the same bound `Comprehension`
+has. There is no `while`, no `break`, no `return`. Recursion across calls is
+excluded by validation: once any body is carried, the call graph over
+carried bodies must be acyclic (`check_call_graph_acyclic`), the same guard
+the execution IR uses (`EX2-030`). A recursive function's body is exported as
+`ElidedModelica`, so the check never has to reject a model the compiler
+accepted.
+
+*Amended 2026-09-29.* Until bodies were carried this property read "function
+bodies are not carried, so recursion is not expressible". The claim is the
+same; it now rests on a check the artifact carries rather than on
+withholding information a consumer needs.
 
 Every artifact therefore denotes a finite system of equations over a finite
 index space, and every quantity it can express is computable in bounded steps.
@@ -562,12 +575,14 @@ convenience.
 
 ### Three holes in the totality claim, named
 
-- `RbcFunctionBody::External { language, symbol }` — the artifact can call
-  arbitrary foreign code. Totality is a property of what the IR carries, not
-  of what running it does.
-- `RbcFunctionBody::ElidedModelica` — the body exists and is not here, so any
-  analysis that needs to look inside a function is working with a hole, and a
-  `Call` node is opaque to it.
+- `RbcFunctionBody::External { .. }` — the artifact can call arbitrary
+  foreign code. Totality is a property of what the IR carries, not of what
+  running it does.
+- `RbcFunctionBody::ElidedModelica` — the body exists and is not here
+  (recursive, or written by an exporter that elides bodies), so any analysis
+  that needs to look inside that function is working with a hole, and a
+  `Call` to it is opaque. Import refuses such a call rather than inventing a
+  body.
 - `RbcExprNode::Unsupported` — explicitly "this schema version cannot
   represent it"; a consumer must treat the model as not fully understood.
 

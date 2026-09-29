@@ -15,6 +15,10 @@
 
 use std::collections::BTreeSet;
 
+mod functions;
+pub(crate) use functions::function_spans;
+use functions::{check_call_graph_acyclic, check_function_bodies};
+
 use crate::schema::*;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -268,6 +272,10 @@ struct Counts {
     connection_sets: u32,
     domains: u32,
     functions: u32,
+    clocks: u32,
+    delays: u32,
+    previous_values: u32,
+    terminals: u32,
 }
 
 impl Counts {
@@ -285,6 +293,10 @@ impl Counts {
             connection_sets: model.connection_sets.len() as u32,
             domains: model.domains.len() as u32,
             functions: model.functions.len() as u32,
+            clocks: model.clocks.len() as u32,
+            delays: model.delays.len() as u32,
+            previous_values: model.previous_values.len() as u32,
+            terminals: model.terminals.len() as u32,
         }
     }
 }
@@ -482,6 +494,23 @@ fn check_expressions(
                 }
             }
             RbcExprNode::Literal { .. } => {}
+            RbcExprNode::ClockTransfer {
+                source,
+                source_clock,
+                target_clock,
+                ..
+            } => {
+                operand(*source);
+                for clock in [source_clock, target_clock] {
+                    reference(
+                        errors,
+                        format!("expression {index}"),
+                        "clock",
+                        clock.0,
+                        counts.clocks,
+                    );
+                }
+            }
             RbcExprNode::Coordinate { coordinate } => {
                 match coordinate {
                     RbcCoordinate::Binder { domain, .. } => reference(
@@ -504,6 +533,34 @@ fn check_expressions(
                         "function",
                         function.0,
                         counts.functions,
+                    ),
+                    RbcCoordinate::ClockInterval { clock } => reference(
+                        errors,
+                        format!("expression {index}"),
+                        "clock",
+                        clock.0,
+                        counts.clocks,
+                    ),
+                    RbcCoordinate::Delay { delay } => reference(
+                        errors,
+                        format!("expression {index}"),
+                        "delay",
+                        delay.0,
+                        counts.delays,
+                    ),
+                    RbcCoordinate::Previous { previous } => reference(
+                        errors,
+                        format!("expression {index}"),
+                        "previous value",
+                        previous.0,
+                        counts.previous_values,
+                    ),
+                    RbcCoordinate::Terminal { terminal } => reference(
+                        errors,
+                        format!("expression {index}"),
+                        "terminal",
+                        terminal.0,
+                        counts.terminals,
                     ),
                     _ => {}
                 }
@@ -953,212 +1010,6 @@ fn check_connections(errors: &mut Vec<ValidationError>, model: &RbcModel, counts
     }
 }
 
-/// No cycle in the call graph, once any function body is carried.
-///
-/// Until bodies were carried, termination rested on their absence: a call
-/// was a leaf because the callee's body was not in the artifact, so
-/// recursion could not be *executed* from it (SPEC_RUMOCA_BITCODE §9a).
-/// Carrying a body removes that argument and this check replaces it. It is
-/// the same guard Execution IR v2 uses for the same reason (`EX2-030`).
-///
-/// Only applied when at least one body is present. An artifact that elides
-/// every body is still total by the original argument, and a cycle in its
-/// `calls` edges is then a fact about the source, not a hazard.
-fn check_call_graph_acyclic(errors: &mut Vec<ValidationError>, model: &RbcModel) {
-    if !model
-        .functions
-        .iter()
-        .any(|function| matches!(function.body, RbcFunctionBody::Modelica { .. }))
-    {
-        return;
-    }
-    // Iterative depth-first search with an explicit stack: a recursive walk
-    // over a graph whose acyclicity is the thing in question is a way to
-    // overflow the stack instead of reporting the cycle.
-    #[derive(Clone, Copy, PartialEq)]
-    enum Mark {
-        Unvisited,
-        InProgress,
-        Done,
-    }
-    let mut marks = vec![Mark::Unvisited; model.functions.len()];
-    for root in 0..model.functions.len() {
-        if marks[root] != Mark::Unvisited {
-            continue;
-        }
-        let mut stack = vec![(root, 0usize)];
-        marks[root] = Mark::InProgress;
-        while let Some((current, next)) = stack.pop() {
-            let Some(function) = model.functions.get(current) else {
-                continue;
-            };
-            match function.calls.get(next) {
-                None => marks[current] = Mark::Done,
-                Some(callee) => {
-                    stack.push((current, next + 1));
-                    let callee = callee.0 as usize;
-                    match marks.get(callee).copied() {
-                        Some(Mark::InProgress) => {
-                            errors.push(ValidationError::Connector(format!(
-                                "function '{}' is reachable from itself; an artifact \
-                                 that carries function bodies must have an acyclic \
-                                 call graph",
-                                model.functions[callee].name
-                            )));
-                            marks[callee] = Mark::Done;
-                        }
-                        Some(Mark::Unvisited) => {
-                            marks[callee] = Mark::InProgress;
-                            stack.push((callee, 0));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Expression references inside carried function bodies.
-///
-/// Added with the bodies themselves. Every other table's references are
-/// checked here, and the one table that was not -- domains -- is how the
-/// compiler came to emit artifacts that failed its own validator with
-/// dangling ids (fixed in `8f86b8fe`). A new reference-bearing table ships
-/// with its check or it repeats that.
-fn check_function_bodies(errors: &mut Vec<ValidationError>, model: &RbcModel, counts: &Counts) {
-    for function in &model.functions {
-        let RbcFunctionBody::Modelica { statements } = &function.body else {
-            continue;
-        };
-        let referrer = format!("function {} body", function.id.0);
-        check_statements(errors, statements, function, counts, &referrer);
-        for fold in &function.folds {
-            reference(
-                errors,
-                referrer.clone(),
-                "domain",
-                fold.domain.0,
-                counts.domains,
-            );
-            if let Some(parent) = fold.parent
-                && parent as usize >= function.folds.len()
-            {
-                errors.push(ValidationError::Connector(format!(
-                    "{referrer}: fold {} names parent {parent}, but the function \
-                     declares {} folds",
-                    fold.ordinal,
-                    function.folds.len()
-                )));
-            }
-            for group in [&fold.parameters, &fold.initial, &fold.update, &fold.output] {
-                for definition in group {
-                    reference(
-                        errors,
-                        referrer.clone(),
-                        "expression",
-                        definition.expression.0,
-                        counts.expressions,
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// One statement list, recursing into loop bodies.
-///
-/// Recursive because a loop body is a statement list like any other, and a
-/// reference nested two loops deep is exactly as able to dangle as one at
-/// the top. Depth is bounded by the artifact's own nesting.
-fn check_statements(
-    errors: &mut Vec<ValidationError>,
-    statements: &[RbcFunctionStatement],
-    function: &RbcFunction,
-    counts: &Counts,
-    referrer: &str,
-) {
-    let expression = |errors: &mut Vec<ValidationError>, id: ExprId| {
-        reference(
-            errors,
-            referrer.to_string(),
-            "expression",
-            id.0,
-            counts.expressions,
-        );
-    };
-    for statement in statements {
-        match statement {
-            RbcFunctionStatement::Assignment {
-                expression: rhs, ..
-            } => {
-                expression(errors, *rhs);
-            }
-            RbcFunctionStatement::Assertion { condition, message } => {
-                expression(errors, *condition);
-                expression(errors, *message);
-            }
-            RbcFunctionStatement::AssignmentGroup {
-                values,
-                conditional,
-                expressions,
-            } => {
-                for id in expressions {
-                    expression(errors, *id);
-                }
-                // Arity is the property that makes a group a group: each
-                // branch supplies exactly one expression per value. A short
-                // branch would silently leave a value undefined on the path
-                // that selects it.
-                if let Some(correlation) = conditional {
-                    if correlation.conditions.len() != correlation.branches.len() {
-                        errors.push(ValidationError::Connector(format!(
-                            "{referrer}: {} branch conditions for {} branches",
-                            correlation.conditions.len(),
-                            correlation.branches.len()
-                        )));
-                    }
-                    for (ordinal, arm) in correlation
-                        .branches
-                        .iter()
-                        .chain(std::iter::once(&correlation.fallback))
-                        .enumerate()
-                    {
-                        if arm.len() != values.len() {
-                            errors.push(ValidationError::Connector(format!(
-                                "{referrer}: arm {ordinal} defines {} of {} grouped values",
-                                arm.len(),
-                                values.len()
-                            )));
-                        }
-                        for id in arm {
-                            expression(errors, *id);
-                        }
-                    }
-                    for id in &correlation.conditions {
-                        expression(errors, *id);
-                    }
-                } else if expressions.len() != values.len() {
-                    errors.push(ValidationError::Connector(format!(
-                        "{referrer}: {} expressions for {} grouped values",
-                        expressions.len(),
-                        values.len()
-                    )));
-                }
-            }
-            RbcFunctionStatement::For { fold, statements } => {
-                if *fold as usize >= function.folds.len() {
-                    errors.push(ValidationError::Connector(format!(
-                        "{referrer}: loop names fold {fold}, but the function declares {}",
-                        function.folds.len()
-                    )));
-                }
-                check_statements(errors, statements, function, counts, referrer);
-            }
-        }
-    }
-}
-
 fn check_trace_points(errors: &mut Vec<ValidationError>, model: &RbcModel, counts: &Counts) {
     let mut seen = BTreeSet::new();
     for trace in &model.trace_points {
@@ -1257,6 +1108,9 @@ fn check_discrete_definitions(
             }
         }
     }
+    check_temporal_owners(errors, model, counts);
+    // A transaction owns and defines its targets as surely as a B.1c owner.
+    defined.extend(check_model_event_transactions(errors, model, counts));
     for variable in &model.variables {
         if variable.role == RbcRole::DiscreteValue && !defined.contains(&variable.id.0) {
             errors.push(ValidationError::UndefinedDiscreteValue {
@@ -1265,6 +1119,122 @@ fn check_discrete_definitions(
             });
         }
     }
+}
+
+/// References inside the temporal owner tables and structured roots.
+fn check_temporal_owners(errors: &mut Vec<ValidationError>, model: &RbcModel, counts: &Counts) {
+    for (index, previous) in model.previous_values.iter().enumerate() {
+        let referrer = format!("previous value {index}");
+        reference(
+            errors,
+            referrer.clone(),
+            "variable",
+            previous.variable.0,
+            counts.variables,
+        );
+        reference(errors, referrer, "clock", previous.clock.0, counts.clocks);
+    }
+    for (index, root) in model.structured_roots.iter().enumerate() {
+        let referrer = format!("structured root {index}");
+        reference(
+            errors,
+            referrer.clone(),
+            "domain",
+            root.domain.0,
+            counts.domains,
+        );
+        reference(
+            errors,
+            referrer,
+            "expression",
+            root.expression.0,
+            counts.expressions,
+        );
+    }
+    for (index, delay) in model.delays.iter().enumerate() {
+        let referrer = format!("delay {index}");
+        let expressions = match delay.delay {
+            RbcDelayKind::Parameter { delay_time } => vec![delay.source, delay_time.expression],
+            RbcDelayKind::Bounded {
+                delay_time,
+                maximum,
+            } => vec![delay.source, delay_time, maximum.expression],
+        };
+        for expression in expressions {
+            reference(
+                errors,
+                referrer.clone(),
+                "expression",
+                expression.0,
+                counts.expressions,
+            );
+        }
+    }
+    if model.terminals.len() > 1 {
+        errors.push(ValidationError::Connector(format!(
+            "{} terminal() owners; a model has at most one",
+            model.terminals.len()
+        )));
+    }
+}
+
+/// References inside model event transactions; returns the targets owned.
+fn check_model_event_transactions(
+    errors: &mut Vec<ValidationError>,
+    model: &RbcModel,
+    counts: &Counts,
+) -> Vec<u32> {
+    let mut owned = Vec::new();
+    for (index, transaction) in model.model_event_transactions.iter().enumerate() {
+        let referrer = format!("model event transaction {index}");
+        for target in &transaction.targets {
+            reference(
+                errors,
+                referrer.clone(),
+                "variable",
+                target.0,
+                counts.variables,
+            );
+            owned.push(target.0);
+        }
+        for step in &transaction.steps {
+            for condition in [step.trigger, step.guard] {
+                reference(
+                    errors,
+                    referrer.clone(),
+                    "condition",
+                    condition.0,
+                    counts.conditions,
+                );
+            }
+            if let Some(clock) = step.clock {
+                reference(errors, referrer.clone(), "clock", clock.0, counts.clocks);
+            }
+            for definition in &step.definitions {
+                reference(
+                    errors,
+                    referrer.clone(),
+                    "variable",
+                    definition.target.0,
+                    counts.variables,
+                );
+                reference(
+                    errors,
+                    referrer.clone(),
+                    "expression",
+                    definition.value.0,
+                    counts.expressions,
+                );
+                if !transaction.targets.contains(&definition.target) {
+                    errors.push(ValidationError::Connector(format!(
+                        "{referrer}: a step defines variable {}, which the transaction does not own",
+                        definition.target.0
+                    )));
+                }
+            }
+        }
+    }
+    owned
 }
 
 fn check_summary(errors: &mut Vec<ValidationError>, model: &RbcModel) {

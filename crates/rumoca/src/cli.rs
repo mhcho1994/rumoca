@@ -314,6 +314,12 @@ pub struct ModelOptions {
     /// Enables declared-value analyses; parameters with fixed=false remain tunable.
     #[arg(long)]
     pub freeze_parameters: bool,
+
+    /// Run a bitcode pass over the compiled model before it is simulated or
+    /// generated: `DAE -> RBC -> [passes] -> DAE`. Repeatable; runs in the
+    /// order given. `default` runs every pass this build knows.
+    #[arg(long = "pass", value_name = "NAME", action = ArgAction::Append)]
+    pub passes: Vec<String>,
 }
 
 /// `compile`/`check` model input: the required model-file positional plus the
@@ -1040,6 +1046,7 @@ fn run_configured_simulation(args: SimCommandArgs) -> Result<()> {
                     .collect(),
                 no_fold_parameter_bindings: false,
                 freeze_parameters: false,
+                passes: Vec::new(),
             },
         };
         init_debug_tracing(&args.diagnostics)?;
@@ -1664,6 +1671,7 @@ fn compile_with_inferred_model(
         .verbose(verbose)
         .no_fold_parameter_bindings(args.options.no_fold_parameter_bindings)
         .freeze_parameters(args.options.freeze_parameters)
+        .passes(&args.options.passes)
         .source_roots(&source_roots);
     let result = compiler.compile_file(&args.model_file)?;
     Ok((result, model))
@@ -1687,6 +1695,7 @@ fn compile_early_ir_with_inferred_model(
         .verbose(verbose)
         .no_fold_parameter_bindings(args.options.no_fold_parameter_bindings)
         .freeze_parameters(args.options.freeze_parameters)
+        .passes(&args.options.passes)
         .source_roots(&source_roots);
     let artifact = match phase {
         CompilePhase::Ast => {
@@ -1719,6 +1728,7 @@ pub(crate) fn compile_dae_with_inferred_model(
         .verbose(verbose)
         .no_fold_parameter_bindings(args.options.no_fold_parameter_bindings)
         .freeze_parameters(args.options.freeze_parameters)
+        .passes(&args.options.passes)
         .source_roots(&source_roots);
     let result = compiler.compile_file_dae(&args.model_file)?;
     Ok((result, model))

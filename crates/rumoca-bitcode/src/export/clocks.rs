@@ -54,3 +54,27 @@ pub(super) fn export_ownerships(
         })
         .collect()
 }
+
+/// The derivation of a clock conversion's target clock.
+pub(super) fn transfer_kind(kind: dae::ClockTransferKind) -> RbcClockTransferKind {
+    match kind {
+        dae::ClockTransferKind::SubSample { factor } => RbcClockTransferKind::SubSample { factor },
+        dae::ClockTransferKind::SuperSample { factor } => {
+            RbcClockTransferKind::SuperSample { factor }
+        }
+        dae::ClockTransferKind::ShiftSample {
+            counter,
+            resolution,
+        } => RbcClockTransferKind::ShiftSample {
+            counter,
+            resolution,
+        },
+        dae::ClockTransferKind::BackSample {
+            counter,
+            resolution,
+        } => RbcClockTransferKind::BackSample {
+            counter,
+            resolution,
+        },
+    }
+}

@@ -1465,6 +1465,23 @@ impl<'dae> Functions<'_, 'dae> {
         Ok(definition)
     }
 
+    /// The expression the current definition of `value` assigned.
+    ///
+    /// A loop transition defines its carried values itself: `begin_loop`
+    /// issues one fold-parameter node per target and `finish_loop` one
+    /// fold-output node, and neither returns them. A caller replaying an
+    /// arena in order has to know which ids those nodes took, and this is
+    /// the read-only way to ask without re-deriving the transition.
+    pub fn current_definition_rhs(
+        &self,
+        body: &FunctionBody<'dae>,
+        value: FunctionValueId<'dae>,
+        provenance: DaeProvenance,
+    ) -> Result<ExprId<'dae>, DaeConstructionError> {
+        let definition = self.current_definition_id(body, value, provenance)?;
+        function_definition_rhs(self.storage, value, definition, provenance)
+    }
+
     pub fn assign(
         &mut self,
         body: &mut FunctionBody<'dae>,

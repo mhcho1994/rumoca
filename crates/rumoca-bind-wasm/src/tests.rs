@@ -208,24 +208,32 @@ fn unique_test_cache_root() -> std::path::PathBuf {
 
 #[test]
 fn test_get_version() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let version = get_version();
     assert!(!version.is_empty());
 }
 
 #[test]
 fn test_get_git_commit() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let commit = get_git_commit();
     assert!(!commit.is_empty());
 }
 
 #[test]
 fn test_get_build_time_utc() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let build_time = get_build_time_utc();
     assert!(!build_time.is_empty());
 }
 
 #[test]
 fn test_init_start_hook_is_safe_to_call() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     init();
 }
 
@@ -243,6 +251,8 @@ fn test_wasm_init_is_a_noop() {
 #[test]
 #[cfg(target_arch = "wasm32")]
 fn test_parse_wrapper_serializes_success_and_error_shape() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let valid: ParseResult = decode_wasm_value(
         parse("model M\n  Real x;\nend M;\n").expect("parse payload should serialize"),
     );
@@ -264,6 +274,8 @@ fn test_parse_wrapper_serializes_success_and_error_shape() {
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_parse_validation_still_distinguishes_valid_and_invalid_sources_on_native() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     assert!(parse_source_to_ast_with_errors("model M\n  Real x;\nend M;\n", "input.mo").is_ok());
     assert!(parse_source_to_ast_with_errors("model M Real x end M;", "input.mo").is_err());
 }
@@ -271,6 +283,8 @@ fn test_parse_validation_still_distinguishes_valid_and_invalid_sources_on_native
 #[test]
 #[cfg(target_arch = "wasm32")]
 fn test_lint_wrapper_returns_naming_convention_message_shape() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let messages: Vec<WasmLintMessage> =
         decode_wasm_value(lint("model m Real x; end m;").expect("lint payload should serialize"));
     let message = messages
@@ -300,6 +314,8 @@ fn test_lint_wrapper_returns_naming_convention_message_shape() {
 #[test]
 #[cfg(target_arch = "wasm32")]
 fn test_check_wrapper_reports_syntax_errors_and_valid_lint_messages() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let syntax_messages: Vec<WasmLintMessage> = decode_wasm_value(
         check("model M Real x end M;").expect("syntax diagnostics should serialize"),
     );
@@ -329,6 +345,8 @@ fn test_check_wrapper_reports_syntax_errors_and_valid_lint_messages() {
 
 #[test]
 fn test_list_classes_includes_nested_packages() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let source = r#"
     package Lib
       package Nested
@@ -380,6 +398,8 @@ const DOC_MODEL_SOURCE: &str = r#"
 #[cfg(target_arch = "wasm32")]
 #[test]
 fn test_get_class_info_extracts_documentation_annotation() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     session.update_document("input.mo", DOC_MODEL_SOURCE);
     let json =
@@ -413,6 +433,8 @@ fn test_get_class_info_extracts_documentation_annotation() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_extract_documentation_annotation_fields_native() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let parsed = parse_source_to_ast(DOC_MODEL_SOURCE, "input.mo").expect("parse should succeed");
     let class =
         find_class_by_qualified_name(&parsed, "DocModel").expect("DocModel should be present");
@@ -439,6 +461,8 @@ fn test_extract_documentation_annotation_fields_native() {
 
 #[test]
 fn test_compile_to_json_valid_model() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model Ball
@@ -1494,6 +1518,8 @@ fn test_lsp_completion_reuses_loaded_source_root_namespace_cache_after_local_edi
 
 #[test]
 fn test_compile_to_json_exposes_orbit_algebraics_from_native_dae() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model SatelliteOrbit2D
@@ -1565,6 +1591,8 @@ fn test_compile_to_json_exposes_orbit_algebraics_from_native_dae() {
 #[cfg(target_arch = "wasm32")]
 #[test]
 fn test_render_target_wrapper_serializes_target_files() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model SimpleDecay
@@ -1598,6 +1626,8 @@ fn test_render_target_wrapper_serializes_target_files() {
 
 #[test]
 fn test_compile_to_json_uses_native_only_shape() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let source = r#"
     model SimpleDecay
@@ -1640,6 +1670,8 @@ fn test_compile_to_json_uses_native_only_shape() {
 
 #[test]
 fn test_lsp_document_symbols_wrapper_returns_nested_outline() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let source = r#"
 model Outline
   parameter Real k = 1;
@@ -1680,6 +1712,8 @@ end Outline;
 
 #[test]
 fn test_lsp_semantic_token_legend_wrapper_exposes_expected_entries() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let legend_json =
         lsp_semantic_token_legend().expect("semantic token legend wrapper should serialize");
     let legend: lsp_types::SemanticTokensLegend =
@@ -1706,6 +1740,8 @@ fn test_lsp_semantic_token_legend_wrapper_exposes_expected_entries() {
 
 #[test]
 fn test_lsp_semantic_tokens_wrapper_highlights_keywords_and_functions() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let source = r#"
 model Ball
   Real x(start=1);
@@ -1759,6 +1795,8 @@ end Ball;
 
 #[test]
 fn test_compile_to_json_recovers_after_syntax_diagnostics() {
+    // The singleton session is process-wide; see `session_test_guard`.
+    let _guard = session_test_guard();
     let mut session = Session::default();
     let invalid = r#"
     model Ball

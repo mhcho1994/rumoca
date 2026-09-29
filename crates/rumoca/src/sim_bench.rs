@@ -385,6 +385,7 @@ fn resolve_config_bench_input(args: &SimBenchArgs, config_path: &str) -> Result<
                 source_roots,
                 no_fold_parameter_bindings: false,
                 freeze_parameters: false,
+                passes: Vec::new(),
             },
         },
         t_end: args.t_end.unwrap_or(config.sim.t_end),

@@ -288,6 +288,11 @@ fn parse_binary(word: &str, line: usize) -> Result<RbcBinaryOp, TextError> {
         "ge" => GreaterEqual,
         "and" => And,
         "or" => Or,
+        "eadd" => ElementwiseAdd,
+        "esub" => ElementwiseSubtract,
+        "emul" => ElementwiseMultiply,
+        "ediv" => ElementwiseDivide,
+        "epow" => ElementwisePower,
         other => return Err(TextError::at(line, format!("unknown binary op `{other}`"))),
     })
 }
@@ -343,6 +348,26 @@ fn parse_coordinate(cursor: &mut Cursor<'_>) -> Result<RbcCoordinate, TextError>
     if kind == "cond" {
         return Ok(Condition {
             condition: ConditionId(cursor.id('?')?),
+        });
+    }
+    if kind == "clockint" {
+        return Ok(ClockInterval {
+            clock: ClockId(cursor.number()?),
+        });
+    }
+    if kind == "delay" {
+        return Ok(Delay {
+            delay: DelayId(cursor.number()?),
+        });
+    }
+    if kind == "previous" {
+        return Ok(Previous {
+            previous: PreviousId(cursor.number()?),
+        });
+    }
+    if kind == "terminal" {
+        return Ok(Terminal {
+            terminal: TerminalId(cursor.number()?),
         });
     }
     if kind == "fnparam" {
@@ -448,6 +473,11 @@ fn empty_model() -> RbcModel {
         components: Vec::new(),
         trace_points: Vec::new(),
         discrete_definitions: Vec::new(),
+        model_event_transactions: Vec::new(),
+        previous_values: Vec::new(),
+        terminals: Vec::new(),
+        structured_roots: Vec::new(),
+        delays: Vec::new(),
         summary: RbcSummary::default(),
     }
 }
@@ -540,6 +570,7 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
                 parameters.push(RbcFunctionParameter {
                     name: cursor.string()?,
                     value_type: TypeId(cursor.id('$')?),
+                    declaration: None,
                 });
             }
             cursor.expect("results")?;
@@ -554,6 +585,10 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
                 "external" => RbcFunctionBody::External {
                     language: cursor.string()?,
                     symbol: cursor.string()?,
+                    purity: RbcPurity::Impure,
+                    arguments: Vec::new(),
+                    result: None,
+                    linkage: RbcExternalLinkage::default(),
                 },
                 other => {
                     return Err(TextError::at(
@@ -574,6 +609,7 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
                 // folds either; `emit-text` refuses an artifact whose body
                 // it cannot represent rather than writing an empty one.
                 folds: Vec::new(),
+                values: Vec::new(),
                 calls: Vec::new(),
                 id,
                 name,
@@ -945,6 +981,38 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
                         function,
                         output,
                         arguments,
+                    }
+                }
+                "ctransfer" => {
+                    let kind = match &*cursor.word()? {
+                        "sub" => RbcClockTransferKind::SubSample {
+                            factor: cursor.number()?,
+                        },
+                        "super" => RbcClockTransferKind::SuperSample {
+                            factor: cursor.number()?,
+                        },
+                        "shift" => RbcClockTransferKind::ShiftSample {
+                            counter: cursor.number()?,
+                            resolution: cursor.number()?,
+                        },
+                        "back" => RbcClockTransferKind::BackSample {
+                            counter: cursor.number()?,
+                            resolution: cursor.number()?,
+                        },
+                        other => {
+                            return Err(TextError::at(
+                                number,
+                                format!("unknown clock transfer `{other}`"),
+                            ));
+                        }
+                    };
+                    let source = ExprId(cursor.id('^')?);
+                    cursor.expect("clocks")?;
+                    RbcExprNode::ClockTransfer {
+                        transfer: kind,
+                        source,
+                        source_clock: ClockId(cursor.number()?),
+                        target_clock: ClockId(cursor.number()?),
                     }
                 }
                 "unsupported" => RbcExprNode::Unsupported {
