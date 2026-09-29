@@ -123,10 +123,7 @@ fn affine_block_jacobian<M: ImplicitProjectionModel>(
             .take_affine_block_jacobian(block_index)
             .map(|mut retained| {
                 debug_assert_eq!(retained.shape(), shape);
-                let pattern = structure.pattern();
-                for row in 0..shape.0 {
-                    pattern.visit_row_columns(row, &mut |column| retained[(row, column)] = 0.0);
-                }
+                clear_pattern_entries(&mut retained, structure.pattern());
                 retained
             }),
         None => None,
@@ -291,5 +288,15 @@ impl<M: ImplicitProjectionModel> AffineBlockSystem<'_, M> {
             y[index] = value;
         }
         Some(changed)
+    }
+}
+
+/// Zero exactly the pattern entries of a retained block Jacobian.
+///
+/// One non-generic copy serves every projection model, so the row visitor is
+/// compiled once.
+fn clear_pattern_entries(matrix: &mut DMatrix<f64>, pattern: &solve::StructuralPattern) {
+    for row in 0..matrix.nrows() {
+        pattern.visit_row_columns(row, &mut |column| matrix[(row, column)] = 0.0);
     }
 }
