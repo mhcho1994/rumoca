@@ -588,6 +588,9 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
                     .binary(dae::BinaryOperator::Divide, numerator, denominator)
                     .map(Derivative::Expression)
             }
+            dae::BinaryOperator::Power if order == 1 => {
+                self.differentiate_power(lhs, rhs, lhs_derivative, rhs_derivative, provenance)
+            }
             _ => unreachable!("differentiability preflight rejects this binary operator"),
         }
     }
@@ -615,9 +618,121 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             Builtin::Sin | Builtin::Cos => {
                 self.differentiate_trigonometric_builtin(builtin, arguments, provenance)
             }
+            Builtin::Tan | Builtin::Exp | Builtin::Log | Builtin::Sqrt => {
+                self.differentiate_elementary_builtin(builtin, arguments, provenance)
+            }
             Builtin::Atan2 => self.differentiate_atan2_builtin(arguments, provenance),
             _ => unreachable!("differentiability preflight rejects this builtin"),
         }
+    }
+
+    /// `d(a^b) = b*a^(b-1)*da` for a time-invariant exponent, and
+    /// `a^b*(db*log(a) + b*da/a)` otherwise.
+    fn differentiate_power(
+        &mut self,
+        lhs: dae::ExprId<'source>,
+        rhs: dae::ExprId<'source>,
+        lhs_derivative: Derivative<'target>,
+        rhs_derivative: Derivative<'target>,
+        provenance: dae::DaeProvenance,
+    ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
+        let base = self.rebuild_instantiated(lhs)?;
+        let exponent = self.rebuild_instantiated(rhs)?;
+        let Derivative::Expression(exponent_derivative) = rhs_derivative else {
+            let one = self
+                .target
+                .at(provenance)
+                .literal(dae::DaeLiteral::Real(1.0))?;
+            let lowered =
+                self.target
+                    .at(provenance)
+                    .binary(dae::BinaryOperator::Subtract, exponent, one)?;
+            let power = self
+                .target
+                .at(provenance)
+                .binary(dae::BinaryOperator::Power, base, lowered)?;
+            let factor =
+                self.target
+                    .at(provenance)
+                    .binary(dae::BinaryOperator::Multiply, exponent, power)?;
+            return self.multiply(lhs_derivative, factor, provenance);
+        };
+        let log_base = self
+            .target
+            .at(provenance)
+            .builtin(dae::PureBuiltin::Log, [base])?;
+        let from_exponent = Derivative::Expression(self.target.at(provenance).binary(
+            dae::BinaryOperator::Multiply,
+            exponent_derivative,
+            log_base,
+        )?);
+        let ratio = self
+            .target
+            .at(provenance)
+            .binary(dae::BinaryOperator::Divide, exponent, base)?;
+        let from_base = self.multiply(lhs_derivative, ratio, provenance)?;
+        let sum = self.combine_sum(dae::BinaryOperator::Add, from_exponent, from_base, provenance)?;
+        let power = self
+            .target
+            .at(provenance)
+            .binary(dae::BinaryOperator::Power, base, exponent)?;
+        self.multiply(sum, power, provenance)
+    }
+
+    /// `tan`, `exp`, `log` and `sqrt`: each derivative is `du` scaled by a
+    /// function of `u` alone.
+    fn differentiate_elementary_builtin(
+        &mut self,
+        builtin: dae::PureBuiltin,
+        arguments: dae::ExpressionOperands<'source>,
+        provenance: dae::DaeProvenance,
+    ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
+        let argument = arguments.iter().next().expect("checked unary builtin");
+        let derivative = self.differentiate_order(argument, 1, provenance)?;
+        let Derivative::Expression(derivative) = derivative else {
+            return Ok(Derivative::Zero);
+        };
+        let value = self.rebuild_instantiated(argument)?;
+        let at = self.target.at(provenance);
+        let (operator, factor) = match builtin {
+            // d exp(u) = exp(u) du
+            dae::PureBuiltin::Exp => (
+                dae::BinaryOperator::Multiply,
+                at.builtin(dae::PureBuiltin::Exp, [value])?,
+            ),
+            // d log(u) = du / u
+            dae::PureBuiltin::Log => (dae::BinaryOperator::Divide, value),
+            // d sqrt(u) = du / (2 sqrt(u))
+            dae::PureBuiltin::Sqrt => {
+                let root = at.builtin(dae::PureBuiltin::Sqrt, [value])?;
+                let two = self
+                    .target
+                    .at(provenance)
+                    .literal(dae::DaeLiteral::Real(2.0))?;
+                (
+                    dae::BinaryOperator::Divide,
+                    self.target
+                        .at(provenance)
+                        .binary(dae::BinaryOperator::Multiply, two, root)?,
+                )
+            }
+            // d tan(u) = du / cos(u)^2
+            _ => {
+                let cosine = at.builtin(dae::PureBuiltin::Cos, [value])?;
+                (
+                    dae::BinaryOperator::Divide,
+                    self.target.at(provenance).binary(
+                        dae::BinaryOperator::Multiply,
+                        cosine,
+                        cosine,
+                    )?,
+                )
+            }
+        };
+        self.target
+            .at(provenance)
+            .binary(operator, derivative, factor)
+            .map(Derivative::Expression)
     }
 
     fn differentiate_bilinear_builtin(

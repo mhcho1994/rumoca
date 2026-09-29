@@ -1211,12 +1211,20 @@ impl<'facts, 'dae> HolonomicProofWalk<'facts, 'dae> {
                 operand,
             } => self.can_differentiate_order(operand, order, on_residual),
             dae::ExpressionOperation::Binary { operator, lhs, rhs } => {
-                matches!(
+                // Quotients and powers have first-derivative rules only.
+                (matches!(
                     operator,
                     dae::BinaryOperator::Add
                         | dae::BinaryOperator::Subtract
                         | dae::BinaryOperator::Multiply
-                ) && self.can_differentiate_order(lhs, order, on_residual)
+                ) || (order == 1
+                    && matches!(
+                        operator,
+                        dae::BinaryOperator::Divide | dae::BinaryOperator::Power
+                    )
+                    && self.view.expression(lhs).is_some_and(|lhs| lhs.value_type().is_scalar())
+                    && self.view.expression(rhs).is_some_and(|rhs| rhs.value_type().is_scalar())))
+                    && self.can_differentiate_order(lhs, order, on_residual)
                     && self.can_differentiate_order(rhs, order, on_residual)
             }
             dae::ExpressionOperation::Builtin { builtin, arguments } if order == 1 => {
@@ -1227,6 +1235,10 @@ impl<'facts, 'dae> HolonomicProofWalk<'facts, 'dae> {
                         | dae::PureBuiltin::Identity
                         | dae::PureBuiltin::Sin
                         | dae::PureBuiltin::Cos
+                        | dae::PureBuiltin::Tan
+                        | dae::PureBuiltin::Exp
+                        | dae::PureBuiltin::Log
+                        | dae::PureBuiltin::Sqrt
                         | dae::PureBuiltin::Atan2
                         | dae::PureBuiltin::Vector
                         | dae::PureBuiltin::Transpose
@@ -1441,6 +1453,14 @@ fn is_differentiable_in_context<'dae>(
             is_differentiable_in_context(view, facts, lhs, demoted, visited, context)
                 && is_differentiable_in_context(view, facts, rhs, demoted, visited, context)
         }
+        dae::ExpressionOperation::Binary {
+            operator: dae::BinaryOperator::Power,
+            lhs,
+            rhs,
+        } if view.expression(lhs).is_some_and(|lhs| lhs.value_type().is_scalar()) => {
+            is_differentiable_in_context(view, facts, lhs, demoted, visited, context)
+                && is_differentiable_in_context(view, facts, rhs, demoted, visited, context)
+        }
         dae::ExpressionOperation::Builtin { builtin, arguments } => {
             builtin_is_differentiable(view, facts, builtin, arguments, demoted, visited, context)
         }
@@ -1496,6 +1516,10 @@ fn builtin_is_differentiable<'dae>(
         Builtin::Zeros | Builtin::Ones | Builtin::Identity => true,
         Builtin::Sin
         | Builtin::Cos
+        | Builtin::Tan
+        | Builtin::Exp
+        | Builtin::Log
+        | Builtin::Sqrt
         | Builtin::Atan2
         | Builtin::Vector
         | Builtin::Transpose

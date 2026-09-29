@@ -1033,10 +1033,12 @@ fn fixture_constraint_rhs<'dae>(
             .at(provenance)
             .builtin(dae::PureBuiltin::Atan2, [state, parameter]);
     }
+    // `asin` has no symbolic derivative rule, so the constraint stays
+    // non-differentiable.
     if nonlinear {
         return expressions
             .at(provenance)
-            .builtin(dae::PureBuiltin::Tan, [state]);
+            .builtin(dae::PureBuiltin::Asin, [state]);
     }
     let parameter = expressions
         .at(provenance)

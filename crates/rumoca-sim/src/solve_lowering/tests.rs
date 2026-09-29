@@ -369,6 +369,41 @@ fn checked_assertion_fails_with_its_source_message() {
 }
 
 #[test]
+fn index_reduction_differentiates_powers_quotients_and_elementary_functions() {
+    // der(z) = der(x) with x a function of time: index reduction must
+    // differentiate x's equation, and z(1) = x(1) - x(0).
+    let cases = [
+        ("4*time^3", 4.0),
+        ("(1 + time)^time", 1.0),
+        ("exp(time)", std::f64::consts::E - 1.0),
+        ("log(1 + time)", std::f64::consts::LN_2),
+        ("sqrt(1 + time)", std::f64::consts::SQRT_2 - 1.0),
+        ("tan(time)", 1.0f64.tan()),
+        ("time/(1 + time)", 0.5),
+    ];
+    for (definition, expected) in cases {
+        let source = format!(
+            "model Chain\n  Real x;\n  Real z(start=0, fixed=true);\nequation\n  \
+             x = {definition};\n  der(z) = der(x);\nend Chain;\n"
+        );
+        let dae = compile(&source, "Chain");
+        let options = SimOptions {
+            t_end: 1.0,
+            dt: Some(0.01),
+            ..SimOptions::default()
+        };
+        let result = simulate_dae(&dae, &options)
+            .unwrap_or_else(|error| panic!("x = {definition}: {error}"));
+        let z = result.names.iter().position(|name| name == "z").expect("z column");
+        let last = *result.data[z].last().expect("trajectory sample");
+        assert!(
+            (last - expected).abs() < 1.0e-4,
+            "x = {definition}: z(1) = {last}, expected {expected}"
+        );
+    }
+}
+
+#[test]
 fn parameter_sized_linspace_evaluates_in_a_start_value() {
     let dae = compile(
         concat!(
