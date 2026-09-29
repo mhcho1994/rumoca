@@ -382,3 +382,44 @@ fn a_settled_binding_that_indexes_out_of_bounds_is_still_refused() {
     );
     assert!(text(&compiled).contains("EF032"), "{}", text(&compiled));
 }
+
+#[test]
+fn the_text_profile_round_trips_a_carried_body_exactly() {
+    // `emit-text` printed a carried body as "N statements not in text" and a
+    // function-value node as a placeholder, so `assemble` refused its own
+    // output for any model with a function. Bodies, value tables, folds and
+    // call edges are written as function records now, and the reassembled
+    // artifact is the original.
+    let work = tempdir().expect("temp dir");
+    let artifact = emit(work.path());
+    let text = work.path().join("fixture.rbt");
+    let back = work.path().join("back.rbc");
+    let emitted = rumoca(&[
+        "bitcode",
+        "emit-text",
+        &artifact,
+        "-o",
+        text.to_str().unwrap(),
+        "--sources",
+    ]);
+    assert!(emitted.status.success(), "{}", text_of(&emitted));
+    let assembled = rumoca(&[
+        "bitcode",
+        "assemble",
+        text.to_str().unwrap(),
+        "-o",
+        back.to_str().unwrap(),
+    ]);
+    assert!(assembled.status.success(), "{}", text_of(&assembled));
+    let dump = |path: &str| -> serde_json::Value {
+        let out = rumoca(&["bitcode", "dump", path]);
+        let mut value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        value["producer"] = serde_json::Value::Null;
+        value
+    };
+    assert_eq!(dump(&artifact), dump(back.to_str().unwrap()));
+}
+
+fn text_of(output: &Output) -> String {
+    text(output)
+}

@@ -206,6 +206,37 @@ fn literal(value: &RbcLiteral) -> String {
 }
 
 /// Render `file` as the textual IR.
+/// A table entry as a quoted JSON record, for constructs whose structure is
+/// nested deeper than one line reads well.
+fn json(value: &impl serde::Serialize) -> Result<String, TextError> {
+    Ok(quote(
+        &serde_json::to_string(value).map_err(|e| TextError::at(0, e.to_string()))?,
+    ))
+}
+
+/// Whether a function carries anything the one-line `fn` form omits.
+fn needs_record(function: &RbcFunction) -> bool {
+    let external_abi = matches!(
+        &function.body,
+        RbcFunctionBody::External {
+            purity,
+            arguments,
+            result,
+            linkage,
+            ..
+        } if *purity == RbcPurity::Pure
+            || !arguments.is_empty()
+            || result.is_some()
+            || !linkage.is_empty()
+    );
+    matches!(function.body, RbcFunctionBody::Modelica { .. })
+        || external_abi
+        || !function.values.is_empty()
+        || !function.folds.is_empty()
+        || !function.calls.is_empty()
+        || function.parameters.iter().any(|p| p.declaration.is_some())
+}
+
 pub fn print_text(file: &RbcFile) -> Result<String, TextError> {
     print_text_with(file, TextOptions::default())
 }
@@ -289,6 +320,14 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
     if !model.functions.is_empty() {
         let _ = writeln!(out, "\n; functions");
         for function in &model.functions {
+            // A function the one-line form cannot hold -- a carried body,
+            // its value table and folds, call edges, an external ABI,
+            // parameter spans -- is written as a record, the way clocks are,
+            // rather than printed with those parts missing.
+            if needs_record(function) {
+                let _ = writeln!(out, "function_record {}", json(function)?);
+                continue;
+            }
             let parameters = function
                 .parameters
                 .iter()
@@ -308,12 +347,8 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
                 } => {
                     format!("body external {} {}", quote(language), quote(symbol))
                 }
-                // The text profile is a declared subset and already refuses
-                // artifacts whose content it cannot represent. Recording the
-                // count keeps the listing honest about what it dropped
-                // rather than printing "elided" for a body that is present.
-                RbcFunctionBody::Modelica { statements } => {
-                    format!("body modelica {} statements not in text", statements.len())
+                RbcFunctionBody::Modelica { .. } => {
+                    unreachable!("a carried body is written as a function record")
                 }
             };
             let inline = match function.inline {
@@ -580,9 +615,26 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
                 // render a reference into one. `emit-text` refuses such an
                 // artifact outright; this keeps the listing honest if it is
                 // ever reached another way.
-                RbcExprNode::FunctionValue { .. }
-                | RbcExprNode::FunctionFoldParameter { .. }
-                | RbcExprNode::FunctionFoldOutput { .. } => "function-body-value".to_string(),
+                RbcExprNode::FunctionValue {
+                    function,
+                    value,
+                    definition,
+                } => format!("fnvalue ~{} {value} def {definition}", function.0),
+                RbcExprNode::FunctionFoldParameter {
+                    function,
+                    fold,
+                    carried,
+                    definition,
+                } => format!(
+                    "foldparam ~{} {fold} {carried} def {definition}",
+                    function.0
+                ),
+                RbcExprNode::FunctionFoldOutput {
+                    function,
+                    fold,
+                    carried,
+                    definition,
+                } => format!("foldout ~{} {fold} {carried} def {definition}", function.0),
                 RbcExprNode::ClockTransfer {
                     transfer: kind,
                     source,
@@ -881,6 +933,21 @@ view {view} bodies {} {bodies}",
             "clock_ownership {}",
             quote(&serde_json::to_string(owner).map_err(|e| TextError::at(0, e.to_string()))?)
         );
+    }
+    for transaction in &model.model_event_transactions {
+        let _ = writeln!(out, "model_event_transaction {}", json(transaction)?);
+    }
+    for previous in &model.previous_values {
+        let _ = writeln!(out, "previous_value {}", json(previous)?);
+    }
+    for terminal in &model.terminals {
+        let _ = writeln!(out, "terminal_record {}", json(terminal)?);
+    }
+    for root in &model.structured_roots {
+        let _ = writeln!(out, "structured_root {}", json(root)?);
+    }
+    for delay in &model.delays {
+        let _ = writeln!(out, "delay_record {}", json(delay)?);
     }
     if !model.conditions.is_empty() {
         let _ = writeln!(out, "\n; conditions");

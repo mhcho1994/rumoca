@@ -385,16 +385,9 @@ fn run_check(path: &Path, strict: bool, connections: bool) -> Result<()> {
 
 fn run_emit_text(input: &Path, output: Option<&Path>, sources: bool) -> Result<()> {
     let (file, _) = rumoca_bitcode::read_file(input).map_err(anyhow::Error::from)?;
-    if file.execution.is_some()
-        || !file.model.connectors.is_empty()
-        || !file.model.model_event_transactions.is_empty()
-        || !file.model.previous_values.is_empty()
-        || !file.model.terminals.is_empty()
-        || !file.model.structured_roots.is_empty()
-        || !file.model.delays.is_empty()
-    {
+    if file.execution.is_some() || !file.model.connectors.is_empty() {
         bail!(
-            "text profile does not carry execution, connector or model-event-transaction declarations; use bitcode dump or convert"
+            "text profile does not carry execution/connector declarations; use bitcode dump or convert"
         );
     }
     let text =

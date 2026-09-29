@@ -983,6 +983,39 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
                         arguments,
                     }
                 }
+                "fnvalue" => {
+                    let function = FunctionId(cursor.id('~')?);
+                    let value = cursor.number()?;
+                    cursor.expect("def")?;
+                    RbcExprNode::FunctionValue {
+                        function,
+                        value,
+                        definition: cursor.number()?,
+                    }
+                }
+                "foldparam" | "foldout" => {
+                    let output = kind == "foldout";
+                    let function = FunctionId(cursor.id('~')?);
+                    let fold = cursor.number()?;
+                    let carried = cursor.number()?;
+                    cursor.expect("def")?;
+                    let definition = cursor.number()?;
+                    if output {
+                        RbcExprNode::FunctionFoldOutput {
+                            function,
+                            fold,
+                            carried,
+                            definition,
+                        }
+                    } else {
+                        RbcExprNode::FunctionFoldParameter {
+                            function,
+                            fold,
+                            carried,
+                            definition,
+                        }
+                    }
+                }
                 "ctransfer" => {
                     let kind = match &*cursor.word()? {
                         "sub" => RbcClockTransferKind::SubSample {
@@ -1159,6 +1192,30 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
                     value: ExprId(cursor.id('^')?),
                     provenance: cursor.provenance()?,
                 }),
+                "function_record" => model.functions.push(
+                    serde_json::from_str(&cursor.string()?)
+                        .map_err(|e| TextError::at(number, e.to_string()))?,
+                ),
+                "model_event_transaction" => model.model_event_transactions.push(
+                    serde_json::from_str(&cursor.string()?)
+                        .map_err(|e| TextError::at(number, e.to_string()))?,
+                ),
+                "previous_value" => model.previous_values.push(
+                    serde_json::from_str(&cursor.string()?)
+                        .map_err(|e| TextError::at(number, e.to_string()))?,
+                ),
+                "terminal_record" => model.terminals.push(
+                    serde_json::from_str(&cursor.string()?)
+                        .map_err(|e| TextError::at(number, e.to_string()))?,
+                ),
+                "structured_root" => model.structured_roots.push(
+                    serde_json::from_str(&cursor.string()?)
+                        .map_err(|e| TextError::at(number, e.to_string()))?,
+                ),
+                "delay_record" => model.delays.push(
+                    serde_json::from_str(&cursor.string()?)
+                        .map_err(|e| TextError::at(number, e.to_string()))?,
+                ),
                 "clock_record" => model.clocks.push(
                     serde_json::from_str(&cursor.string()?)
                         .map_err(|e| TextError::at(number, e.to_string()))?,
