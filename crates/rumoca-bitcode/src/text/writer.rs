@@ -297,6 +297,13 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
                 RbcFunctionBody::External { language, symbol } => {
                     format!("body external {} {}", quote(language), quote(symbol))
                 }
+                // The text profile is a declared subset and already refuses
+                // artifacts whose content it cannot represent. Recording the
+                // count keeps the listing honest about what it dropped
+                // rather than printing "elided" for a body that is present.
+                RbcFunctionBody::Modelica { statements } => {
+                    format!("body modelica {} statements not in text", statements.len())
+                }
             };
             let inline = match function.inline {
                 RbcInline::Unstated => "",

@@ -222,6 +222,8 @@ pub fn validate(model: &RbcModel, options: &ValidateOptions) -> Result<(), Vec<V
     check_clocks(&mut errors, model, &counts);
     check_connections(&mut errors, model, &counts);
     check_trace_points(&mut errors, model, &counts);
+    check_function_bodies(&mut errors, model, &counts);
+    check_call_graph_acyclic(&mut errors, model);
     check_discrete_definitions(&mut errors, model, &counts);
     check_summary(&mut errors, model);
 
@@ -932,6 +934,117 @@ fn check_connections(errors: &mut Vec<ValidationError>, model: &RbcModel, counts
                 equation.0,
                 counts.equations,
             );
+        }
+    }
+}
+
+/// No cycle in the call graph, once any function body is carried.
+///
+/// Until bodies were carried, termination rested on their absence: a call
+/// was a leaf because the callee's body was not in the artifact, so
+/// recursion could not be *executed* from it (SPEC_RUMOCA_BITCODE §9a).
+/// Carrying a body removes that argument and this check replaces it. It is
+/// the same guard Execution IR v2 uses for the same reason (`EX2-030`).
+///
+/// Only applied when at least one body is present. An artifact that elides
+/// every body is still total by the original argument, and a cycle in its
+/// `calls` edges is then a fact about the source, not a hazard.
+fn check_call_graph_acyclic(errors: &mut Vec<ValidationError>, model: &RbcModel) {
+    if !model
+        .functions
+        .iter()
+        .any(|function| matches!(function.body, RbcFunctionBody::Modelica { .. }))
+    {
+        return;
+    }
+    // Iterative depth-first search with an explicit stack: a recursive walk
+    // over a graph whose acyclicity is the thing in question is a way to
+    // overflow the stack instead of reporting the cycle.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Unvisited,
+        InProgress,
+        Done,
+    }
+    let mut marks = vec![Mark::Unvisited; model.functions.len()];
+    for root in 0..model.functions.len() {
+        if marks[root] != Mark::Unvisited {
+            continue;
+        }
+        let mut stack = vec![(root, 0usize)];
+        marks[root] = Mark::InProgress;
+        while let Some((current, next)) = stack.pop() {
+            let Some(function) = model.functions.get(current) else {
+                continue;
+            };
+            match function.calls.get(next) {
+                None => marks[current] = Mark::Done,
+                Some(callee) => {
+                    stack.push((current, next + 1));
+                    let callee = callee.0 as usize;
+                    match marks.get(callee).copied() {
+                        Some(Mark::InProgress) => {
+                            errors.push(ValidationError::Connector(format!(
+                                "function '{}' is reachable from itself; an artifact \
+                                 that carries function bodies must have an acyclic \
+                                 call graph",
+                                model.functions[callee].name
+                            )));
+                            marks[callee] = Mark::Done;
+                        }
+                        Some(Mark::Unvisited) => {
+                            marks[callee] = Mark::InProgress;
+                            stack.push((callee, 0));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Expression references inside carried function bodies.
+///
+/// Added with the bodies themselves. Every other table's references are
+/// checked here, and the one table that was not -- domains -- is how the
+/// compiler came to emit artifacts that failed its own validator with
+/// dangling ids (TOOLBUG, fixed in `8f86b8fe`). A new reference-bearing
+/// table ships with its check or it repeats that.
+fn check_function_bodies(errors: &mut Vec<ValidationError>, model: &RbcModel, counts: &Counts) {
+    for function in &model.functions {
+        let RbcFunctionBody::Modelica { statements } = &function.body else {
+            continue;
+        };
+        let referrer = format!("function {} body", function.id.0);
+        for statement in statements {
+            match statement {
+                RbcFunctionStatement::Assignment { expression, .. } => {
+                    reference(
+                        errors,
+                        referrer.clone(),
+                        "expression",
+                        expression.0,
+                        counts.expressions,
+                    );
+                }
+                RbcFunctionStatement::Assertion { condition, message } => {
+                    reference(
+                        errors,
+                        referrer.clone(),
+                        "expression",
+                        condition.0,
+                        counts.expressions,
+                    );
+                    reference(
+                        errors,
+                        referrer.clone(),
+                        "expression",
+                        message.0,
+                        counts.expressions,
+                    );
+                }
+            }
         }
     }
 }

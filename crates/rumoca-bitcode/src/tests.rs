@@ -1021,6 +1021,26 @@ fn cost_of_body(body: &RbcFunctionBody) -> Cost {
         // recurse: a call is a leaf as far as this IR is concerned.
         RbcFunctionBody::ElidedModelica => Cost::Opaque,
         RbcFunctionBody::External { .. } => Cost::Opaque,
+        // A carried body is bounded *per body*: its statement forms are
+        // assignment and assertion, which evaluate expressions once each,
+        // and neither can iterate. What a carried body does change is that
+        // a call is no longer a leaf -- the callee's body is now here to
+        // follow. Termination therefore stops resting on the body being
+        // absent and rests on `check_call_graph_acyclic` instead, which is
+        // enforced for any artifact that carries one.
+        RbcFunctionBody::Modelica { statements } => {
+            if statements.iter().all(|statement| {
+                matches!(
+                    statement,
+                    RbcFunctionStatement::Assignment { .. }
+                        | RbcFunctionStatement::Assertion { .. }
+                )
+            }) {
+                Cost::Bounded
+            } else {
+                Cost::Opaque
+            }
+        }
     }
 }
 

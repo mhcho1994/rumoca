@@ -24,6 +24,9 @@ use rumoca_ir_flat as flat;
 
 use crate::schema::*;
 
+mod function_body;
+use function_body::export_function_body;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
     #[error("bitcode v2 cannot represent semantic owner table `{0}`")]
@@ -1134,7 +1137,11 @@ fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunctio
                     language: format!("{:?}", external.language()).to_lowercase(),
                     symbol: external.symbol().to_string(),
                 },
-                None => RbcFunctionBody::ElidedModelica,
+                // A Modelica body is carried when every statement in it is a
+                // form this schema version holds. Partial bodies are not
+                // emitted: half a body is worse than none, because a
+                // consumer cannot tell which half is missing.
+                None => export_function_body(function),
             };
             Some(RbcFunction {
                 id: FunctionId(index as u32),

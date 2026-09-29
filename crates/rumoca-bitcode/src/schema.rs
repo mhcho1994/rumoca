@@ -1103,11 +1103,46 @@ pub enum RbcInline {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RbcFunctionBody {
     /// A Modelica body exists but is not in this artifact.
+    ///
+    /// Still valid, and still the right answer for a producer that cannot
+    /// or need not carry bodies. An artifact that elides every body is
+    /// total by the argument in SPEC_RUMOCA_BITCODE §9a as originally
+    /// written; one that carries them is total by the acyclic call-graph
+    /// check over [`RbcFunction::calls`]. Which applies is readable here.
     ElidedModelica,
+    /// A Modelica body, in the bounded form the DAE holds.
+    ///
+    /// Not Modelica statements: by the time a body reaches the DAE it has
+    /// been lowered to assignment, grouped assignment, assertion and a fold
+    /// over a compact domain. There is no `while`, no `break` and no
+    /// `return`, so the body itself cannot express unbounded iteration —
+    /// the only route to non-termination is a call cycle, which
+    /// `RbcFunction::calls` makes checkable.
+    Modelica {
+        statements: Vec<RbcFunctionStatement>,
+    },
     /// An MLS §12.9 external body, named by language and symbol. Carried
     /// because it is the whole of what the function does: there is no
     /// Modelica body that could be elided.
     External { language: String, symbol: String },
+}
+
+/// One statement of a lowered function body.
+///
+/// The four forms `rumoca_ir_dae::FunctionStatementView` distinguishes. A
+/// consumer that only needs to *read* a body — reachability, coverage, a
+/// constant-folding pass — works from these without reconstructing a DAE.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RbcFunctionStatement {
+    /// One SSA definition: `value := expression`.
+    Assignment {
+        /// Owner-local ordinal of the value this defines.
+        value: u32,
+        expression: ExprId,
+    },
+    /// An MLS §8.3.7 assertion inside the body.
+    Assertion { condition: ExprId, message: ExprId },
 }
 
 /// Identifies one structured equation family.
