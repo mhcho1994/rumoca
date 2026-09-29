@@ -969,17 +969,22 @@ fn single_assignment_result<'dae>(
         return None;
     }
     let result = function.result_values().get(output as usize)?;
-    let mut statements = function.statements();
-    let dae::FunctionStatementView::Assignment { definition } = statements.next()? else {
-        return None;
-    };
-    if statements.next().is_some()
-        || definition.target() != result.target()
-        || definition.rhs() != result.rhs()
-    {
-        return None;
-    }
-    Some(result.rhs())
+    // A body of assignments and assignment groups (an `if` statement's merged
+    // definitions) defines each output as one expression DAG over the
+    // parameters and earlier definitions (`FunctionValue`), which is exactly
+    // the call's value. Loops (folds) are not straight-line; assertions do not
+    // contribute to the value.
+    function
+        .statements()
+        .all(|statement| {
+            matches!(
+                statement,
+                dae::FunctionStatementView::Assignment { .. }
+                    | dae::FunctionStatementView::AssignmentGroup { .. }
+                    | dae::FunctionStatementView::Assertion { .. }
+            )
+        })
+        .then(|| result.rhs())
 }
 
 pub(super) fn forwarded_call_argument<'dae>(

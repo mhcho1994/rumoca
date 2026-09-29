@@ -369,7 +369,7 @@ fn checked_assertion_fails_with_its_source_message() {
 }
 
 #[test]
-fn index_reduction_differentiates_powers_quotients_and_elementary_functions() {
+fn index_reduction_differentiates_elementary_and_piecewise_definitions() {
     // der(z) = der(x) with x a function of time: index reduction must
     // differentiate x's equation, and z(1) = x(1) - x(0).
     let cases = [
@@ -380,6 +380,19 @@ fn index_reduction_differentiates_powers_quotients_and_elementary_functions() {
         ("sqrt(1 + time)", std::f64::consts::SQRT_2 - 1.0),
         ("tan(time)", 1.0f64.tan()),
         ("time/(1 + time)", 0.5),
+        // Continuous piecewise definitions differentiate branch by branch.
+        ("if time > 0.5 then time^2 + 0.25 else time", 1.25),
+        ("smooth(1, if time > 0.5 then time^2 + 0.25 else time)", 1.25),
+        ("noEvent(exp(time))", std::f64::consts::E - 1.0),
+        ("abs(time + 1)", 1.0),
+        ("sign(time + 1)*time", 1.0),
+        ("sinh(time)", 1.0f64.sinh()),
+        ("cosh(time)", 1.0f64.cosh() - 1.0),
+        ("tanh(time)", 1.0f64.tanh()),
+        ("asin(time/2)", 0.5f64.asin()),
+        ("acos(time/2)", 0.5f64.acos() - std::f64::consts::FRAC_PI_2),
+        ("atan(time)", std::f64::consts::FRAC_PI_4),
+        ("log10(1 + time)", std::f64::consts::LOG10_2),
     ];
     for (definition, expected) in cases {
         let source = format!(
@@ -401,6 +414,48 @@ fn index_reduction_differentiates_powers_quotients_and_elementary_functions() {
             "x = {definition}: z(1) = {last}, expected {expected}"
         );
     }
+}
+
+#[test]
+fn index_reduction_differentiates_through_a_function_body_with_an_if_statement() {
+    // `ease` has local definitions and an if statement; der(y) of its call
+    // is differentiated through the body. z(1) = ease(1) - ease(0).
+    let dae = compile(
+        concat!(
+            "model Eased\n",
+            "  function ease\n",
+            "    input Real x;\n",
+            "    output Real y;\n",
+            "  protected\n",
+            "    Real s = 2*x;\n",
+            "    Real w;\n",
+            "  algorithm\n",
+            "    if s > 1 then\n",
+            "      w := s^2;\n",
+            "    else\n",
+            "      w := 2*s - 1;\n",
+            "    end if;\n",
+            "    y := w + x;\n",
+            "  end ease;\n",
+            "  Real y;\n",
+            "  Real z(start=0, fixed=true);\n",
+            "equation\n",
+            "  y = ease(time);\n",
+            "  der(z) = der(y);\n",
+            "end Eased;\n",
+        ),
+        "Eased",
+    );
+    let options = SimOptions {
+        t_end: 1.0,
+        dt: Some(0.01),
+        ..SimOptions::default()
+    };
+    let result = simulate_dae(&dae, &options).expect("the call differentiates through its body");
+    let z = result.names.iter().position(|name| name == "z").expect("z column");
+    let last = *result.data[z].last().expect("trajectory sample");
+    // ease(0) = -1 and ease(1) = 4 + 1 = 5.
+    assert!((last - 6.0).abs() < 1.0e-4, "z(1) = {last}, expected 6");
 }
 
 #[test]

@@ -189,6 +189,21 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             dae::ExpressionOperation::Array(elements) => {
                 self.differentiate_array(elements, order, provenance)
             }
+            // `smooth(n, e)` and `noEvent(e)` only annotate `e`.
+            dae::ExpressionOperation::Builtin {
+                builtin: dae::PureBuiltin::Smooth | dae::PureBuiltin::NoEvent,
+                arguments,
+            } => {
+                let value = arguments.iter().last().expect("checked annotation builtin value");
+                self.differentiate_order(value, order, provenance)
+            }
+            dae::ExpressionOperation::Conditional(operands) => {
+                self.differentiate_conditional(operands, order, provenance)
+            }
+            // An earlier definition in the same function body.
+            dae::ExpressionOperation::FunctionValue { definition, .. } => {
+                self.differentiate_order(definition.rhs(), order, provenance)
+            }
             dae::ExpressionOperation::Builtin { builtin, arguments } if order == 1 => {
                 self.differentiate_builtin(builtin, arguments, provenance)
             }
@@ -618,12 +633,59 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             Builtin::Sin | Builtin::Cos => {
                 self.differentiate_trigonometric_builtin(builtin, arguments, provenance)
             }
-            Builtin::Tan | Builtin::Exp | Builtin::Log | Builtin::Sqrt => {
-                self.differentiate_elementary_builtin(builtin, arguments, provenance)
-            }
+            // Piecewise constant between events.
+            Builtin::Sign => Ok(Derivative::Zero),
+            Builtin::Tan
+            | Builtin::Exp
+            | Builtin::Log
+            | Builtin::Sqrt
+            | Builtin::Log10
+            | Builtin::Sinh
+            | Builtin::Cosh
+            | Builtin::Tanh
+            | Builtin::Asin
+            | Builtin::Acos
+            | Builtin::Atan
+            | Builtin::Abs => self.differentiate_elementary_builtin(builtin, arguments, provenance),
             Builtin::Atan2 => self.differentiate_atan2_builtin(arguments, provenance),
             _ => unreachable!("differentiability preflight rejects this builtin"),
         }
+    }
+
+    /// A conditional is differentiated branch by branch under the same
+    /// conditions: between events the selected branch is the value, so its
+    /// derivative is the selected branch's derivative.
+    fn differentiate_conditional(
+        &mut self,
+        operands: dae::ExpressionOperands<'source>,
+        order: u8,
+        provenance: dae::DaeProvenance,
+    ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
+        let operands = operands.iter().collect::<Vec<_>>();
+        let (fallback, branches) = operands.split_last().expect("checked conditional fallback");
+        let mut derivatives = Vec::with_capacity(branches.len() / 2);
+        let mut any_nonzero = false;
+        for pair in branches.chunks_exact(2) {
+            let derivative = self.differentiate_order(pair[1], order, provenance)?;
+            any_nonzero |= matches!(derivative, Derivative::Expression(_));
+            derivatives.push((pair[0], pair[1], derivative));
+        }
+        let fallback_derivative = self.differentiate_order(*fallback, order, provenance)?;
+        any_nonzero |= matches!(fallback_derivative, Derivative::Expression(_));
+        if !any_nonzero {
+            return Ok(Derivative::Zero);
+        }
+        let mut target_branches = Vec::with_capacity(derivatives.len());
+        for (condition, value, derivative) in derivatives {
+            let condition = self.rebuild_instantiated(condition)?;
+            let derivative = self.materialize_derivative(derivative, value, provenance)?;
+            target_branches.push((condition, derivative));
+        }
+        let fallback = self.materialize_derivative(fallback_derivative, *fallback, provenance)?;
+        self.target
+            .at(provenance)
+            .conditional(target_branches, fallback)
+            .map(Derivative::Expression)
     }
 
     /// `d(a^b) = b*a^(b-1)*da` for a time-invariant exponent, and
@@ -679,60 +741,108 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
         self.multiply(sum, power, provenance)
     }
 
-    /// `tan`, `exp`, `log` and `sqrt`: each derivative is `du` scaled by a
-    /// function of `u` alone.
+    /// Elementary functions of one argument: each derivative is `du`
+    /// multiplied or divided by a function of `u` alone.
     fn differentiate_elementary_builtin(
         &mut self,
         builtin: dae::PureBuiltin,
         arguments: dae::ExpressionOperands<'source>,
         provenance: dae::DaeProvenance,
     ) -> Result<Derivative<'target>, dae::DaeConstructionError> {
+        use dae::BinaryOperator::{Divide, Multiply, Subtract};
+        use dae::PureBuiltin as B;
+
         let argument = arguments.iter().next().expect("checked unary builtin");
         let derivative = self.differentiate_order(argument, 1, provenance)?;
         let Derivative::Expression(derivative) = derivative else {
             return Ok(Derivative::Zero);
         };
-        let value = self.rebuild_instantiated(argument)?;
-        let at = self.target.at(provenance);
+        let u = self.rebuild_instantiated(argument)?;
         let (operator, factor) = match builtin {
             // d exp(u) = exp(u) du
-            dae::PureBuiltin::Exp => (
-                dae::BinaryOperator::Multiply,
-                at.builtin(dae::PureBuiltin::Exp, [value])?,
-            ),
-            // d log(u) = du / u
-            dae::PureBuiltin::Log => (dae::BinaryOperator::Divide, value),
-            // d sqrt(u) = du / (2 sqrt(u))
-            dae::PureBuiltin::Sqrt => {
-                let root = at.builtin(dae::PureBuiltin::Sqrt, [value])?;
-                let two = self
-                    .target
-                    .at(provenance)
-                    .literal(dae::DaeLiteral::Real(2.0))?;
+            B::Exp => (Multiply, self.apply(B::Exp, u, provenance)?),
+            // d log(u) = du/u;  d log10(u) = du/(u ln 10)
+            B::Log => (Divide, u),
+            B::Log10 => {
+                let ln10 = self.real(std::f64::consts::LN_10, provenance)?;
+                (Divide, self.product(Multiply, u, ln10, provenance)?)
+            }
+            // d sqrt(u) = du/(2 sqrt(u))
+            B::Sqrt => {
+                let two = self.real(2.0, provenance)?;
+                let root = self.apply(B::Sqrt, u, provenance)?;
+                (Divide, self.product(Multiply, two, root, provenance)?)
+            }
+            // d sinh(u) = cosh(u) du;  d cosh(u) = sinh(u) du
+            B::Sinh => (Multiply, self.apply(B::Cosh, u, provenance)?),
+            B::Cosh => (Multiply, self.apply(B::Sinh, u, provenance)?),
+            // d tanh(u) = du/cosh(u)^2
+            B::Tanh => {
+                let cosh = self.apply(B::Cosh, u, provenance)?;
+                (Divide, self.product(Multiply, cosh, cosh, provenance)?)
+            }
+            // d asin(u) = du/sqrt(1 - u^2);  d acos(u) = -du/sqrt(1 - u^2)
+            B::Asin | B::Acos => {
+                let one = self.real(1.0, provenance)?;
+                let square = self.product(Multiply, u, u, provenance)?;
+                let rest = self.product(Subtract, one, square, provenance)?;
+                (Divide, self.apply(B::Sqrt, rest, provenance)?)
+            }
+            // d atan(u) = du/(1 + u^2)
+            B::Atan => {
+                let one = self.real(1.0, provenance)?;
+                let square = self.product(Multiply, u, u, provenance)?;
                 (
-                    dae::BinaryOperator::Divide,
-                    self.target
-                        .at(provenance)
-                        .binary(dae::BinaryOperator::Multiply, two, root)?,
+                    Divide,
+                    self.product(dae::BinaryOperator::Add, one, square, provenance)?,
                 )
             }
-            // d tan(u) = du / cos(u)^2
+            // d |u| = sign(u) du
+            B::Abs => (Multiply, self.apply(B::Sign, u, provenance)?),
+            // d tan(u) = du/cos(u)^2
             _ => {
-                let cosine = at.builtin(dae::PureBuiltin::Cos, [value])?;
-                (
-                    dae::BinaryOperator::Divide,
-                    self.target.at(provenance).binary(
-                        dae::BinaryOperator::Multiply,
-                        cosine,
-                        cosine,
-                    )?,
-                )
+                let cosine = self.apply(B::Cos, u, provenance)?;
+                (Divide, self.product(Multiply, cosine, cosine, provenance)?)
             }
         };
+        let result = self.product(operator, derivative, factor, provenance)?;
+        if builtin == B::Acos {
+            return self
+                .target
+                .at(provenance)
+                .unary(dae::UnaryOperator::Negate, result)
+                .map(Derivative::Expression);
+        }
+        Ok(Derivative::Expression(result))
+    }
+
+    fn apply(
+        &mut self,
+        builtin: dae::PureBuiltin,
+        argument: dae::ExprId<'target>,
+        provenance: dae::DaeProvenance,
+    ) -> Result<dae::ExprId<'target>, dae::DaeConstructionError> {
+        self.target.at(provenance).builtin(builtin, [argument])
+    }
+
+    fn product(
+        &mut self,
+        operator: dae::BinaryOperator,
+        lhs: dae::ExprId<'target>,
+        rhs: dae::ExprId<'target>,
+        provenance: dae::DaeProvenance,
+    ) -> Result<dae::ExprId<'target>, dae::DaeConstructionError> {
+        self.target.at(provenance).binary(operator, lhs, rhs)
+    }
+
+    fn real(
+        &mut self,
+        value: f64,
+        provenance: dae::DaeProvenance,
+    ) -> Result<dae::ExprId<'target>, dae::DaeConstructionError> {
         self.target
             .at(provenance)
-            .binary(operator, derivative, factor)
-            .map(Derivative::Expression)
+            .literal(dae::DaeLiteral::Real(value))
     }
 
     fn differentiate_bilinear_builtin(

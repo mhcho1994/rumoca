@@ -208,6 +208,21 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
                     .collect::<Result<Vec<_>, _>>()?;
                 self.target.at(provenance).builtin(builtin, arguments)
             }
+            dae::ExpressionOperation::Conditional(operands) => {
+                let operands = operands
+                    .iter()
+                    .map(|operand| self.rebuild_instantiated(operand))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let (fallback, branches) =
+                    operands.split_last().expect("checked conditional fallback");
+                self.target.at(provenance).conditional(
+                    branches.chunks_exact(2).map(|pair| (pair[0], pair[1])),
+                    *fallback,
+                )
+            }
+            dae::ExpressionOperation::FunctionValue { definition, .. } => {
+                self.rebuild_instantiated(definition.rhs())
+            }
             _ => unreachable!("instantiation preflight rejects this function expression"),
         }
     }
