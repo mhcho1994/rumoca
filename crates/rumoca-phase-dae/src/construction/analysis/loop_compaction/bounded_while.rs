@@ -325,33 +325,18 @@ fn is_positive_increment(value: &Expression, counter: &VarName) -> bool {
 /// Whether `expression` subscripts an array with exactly `counter` (MLS §10.5:
 /// an index below 1 is an error, so every error-free evaluation has `k >= 1`).
 fn indexes_with(expression: &Expression, counter: &VarName) -> bool {
-    struct Search<'a> {
-        counter: &'a VarName,
-        found: bool,
-    }
-    impl rumoca_core::ExpressionVisitor for Search<'_> {
-        fn visit_expression(&mut self, expression: &Expression) {
-            let subscripts = match expression {
-                Expression::VarRef { subscripts, .. } | Expression::Index { subscripts, .. } => {
-                    subscripts.as_slice()
-                }
-                _ => &[],
-            };
-            if subscripts.iter().any(|subscript| {
-                matches!(subscript, Subscript::Expr { expr, .. }
-                    if plain_reference(expr) == Some(self.counter))
-            }) {
-                self.found = true;
+    expression.contains_subexpression(|node| {
+        let subscripts = match node {
+            Expression::VarRef { subscripts, .. } | Expression::Index { subscripts, .. } => {
+                subscripts.as_slice()
             }
-            self.walk_expression(expression);
-        }
-    }
-    let mut search = Search {
-        counter,
-        found: false,
-    };
-    rumoca_core::ExpressionVisitor::visit_expression(&mut search, expression);
-    search.found
+            _ => &[],
+        };
+        subscripts.iter().any(|subscript| {
+            matches!(subscript, Subscript::Expr { expr, .. }
+                if plain_reference(expr) == Some(counter))
+        })
+    })
 }
 
 fn statements_exit_early(statements: &[rumoca_core::Statement]) -> bool {

@@ -1877,18 +1877,14 @@ impl StringConversionFormat {
     }
 }
 
-struct ContainsExpressionChecker<'a, F>
-where
-    F: FnMut(&Expression) -> bool,
-{
+/// One shared visitor for every predicate type, so callers do not each compile
+/// a copy of the traversal methods.
+struct ContainsExpressionChecker<'a> {
     found: bool,
-    predicate: &'a mut F,
+    predicate: &'a mut dyn FnMut(&Expression) -> bool,
 }
 
-impl<F> crate::ExpressionVisitor for ContainsExpressionChecker<'_, F>
-where
-    F: FnMut(&Expression) -> bool,
-{
+impl crate::ExpressionVisitor for ContainsExpressionChecker<'_> {
     fn visit_expression(&mut self, expr: &Expression) {
         if self.found {
             return;
