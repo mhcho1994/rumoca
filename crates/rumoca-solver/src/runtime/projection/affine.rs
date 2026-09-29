@@ -98,8 +98,8 @@ fn settle_affine_block<M: ImplicitProjectionModel>(
         }
         settled = system.project(candidate)?;
     }
-    if structure.is_some() {
-        model.retain_affine_block_jacobian(block_index, system.jacobian);
+    if let (Some(_), Some(cache)) = (structure, model.affine_jacobian_cache(block_index)) {
+        cache.borrow_mut().retain_affine_jacobian(system.jacobian);
     }
     Ok(settled)
 }
@@ -119,7 +119,10 @@ fn affine_block_jacobian<M: ImplicitProjectionModel>(
 ) -> Result<DMatrix<f64>, RuntimeSolveError> {
     let shape = (block.rows.len(), block.y_indices.len());
     let retained = match structure {
-        Some(_) => model.take_affine_block_jacobian(block_index),
+        Some(_) => match model.affine_jacobian_cache(block_index) {
+            Some(cache) => cache.borrow_mut().take_affine_jacobian(),
+            None => None,
+        },
         None => None,
     };
     let storage = match (retained, structure) {

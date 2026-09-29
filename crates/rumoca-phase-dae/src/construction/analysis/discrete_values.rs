@@ -290,20 +290,17 @@ fn algorithm_reads_target_before_definition(
                     && cond_blocks
                         .iter()
                         .any(|block| expression_reads_current_target(&block.cond, target, roles));
-                let mut exits = cond_blocks
-                    .iter()
-                    .map(|block| {
-                        let (branch_read, branch_written) =
-                            algorithm_reads_target_before_definition(
-                                &block.stmts,
-                                target,
-                                roles,
-                                written,
-                            );
-                        entry_read |= branch_read;
-                        branch_written
-                    })
-                    .collect::<Vec<_>>();
+                let mut exits = Vec::with_capacity(cond_blocks.len() + 1);
+                for block in cond_blocks {
+                    let (branch_read, branch_written) = algorithm_reads_target_before_definition(
+                        &block.stmts,
+                        target,
+                        roles,
+                        written,
+                    );
+                    entry_read |= branch_read;
+                    exits.push(branch_written);
+                }
                 match else_block {
                     Some(branch) => {
                         let (branch_read, branch_written) =

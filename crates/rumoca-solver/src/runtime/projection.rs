@@ -270,16 +270,16 @@ pub(crate) trait ImplicitProjectionModel {
         None
     }
 
-    /// The Jacobian an earlier affine solve of block `block_index` retained:
-    /// block-shaped and zero at every entry outside the block's structural
-    /// pattern. `None` when the model retains none.
-    fn take_affine_block_jacobian(&self, _block_index: usize) -> Option<DMatrix<f64>> {
+    /// The cache that retains block `block_index`'s affine Jacobian between
+    /// solves: block-shaped and zero at every entry outside the block's
+    /// structural pattern. `None` when the model retains none. One hook
+    /// serves take and retain, so implementors compile one default.
+    fn affine_jacobian_cache(
+        &self,
+        _block_index: usize,
+    ) -> Option<&std::cell::RefCell<SparseNewtonCache>> {
         None
     }
-
-    /// Retain an affine block Jacobian that is zero outside its structural
-    /// pattern for the next affine solve of block `block_index`.
-    fn retain_affine_block_jacobian(&self, _block_index: usize, _jacobian: DMatrix<f64>) {}
 
     /// The canonical projection block that fallback counts attribute block
     /// `block_index` of this model's plan to; `None` leaves it uncounted.

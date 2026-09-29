@@ -9,7 +9,7 @@ pub(super) use prepared_jacobian::{
 use crate::runtime::projection::{
     ImplicitProjectionModel, ScaledNewtonSystem, per_row_torn_block_sweep,
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 use rumoca_eval_solve::dense_basis::{DenseStageMatrix, DependentConditioning};
 use rumoca_eval_solve::{PreparedTornSweep, TornSweepStatus};
 
@@ -797,23 +797,12 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
         delta
     }
 
-    fn take_affine_block_jacobian(&self, block_index: usize) -> Option<DMatrix<f64>> {
-        let block_index = self.block_indices.get(block_index).copied()?;
-        self.runtime
-            .algebraic_newton_caches
-            .get(block_index)?
-            .borrow_mut()
-            .take_affine_jacobian()
-    }
-
-    fn retain_affine_block_jacobian(&self, block_index: usize, jacobian: DMatrix<f64>) {
-        if let Some(cache) = self
-            .block_indices
-            .get(block_index)
-            .and_then(|&index| self.runtime.algebraic_newton_caches.get(index))
-        {
-            cache.borrow_mut().retain_affine_jacobian(jacobian);
-        }
+    fn affine_jacobian_cache(
+        &self,
+        block_index: usize,
+    ) -> Option<&std::cell::RefCell<crate::runtime::projection::SparseNewtonCache>> {
+        let index = self.block_indices.get(block_index).copied()?;
+        self.runtime.algebraic_newton_caches.get(index)
     }
 
     fn solve_algebraic_newton_delta(

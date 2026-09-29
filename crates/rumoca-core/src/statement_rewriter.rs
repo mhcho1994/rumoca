@@ -325,3 +325,33 @@ pub trait FallibleStatementRewriter: FallibleExpressionRewriter {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Expression, Span};
+
+    struct Identity;
+    impl ExpressionRewriter for Identity {}
+    impl StatementRewriter for Identity {}
+
+    struct Fallible;
+    impl FallibleExpressionRewriter for Fallible {
+        type Error = ();
+    }
+    impl FallibleStatementRewriter for Fallible {}
+
+    fn indices() -> Vec<ForIndex> {
+        vec![ForIndex {
+            ident: "i".to_string(),
+            range: Expression::Empty { span: Span::DUMMY },
+        }]
+    }
+
+    #[test]
+    fn for_indices_keep_their_names_and_rewrite_their_ranges() {
+        let source = indices();
+        assert_eq!(Identity.rewrite_for_indices(&source), source);
+        assert_eq!(Fallible.rewrite_for_indices(&source), Ok(source));
+    }
+}
