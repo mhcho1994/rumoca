@@ -319,10 +319,48 @@ where
         if let dae::CoordinateView::ClockInterval(clock) = coordinate {
             return Ok(vec![self.view.periodic_clock(clock).period_seconds()]);
         }
+        // An input has a value at the initial instant: its binding, or what
+        // the host supplies (MLS §8.6.1 -- the environment provides inputs).
+        // `input_value` resolves exactly that and still refuses an input that
+        // has neither, so a start or nominal written over an input evaluates
+        // instead of being refused as non-static.
+        if let dae::CoordinateView::Input(input) = coordinate {
+            let index = input.index() as usize;
+            let variable = self
+                .view
+                .variable(input.into())
+                .expect("finalized input identity resolves");
+            if self.evaluating[index] {
+                return Err(failure(
+                    NumericEvaluationErrorKind::CyclicDependency,
+                    format!(
+                        "cyclic static-value dependency includes `{}`",
+                        variable.name()
+                    ),
+                    variable.declaration().span(),
+                ));
+            }
+            self.evaluating[index] = true;
+            let value = self.input_value(variable);
+            self.evaluating[index] = false;
+            return value;
+        }
         let variable = coordinate_variable(coordinate).ok_or_else(|| {
+            // Name which one: "a runtime coordinate" alone left every such
+            // failure undiagnosable.
+            let kind = match coordinate {
+                dae::CoordinateView::Time => "`time`",
+                dae::CoordinateView::Condition(_) => "an event condition",
+                dae::CoordinateView::Delay(_) => "a `delay` output",
+                dae::CoordinateView::Previous(_) => "a `previous` value",
+                dae::CoordinateView::Terminal(_) => "`terminal()`",
+                _ => "a runtime coordinate",
+            };
+            let named = runtime_variable_name(self.view, coordinate)
+                .map_or_else(|| kind.to_string(), |name| format!("`{name}`"));
             failure(
                 NumericEvaluationErrorKind::NonStaticCoordinate,
-                "numeric evaluation depends on a runtime coordinate",
+                format!("numeric evaluation depends on {named}, which has no static value"),
                 span,
             )
         })?;
@@ -1534,6 +1572,27 @@ fn function_result_error(span: Span) -> NumericEvaluationError {
         "function result ordinal is out of range",
         span,
     )
+}
+
+/// The declared name behind a runtime variable coordinate, for diagnostics.
+fn runtime_variable_name<'dae>(
+    view: dae::DaeView<'dae>,
+    coordinate: dae::CoordinateView<'dae>,
+) -> Option<String> {
+    let id: dae::VariableId<'dae> = match coordinate {
+        dae::CoordinateView::Input(id) => id.into(),
+        dae::CoordinateView::State(id) | dae::CoordinateView::Derivative(id) => id.into(),
+        dae::CoordinateView::Algebraic(id) => id.into(),
+        dae::CoordinateView::DiscreteReal(id) => id.into(),
+        dae::CoordinateView::DiscreteValue(id) => id.into(),
+        _ => return None,
+    };
+    let variable = view.variable(id)?;
+    Some(format!(
+        "{} {}",
+        role_name(variable.role()),
+        variable.name()
+    ))
 }
 
 fn coordinate_variable(coordinate: dae::CoordinateView<'_>) -> Option<dae::VariableId<'_>> {

@@ -555,3 +555,38 @@ fn a_zero_size_array_with_a_scalar_attribute_simulates() {
     ]);
     assert!(run.status.success(), "{}", text(&run));
 }
+
+#[test]
+fn a_start_written_over_an_input_evaluates_from_the_inputs_value() {
+    // `x(start = 3 * u)` with `input Real u = 2`: the input has a value at the
+    // initial instant, but the evaluator refused any input coordinate as
+    // "a runtime coordinate". It now resolves the input as it does anywhere
+    // else -- binding, or the host-supplied value -- so x(0) = 6.
+    let work = tempdir().expect("temp dir");
+    let source = work.path().join("InputStart.mo");
+    fs::write(
+        &source,
+        "model InputStart\n  input Real u = 2;\n  Real x(start = 3 * u, fixed = true, max = 5.9);\n\
+         equation\n  der(x) = -x;\nend InputStart;\n",
+    )
+    .expect("write fixture");
+    let artifact = work.path().join("input_start.rbc");
+    let compiled = rumoca(&[
+        "compile",
+        source.to_str().unwrap(),
+        "--emit-bitcode",
+        artifact.to_str().unwrap(),
+    ]);
+    assert!(artifact.exists(), "fixture must compile: {}", text(&compiled));
+    let run = rumoca(&[
+        "compile-bitcode",
+        artifact.to_str().unwrap(),
+        "--simulate",
+        "--check",
+        "--t-end",
+        "0.01",
+    ]);
+    let report: serde_json::Value = serde_json::from_slice(&run.stdout).expect("json");
+    assert_eq!(report[0]["kind"], "above-max", "{}", text(&run));
+    assert_eq!(report[0]["value"], 6.0, "{}", text(&run));
+}
