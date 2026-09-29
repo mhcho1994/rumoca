@@ -1,6 +1,6 @@
 # TOOLBUG-043 — `array .+ scalar` is rejected by DAE construction
 
-**Status:** open.
+**Status:** fixed (this change).
 **Severity:** low-medium — valid Modelica refused at compile time.
 
 ## What
@@ -27,3 +27,11 @@ shape or the DAE's element-wise type rule must admit a scalar operand.
 
 Found while writing the element-wise bitcode fixture (TOOLBUG-042); the
 fixture uses `k .+ x` instead.
+
+## Fix
+
+`.+` and `.-` now use the element-wise type rule that `.*`, `./` and `.^`
+already used, which admits a scalar on either side; `+` and `-` keep
+requiring equal shapes, as MLS §10.6.1 says. Verified end to end:
+`y = 2 .+ x` simulates with every element equal to `2 + x[i]`, and the model
+round-trips through bitcode.

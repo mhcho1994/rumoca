@@ -445,10 +445,21 @@ fn a_model_with_an_unconnected_input_runs_when_its_inputs_are_held() {
         "--emit-bitcode",
         artifact.to_str().unwrap(),
     ]);
-    assert!(artifact.exists(), "fixture must compile: {}", text(&compiled));
+    assert!(
+        artifact.exists(),
+        "fixture must compile: {}",
+        text(&compiled)
+    );
     let artifact = artifact.to_str().unwrap();
     let simulate = |extra: &[&str]| {
-        let mut args = vec!["compile-bitcode", artifact, "--simulate", "--check", "--t-end", "1"];
+        let mut args = vec![
+            "compile-bitcode",
+            artifact,
+            "--simulate",
+            "--check",
+            "--t-end",
+            "1",
+        ];
         args.extend_from_slice(extra);
         rumoca(&args)
     };
@@ -460,9 +471,54 @@ fn a_model_with_an_unconnected_input_runs_when_its_inputs_are_held() {
     );
     let held = simulate(&["--free-inputs", "start"]);
     assert!(held.status.success(), "{}", text(&held));
-    assert!(text(&held).contains("holding 1 free input(s) constant"), "{}", text(&held));
+    assert!(
+        text(&held).contains("holding 1 free input(s) constant"),
+        "{}",
+        text(&held)
+    );
     // Held at 2 for the whole run, x crosses its max near t = ln 2; held
     // only at t = 0 it would not.
     let driven = simulate(&["--input", "u=2"]);
     assert!(text(&driven).contains("above-max"), "{}", text(&driven));
+}
+
+#[test]
+fn check_reports_each_array_element_against_its_declared_bound() {
+    // The solver reports `y[1]`, `y[2]`, ... while bounds are declared on
+    // `y`, so `--check` never checked an array element. A scalar bound now
+    // applies to every element, a literal array bound element-wise.
+    let work = tempdir().expect("temp dir");
+    let source = work.path().join("ArrayBounds.mo");
+    fs::write(
+        &source,
+        "model ArrayBounds\n  Real x[3](each start = 1, each fixed = true);\n  \
+         Real y[3](each max = 2.9);\n  Real w[3](max = {5, 2.5, 5});\nequation\n  \
+         der(x) = -x;\n  y = 2 .+ x;\n  w = {2, 2, 2} + x;\nend ArrayBounds;\n",
+    )
+    .expect("write fixture");
+    let artifact = work.path().join("bounds.rbc");
+    let compiled = rumoca(&[
+        "compile",
+        source.to_str().unwrap(),
+        "--emit-bitcode",
+        artifact.to_str().unwrap(),
+    ]);
+    assert!(artifact.exists(), "fixture must compile: {}", text(&compiled));
+    let checked = rumoca(&[
+        "compile-bitcode",
+        artifact.to_str().unwrap(),
+        "--simulate",
+        "--check",
+        "--t-end",
+        "0.1",
+    ]);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).expect("json");
+    let mut broken: Vec<String> = report
+        .as_array()
+        .expect("violations")
+        .iter()
+        .map(|v| v["variable"].as_str().unwrap_or_default().to_string())
+        .collect();
+    broken.sort();
+    assert_eq!(broken, ["w[2]", "y[1]", "y[2]", "y[3]"]);
 }

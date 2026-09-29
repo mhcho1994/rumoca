@@ -42,7 +42,17 @@ DENORMAL = 1e-300
 
 
 def _literal(expression) -> float | None:
-    return getattr(expression, "value", None) if expression is not None else None
+    value = getattr(expression, "value", None) if expression is not None else None
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _elements(expression) -> list | None:
+    """The literal elements of a one-dimensional array bound, or None."""
+    elements = getattr(expression, "elements", None) if expression is not None else None
+    if not elements:
+        return None
+    values = [_literal(element) for element in elements]
+    return values if all(value is not None for value in values) else None
 
 
 class RangeSan:
@@ -71,6 +81,40 @@ class RangeSan:
                 found[variable.name] = (low, high, variable)
         return found
 
+    @staticmethod
+    def _array_bounds(model):
+        """{name: (min elements, max elements, variable)} for literal array
+        bounds, e.g. `Real w[3](max = {5, 2.5, 5})`."""
+        found = {}
+        for variable in model.variables:
+            low, high = _elements(variable.minimum), _elements(variable.maximum)
+            if low is not None or high is not None:
+                found[variable.name] = (low, high, variable)
+        return found
+
+    @staticmethod
+    def _element_bound(name, bounds, arrays):
+        """The bound on one element column, `y[2]`.
+
+        Observations are published per element while bounds are declared per
+        variable; matching only whole names skipped every array element. A
+        scalar bound (`each max = 2.9`) holds for every element, a literal
+        array bound element-wise. Other shapes are left unchecked, not guessed.
+        """
+        if not (name.endswith("]") and "[" in name):
+            return None
+        base, subscript = name[: name.index("[")], name[name.index("[") + 1:-1]
+        if base in bounds:
+            return bounds[base]
+        if base not in arrays or not subscript.isdigit():
+            return None
+        low, high, variable = arrays[base]
+        index = int(subscript) - 1
+        pick = (lambda items: items[index] if items is not None
+                and 0 <= index < len(items) else None)
+        low, high = pick(low), pick(high)
+        return (low, high, variable) if low is not None or high is not None else None
+
     def hints(self, model, context: AnalysisContext) -> list[FuzzHint]:
         found = []
         for _, (low, high, variable) in self._bounds(model).items():
@@ -88,11 +132,12 @@ class RangeSan:
     def observe(self, stream: ObservationStream, model, context: AnalysisContext,
                 testcase: TestCase) -> list[Finding]:
         bounds = self._bounds(model)
+        arrays = self._array_bounds(model)
         worst: dict[tuple[str, str], Finding] = {}
 
         for observation in stream.of(VariableObservation):
             name = observation.label
-            entry = bounds.get(name)
+            entry = bounds.get(name) or self._element_bound(name, bounds, arrays)
             if entry is None:
                 continue
             low, high, variable = entry

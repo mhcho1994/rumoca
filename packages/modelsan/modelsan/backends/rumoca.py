@@ -54,6 +54,13 @@ CLASSIFIERS = (
 )
 
 
+def variable_of(column: str) -> str:
+    """The variable an element column belongs to: `y[2]` -> `y`."""
+    if column.endswith("]") and "[" in column:
+        return column[: column.index("[")]
+    return column
+
+
 _HELD = re.compile(r"holding \d+ free input\(s\) constant at their start values: (.*)")
 
 
@@ -293,8 +300,11 @@ class RumocaBackend:
             times, columns = self._read_trace(trace_csv)
             expected = {name for name, identifier in self._ids.items()
                         if identifier in self._observed_ids}
-            if done.returncode == 0 and not expected <= columns.keys():
-                raise ValueError(f"missing requested columns: {sorted(expected - columns.keys())}")
+            # An array variable is published one column per element (`y[1]`),
+            # so it is present when any element column is.
+            present = set(columns) | {variable_of(name) for name in columns}
+            if done.returncode == 0 and not expected <= present:
+                raise ValueError(f"missing requested columns: {sorted(expected - present)}")
         except (OSError, ValueError, csv.Error) as error:
             return ExecutionResult.backend_error(self.name, f"invalid observations: {error}")
         trace = Trace(times=times, columns=columns) if times else None
@@ -368,7 +378,9 @@ class RumocaBackend:
         stream.add(SimulationStart())
         for index, time in enumerate(times):
             for name, values in columns.items():
-                dae_id = self._ids.get(name)
+                # An element column anchors to its variable; the name keeps
+                # the element, so a finding says which element.
+                dae_id = self._ids.get(name, self._ids.get(variable_of(name)))
                 anchor = (CanonicalAnchor(EntityKind.VARIABLE, dae_id, name)
                           if dae_id is not None else None)
                 stream.add(VariableObservation(time=time, canonical=anchor, value=values[index]))

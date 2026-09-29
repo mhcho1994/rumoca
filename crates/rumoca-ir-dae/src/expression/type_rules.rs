@@ -174,10 +174,12 @@ pub(super) fn binary_result(
             }
             Ok(ValueType::scalar(ScalarType::String))
         }
-        BinaryOperator::Add
-        | BinaryOperator::Subtract
-        | BinaryOperator::ElementwiseAdd
-        | BinaryOperator::ElementwiseSubtract => {
+        // MLS §10.6.1: `+`/`-` require equal shapes; their element-wise
+        // forms also take a scalar on either side, like `.*` `./` `.^`.
+        BinaryOperator::ElementwiseAdd | BinaryOperator::ElementwiseSubtract => {
+            elementwise_result(operator, lhs, rhs, at)
+        }
+        BinaryOperator::Add | BinaryOperator::Subtract => {
             expect_same_shape(lhs, rhs, at)?;
             expect_numeric(lhs_scalar, at)?;
             expect_numeric(rhs_scalar, at)?;

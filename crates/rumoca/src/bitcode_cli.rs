@@ -1002,9 +1002,8 @@ fn report_violations(model: &RbcModel, sim: &rumoca_sim::SimResult) -> Result<()
         };
         // One report per variable: a diverged trajectory is one bug, not one
         // per output point.
-        if let Some(violation) =
-            first_violation(name, series, &sim.times, bounds.get(name.as_str()))
-        {
+        let declared = element_bounds(model, &bounds, name);
+        if let Some(violation) = first_violation(name, series, &sim.times, declared.as_ref()) {
             violations.push(violation);
         }
     }
@@ -1056,6 +1055,7 @@ fn first_violation<'a>(
     None
 }
 
+#[derive(Clone)]
 struct DeclaredBounds {
     minimum: Option<f64>,
     maximum: Option<f64>,
@@ -1067,6 +1067,55 @@ struct DeclaredBounds {
 /// Only literal bounds are used. A bound that is itself an expression may
 /// depend on a parameter this run overrode, and silently evaluating it here
 /// would be a second, weaker evaluator.
+/// The bounds that apply to one simulation column.
+///
+/// Columns are per scalar -- `y[2]` -- while bounds are declared per
+/// variable. Looking a column up only by its own name silently skipped every
+/// array element. A scalar bound (`each max = 2.9`) applies to every
+/// element; a literal array bound applies element-wise.
+fn element_bounds(
+    model: &RbcModel,
+    bounds: &std::collections::BTreeMap<&str, DeclaredBounds>,
+    column: &str,
+) -> Option<DeclaredBounds> {
+    if let Some(declared) = bounds.get(column) {
+        return Some(declared.clone());
+    }
+    let (base, subscript) = column.strip_suffix(']')?.split_once('[')?;
+    let declared = bounds.get(base)?;
+    if declared.minimum.is_some() || declared.maximum.is_some() {
+        return Some(declared.clone());
+    }
+    // Only a one-dimensional literal array bound is read element-wise; any
+    // other shape is left unchecked rather than guessed.
+    let index: usize = subscript.parse().ok()?;
+    let variable = model.variables.iter().find(|v| v.name == base)?;
+    let element = |id: Option<rumoca_bitcode::schema::ExprId>| -> Option<f64> {
+        use rumoca_bitcode::schema::{RbcExprNode, RbcLiteral};
+        let RbcExprNode::Array { elements, .. } = &model.expressions.get(id?.0 as usize)?.node
+        else {
+            return None;
+        };
+        let item = elements.get(index.checked_sub(1)?)?;
+        match &model.expressions.get(item.0 as usize)?.node {
+            RbcExprNode::Literal {
+                value: RbcLiteral::Real { value },
+            } => Some(*value),
+            RbcExprNode::Literal {
+                value: RbcLiteral::Integer { value },
+            } => Some(*value as f64),
+            _ => None,
+        }
+    };
+    let minimum = element(variable.min);
+    let maximum = element(variable.max);
+    (minimum.is_some() || maximum.is_some()).then(|| DeclaredBounds {
+        minimum,
+        maximum,
+        source: declared.source.clone(),
+    })
+}
+
 fn declared_bounds(model: &RbcModel) -> std::collections::BTreeMap<&str, DeclaredBounds> {
     let literal = |id: Option<rumoca_bitcode::schema::ExprId>| -> Option<f64> {
         let index = id?.0 as usize;
@@ -1088,7 +1137,18 @@ fn declared_bounds(model: &RbcModel) -> std::collections::BTreeMap<&str, Declare
         .filter_map(|variable| {
             let minimum = literal(variable.min);
             let maximum = literal(variable.max);
-            (minimum.is_some() || maximum.is_some()).then(|| {
+            // An array bound is kept too, with no scalar value, so a column
+            // of that array can read its element (`element_bounds`).
+            let array_bound = [variable.min, variable.max]
+                .into_iter()
+                .flatten()
+                .any(|id| {
+                    matches!(
+                        model.expressions.get(id.0 as usize).map(|e| &e.node),
+                        Some(rumoca_bitcode::schema::RbcExprNode::Array { .. })
+                    )
+                });
+            (minimum.is_some() || maximum.is_some() || array_bound).then(|| {
                 (
                     variable.name.as_str(),
                     DeclaredBounds {
@@ -1113,7 +1173,8 @@ fn declared_bounds(model: &RbcModel) -> std::collections::BTreeMap<&str, Declare
 
 /// One resolved trace point: what to observe, and which solver column holds it.
 struct TracePlanRow {
-    id: u32,
+    /// The trace point's id, or `id.k` for element `k` of an array trace.
+    id: String,
     label: String,
     variable: String,
     quantity: String,
@@ -1122,11 +1183,17 @@ struct TracePlanRow {
     column: Option<usize>,
 }
 
+/// One row per published column.
+///
+/// The solver reports an array variable one column per element (`w[1]`), so
+/// a trace point on `w` matched no column and published nothing -- every
+/// array variable was invisible to trace-driven analysis. An array trace
+/// point now publishes each element under its own id `id.k`.
 fn resolve_trace_plan(model: &RbcModel, names: &[String]) -> Vec<TracePlanRow> {
     model
         .trace_points
         .iter()
-        .map(|trace| {
+        .flat_map(|trace| {
             let variable = model
                 .variables
                 .get(trace.variable.0 as usize)
@@ -1142,17 +1209,51 @@ fn resolve_trace_plan(model: &RbcModel, names: &[String]) -> Vec<TracePlanRow> {
                     )
                 })
                 .unwrap_or_default();
-            TracePlanRow {
-                id: trace.id.0,
-                label: trace.label.clone(),
-                column: names.iter().position(|name| *name == variable),
+            let row = |id: String, label: String, variable: String, column| TracePlanRow {
+                id,
+                label,
                 variable,
                 quantity: trace
                     .quantity
                     .map(|quantity| format!("{quantity:?}").to_lowercase())
                     .unwrap_or_default(),
                 unit: trace.unit.clone().unwrap_or_default(),
-                connection,
+                connection: connection.clone(),
+                column,
+            };
+            if let Some(column) = names.iter().position(|name| *name == variable) {
+                return vec![row(
+                    trace.id.0.to_string(),
+                    trace.label.clone(),
+                    variable,
+                    Some(column),
+                )];
+            }
+            let prefix = format!("{variable}[");
+            let elements: Vec<TracePlanRow> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| name.starts_with(&prefix) && name.ends_with(']'))
+                .enumerate()
+                .map(|(k, (column, name))| {
+                    let suffix = &name[variable.len()..];
+                    row(
+                        format!("{}.{}", trace.id.0, k + 1),
+                        format!("{}{suffix}", trace.label),
+                        name.clone(),
+                        Some(column),
+                    )
+                })
+                .collect();
+            if elements.is_empty() {
+                vec![row(
+                    trace.id.0.to_string(),
+                    trace.label.clone(),
+                    variable,
+                    None,
+                )]
+            } else {
+                elements
             }
         })
         .collect()
