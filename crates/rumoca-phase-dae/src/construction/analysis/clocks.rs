@@ -67,19 +67,19 @@ impl ClockPlan {
         span: Span,
     ) -> Option<Result<Self, ToDaeError>> {
         let (source, skip) = self.event()?;
-        let shifted = u32::try_from(counter)
-            .ok()
-            .filter(|_| resolution == 1)
-            .and_then(|counter| skip.checked_add(counter));
-        Some(shifted.map_or_else(
-            || Err(event_clock_conversion("shiftSample", span)),
-            |skip| {
-                Ok(Self {
-                    schedule: ClockSchedule::Event { source, skip },
-                    constructor_span: self.constructor_span,
-                })
-            },
-        ))
+        let Ok(counter) = u32::try_from(counter) else {
+            return Some(Err(event_clock_conversion("shiftSample", span)));
+        };
+        if resolution != 1 {
+            return Some(Err(event_clock_conversion("shiftSample", span)));
+        }
+        let Some(skip) = skip.checked_add(counter) else {
+            return Some(Err(event_clock_conversion("shiftSample", span)));
+        };
+        Some(Ok(Self {
+            schedule: ClockSchedule::Event { source, skip },
+            constructor_span: self.constructor_span,
+        }))
     }
 }
 

@@ -184,11 +184,16 @@ fn expression_clock_plan(
                 counter,
                 resolution,
             } => source_lattice.back_sample(counter, resolution),
-        }
-        .map_err(|source| dae::DaeConstructionError::InvalidClockLattice {
-            source,
-            span: *span,
-        })?;
+        };
+        let lattice = match lattice {
+            Ok(lattice) => lattice,
+            Err(source) => {
+                return Err(dae::DaeConstructionError::InvalidClockLattice {
+                    source,
+                    span: *span,
+                });
+            }
+        };
         return Ok(Some(ClockPlan::periodic(lattice, *span)));
     }
     let mut owner = None;

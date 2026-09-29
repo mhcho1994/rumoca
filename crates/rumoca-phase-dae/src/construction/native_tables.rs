@@ -133,11 +133,11 @@ fn native_table_handles(flat: &flat::Model) -> Vec<NativeTableHandle<'_>> {
 /// state. The runtime requires a finite positive integer id. The map is a
 /// lookup only; nothing iterates it.
 pub(crate) fn native_table_ids(flat: &flat::Model) -> std::collections::HashMap<VarName, u64> {
-    native_table_handles(flat)
-        .into_iter()
-        .enumerate()
-        .map(|(index, handle)| (handle.name.clone(), index as u64 + 1))
-        .collect()
+    let mut ids = std::collections::HashMap::new();
+    for (index, handle) in native_table_handles(flat).into_iter().enumerate() {
+        ids.insert(handle.name.clone(), index as u64 + 1);
+    }
+    ids
 }
 
 /// Fold every native table handle constructor into a loaded table descriptor.

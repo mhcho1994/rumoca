@@ -57,10 +57,10 @@ impl StructuredSolve {
                 && rumoca_eval_solve::projection_policy::affine_elimination_capacity(layout)
                     .is_some()
         });
-        Some(torn.map_or_else(
-            || Self::Sparse(pattern.clone()),
-            |layout| Self::Torn(layout.clone()),
-        ))
+        Some(match torn {
+            Some(layout) => Self::Torn(layout.clone()),
+            None => Self::Sparse(pattern.clone()),
+        })
     }
 }
 

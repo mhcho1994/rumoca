@@ -427,15 +427,16 @@ impl SolveRuntime {
     ) -> Result<ModeSearch, RuntimeSolveError> {
         let limit = self.event_schedule().mode_search_relations();
         let candidates = self.mode_candidates(history, input.p)?;
-        let roots = candidates.iter().map(|(root, _)| *root).collect::<Vec<_>>();
+        let mut roots = Vec::with_capacity(candidates.len());
+        for (root, _) in &candidates {
+            roots.push(*root);
+        }
         if candidates.is_empty() || candidates.len() > limit {
             return Ok(ModeSearch::Unsearched { roots, limit });
         }
         let (base_y, base_p) = (input.y.to_vec(), input.p.to_vec());
         for mode in 0..(1usize << candidates.len()) {
-            let sides = (0..candidates.len())
-                .map(|bit| if mode >> bit & 1 == 1 { 1.0 } else { 0.0 })
-                .collect::<Vec<_>>();
+            let sides = mode_sides(mode, candidates.len());
             if self.mode_is_consistent(&candidates, &sides, input, project_algebraics)? {
                 root_relation_overrides
                     .retain(|(root, _)| !candidates.iter().any(|(c, _)| c == root));
@@ -504,8 +505,10 @@ impl SolveRuntime {
             .filter(|(_, index)| history.iter().any(|(_, prior)| prior[*index] != p[*index]))
             .map(|(root, _)| *root)
             .collect::<Vec<_>>();
-        let neighborhoods = solve::root_neighborhoods(&events.root_conditions)
-            .map_err(|error| RuntimeSolveError::solve_ir(error.to_string()))?;
+        let neighborhoods = match solve::root_neighborhoods(&events.root_conditions) {
+            Ok(neighborhoods) => neighborhoods,
+            Err(error) => return Err(RuntimeSolveError::solve_ir(error.to_string())),
+        };
         let joined = cycling
             .iter()
             .filter_map(|root| neighborhoods.get(*root))
@@ -1224,4 +1227,14 @@ enum ModeSearch {
     /// The cycle has no relation candidates, or more than `limit`, so it was
     /// not searched.
     Unsearched { roots: Vec<usize>, limit: usize },
+}
+
+/// The relation sides one joint mode assigns: bit `k` of `mode` picks the
+/// upper side for candidate `k`.
+fn mode_sides(mode: usize, count: usize) -> Vec<f64> {
+    let mut sides = Vec::with_capacity(count);
+    for bit in 0..count {
+        sides.push(if mode >> bit & 1 == 1 { 1.0 } else { 0.0 });
+    }
+    sides
 }
