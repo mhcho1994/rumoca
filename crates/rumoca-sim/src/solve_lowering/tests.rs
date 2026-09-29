@@ -977,6 +977,47 @@ fn implicit_algebraic_over_fixed_false_parameters_initializes() {
 }
 
 #[test]
+fn algebraic_non_finite_at_parameter_seed_does_not_abort_initialization() {
+    // With d and m at their seeds (0), y selects x^m and its index-reduced
+    // derivative m*x^(m-1) is non-finite at x = 0; the initial equation z = y
+    // reads y. That makes rows non-finite at the seed iterate, not the
+    // initialization a failure: d and m solve and y is 0 at t = 0.
+    let dae = compile(
+        concat!(
+            "model Seeded\n",
+            "  parameter Real d(fixed=false);\n",
+            "  parameter Real m(fixed=false);\n",
+            "  Real x;\n",
+            "  Real y;\n",
+            "  Real z;\n",
+            "initial equation\n",
+            "  d = 0.5;\n",
+            "  m = 0.5;\n",
+            "  z = y;\n",
+            "equation\n",
+            "  x = time;\n",
+            "  y = if abs(x) < d then x else x^m;\n",
+            "  der(z) = der(y);\n",
+            "end Seeded;\n",
+        ),
+        "Seeded",
+    );
+    let options = SimOptions {
+        t_end: 0.4,
+        dt: Some(0.05),
+        ..SimOptions::default()
+    };
+    let result = simulate_dae(&dae, &options).expect("d and m solve past the seed iterate");
+    let column = |name: &str| {
+        let index = result.names.iter().position(|candidate| candidate == name);
+        &result.data[index.expect("result column")]
+    };
+    for (&y, &z) in column("y").iter().zip(column("z")) {
+        assert!((y - z).abs() < 1.0e-6, "z tracks y below the switch: y={y}, z={z}");
+    }
+}
+
+#[test]
 fn fixed_false_parameter_is_solved_from_its_initial_equation() {
     let dae = compile(
         concat!(

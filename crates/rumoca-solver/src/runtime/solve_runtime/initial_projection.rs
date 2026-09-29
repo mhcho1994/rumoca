@@ -409,13 +409,28 @@ impl InitialProjectionModel<'_> {
                 self.tol,
                 self.max_iters,
             )?;
-            self.runtime.refresh_algebraic_and_output_slots(
+            match self.runtime.refresh_algebraic_and_output_slots(
                 t,
                 &mut settled_y,
                 &settled_p,
                 self.tol,
                 self.max_iters,
-            )?;
+            ) {
+                Ok(()) => {}
+                // A coordinate the continuous equations make non-finite at
+                // this iterate -- a `fixed = false` coefficient still at its
+                // seed selecting `dp^m` at `dp = 0` -- is a value of the view,
+                // not a failure of the evaluation: the rows that read it are
+                // non-finite, the rest (the rows that solve the coefficient)
+                // are not, and the projection rejects the iterate row by row.
+                // The complete-residual certificate evaluates this same view,
+                // so a coordinate that stays non-finite still fails
+                // initialization.
+                Err(RuntimeSolveError::NonFiniteValue { .. }) => {
+                    return Ok((settled_y, settled_p));
+                }
+                Err(error) => return Err(error),
+            }
             if pass > 0 && !changed {
                 return Ok((settled_y, settled_p));
             }
