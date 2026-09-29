@@ -286,8 +286,11 @@ fn power_result(
     {
         return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
     }
+    // Scalar exponentiation is Real even over Integer operands (SPEC_0022
+    // TYPE-034, MLS §6.7); a matrix power is repeated multiplication and
+    // keeps its element type.
     Ok(ValueType::array(
-        promoted_numeric_scalar(lhs.scalar_type(), rhs.scalar_type(), false),
+        promoted_numeric_scalar(lhs.scalar_type(), rhs.scalar_type(), lhs.is_scalar()),
         lhs.dimensions().to_vec(),
     ))
 }
@@ -311,7 +314,10 @@ fn elementwise_result(
         promoted_numeric_scalar(
             lhs.scalar_type(),
             rhs.scalar_type(),
-            matches!(operator, BinaryOperator::ElementwiseDivide),
+            matches!(
+                operator,
+                BinaryOperator::ElementwiseDivide | BinaryOperator::ElementwisePower
+            ),
         ),
         dimensions.to_vec(),
     ))

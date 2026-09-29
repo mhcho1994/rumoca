@@ -953,6 +953,9 @@ pub enum SolveStringConversionFormat {
 pub enum SolveEventActionKind {
     Assert,
     Terminate,
+    /// `assert(..., level = AssertionLevel.warning)`: a violation is reported
+    /// and the simulation continues (MLS §8.3.7).
+    Warning,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

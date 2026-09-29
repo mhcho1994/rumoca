@@ -1173,6 +1173,14 @@ pub fn event_action_request_from_values(
                     message: eval_event_action_message(action, y, p, t, context)?,
                 });
             }
+            SolveEventActionKind::Warning => {
+                let message = eval_event_action_message(action, y, p, t, context)?;
+                tracing::warn!(
+                    target: "rumoca_eval_solve::assert",
+                    time = t,
+                    "assertion warning: {message}"
+                );
+            }
         }
     }
     Ok(EventActionRequest::Continue)

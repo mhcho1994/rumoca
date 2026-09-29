@@ -25,10 +25,15 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             .expression(rhs)
             .expect("checked rhs resolves")
             .value_type();
-        let division = matches!(
-            operator,
-            dae::BinaryOperator::Divide | dae::BinaryOperator::ElementwiseDivide
-        );
+        // Division and scalar exponentiation are Real over Integer operands
+        // (SPEC_0022 TYPE-034); Solve's Divide and Power accept only Real.
+        let real_result = match operator {
+            dae::BinaryOperator::Divide
+            | dae::BinaryOperator::ElementwiseDivide
+            | dae::BinaryOperator::ElementwisePower => true,
+            dae::BinaryOperator::Power => lhs_type.is_scalar(),
+            _ => false,
+        };
         let lhs_integral = matches!(
             lhs_type.scalar_type(),
             dae::ScalarType::Integer | dae::ScalarType::Enumeration
@@ -37,14 +42,14 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             rhs_type.scalar_type(),
             dae::ScalarType::Integer | dae::ScalarType::Enumeration
         );
-        if lhs_integral && (division || rhs_type.scalar_type() == dae::ScalarType::Real) {
+        if lhs_integral && (real_result || rhs_type.scalar_type() == dae::ScalarType::Real) {
             lhs_value = self.builder.convert(
                 solve::SolveConversionOperator::IntegerToReal,
                 lhs_value,
                 at,
             )?;
         }
-        if rhs_integral && (division || lhs_type.scalar_type() == dae::ScalarType::Real) {
+        if rhs_integral && (real_result || lhs_type.scalar_type() == dae::ScalarType::Real) {
             rhs_value = self.builder.convert(
                 solve::SolveConversionOperator::IntegerToReal,
                 rhs_value,

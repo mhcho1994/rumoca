@@ -12,6 +12,7 @@ mod input_batches;
 #[cfg(all(feature = "solver-diffsol", feature = "solver-rk45"))]
 mod parameter_bindings;
 mod structure_report;
+mod summed_derivatives;
 #[cfg(feature = "solver-rk45")]
 mod zero_state_batch;
 
@@ -365,6 +366,33 @@ fn checked_assertion_fails_with_its_source_message() {
         .expect_err("a checked failing assertion must stop instead of returning a plausible trace");
 
     assert!(error.to_string().contains("bound violated"), "{error}");
+}
+
+#[test]
+fn warning_level_assertion_reports_and_continues_while_error_level_stops() {
+    let source = |level: &str| {
+        format!(
+            "model LeveledAssertion\n  Real x(start=0);\nequation\n  der(x) = 1;\n  \
+             assert(x < 0.25, \"bound violated\", AssertionLevel.{level});\nend LeveledAssertion;\n"
+        )
+    };
+    let options = SimOptions {
+        t_end: 1.0,
+        dt: Some(0.05),
+        ..SimOptions::default()
+    };
+
+    let warning = compile(&source("warning"), "LeveledAssertion");
+    let result = simulate_dae(&warning, &options)
+        .expect("a warning-level assertion must not stop the simulation");
+    let x = result.names.iter().position(|name| name == "x").expect("x column");
+    let last = *result.data[x].last().expect("trajectory sample");
+    assert!((last - 1.0).abs() < 1.0e-8, "x(1) = {last}");
+
+    let error = compile(&source("error"), "LeveledAssertion");
+    let failure = simulate_dae(&error, &options)
+        .expect_err("an error-level assertion must stop the simulation");
+    assert!(failure.to_string().contains("bound violated"), "{failure}");
 }
 
 #[test]

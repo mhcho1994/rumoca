@@ -1215,12 +1215,7 @@ fn lower_event_actions<'dae>(
     for (_, action) in view.event_actions() {
         match action.operation() {
             dae::EventActionOperation::Assert { message, level } => {
-                if level.is_some() {
-                    return Err(LowerError::unsupported(
-                        "assertion levels do not yet have checked Solve lowering",
-                        action.provenance().span(),
-                    ));
-                }
+                let kind = assertion_kind(view, level, action.provenance().span())?;
                 push_message_action(
                     MessageActionContext {
                         view,
@@ -1229,7 +1224,7 @@ fn lower_event_actions<'dae>(
                     },
                     action,
                     message,
-                    solve::SolveEventActionKind::Assert,
+                    kind,
                     actions,
                     action_conditions,
                 )?;
@@ -1268,6 +1263,32 @@ fn lower_event_actions<'dae>(
         &updates,
         solve::DiscreteRowRole::EventAction,
     )
+}
+
+/// The event action an `assert` lowers to, from its `level` argument.
+///
+/// The predefined `AssertionLevel` is `enumeration(warning, error)` (MLS
+/// §4.9.7, declared by the flattener), so a level is the ordinal 1 or 2. It must be known at translation time: which kind of action
+/// a violation is decides whether the simulation stops.
+fn assertion_kind<'dae>(
+    view: dae::DaeView<'dae>,
+    level: Option<dae::ExprId<'dae>>,
+    span: Span,
+) -> Result<solve::SolveEventActionKind, LowerError> {
+    let Some(level) = level else {
+        return Ok(solve::SolveEventActionKind::Assert);
+    };
+    let unsupported = || {
+        LowerError::unsupported(
+            "assertion level is not a translation-time AssertionLevel value",
+            span,
+        )
+    };
+    match super::ScalarSelector::new(view, None).constant_real(level, 0) {
+        Ok(value) if value == 1.0 => Ok(solve::SolveEventActionKind::Warning),
+        Ok(value) if value == 2.0 => Ok(solve::SolveEventActionKind::Assert),
+        _ => Err(unsupported()),
+    }
 }
 
 #[derive(Clone, Copy)]
