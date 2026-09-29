@@ -39,11 +39,6 @@ impl CoSimulationStepPlan {
         method: CoSimulationMethod::ClassicalRk4,
         substep: CoSimulationSubstep::CommunicationStep,
     };
-
-    #[must_use]
-    pub const fn method(&self) -> CoSimulationMethod {
-        self.method
-    }
 }
 
 #[cfg(test)]

@@ -699,7 +699,7 @@ impl StructuralPattern {
         let capacity = self.nonzero_upper_bound().unwrap_or(0);
         let mut coordinates = Vec::with_capacity(capacity);
         for row in 0..self.rows as usize {
-            self.visit_row_columns(row, |column| coordinates.push((row, column)));
+            self.visit_row_columns(row, &mut |column| coordinates.push((row, column)));
         }
         coordinates
     }
@@ -707,12 +707,12 @@ impl StructuralPattern {
     /// Visit the certified columns in one row without materializing the
     /// complete sparse relation. Columns are yielded in ascending order.
     #[inline]
-    pub fn visit_row_columns(&self, row: usize, mut visitor: impl FnMut(usize)) {
+    pub fn visit_row_columns(&self, row: usize, visitor: &mut dyn FnMut(usize)) {
         debug_assert!(row < self.rows as usize);
         match &self.representation {
             PatternRepresentation::Empty => {}
             PatternRepresentation::Full => {
-                (0..self.columns as usize).for_each(&mut visitor);
+                (0..self.columns as usize).for_each(&mut *visitor);
             }
             PatternRepresentation::Diagonal => {
                 if row < self.columns as usize {
@@ -728,7 +728,7 @@ impl StructuralPattern {
                     .saturating_add(*upper_bandwidth as usize)
                     .saturating_add(1)
                     .min(self.columns as usize);
-                (start..end).for_each(&mut visitor);
+                (start..end).for_each(&mut *visitor);
             }
             PatternRepresentation::Csr {
                 row_offsets,
@@ -747,7 +747,7 @@ impl StructuralPattern {
             } => {
                 if let Some(columns) = affine_columns_for_row(domain, *row_start, column_maps, row)
                 {
-                    columns.into_iter().for_each(&mut visitor);
+                    columns.into_iter().for_each(&mut *visitor);
                 }
             }
         }
@@ -1009,7 +1009,7 @@ impl StructuralPattern {
             } => append_csr_column_rows(&mut columns, row_offsets, column_indices),
             PatternRepresentation::Affine { .. } => {
                 for row in 0..self.rows as usize {
-                    self.visit_row_columns(row, |column| columns[column].push(row));
+                    self.visit_row_columns(row, &mut |column| columns[column].push(row));
                 }
             }
         }

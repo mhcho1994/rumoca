@@ -44,23 +44,21 @@ end Impulse;
 "#;
 
 fn initial(model: &str, name: &str) -> f64 {
-    let compiled = Compiler::new()
-        .model(model)
-        .compile_str(MODELS, "Impulse.mo")
-        .unwrap_or_else(|error| panic!("{model} should compile: {error:?}"));
-    let result = simulate_dae(
-        &compiled.dae,
-        &SimOptions {
-            t_end: 1e-4,
-            ..SimOptions::default()
-        },
-    )
-    .unwrap_or_else(|error| panic!("{model} should simulate: {error:?}"));
-    let column = result
-        .names
-        .iter()
-        .position(|candidate| candidate == name)
-        .unwrap_or_else(|| panic!("{name} is recorded"));
+    let compiled = match Compiler::new().model(model).compile_str(MODELS, "Impulse.mo") {
+        Ok(compiled) => compiled,
+        Err(error) => panic!("{model} should compile: {error:?}"),
+    };
+    let options = SimOptions {
+        t_end: 1e-4,
+        ..SimOptions::default()
+    };
+    let result = match simulate_dae(&compiled.dae, &options) {
+        Ok(result) => result,
+        Err(error) => panic!("{model} should simulate: {error:?}"),
+    };
+    let Some(column) = result.names.iter().position(|candidate| candidate == name) else {
+        panic!("{name} is recorded");
+    };
     result.data[column][0]
 }
 

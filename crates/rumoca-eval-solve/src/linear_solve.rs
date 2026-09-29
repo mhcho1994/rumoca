@@ -149,7 +149,7 @@ fn solve_sparse_unchecked(
     }
     let mut matrix = AugmentedMatrix::zeroed(n)?;
     for row in 0..n {
-        pattern.visit_row_columns(row, |column| {
+        pattern.visit_row_columns(row, &mut |column| {
             let offset = row * n + column;
             matrix.set(row, column, regs[matrix_start as usize + offset]);
         });

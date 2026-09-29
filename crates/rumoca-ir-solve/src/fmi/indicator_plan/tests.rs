@@ -290,3 +290,38 @@ fn a_descending_inventory_source_is_refused() {
         }
     );
 }
+
+#[test]
+fn every_rejection_names_its_source_in_the_error_text() {
+    let rejections = [
+        IndicatorPlanRejection::RootIndexOutOfRange,
+        IndicatorPlanRejection::DeadlineIndexOutOfRange,
+        IndicatorPlanRejection::DelayIndexOutOfRange,
+        IndicatorPlanRejection::SourceKindOutOfOrder,
+        IndicatorPlanRejection::SourceIndexNotAscending,
+    ];
+    let mut texts = std::collections::BTreeSet::new();
+    for rejection in rejections {
+        let error = IndicatorPlanError {
+            position: 3,
+            rejection,
+        };
+        let text = error.to_string();
+        assert!(text.starts_with("FMI event-indicator 3 is unusable: "));
+        texts.insert(text);
+    }
+    assert_eq!(texts.len(), rejections.len());
+}
+
+#[test]
+fn a_plan_without_entries_is_empty() {
+    let plan = FmiIndicatorPlan {
+        entries: Box::default(),
+        relation_memory_targets: Box::default(),
+        root_value_count: 0,
+        root_value_len: 0,
+        deadline_len: 0,
+    };
+    assert!(plan.is_empty());
+    assert_eq!(plan.len(), 0);
+}

@@ -17,7 +17,7 @@ pub fn for_each_expression<'dae>(
     root: ExprId<'dae>,
     mut visit: impl FnMut(ExprId<'dae>, ExpressionView<'dae>),
 ) {
-    for_each_expression_pruned(dae, root, |expression, node| {
+    walk_root(dae, root, &mut |expression, node| {
         visit(expression, node);
         true
     });
@@ -36,8 +36,18 @@ pub fn for_each_expression_pruned<'dae>(
     root: ExprId<'dae>,
     mut visit: impl FnMut(ExprId<'dae>, ExpressionView<'dae>) -> bool,
 ) {
-    with_shared_stamps(dae, |stamps| {
-        walk_pruned(dae, stamps, &mut vec![root], |id, node| {
+    walk_root(dae, root, &mut visit);
+}
+
+/// One shared walker for every visitor type, so callers do not each compile a
+/// copy of the traversal.
+fn walk_root<'dae>(
+    dae: DaeView<'dae>,
+    root: ExprId<'dae>,
+    visit: &mut dyn FnMut(ExprId<'dae>, ExpressionView<'dae>) -> bool,
+) {
+    with_shared_stamps(dae, &mut |stamps| {
+        walk_pruned(dae, stamps, &mut vec![root], &mut |id, node| {
             Some(visit(id, node))
         });
     });
@@ -50,7 +60,7 @@ fn walk_pruned<'dae>(
     dae: DaeView<'dae>,
     stamps: &mut StampTable,
     pending: &mut Vec<ExprId<'dae>>,
-    mut visit: impl FnMut(ExprId<'dae>, ExpressionView<'dae>) -> Option<bool>,
+    visit: &mut dyn FnMut(ExprId<'dae>, ExpressionView<'dae>) -> Option<bool>,
 ) -> bool {
     while let Some(expression) = pending.pop() {
         if !stamps.mark(expression) {
@@ -104,7 +114,7 @@ thread_local! {
     static SHARED_STAMPS: std::cell::RefCell<StampTable> = std::cell::RefCell::default();
 }
 
-fn with_shared_stamps<R>(dae: DaeView<'_>, walk: impl FnOnce(&mut StampTable) -> R) -> R {
+fn with_shared_stamps(dae: DaeView<'_>, walk: &mut dyn FnMut(&mut StampTable)) {
     SHARED_STAMPS.with(|shared| {
         let (mut borrowed, mut own);
         let table: &mut StampTable = if let Ok(table) = shared.try_borrow_mut() {
@@ -166,7 +176,7 @@ impl<'dae> ExpressionTraversal<'dae> {
         self.pending.clear();
         self.pending.extend(roots);
         self.pending.reverse();
-        walk_pruned(dae, &mut self.stamps, &mut self.pending, |id, node| {
+        walk_pruned(dae, &mut self.stamps, &mut self.pending, &mut |id, node| {
             Some(visit(id, node))
         });
     }
@@ -239,11 +249,13 @@ fn expression_any<'dae>(
     root: ExprId<'dae>,
     mut predicate: impl FnMut(ExpressionView<'dae>) -> bool,
 ) -> bool {
-    with_shared_stamps(dae, |stamps| {
-        walk_pruned(dae, stamps, &mut vec![root], |_, node| {
+    let mut found = false;
+    with_shared_stamps(dae, &mut |stamps| {
+        found = walk_pruned(dae, stamps, &mut vec![root], &mut |_, node| {
             (!predicate(node)).then_some(true)
-        })
-    })
+        });
+    });
+    found
 }
 
 fn push_children<'dae>(

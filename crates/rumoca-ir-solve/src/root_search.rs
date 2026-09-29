@@ -229,6 +229,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_plan_without_roles_is_empty() {
+        let plan = RootSearchPlan { roles: Box::default() };
+        assert!(plan.is_empty());
+        assert_eq!(plan.len(), 0);
+    }
+
+    #[test]
     fn continuous_static_root_uses_certified_tensor_dependency_flow() {
         let parameter_tensor_root = vec![
             crate::LinearOp::TensorLoad {

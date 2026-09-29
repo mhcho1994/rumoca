@@ -146,7 +146,7 @@ impl Csr {
         let mut col_idx = Vec::new();
         let mut positions = BTreeMap::new();
         for row in 0..n {
-            pattern.visit_row_columns(row, |column| {
+            pattern.visit_row_columns(row, &mut |column| {
                 positions.insert((row, column), col_idx.len());
                 col_idx.push(column);
             });

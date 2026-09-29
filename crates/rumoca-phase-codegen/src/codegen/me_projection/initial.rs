@@ -121,7 +121,7 @@ pub(super) fn initialization_value(
         {
             let (mut row_ptr, mut col_idx) = (vec![0], Vec::new());
             for row in 0..n {
-                pattern.visit_row_columns(row, |column| col_idx.push(column));
+                pattern.visit_row_columns(row, &mut |column| col_idx.push(column));
                 row_ptr.push(col_idx.len());
             }
             record.pattern = true;

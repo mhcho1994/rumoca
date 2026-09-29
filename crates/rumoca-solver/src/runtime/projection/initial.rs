@@ -1223,7 +1223,7 @@ fn fill_reverse_projection_row(jacobian: &mut DMatrix<f64>, input: ReverseProjec
         }
         return;
     };
-    structure.visit_row_columns(row, |column| {
+    structure.visit_row_columns(row, &mut |column| {
         jacobian[(row, column)] = gradient[y_indices[column]];
     });
 }

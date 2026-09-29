@@ -73,7 +73,7 @@ impl AffineEliminationLayout {
         let row_columns = (0..n)
             .map(|row| {
                 let mut columns = Vec::new();
-                pattern.visit_row_columns(row, |column| columns.push(column));
+                pattern.visit_row_columns(row, &mut |column| columns.push(column));
                 columns.into_boxed_slice()
             })
             .collect();
@@ -174,7 +174,7 @@ fn append_zero_guards(
     known_columns: &[bool],
     guards: &mut Vec<(usize, usize)>,
 ) {
-    pattern.visit_row_columns(row, |dependency| {
+    pattern.visit_row_columns(row, &mut |dependency| {
         if !known_columns[dependency] {
             guards.push((row, dependency));
         }

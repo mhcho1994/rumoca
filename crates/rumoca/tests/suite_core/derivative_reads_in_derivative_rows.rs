@@ -30,24 +30,23 @@ end DerRead;
 "#;
 
 fn final_y(model: &str) -> f64 {
-    let compiled = Compiler::new()
-        .model(model)
-        .compile_str(MODELS, "DerRead.mo")
-        .unwrap_or_else(|error| panic!("{model} compiles: {error:?}"));
-    let result: SimResult = simulate_dae_with_diagnostics(
-        &compiled.dae,
-        &SimOptions {
-            t_end: 1.0,
-            ..SimOptions::default()
-        },
-    )
-    .unwrap_or_else(|error| panic!("{model} simulates: {error:?}"));
-    let index = result
-        .names
-        .iter()
-        .position(|name| name == "y")
-        .expect("y is recorded");
-    *result.data[index].last().expect("a sample")
+    let compiled = match Compiler::new().model(model).compile_str(MODELS, "DerRead.mo") {
+        Ok(compiled) => compiled,
+        Err(error) => panic!("{model} compiles: {error:?}"),
+    };
+    let options = SimOptions {
+        t_end: 1.0,
+        ..SimOptions::default()
+    };
+    let result: SimResult = match simulate_dae_with_diagnostics(&compiled.dae, &options) {
+        Ok(result) => result,
+        Err(error) => panic!("{model} simulates: {error:?}"),
+    };
+    let index = result.names.iter().position(|name| name == "y");
+    let (Some(_), Some(last)) = (index, index.and_then(|i| result.data[i].last())) else {
+        panic!("y is recorded with at least one sample");
+    };
+    *last
 }
 
 #[test]

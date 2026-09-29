@@ -125,7 +125,7 @@ fn affine_block_jacobian<M: ImplicitProjectionModel>(
                 debug_assert_eq!(retained.shape(), shape);
                 let pattern = structure.pattern();
                 for row in 0..shape.0 {
-                    pattern.visit_row_columns(row, |column| retained[(row, column)] = 0.0);
+                    pattern.visit_row_columns(row, &mut |column| retained[(row, column)] = 0.0);
                 }
                 retained
             }),

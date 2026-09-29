@@ -1143,12 +1143,13 @@ end FmiUndelayedDecay;
     fn fmi_targets_render_state_events_in_the_scalar_event_profile() {
         let result = compile_switched_target_demo();
         for target in ["fmi2", "fmi3"] {
-            let files = render_target_files(&result, "FmiSwitchedDecay", target, None)
-                .unwrap_or_else(|error| panic!("{target}: {error:#}"));
-            let model = files
-                .iter()
-                .find(|file| file.path.ends_with("model.c"))
-                .unwrap_or_else(|| panic!("{target} renders model.c"));
+            let files = match render_target_files(&result, "FmiSwitchedDecay", target, None) {
+                Ok(files) => files,
+                Err(error) => panic!("{target}: {error:#}"),
+            };
+            let Some(model) = files.iter().find(|file| file.path.ends_with("model.c")) else {
+                panic!("{target} renders model.c");
+            };
             assert!(model.content.contains("rmc_event_indicators"), "{target}");
         }
     }

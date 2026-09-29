@@ -44,7 +44,7 @@ fn fixed(index: u32) -> TensorUpdateSubscript {
 fn assert_rows(pattern: &StructuralPattern, expected: &[&[usize]]) {
     for (row, &columns) in expected.iter().enumerate() {
         let mut actual = Vec::new();
-        pattern.visit_row_columns(row, |column| actual.push(column));
+        pattern.visit_row_columns(row, &mut |column| actual.push(column));
         assert_eq!(actual, columns, "output {row}");
     }
 }
