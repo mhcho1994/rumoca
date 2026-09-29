@@ -109,6 +109,49 @@ Each step is measurable against the corpus: the count of artifacts carrying
 an `Unsupported` node, and the count that survive `compile-bitcode`, should
 fall monotonically to zero for the forms handled so far.
 
+## Import: the obstacle is import's phase order, not the API
+
+The export half is done and measured. Import is not, and what stands in the
+way is worth recording because it is not what it looks like.
+
+**It is not a missing API.** `DaeConstruction::function(signature, build)`
+and `recursive_functions` are public, and so is the body-building surface
+they hand out: `functions.output`, `.local`, `.begin`, `.assign`,
+`.define`, `.begin_loop`, `.assign_loop`, `.assign_conditional_all`.
+Everything a body needs can be built from outside the crate.
+
+**It is import's phase order.** `rebuild` runs types, variables, domains,
+conditions, clocks, then the whole expression arena in one pass, then
+equations. A carried body breaks that shape in both directions:
+
+- an `RbcExprNode::FunctionValue` in the arena names a value that does not
+  exist until its function is under construction, and
+- that function's own statements need expressions, which the arena pass has
+  not finished producing.
+
+So the two must interleave: reconstruct each function alongside the
+expressions its body references, in call-graph order, before the equation
+expressions that call it. `RbcFunction::calls` (36716d4d) already gives the
+order, and `check_call_graph_acyclic` already proves it is a valid one.
+
+Until then import refuses these nodes with a message saying exactly that,
+rather than inventing a node whose meaning is not what the source said.
+Note that import has *never* reconstructed a function: even a plain
+`RbcExprNode::Call` is refused today, on the grounds that bitcode carried
+declarations and not bodies. That reason no longer holds, so the same work
+that lands bodies also lands calls.
+
+### Staging for import
+
+1. Reconstruct function *declarations* in call-graph order, so a `Call`
+   resolves to a real `FunctionId`.
+2. Interleave expression reconstruction with body construction: a function's
+   own statements first, then the equation expressions that name it.
+3. Folds and conditionals, reusing `begin_loop` and
+   `assign_conditional_all`.
+4. Re-measure: `compile-bitcode` successes over the corpus, which was
+   77/120 before this work and is bounded by exactly this gap after it.
+
 ## What this does not do
 
 It does not make the frontend minimal by itself. It removes the reason the
