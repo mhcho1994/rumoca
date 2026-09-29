@@ -1041,9 +1041,7 @@ pub(crate) fn finalize_flat_model(
     );
 
     collapse_index_refs_to_known_varrefs(flat);
-    inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
     ctx.seed_expanded_component_keys(flat);
-    substitute_known_constants_in_flat(flat, ctx)?;
     ctx.build_parameter_lookup(flat, tree);
     if ctx.recompute_symbolic_component_dimensions(flat, overlay, tree)? {
         ctx.build_parameter_lookup(flat, tree);
@@ -1060,16 +1058,6 @@ pub(crate) fn finalize_flat_model(
         &ctx.component_members,
     )?;
     if collected_new_functions {
-        mark_record_constructor_calls(flat, tree);
-        inject_referenced_qualified_class_constants(
-            tree,
-            class_index,
-            model_name,
-            flat,
-            overlay,
-            ctx,
-        )?;
-        substitute_known_constants_in_flat(flat, ctx)?;
         mark_record_constructor_calls(flat, tree);
         collapse_index_refs_to_known_varrefs(flat);
     }
