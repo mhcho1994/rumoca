@@ -734,6 +734,12 @@ fn expression_node(
             value: check(value)?,
             subscripts: subscripts_of(subscripts, &check)?,
         },
+        // Values inside a function body: see `function_body`.
+        ref inner @ (dae::ExpressionOperation::FunctionValue { .. }
+        | dae::ExpressionOperation::FunctionFoldParameter { .. }
+        | dae::ExpressionOperation::FunctionFoldOutput { .. }) => {
+            function_body::function_node(inner)?
+        }
         other => unsupported(
             &format!(
                 "expression form {} not in bitcode v2",
@@ -1132,16 +1138,19 @@ fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunctio
                 .iter()
                 .map(|ty| TypeId(ty.index()))
                 .collect();
-            let body = match function.external() {
-                Some(external) => RbcFunctionBody::External {
-                    language: format!("{:?}", external.language()).to_lowercase(),
-                    symbol: external.symbol().to_string(),
-                },
+            let (body, folds) = match function.external() {
+                Some(external) => (
+                    RbcFunctionBody::External {
+                        language: format!("{:?}", external.language()).to_lowercase(),
+                        symbol: external.symbol().to_string(),
+                    },
+                    Vec::new(),
+                ),
                 // A Modelica body is carried when every statement in it is a
                 // form this schema version holds. Partial bodies are not
                 // emitted: half a body is worse than none, because a
                 // consumer cannot tell which half is missing.
-                None => export_function_body(function),
+                None => export_function_body(view, function),
             };
             Some(RbcFunction {
                 id: FunctionId(index as u32),
@@ -1155,6 +1164,7 @@ fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunctio
                     rumoca_core::InlineAnnotation::Never => RbcInline::Never,
                 },
                 body,
+                folds,
                 declaration: ctx.provenance(function.declaration()),
             })
         })

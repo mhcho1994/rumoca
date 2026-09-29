@@ -1132,6 +1132,15 @@ impl<'dae> FunctionFoldView<'dae> {
         };
     }
 
+    /// Owner-local ordinal of the lexically enclosing fold, when nested.
+    ///
+    /// The ordinal rather than an id because a consumer that serializes the
+    /// fold table addresses parents by position within one function, which
+    /// is how the entry itself stores it.
+    pub fn parent_ordinal(self) -> Option<u32> {
+        self.entry.parent
+    }
+
     pub fn targets(self) -> impl ExactSizeIterator<Item = FunctionValueId<'dae>> {
         self.entry
             .targets

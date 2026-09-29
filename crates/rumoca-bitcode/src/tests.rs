@@ -1011,6 +1011,13 @@ fn cost_of_node(node: &RbcExprNode) -> Cost {
         RbcExprNode::ArrayUpdate { .. } => Cost::Bounded,
         // A call names a function whose body this artifact does not carry.
         RbcExprNode::Call { .. } => Cost::Opaque,
+        // Leaves. Each reads one value a function body already defined,
+        // named by owner-local ordinal: no operand to walk and no
+        // iteration. The cost of *producing* that value is the body's, and
+        // `cost_of_body` classifies it there.
+        RbcExprNode::FunctionValue { .. }
+        | RbcExprNode::FunctionFoldParameter { .. }
+        | RbcExprNode::FunctionFoldOutput { .. } => Cost::Bounded,
         RbcExprNode::Unsupported { .. } => Cost::Opaque,
     }
 }

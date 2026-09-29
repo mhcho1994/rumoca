@@ -500,6 +500,22 @@ fn build_expression<'dae>(
     at: dae::DaeProvenance,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
     Ok(match &expression.node {
+        // Carried by the artifact, not yet rebuilt into a DAE.
+        //
+        // These name a value inside a function body, so reconstructing one
+        // means driving the DAE's function-body construction from the
+        // artifact -- the remaining step of
+        // docs/design/carry-function-bodies.md. Refusing here is the honest
+        // outcome: the alternative is inventing a node whose meaning is not
+        // what the source said.
+        RbcExprNode::FunctionValue { .. }
+        | RbcExprNode::FunctionFoldParameter { .. }
+        | RbcExprNode::FunctionFoldOutput { .. } => {
+            return Err(ctx.unsupported(
+                "function-body value: the artifact carries it, but rebuilding a \
+                 DAE from a carried body is not implemented yet",
+            ));
+        }
         RbcExprNode::StringConversion { value, format } => {
             let value = resolve(built, value.0, "expression", ctx)?;
             owner.at(at).string_conversion(

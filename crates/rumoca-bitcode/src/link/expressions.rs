@@ -22,6 +22,13 @@ impl Shift for RbcExprNode {
                 }
             }
             Self::Literal { .. } => {}
+            // `value`, `fold`, `carried` and `definition` are owner-local
+            // ordinals *within* a function, so linking must not rebase them.
+            // Only the owning `FunctionId` moves, and shifting it is what
+            // relocates the whole reference.
+            Self::FunctionValue { function, .. }
+            | Self::FunctionFoldParameter { function, .. }
+            | Self::FunctionFoldOutput { function, .. } => function.shift(m)?,
             Self::Unsupported { detail } => {
                 return Err(super::LinkError(format!(
                     "unsupported expression: {detail}"

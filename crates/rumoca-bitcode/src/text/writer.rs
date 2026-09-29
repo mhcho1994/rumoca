@@ -565,6 +565,13 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
                         .collect::<Vec<_>>()
                         .join(" ")
                 ),
+                // The text profile carries no function bodies, so it cannot
+                // render a reference into one. `emit-text` refuses such an
+                // artifact outright; this keeps the listing honest if it is
+                // ever reached another way.
+                RbcExprNode::FunctionValue { .. }
+                | RbcExprNode::FunctionFoldParameter { .. }
+                | RbcExprNode::FunctionFoldOutput { .. } => "function-body-value".to_string(),
                 RbcExprNode::Unsupported { detail } => format!("unsupported {}", quote(detail)),
             };
             let _ = writeln!(

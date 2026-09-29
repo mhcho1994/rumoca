@@ -795,6 +795,37 @@ pub enum RbcExprNode {
         output: u32,
         arguments: Vec<ExprId>,
     },
+    /// Read a value defined inside a function body.
+    ///
+    /// Representable only because bodies are now carried: the value this
+    /// names is one of `RbcFunction::body`'s definitions, addressed by the
+    /// owner-local ordinal the DAE uses. While bodies were elided there was
+    /// nothing for it to refer to, which is why it was `Unsupported` -- and
+    /// why 97% of unrepresentable nodes across eleven libraries were this
+    /// one form.
+    FunctionValue {
+        function: FunctionId,
+        /// Owner-local ordinal of the value.
+        value: u32,
+        /// Owner-local ordinal of the SSA definition that produced it.
+        definition: u32,
+    },
+    /// Read a fold's carried parameter at the current iteration.
+    FunctionFoldParameter {
+        function: FunctionId,
+        /// Owner-local ordinal of the fold.
+        fold: u32,
+        /// Position within the carried tuple.
+        carried: u32,
+        definition: u32,
+    },
+    /// Read a fold's carried output after the last iteration.
+    FunctionFoldOutput {
+        function: FunctionId,
+        fold: u32,
+        carried: u32,
+        definition: u32,
+    },
     /// A node this schema version cannot represent. A consumer must treat the
     /// containing model as not fully understood rather than assume a default.
     /// Producers only emit this when explicitly asked to tolerate gaps.
@@ -1063,6 +1094,12 @@ pub struct RbcFunction {
     /// The MLS §18.3 `Inline`/`LateInline` request the declaration wrote.
     pub inline: RbcInline,
     pub body: RbcFunctionBody,
+    /// Bounded loops this body contains, addressed by owner-local ordinal.
+    ///
+    /// Beside the statements rather than inside them so a nested fold can
+    /// name its parent by ordinal, which is how the DAE addresses them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folds: Vec<RbcFunctionFold>,
     /// Functions this one calls, in first-seen order.
     ///
     /// A call inside an *equation* is already visible: `RbcExprNode::Call`
@@ -1143,6 +1180,80 @@ pub enum RbcFunctionStatement {
     },
     /// An MLS §8.3.7 assertion inside the body.
     Assertion { condition: ExprId, message: ExprId },
+    /// Several values defined together, optionally under a shared branch.
+    ///
+    /// One statement rather than a run of assignments because the branch
+    /// correlation is shared: every value takes its result from the *same*
+    /// selected branch. Splitting them would let a consumer pick different
+    /// branches for different values, which is a different program.
+    AssignmentGroup {
+        /// Owner-local ordinals of the values defined, in order.
+        values: Vec<u32>,
+        /// Absent when the group is unconditional.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conditional: Option<RbcFunctionConditional>,
+        /// One expression per value when unconditional; empty when the
+        /// values come from `conditional` instead.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        expressions: Vec<ExprId>,
+    },
+    /// A bounded loop. `fold` is an owner-local ordinal into the function's
+    /// fold table, which carries the transition; the body is here, because
+    /// that is where the DAE keeps it and a second home would let the two
+    /// disagree about what the loop runs.
+    For {
+        fold: u32,
+        statements: Vec<RbcFunctionStatement>,
+    },
+}
+
+/// A fold over a compact domain: the bounded loop a function body can hold.
+///
+/// Not a general loop. The domain fixes the trip count before evaluation,
+/// exactly as `RbcExprNode::Comprehension` does, which is why carrying a
+/// body does not reintroduce unbounded iteration. The four definition
+/// groups are the transition: `parameters` bind the binder values,
+/// `initial` seeds the carried tuple, `update` produces the next one, and
+/// `output` reads the result out after the last iteration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RbcFunctionFold {
+    /// Owner-local ordinal, so a nested fold can name its parent.
+    pub ordinal: u32,
+    /// The compact domain iterated; fixes the trip count.
+    pub domain: DomainId,
+    /// Owner-local ordinal of the lexically enclosing fold, when nested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
+    /// Values carried from one iteration to the next.
+    pub targets: Vec<u32>,
+    /// Values defined afresh each iteration: in the transition region, but
+    /// neither seeded from nor returned in the carried tuple.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iteration_locals: Vec<u32>,
+    pub parameters: Vec<RbcFunctionDefinition>,
+    pub initial: Vec<RbcFunctionDefinition>,
+    pub update: Vec<RbcFunctionDefinition>,
+    pub output: Vec<RbcFunctionDefinition>,
+}
+
+/// One SSA definition inside a fold's transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RbcFunctionDefinition {
+    /// Owner-local ordinal of the value defined.
+    pub value: u32,
+    pub expression: ExprId,
+}
+
+/// Shared branch correlation for one grouped assignment.
+///
+/// `conditions[i]` selects `branches[i]`; `fallback` is the `else`. Each
+/// branch supplies one expression per value in the group, so the arity is
+/// checked rather than assumed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RbcFunctionConditional {
+    pub conditions: Vec<ExprId>,
+    pub branches: Vec<Vec<ExprId>>,
+    pub fallback: Vec<ExprId>,
 }
 
 /// Identifies one structured equation family.

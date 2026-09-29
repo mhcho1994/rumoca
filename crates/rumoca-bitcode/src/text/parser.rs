@@ -570,6 +570,10 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
                 RbcInline::Unstated
             };
             model.functions.push(RbcFunction {
+                // The text profile does not carry bodies, so it carries no
+                // folds either; `emit-text` refuses an artifact whose body
+                // it cannot represent rather than writing an empty one.
+                folds: Vec::new(),
                 calls: Vec::new(),
                 id,
                 name,

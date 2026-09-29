@@ -630,6 +630,21 @@ fn check_expressions(
                     counts.functions,
                 );
             }
+            RbcExprNode::FunctionValue { function, .. }
+            | RbcExprNode::FunctionFoldParameter { function, .. }
+            | RbcExprNode::FunctionFoldOutput { function, .. } => {
+                // Only the function id is artifact-wide. The other fields
+                // are owner-local ordinals, checked against that function's
+                // own body and fold tables by `check_function_bodies`,
+                // which is where the tables to check against are in scope.
+                reference(
+                    errors,
+                    format!("expression {index}"),
+                    "function",
+                    function.0,
+                    counts.functions,
+                );
+            }
             RbcExprNode::Unsupported { detail } => {
                 if options.reject_unsupported {
                     errors.push(ValidationError::UnsupportedNode {
@@ -1009,41 +1024,136 @@ fn check_call_graph_acyclic(errors: &mut Vec<ValidationError>, model: &RbcModel)
 /// Added with the bodies themselves. Every other table's references are
 /// checked here, and the one table that was not -- domains -- is how the
 /// compiler came to emit artifacts that failed its own validator with
-/// dangling ids (TOOLBUG, fixed in `8f86b8fe`). A new reference-bearing
-/// table ships with its check or it repeats that.
+/// dangling ids (fixed in `8f86b8fe`). A new reference-bearing table ships
+/// with its check or it repeats that.
 fn check_function_bodies(errors: &mut Vec<ValidationError>, model: &RbcModel, counts: &Counts) {
     for function in &model.functions {
         let RbcFunctionBody::Modelica { statements } = &function.body else {
             continue;
         };
         let referrer = format!("function {} body", function.id.0);
-        for statement in statements {
-            match statement {
-                RbcFunctionStatement::Assignment { expression, .. } => {
+        check_statements(errors, statements, function, counts, &referrer);
+        for fold in &function.folds {
+            reference(
+                errors,
+                referrer.clone(),
+                "domain",
+                fold.domain.0,
+                counts.domains,
+            );
+            if let Some(parent) = fold.parent
+                && parent as usize >= function.folds.len()
+            {
+                errors.push(ValidationError::Connector(format!(
+                    "{referrer}: fold {} names parent {parent}, but the function \
+                     declares {} folds",
+                    fold.ordinal,
+                    function.folds.len()
+                )));
+            }
+            for group in [&fold.parameters, &fold.initial, &fold.update, &fold.output] {
+                for definition in group {
                     reference(
                         errors,
                         referrer.clone(),
                         "expression",
-                        expression.0,
+                        definition.expression.0,
                         counts.expressions,
                     );
                 }
-                RbcFunctionStatement::Assertion { condition, message } => {
-                    reference(
-                        errors,
-                        referrer.clone(),
-                        "expression",
-                        condition.0,
-                        counts.expressions,
-                    );
-                    reference(
-                        errors,
-                        referrer.clone(),
-                        "expression",
-                        message.0,
-                        counts.expressions,
-                    );
+            }
+        }
+    }
+}
+
+/// One statement list, recursing into loop bodies.
+///
+/// Recursive because a loop body is a statement list like any other, and a
+/// reference nested two loops deep is exactly as able to dangle as one at
+/// the top. Depth is bounded by the artifact's own nesting.
+fn check_statements(
+    errors: &mut Vec<ValidationError>,
+    statements: &[RbcFunctionStatement],
+    function: &RbcFunction,
+    counts: &Counts,
+    referrer: &str,
+) {
+    let expression = |errors: &mut Vec<ValidationError>, id: ExprId| {
+        reference(
+            errors,
+            referrer.to_string(),
+            "expression",
+            id.0,
+            counts.expressions,
+        );
+    };
+    for statement in statements {
+        match statement {
+            RbcFunctionStatement::Assignment {
+                expression: rhs, ..
+            } => {
+                expression(errors, *rhs);
+            }
+            RbcFunctionStatement::Assertion { condition, message } => {
+                expression(errors, *condition);
+                expression(errors, *message);
+            }
+            RbcFunctionStatement::AssignmentGroup {
+                values,
+                conditional,
+                expressions,
+            } => {
+                for id in expressions {
+                    expression(errors, *id);
                 }
+                // Arity is the property that makes a group a group: each
+                // branch supplies exactly one expression per value. A short
+                // branch would silently leave a value undefined on the path
+                // that selects it.
+                if let Some(correlation) = conditional {
+                    if correlation.conditions.len() != correlation.branches.len() {
+                        errors.push(ValidationError::Connector(format!(
+                            "{referrer}: {} branch conditions for {} branches",
+                            correlation.conditions.len(),
+                            correlation.branches.len()
+                        )));
+                    }
+                    for (ordinal, arm) in correlation
+                        .branches
+                        .iter()
+                        .chain(std::iter::once(&correlation.fallback))
+                        .enumerate()
+                    {
+                        if arm.len() != values.len() {
+                            errors.push(ValidationError::Connector(format!(
+                                "{referrer}: arm {ordinal} defines {} of {} grouped values",
+                                arm.len(),
+                                values.len()
+                            )));
+                        }
+                        for id in arm {
+                            expression(errors, *id);
+                        }
+                    }
+                    for id in &correlation.conditions {
+                        expression(errors, *id);
+                    }
+                } else if expressions.len() != values.len() {
+                    errors.push(ValidationError::Connector(format!(
+                        "{referrer}: {} expressions for {} grouped values",
+                        expressions.len(),
+                        values.len()
+                    )));
+                }
+            }
+            RbcFunctionStatement::For { fold, statements } => {
+                if *fold as usize >= function.folds.len() {
+                    errors.push(ValidationError::Connector(format!(
+                        "{referrer}: loop names fold {fold}, but the function declares {}",
+                        function.folds.len()
+                    )));
+                }
+                check_statements(errors, statements, function, counts, referrer);
             }
         }
     }

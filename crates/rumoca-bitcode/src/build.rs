@@ -494,6 +494,11 @@ pub fn operands(node: &RbcExprNode) -> Vec<ExprId> {
         RbcExprNode::Index { base, .. } => vec![*base],
         RbcExprNode::ArrayUpdate { base, value, .. } => vec![*base, *value],
         RbcExprNode::Call { arguments, .. } => arguments.clone(),
+        // Leaves: each names a value inside a function body by owner-local
+        // ordinal, not by expression id, so there is no operand to walk.
+        RbcExprNode::FunctionValue { .. }
+        | RbcExprNode::FunctionFoldParameter { .. }
+        | RbcExprNode::FunctionFoldOutput { .. } => Vec::new(),
         RbcExprNode::Unsupported { .. } => Vec::new(),
     }
 }

@@ -202,6 +202,31 @@ impl<'a> Listing<'a> {
             // Printed rather than skipped: a gap in the artifact is exactly the
             // thing a reader is looking for, and silently rendering around it
             // would make a partial export look complete.
+            // A value inside a function body, named by the owner-local
+            // ordinals the DAE uses. Printed as the function and ordinal
+            // rather than resolved, because resolving would mean rendering
+            // the body here and the listing shows it under its function.
+            RbcExprNode::FunctionValue {
+                function, value, ..
+            } => {
+                format!("fnvalue ${}#{}", function.0, value)
+            }
+            RbcExprNode::FunctionFoldParameter {
+                function,
+                fold,
+                carried,
+                ..
+            } => {
+                format!("foldparam ${}#{}[{}]", function.0, fold, carried)
+            }
+            RbcExprNode::FunctionFoldOutput {
+                function,
+                fold,
+                carried,
+                ..
+            } => {
+                format!("foldout ${}#{}[{}]", function.0, fold, carried)
+            }
             RbcExprNode::Unsupported { detail } => format!("<unsupported: {detail}>"),
         }
     }
