@@ -651,8 +651,32 @@ impl SolveMeKernel {
         }
     }
 
+    /// The starting coordinate for `settle_initialization_system`.
+    ///
+    /// Settling the algebraics first gives the initialization a consistent
+    /// guess, but it evaluates every parameter the initialization itself
+    /// determines (`fixed = false`) at its seed. When that makes the guess
+    /// unsolvable -- `4*(t - 0.5) = a*x + b*x^3` with `a` and `b` still 0 has
+    /// no solution in `x` -- the unsettled coordinate is the guess instead;
+    /// the initialization solves parameters and algebraics together and still
+    /// fails loudly if they have no solution.
     pub(super) fn initialization_solver_y(&self) -> Result<Vec<f64>, MeError> {
-        self.current_solver_y()
+        match self.current_solver_y() {
+            Ok(solver_y) => Ok(solver_y),
+            Err(error) if matches!(error.kind(), MeError::Evaluation { .. }) => {
+                let mut solver_y = self.solver_y_guess.borrow().clone();
+                if solver_y.len() < self.states.len() {
+                    return Err(contract(format!(
+                        "initialization solver vector has {} entries for {} state values",
+                        solver_y.len(),
+                        self.states.len()
+                    )));
+                }
+                solver_y[..self.states.len()].copy_from_slice(&self.states);
+                Ok(solver_y)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn with_callback_solver_y<R>(&self, f: impl FnOnce(&mut Vec<f64>) -> R) -> R {

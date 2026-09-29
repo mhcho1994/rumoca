@@ -944,6 +944,39 @@ fn string_declaration_does_not_block_numeric_runtime_vectors() {
 /// `Modelica.Electrical.Analog.Basic.SaturatingInductor.Ipar`, and the whole reason
 /// `ShowSaturatingInductor` could not initialize.
 #[test]
+fn implicit_algebraic_over_fixed_false_parameters_initializes() {
+    // With a and b at their seeds (0), 4*(t - 0.5) = a*x + b*x^3 has no
+    // solution in x; the initialization must solve a and b with x, not
+    // settle x first.
+    let dae = compile(
+        concat!(
+            "model Implicit\n",
+            "  parameter Real a(fixed=false);\n",
+            "  parameter Real b(fixed=false);\n",
+            "  Real x(start=0);\n",
+            "initial equation\n",
+            "  a = 2;\n",
+            "  b = 1;\n",
+            "equation\n",
+            "  4*(time - 0.5) = a*x + b*x^3;\n",
+            "end Implicit;\n",
+        ),
+        "Implicit",
+    );
+    let options = SimOptions {
+        t_end: 1.0,
+        dt: Some(0.05),
+        ..SimOptions::default()
+    };
+    let result = simulate_dae(&dae, &options).expect("the parameters and x initialize together");
+    let x = result.names.iter().position(|name| name == "x").expect("x column");
+    for (time, &value) in result.times.iter().zip(&result.data[x]) {
+        let residual = 4.0 * (time - 0.5) - (2.0 * value + value.powi(3));
+        assert!(residual.abs() < 1.0e-6, "t={time}: x={value}, residual {residual}");
+    }
+}
+
+#[test]
 fn fixed_false_parameter_is_solved_from_its_initial_equation() {
     let dae = compile(
         concat!(
