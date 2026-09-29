@@ -44,7 +44,10 @@ end Impulse;
 "#;
 
 fn initial(model: &str, name: &str) -> f64 {
-    let compiled = match Compiler::new().model(model).compile_str(MODELS, "Impulse.mo") {
+    let compiled = match Compiler::new()
+        .model(model)
+        .compile_str(MODELS, "Impulse.mo")
+    {
         Ok(compiled) => compiled,
         Err(error) => panic!("{model} should compile: {error:?}"),
     };

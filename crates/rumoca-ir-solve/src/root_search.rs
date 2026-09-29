@@ -230,7 +230,9 @@ mod tests {
 
     #[test]
     fn a_plan_without_roles_is_empty() {
-        let plan = RootSearchPlan { roles: Box::default() };
+        let plan = RootSearchPlan {
+            roles: Box::default(),
+        };
         assert!(plan.is_empty());
         assert_eq!(plan.len(), 0);
     }

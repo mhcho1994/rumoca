@@ -30,7 +30,10 @@ end DerRead;
 "#;
 
 fn final_y(model: &str) -> f64 {
-    let compiled = match Compiler::new().model(model).compile_str(MODELS, "DerRead.mo") {
+    let compiled = match Compiler::new()
+        .model(model)
+        .compile_str(MODELS, "DerRead.mo")
+    {
         Ok(compiled) => compiled,
         Err(error) => panic!("{model} compiles: {error:?}"),
     };
