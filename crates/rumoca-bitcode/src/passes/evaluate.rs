@@ -153,32 +153,33 @@ impl Frame<'_> {
                     let result = self.eval(*expression)?;
                     self.define(*value, result)?;
                 }
+                // A failing assertion is the runtime's to report.
                 RbcFunctionStatement::Assertion { condition, .. } => {
-                    // A failing assertion is the runtime's to report.
-                    if !self.eval(*condition)?.boolean()? {
-                        return None;
-                    }
+                    self.eval(*condition)?.boolean()?.then_some(())?;
                 }
                 RbcFunctionStatement::AssignmentGroup {
                     values,
                     expressions,
                     ..
-                } => {
-                    // Each expression is already the join for its value, so
-                    // evaluating it selects the branch; the correlation only
-                    // records that the joins share one selection.
-                    let results = expressions
-                        .iter()
-                        .map(|expression| self.eval(*expression))
-                        .collect::<Option<Vec<_>>>()?;
-                    for (value, result) in values.iter().zip(results) {
-                        self.define(*value, result)?;
-                    }
-                }
+                } => self.group(values, expressions)?,
                 RbcFunctionStatement::For {
                     fold, statements, ..
                 } => self.fold(*fold, statements)?,
             }
+        }
+        Some(())
+    }
+
+    /// Each expression is already the join for its value, so evaluating it
+    /// selects the branch; the correlation only records that the joins share
+    /// one selection.
+    fn group(&mut self, values: &[u32], expressions: &[ExprId]) -> Option<()> {
+        let results = expressions
+            .iter()
+            .map(|expression| self.eval(*expression))
+            .collect::<Option<Vec<_>>>()?;
+        for (value, result) in values.iter().zip(results) {
+            self.define(*value, result)?;
         }
         Some(())
     }
@@ -326,12 +327,8 @@ impl Scope<'_, '_> {
                 binary(*op, &lhs, &rhs)?
             }
             RbcExprNode::Conditional { branches, fallback } => {
-                for branch in branches {
-                    if self.eval(branch.condition)?.boolean()? {
-                        return self.eval(branch.value);
-                    }
-                }
-                self.eval(*fallback)?
+                let taken = self.select(branches, *fallback)?;
+                self.eval(taken)?
             }
             RbcExprNode::Array { elements, .. } => {
                 let values = elements
@@ -386,6 +383,16 @@ impl Scope<'_, '_> {
             }
             _ => return None,
         })
+    }
+
+    /// The branch an `if` expression takes: the first whose condition holds.
+    fn select(&mut self, branches: &[RbcBranch], fallback: ExprId) -> Option<ExprId> {
+        for branch in branches {
+            if self.eval(branch.condition)?.boolean()? {
+                return Some(branch.value);
+            }
+        }
+        Some(fallback)
     }
 
     fn coordinate(&self, coordinate: RbcCoordinate) -> Option<Value> {

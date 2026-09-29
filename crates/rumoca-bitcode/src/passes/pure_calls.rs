@@ -31,10 +31,12 @@ impl Pass for FoldPureCalls {
     fn run(&self, model: &mut RbcModel) -> Result<usize, PassError> {
         let settled = settled_expressions(model);
         let mut folded = 0;
-        for head in 0..model.expressions.len() {
-            if !settled[head] {
-                continue;
-            }
+        let heads: Vec<usize> = settled
+            .iter()
+            .enumerate()
+            .filter_map(|(index, settled)| settled.then_some(index))
+            .collect();
+        for head in heads {
             let RbcExprNode::Call {
                 owner,
                 function,
