@@ -118,17 +118,18 @@ fn affine_block_jacobian<M: ImplicitProjectionModel>(
     structure: Option<&solve::JacobianStructure>,
 ) -> Result<DMatrix<f64>, RuntimeSolveError> {
     let shape = (block.rows.len(), block.y_indices.len());
-    let storage = match structure {
-        Some(structure) => model
-            .take_affine_block_jacobian(block_index)
-            .map(|mut retained| {
-                debug_assert_eq!(retained.shape(), shape);
-                clear_pattern_entries(&mut retained, structure.pattern());
-                retained
-            }),
+    let retained = match structure {
+        Some(_) => model.take_affine_block_jacobian(block_index),
         None => None,
-    }
-    .unwrap_or_else(|| DMatrix::zeros(shape.0, shape.1));
+    };
+    let storage = match (retained, structure) {
+        (Some(mut retained), Some(structure)) => {
+            debug_assert_eq!(retained.shape(), shape);
+            clear_pattern_entries(&mut retained, structure.pattern());
+            retained
+        }
+        _ => DMatrix::zeros(shape.0, shape.1),
+    };
     algebraic_block_jacobian_in(
         model,
         candidate,

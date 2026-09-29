@@ -297,6 +297,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_shared_value_proof_failure_count_is_the_ir_solve_counter() {
+        assert_eq!(
+            shared_value_proof_failures(),
+            rumoca_ir_solve::shared_value_proof_failures()
+        );
+    }
+
+    #[test]
     fn relation_surface_settles_are_counted_per_root_and_reported() {
         reset_projection_fallbacks();
         note_relation_surface(&[4, 9]);

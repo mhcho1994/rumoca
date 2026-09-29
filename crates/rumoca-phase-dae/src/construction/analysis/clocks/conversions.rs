@@ -187,13 +187,14 @@ fn exact_value_clock_conversion<'expression>(
 
 /// The lattice a clock conversion reads; an event clock has none.
 fn conversion_lattice(plan: ClockPlan, span: Span) -> Result<ClockLattice, ToDaeError> {
-    plan.lattice().ok_or_else(|| {
-        ToDaeError::unsupported_runtime_operator(
+    match plan.lattice() {
+        Some(lattice) => Ok(lattice),
+        None => Err(ToDaeError::unsupported_runtime_operator(
             "clock conversion",
             "an event clock has no periodic lattice to convert",
             span,
-        )
-    })
+        )),
+    }
 }
 
 pub(super) fn propagate_clock_conversion_owners(
@@ -300,9 +301,10 @@ fn event_conversion_owner(
     };
     match (source, target) {
         (Some((source, _)), Some((target, _))) => {
-            let shifted = source
-                .shift_event(counter, resolution, span)
-                .ok_or_else(|| event_clock_conversion("shiftSample", span))??;
+            let shifted = match source.shift_event(counter, resolution, span) {
+                Some(shifted) => shifted?,
+                None => return Err(event_clock_conversion("shiftSample", span)),
+            };
             if shifted.schedule != target.schedule {
                 return Err(ToDaeError::unsupported_flat(
                     "clocked value conversion ownership proof",
@@ -313,21 +315,10 @@ fn event_conversion_owner(
             Ok(None)
         }
         (Some((source, _)), None) => source.shift_event(counter, resolution, span).transpose(),
-        (None, Some((target, _))) => {
-            let unshifted = target.event().and_then(|(source, skip)| {
-                let counter = u32::try_from(counter).ok().filter(|_| resolution == 1)?;
-                Some(ClockPlan {
-                    schedule: ClockSchedule::Event {
-                        source,
-                        skip: skip.checked_sub(counter)?,
-                    },
-                    constructor_span: target.constructor_span,
-                })
-            });
-            unshifted
-                .map(Some)
-                .ok_or_else(|| event_clock_conversion("shiftSample", span))
-        }
+        (None, Some((target, _))) => match unshift_event_clock(target, counter, resolution) {
+            Some(unshifted) => Ok(Some(unshifted)),
+            None => Err(event_clock_conversion("shiftSample", span)),
+        },
         (None, None) => Ok(None),
     }
 }
@@ -452,13 +443,14 @@ fn conversion_target_lattice(
             resolution,
         } => source.back_sample(counter, resolution),
     };
-    result.map_err(|error| {
-        ToDaeError::unsupported_runtime_operator(
+    match result {
+        Ok(lattice) => Ok(lattice),
+        Err(error) => Err(ToDaeError::unsupported_runtime_operator(
             "clocked value conversion",
             error.to_string(),
             span,
-        )
-    })
+        )),
+    }
 }
 
 fn conversion_source_lattice(
@@ -478,13 +470,14 @@ fn conversion_source_lattice(
             resolution,
         } => target.shift_sample(counter, resolution),
     };
-    result.map_err(|error| {
-        ToDaeError::unsupported_runtime_operator(
+    match result {
+        Ok(lattice) => Ok(lattice),
+        Err(error) => Err(ToDaeError::unsupported_runtime_operator(
             "clocked value conversion",
             error.to_string(),
             span,
-        )
-    })
+        )),
+    }
 }
 
 /// The partition incidence and clock conversions of declaration bindings.
@@ -696,4 +689,21 @@ fn mentions_clock_conversion(expression: &Expression) -> bool {
     ) || expression_children(expression)
         .into_iter()
         .any(mentions_clock_conversion)
+}
+
+/// The event clock a shifted event clock was derived from, when the shift was
+/// by whole ticks at resolution one and skipped at least `counter` ticks.
+fn unshift_event_clock(target: ClockPlan, counter: i64, resolution: i64) -> Option<ClockPlan> {
+    let (source, skip) = target.event()?;
+    if resolution != 1 {
+        return None;
+    }
+    let counter = u32::try_from(counter).ok()?;
+    Some(ClockPlan {
+        schedule: ClockSchedule::Event {
+            source,
+            skip: skip.checked_sub(counter)?,
+        },
+        constructor_span: target.constructor_span,
+    })
 }
