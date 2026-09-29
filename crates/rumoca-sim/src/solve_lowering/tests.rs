@@ -369,6 +369,30 @@ fn checked_assertion_fails_with_its_source_message() {
 }
 
 #[test]
+fn parameter_sized_linspace_evaluates_in_a_start_value() {
+    let dae = compile(
+        concat!(
+            "model Spaced\n",
+            "  parameter Integer n = 3;\n",
+            "  parameter Real v[n] = linspace(0, 1, n);\n",
+            "  Real x(start = v[2], fixed = true);\n",
+            "equation\n",
+            "  der(x) = 0;\n",
+            "end Spaced;\n",
+        ),
+        "Spaced",
+    );
+    let options = SimOptions {
+        t_end: 0.1,
+        dt: Some(0.05),
+        ..SimOptions::default()
+    };
+    let result = simulate_dae(&dae, &options).expect("a parameter-sized linspace evaluates");
+    let x = result.names.iter().position(|name| name == "x").expect("x column");
+    assert_eq!(result.data[x].first().copied(), Some(0.5));
+}
+
+#[test]
 fn inclusive_relation_holds_at_its_boundary_without_event_chattering() {
     // `0 >= time` is true at t = 0 exactly and false after it.
     let dae = compile(

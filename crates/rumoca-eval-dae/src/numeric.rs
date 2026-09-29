@@ -1307,16 +1307,11 @@ where
     ) -> Result<Vec<f64>, NumericEvaluationError> {
         let start = self.expression(arguments.get(0).expect("checked linspace start"))?[0];
         let stop = self.expression(arguments.get(1).expect("checked linspace stop"))?[0];
-        let count = arguments.get(2).expect("checked linspace extent");
-        let dae::ExpressionOperation::Literal(dae::DaeLiteral::Integer(count)) = self
-            .view
-            .expression(count)
-            .expect("checked linspace extent resolves")
-            .operation()
-        else {
-            unreachable!("checked linspace extent is a literal Integer")
-        };
-        let count = u32::try_from(*count).expect("checked linspace extent is in the u32 domain");
+        // The constructor proved the extent a static Integer of at least 2 --
+        // a literal or a structural parameter expression (`linspace(0, 1, n)`)
+        // -- so it evaluates here like any other operand.
+        let count = self.expression(arguments.get(2).expect("checked linspace extent"))?[0];
+        let count = count as u32;
         let denominator = f64::from(count - 1);
         Ok((0..count)
             .map(|ordinal| start + (stop - start) * f64::from(ordinal) / denominator)
