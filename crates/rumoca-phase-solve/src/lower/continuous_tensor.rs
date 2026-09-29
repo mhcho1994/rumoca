@@ -51,6 +51,7 @@ pub(super) fn lower_explicit_tensor_derivative_family<'dae>(
         Some((family.domain(), first_point)),
         state,
         first_state_scalar,
+        DerivativeReads::Forbidden,
     );
     let candidate = match candidate {
         Ok(candidate) => candidate,
@@ -139,6 +140,7 @@ fn family_points_share_explicit_owner<'dae>(
             Some((family.domain(), values)),
             state,
             expected_scalar,
+            DerivativeReads::Forbidden,
         )?
         else {
             return Ok(false);

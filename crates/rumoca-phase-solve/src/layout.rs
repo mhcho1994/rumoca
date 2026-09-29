@@ -32,6 +32,11 @@ pub(crate) struct LoweredLayout<'dae> {
     /// Exact pure-call owners issued atomically at the DAE expression boundary.
     pub(crate) pure_calls:
         std::cell::RefCell<crate::lower::typed_functions::PureCallRegistry<'dae>>,
+    /// The continuous row defining each state derivative, once structural
+    /// matching has proved it. Every program compiled after that point --
+    /// discrete owners, roots, event conditions -- resolves a derivative it
+    /// reads through its definition, as continuous algebraic rows do.
+    pub(crate) derivative_definitions: std::cell::OnceCell<crate::lower::DerivativeRowIndex<'dae>>,
     pub(crate) marker: std::marker::PhantomData<&'dae mut &'dae ()>,
 }
 
@@ -147,6 +152,7 @@ pub(crate) fn lower_layout<'dae>(
         solve_layout,
         call_scoped_actions: std::cell::RefCell::default(),
         pure_calls: std::cell::RefCell::new(crate::lower::typed_functions::PureCallRegistry::new()),
+        derivative_definitions: std::cell::OnceCell::new(),
         marker: std::marker::PhantomData,
     })
 }

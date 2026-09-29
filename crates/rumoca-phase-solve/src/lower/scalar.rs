@@ -466,7 +466,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             fold_guard_base: 0,
             active_clock: None,
             sampled_source: false,
-            derivative_definitions: None,
+            derivative_definitions: layout.derivative_definitions.get(),
             affine_derivative_systems: None,
             active_derivatives: Vec::new(),
             derivative_seeds: None,
@@ -951,6 +951,55 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         )?;
         self.ops.push(solve::LinearOp::StoreOutput { src: output });
         Ok(self.ops)
+    }
+
+    /// `der(x) = (numerator - Σ offsets) / coefficient` as one program.
+    pub(super) fn summed_derivative_program(
+        mut self,
+        numerator: Option<(dae::ExprId<'dae>, usize)>,
+        summed: &super::summed_derivative::SummedDerivative<'dae>,
+        span: Span,
+    ) -> Result<Vec<solve::LinearOp>, LowerError> {
+        let output = self.summed_derivative_value(numerator, summed, span)?;
+        self.ops.push(solve::LinearOp::StoreOutput { src: output });
+        Ok(self.ops)
+    }
+
+    /// The register holding `(numerator - Σ offsets)` with the derivative's
+    /// factors and sign undone.
+    pub(super) fn summed_derivative_value(
+        &mut self,
+        numerator: Option<(dae::ExprId<'dae>, usize)>,
+        summed: &super::summed_derivative::SummedDerivative<'dae>,
+        span: Span,
+    ) -> Result<solve::Reg, LowerError> {
+        let mut value = match numerator {
+            Some((numerator, scalar)) => self.expression(numerator, scalar)?,
+            None => self.constant(0.0, span)?,
+        };
+        for term in &summed.offsets {
+            let operand = self.expression(term.expression, term.scalar)?;
+            // Moving `s_i * t_i` to the other side flips its sign.
+            let operator = if term.negated {
+                dae::BinaryOperator::Add
+            } else {
+                dae::BinaryOperator::Subtract
+            };
+            value = self.binary(operator, value, operand, span)?;
+        }
+        for factor in &summed.factors {
+            let operand = self.expression(factor.expression, factor.scalar)?;
+            let operator = if factor.divides {
+                dae::BinaryOperator::Multiply
+            } else {
+                dae::BinaryOperator::Divide
+            };
+            value = self.binary(operator, value, operand, span)?;
+        }
+        if summed.derivative_negated {
+            value = self.unary(dae::UnaryOperator::Negate, value, span)?;
+        }
+        Ok(value)
     }
 
     pub(super) fn packed_pair(

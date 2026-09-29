@@ -477,9 +477,7 @@ fn row_unknowns<'dae>(
         // through the continuous system is implicit, so -- exactly as for
         // `ImplicitAlgebraic` -- it conservatively joins every unknown: a zero
         // sensitivity can make the block fail, never certify a wrong value.
-        Some(solve::InitializationCoordinateKind::Algebraic)
-            if !incidence.other_than_algebraic =>
-        {
+        Some(solve::InitializationCoordinateKind::Algebraic) if !incidence.other_than_algebraic => {
             let mut unknowns = space.all_projection_unknowns();
             unknowns.extend(incidence.unknowns);
             RowIncidence::ThroughAlgebraicRefresh(unknowns)

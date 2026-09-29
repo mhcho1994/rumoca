@@ -385,17 +385,15 @@ fn algebraic_row_reads_a_derivative_through_its_defining_equation() {
 }
 
 #[test]
-fn discrete_row_still_rejects_a_derivative_coordinate() {
+fn discrete_row_reads_a_derivative_through_its_defining_equation() {
+    // A discrete owner (a Boolean `u = der(y) > 0`, a sampled `v = der(x)`)
+    // is evaluated at an event instant from the current state, so the
+    // derivative it reads is its definition's right-hand side there.
     let model = derivative_alias_model(true);
-    let error = lower_solve_problem(&model).unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            LowerError::NonComputable { reason, .. }
-                if reason.contains("escaped checked structural substitution")
-        ),
-        "only continuous algebraic and initial rows resolve a derivative: {error:?}"
-    );
+    let solve = lower_solve_problem(&model).unwrap();
+    solve
+        .validate()
+        .expect("the discrete derivative read satisfies the Solve shape contract");
 }
 
 fn scaled_state_model(source: TestSource, coefficient: f64) -> dae::Dae {

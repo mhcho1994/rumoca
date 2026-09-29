@@ -579,7 +579,13 @@ fn project_algebraics_with_plan_inner<M: ImplicitProjectionModel>(
             args.tolerance,
         ));
     }
-    if scaled_residual_converged(&residual, &row_scales, args.tolerance) {
+    if residual_within_roundoff(
+        model,
+        y,
+        (args.parameters, args.time),
+        &rows,
+        (&residual, &row_scales, args.tolerance),
+    )? {
         return Ok(());
     }
     Err(projection_error_for_rows(
@@ -590,6 +596,59 @@ fn project_algebraics_with_plan_inner<M: ImplicitProjectionModel>(
         &row_scales,
         args.tolerance,
     ))
+}
+
+/// Rounding slack for one evaluated row: a residual program of a few dozen
+/// operations over terms of magnitude `m` carries an error up to about
+/// `ops * eps * m`.
+const ROUNDOFF_SLACK: f64 = 64.0;
+
+/// Whether every residual meets its scaled tolerance or, failing that, is
+/// below the rounding noise of its own evaluation.
+///
+/// The row scales convert a residual into the units of the block's unknowns
+/// through the block Jacobian. A row whose unknown enters with a tiny
+/// coefficient but which also reads large known values -- ThermoPower's grid,
+/// `f = fnom*(1 + droop*(P - Poff)/Pgrid)`, reads `f ~ 50` while `dP` enters at
+/// `2.5e-9` -- then asks for a residual far below one ulp of `f`, which no
+/// Newton step can reach. The noise floor of row `i` is estimated from its full
+/// gradient as `ROUNDOFF_SLACK * eps * Σ_j |∂r_i/∂y_j| |y_j|`; a residual below
+/// it is as converged as the arithmetic allows. The floor is only consulted
+/// for a row that fails its scaled check, and never passes a row whose
+/// gradient is unavailable.
+fn residual_within_roundoff<M: ImplicitProjectionModel>(
+    model: &M,
+    y: &[f64],
+    (p, t): (&[f64], f64),
+    rows: &[usize],
+    (residual, row_scales, tolerance): (&[f64], &[f64], f64),
+) -> Result<bool, RuntimeSolveError> {
+    if rows.len() != residual.len() || residual.len() != row_scales.len() {
+        return Ok(false);
+    }
+    let mut gradient = vec![0.0; y.len()];
+    for ((&row, &value), &scale) in rows.iter().zip(residual).zip(row_scales) {
+        if !value.is_finite() {
+            return Ok(false);
+        }
+        if value.abs() <= scaled_tolerance(tolerance, scale) {
+            continue;
+        }
+        gradient.fill(0.0);
+        if !model.eval_implicit_jacobian_row(row, y, p, t, &mut gradient)? {
+            return Ok(false);
+        }
+        let magnitude = gradient
+            .iter()
+            .zip(y)
+            .map(|(derivative, value)| (derivative * value).abs())
+            .filter(|term| term.is_finite())
+            .sum::<f64>();
+        if value.abs() > ROUNDOFF_SLACK * f64::EPSILON * magnitude {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Evaluate a block's selected residual, seeding non-finite rows once from the

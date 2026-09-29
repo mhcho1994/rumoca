@@ -20,6 +20,7 @@ mod initial_parameters;
 mod initial_pins;
 mod initial_projection;
 mod scalar;
+mod summed_derivative;
 pub(crate) mod typed_functions;
 use scalar::{
     AffineDerivativeRow, AffineDerivativeSystem, AffineDerivativeSystems, AffineDerivativeUnknown,
@@ -51,8 +52,9 @@ pub(crate) fn lower_solve_problem(
     clocks::reject_clocked_continuous_feedback(view, &clocks, &structural)?;
     clocks::reject_cross_clock_coincident_cycle(view, &clocks, &structural)?;
     let derivatives = index_derivative_rows(view, &structural.rows)?;
-    let continuous = lower_continuous(view, &lowered, &structural, &derivatives, manifold)?;
-    let initialization = lower_initialization(view, &lowered, &derivatives, pins, overrides)?;
+    let derivatives = lowered.derivative_definitions.get_or_init(|| derivatives);
+    let continuous = lower_continuous(view, &lowered, &structural, derivatives, manifold)?;
+    let initialization = lower_initialization(view, &lowered, derivatives, pins, overrides)?;
     let (mut discrete, mut events, event_transactions) =
         events::lower_discrete_and_events(view, &lowered, &clocks, &continuous)?;
     discrete.event_transactions = call_scoped_actions::append_collected_actions(
@@ -1255,6 +1257,7 @@ fn lower_derivative_scalar_outputs<'dae>(
             None,
             state,
             target as usize,
+            DerivativeReads::Forbidden,
         )?
         else {
             return Ok(false);
@@ -1399,12 +1402,22 @@ fn lower_continuous_row<'dae>(
                 domain_point,
                 state,
                 target as usize,
+                DerivativeReads::Substituted(state),
             )?;
+            // The definition may read other states' derivatives; resolve
+            // them through their own definitions.
+            let compiler = || {
+                let compiler = ScalarCompiler::new(view, layout, domain_point)
+                    .with_function_conditional_owners(function_conditional_owners)
+                    .with_derivative_definitions(derivatives);
+                match affine_derivatives {
+                    Some(systems) => compiler.with_affine_derivative_systems(systems),
+                    None => compiler,
+                }
+            };
             let program = match rhs {
                 DerivativeRhs::Explicit { expression, scalar } => {
-                    ScalarCompiler::new(view, layout, domain_point)
-                        .with_function_conditional_owners(function_conditional_owners)
-                        .program(expression, scalar)?
+                    compiler().program(expression, scalar)?
                 }
                 DerivativeRhs::Scaled {
                     numerator,
@@ -1412,16 +1425,19 @@ fn lower_continuous_row<'dae>(
                     coefficient,
                     coefficient_scalar,
                     span,
-                } => ScalarCompiler::new(view, layout, domain_point)
-                    .with_function_conditional_owners(function_conditional_owners)
-                    .scaled_derivative_program(ScaledDerivativeProgram {
-                        numerator,
-                        numerator_scalar,
-                        coefficient,
-                        coefficient_scalar,
-                        negate: false,
-                        span,
-                    })?,
+                } => compiler().scaled_derivative_program(ScaledDerivativeProgram {
+                    numerator,
+                    numerator_scalar,
+                    coefficient,
+                    coefficient_scalar,
+                    negate: false,
+                    span,
+                })?,
+                DerivativeRhs::Summed {
+                    numerator,
+                    summed,
+                    span,
+                } => compiler().summed_derivative_program(numerator, &summed, span)?,
             };
             let target = variable_scalar_slot(layout, state.index(), target as usize, span)?;
             let solve::ScalarSlot::Y { index, .. } = target else {
@@ -1686,13 +1702,47 @@ fn expression_contains_derivative<'dae>(
     view: dae::DaeView<'dae>,
     expression: dae::ExprId<'dae>,
 ) -> bool {
+    expression_contains_derivative_of(view, expression, |_| true)
+}
+
+/// Which derivative coordinates a state row's defining side may read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DerivativeReads<'dae> {
+    /// None: the definition must be derivative-free (tensor families and
+    /// every consumer without a derivative-definition index).
+    Forbidden,
+    /// Other states' derivatives, which the consumer substitutes from their
+    /// own definitions (`der(e2) = ... + der(e1)`); only `state`'s own
+    /// derivative is refused, since it would make the row implicit.
+    Substituted(dae::StateId<'dae>),
+}
+
+impl<'dae> DerivativeReads<'dae> {
+    /// Whether `expression` reads a derivative this mode does not allow.
+    pub(super) fn blocked(self, view: dae::DaeView<'dae>, expression: dae::ExprId<'dae>) -> bool {
+        match self {
+            Self::Forbidden => expression_contains_derivative(view, expression),
+            Self::Substituted(state) => {
+                expression_contains_derivative_of(view, expression, |found| found == state)
+            }
+        }
+    }
+}
+
+fn expression_contains_derivative_of<'dae>(
+    view: dae::DaeView<'dae>,
+    expression: dae::ExprId<'dae>,
+    reads: impl Fn(dae::StateId<'dae>) -> bool,
+) -> bool {
     let mut pending = vec![expression];
     while let Some(expression) = pending.pop() {
         let node = view
             .expression(expression)
             .expect("branded expression resolves");
         match node.operation() {
-            dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(_)) => {
+            dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(found))
+                if reads(found) =>
+            {
                 return true;
             }
             dae::ExpressionOperation::Literal(_)
@@ -1789,6 +1839,14 @@ enum DerivativeRhs<'dae> {
         coefficient_scalar: usize,
         span: Span,
     },
+    /// `der(x) = (numerator - Σ offsets) / coefficient`: the derivative was
+    /// one affine term of a sum (`summed_derivative`). No numerator is zero:
+    /// the whole residual is the sum.
+    Summed {
+        numerator: Option<(dae::ExprId<'dae>, usize)>,
+        summed: summed_derivative::SummedDerivative<'dae>,
+        span: Span,
+    },
 }
 
 fn derivative_rhs<'dae>(
@@ -1798,6 +1856,7 @@ fn derivative_rhs<'dae>(
     domain_point: Option<(dae::DomainId<'dae>, &[i64])>,
     state: dae::StateId<'dae>,
     state_scalar: usize,
+    reads: DerivativeReads<'dae>,
 ) -> Result<DerivativeRhs<'dae>, LowerError> {
     let selector = ScalarSelector::new(view, domain_point);
     let (residual, scalar) = selector.select_array_element(residual, scalar)?;
@@ -1811,6 +1870,21 @@ fn derivative_rhs<'dae>(
         rhs,
     } = node.operation()
     else {
+        // `a + c*der(x) = 0` -- index reduction differentiates rows of any
+        // shape -- is the summed form with a zero right-hand side.
+        if let Some(summed) = summed_derivative::summed_derivative(
+            &selector,
+            residual,
+            scalar,
+            (state, state_scalar),
+            reads,
+        )? {
+            return Ok(DerivativeRhs::Summed {
+                numerator: None,
+                summed,
+                span: node.provenance().span(),
+            });
+        }
         return Err(LowerError::non_computable(
             "state equation is not a subtractive derivative residual",
             node.provenance().span(),
@@ -1822,13 +1896,13 @@ fn derivative_rhs<'dae>(
     let rhs = selector.structural_branch(rhs, scalar)?;
     let lhs_direct = is_target_derivative(&selector, lhs, scalar, state, state_scalar)?;
     let rhs_direct = is_target_derivative(&selector, rhs, scalar, state, state_scalar)?;
-    if lhs_direct && !expression_contains_derivative(view, rhs) {
+    if lhs_direct && !reads.blocked(view, rhs) {
         return Ok(DerivativeRhs::Explicit {
             expression: rhs,
             scalar,
         });
     }
-    if rhs_direct && !expression_contains_derivative(view, lhs) {
+    if rhs_direct && !reads.blocked(view, lhs) {
         return Ok(DerivativeRhs::Explicit {
             expression: lhs,
             scalar,
@@ -1837,9 +1911,7 @@ fn derivative_rhs<'dae>(
     let lhs_scaled = scaled_derivative_factor(&selector, lhs, scalar, state, state_scalar)?;
     let rhs_scaled = scaled_derivative_factor(&selector, rhs, scalar, state, state_scalar)?;
     match (lhs_scaled, rhs_scaled) {
-        (Some((coefficient, coefficient_scalar)), None)
-            if !expression_contains_derivative(view, rhs) =>
-        {
+        (Some((coefficient, coefficient_scalar)), None) if !reads.blocked(view, rhs) => {
             Ok(DerivativeRhs::Scaled {
                 numerator: rhs,
                 numerator_scalar: scalar,
@@ -1848,9 +1920,7 @@ fn derivative_rhs<'dae>(
                 span: node.provenance().span(),
             })
         }
-        (None, Some((coefficient, coefficient_scalar)))
-            if !expression_contains_derivative(view, lhs) =>
-        {
+        (None, Some((coefficient, coefficient_scalar))) if !reads.blocked(view, lhs) => {
             Ok(DerivativeRhs::Scaled {
                 numerator: lhs,
                 numerator_scalar: scalar,
@@ -1859,10 +1929,30 @@ fn derivative_rhs<'dae>(
                 span: node.provenance().span(),
             })
         }
-        _ => Err(LowerError::non_computable(
-            "matched derivative is not an isolated affine product",
-            node.provenance().span(),
-        )),
+        _ => {
+            for (side, other) in [(lhs, rhs), (rhs, lhs)] {
+                if reads.blocked(view, other) {
+                    continue;
+                }
+                if let Some(summed) = summed_derivative::summed_derivative(
+                    &selector,
+                    side,
+                    scalar,
+                    (state, state_scalar),
+                    reads,
+                )? {
+                    return Ok(DerivativeRhs::Summed {
+                        numerator: Some((other, scalar)),
+                        summed,
+                        span: node.provenance().span(),
+                    });
+                }
+            }
+            Err(LowerError::non_computable(
+                "matched derivative is not an isolated affine product",
+                node.provenance().span(),
+            ))
+        }
     }
 }
 
@@ -1930,13 +2020,26 @@ fn scaled_derivative_factor<'dae>(
             node.provenance().span(),
         ));
     }
-    if selector.constant_real(factor.0, factor.1)? == 0.0 {
-        return Err(LowerError::non_computable(
-            "matched derivative has a zero affine coefficient",
-            node.provenance().span(),
-        ));
-    }
+    reject_zero_coefficient(selector, factor, node.provenance().span())?;
     Ok(Some(factor))
+}
+
+/// Refuse a derivative coefficient that is the constant zero. A coefficient
+/// that is not compile-time numeric (`J*der(w)*w`) is divided at run time,
+/// where a zero denominator is a recorded domain violation, not a silent
+/// value.
+fn reject_zero_coefficient<'dae>(
+    selector: &ScalarSelector<'dae>,
+    (expression, scalar): (dae::ExprId<'dae>, usize),
+    span: Span,
+) -> Result<(), LowerError> {
+    match selector.constant_real(expression, scalar) {
+        Ok(value) if value == 0.0 => Err(LowerError::non_computable(
+            "matched derivative has a zero affine coefficient",
+            span,
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn lower_initialization<'dae>(
