@@ -54,6 +54,24 @@ CLASSIFIERS = (
 )
 
 
+_HELD = re.compile(r"holding \d+ free input\(s\) constant at their start values: (.*)")
+
+
+def held_inputs(stderr: str) -> dict[str, float]:
+    """The inputs `--free-inputs` held constant, as Rumoca reported them."""
+    match = _HELD.search(stderr or "")
+    if not match:
+        return {}
+    held = {}
+    for pair in match.group(1).split(", "):
+        name, _, value = pair.rpartition("=")
+        try:
+            held[name] = float(value)
+        except ValueError:
+            continue
+    return held
+
+
 def classify(text: str) -> FailureKind:
     for pattern, kind in CLASSIFIERS:
         if pattern.search(text):
@@ -79,7 +97,8 @@ class RumocaBackend:
 
     def __init__(self, executable: str = "./target/debug/rumoca",
                  t_end: float = 0.5, timeout: float = 90.0, *, replay=None,
-                 source_roots=None, cache_dir=None, dt=None, freeze_parameters=False) -> None:
+                 source_roots=None, cache_dir=None, dt=None, freeze_parameters=False,
+                 free_inputs=None) -> None:
         if dt is not None and (not math.isfinite(dt) or dt <= 0):
             raise ValueError("output interval must be finite and positive")
         self.executable = executable
@@ -92,6 +111,13 @@ class RumocaBackend:
         self.cache_dir = str(Path(cache_dir).resolve()) if cache_dir is not None else None
         self.dt = dt
         self.freeze_parameters = bool(freeze_parameters)
+        # `"start"` holds every unbound top-level input at its start value
+        # (else 0) instead of refusing the model; None keeps the refusal. A
+        # run under held inputs records which were held, because a finding
+        # it produces is about that input history, not every history.
+        if free_inputs not in (None, "start"):
+            raise ValueError("free_inputs must be None or 'start'")
+        self.free_inputs = free_inputs
         # Opt-in authoring permission; None never re-lowers a saved program.
         self.replay = replay
         self._work: tempfile.TemporaryDirectory | None = None
@@ -245,6 +271,8 @@ class RumocaBackend:
             command += ["--dt", str(self.dt)]
         for name, value in testcase.parameters.items():
             command += ["--param", f"{name}={value!r}"]
+        if self.free_inputs is not None:
+            command += ["--free-inputs", self.free_inputs]
 
         try:
             done = execute(command, Path.cwd(), self.timeout)
@@ -280,7 +308,8 @@ class RumocaBackend:
         metadata = {"domain_diagnostics": diagnostics, "execution": "saved-equations",
                     "artifact_sha256": file_digest(self._artifact),
                     "output_interval": self.dt, "command": command,
-                    "returncode": done.returncode, "stdout": done.stdout, "stderr": done.stderr}
+                    "returncode": done.returncode, "stdout": done.stdout, "stderr": done.stderr,
+                    "held_inputs": held_inputs(done.stderr)}
         text = " ".join((done.stdout + done.stderr).split())
 
         if (done.returncode != 0 and "simulation failed:" not in text.lower()

@@ -191,6 +191,63 @@ pub struct CompileBitcodeArgs {
     /// as machine-readable JSON, and exit non-zero when any is found.
     #[arg(long, requires = "simulate")]
     pub check: bool,
+    /// Hold a top-level input at a constant value: `--input name=value`.
+    /// Repeatable; names are scalar names, e.g. `u[2]`.
+    #[arg(long = "input", value_name = "NAME=VALUE", requires = "simulate")]
+    pub inputs: Vec<String>,
+    /// Hold every top-level input that has no binding and no `--input` at a
+    /// constant: its literal `start` value, else 0. This is how a model with
+    /// unconnected inputs is simulated standalone (MLS §4.4.2.2: the
+    /// environment supplies inputs; here the environment is a constant).
+    #[arg(long, value_enum, requires = "simulate")]
+    pub free_inputs: Option<FreeInputs>,
+}
+
+/// What `--free-inputs` holds an unbound input at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FreeInputs {
+    /// The input's literal `start` value, or 0 when it has none.
+    Start,
+}
+
+/// Every unbound top-level input scalar and the constant `--free-inputs`
+/// holds it at, skipping those given explicitly.
+fn free_input_values(
+    dae: &rumoca_compile::compile::Dae,
+    explicit: &[(String, f64)],
+) -> Vec<(String, f64)> {
+    use rumoca_compile::compile as dae_ir;
+    dae.inspect(|view| {
+        view.variables()
+            .filter(|(_, variable)| {
+                variable.role() == dae_ir::VariableRole::Input && variable.binding().is_none()
+            })
+            .flat_map(|(_, variable)| {
+                // A scalar start applies to every element; an array start
+                // that is not a literal falls back to 0 per element.
+                let value = variable
+                    .start()
+                    .and_then(|id| view.expression(id))
+                    .and_then(|start| match start.operation() {
+                        dae_ir::ExpressionOperation::Literal(dae_ir::DaeLiteral::Real(v)) => {
+                            Some(*v)
+                        }
+                        dae_ir::ExpressionOperation::Literal(dae_ir::DaeLiteral::Integer(v)) => {
+                            Some(*v as f64)
+                        }
+                        dae_ir::ExpressionOperation::Literal(dae_ir::DaeLiteral::Boolean(v)) => {
+                            Some(f64::from(u8::from(*v)))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(0.0);
+                (0..variable.scalar_count())
+                    .filter_map(move |scalar| variable.scalar_name(scalar))
+                    .map(move |name| (name, value))
+            })
+            .filter(|(name, _)| !explicit.iter().any(|(given, _)| given == name))
+            .collect()
+    })
 }
 
 /// Parse one `--param name=value` pair.
@@ -823,6 +880,25 @@ fn run_trace(
     };
     for pair in &args.params {
         options.param_overrides.push(parse_param(pair)?);
+    }
+    for pair in &args.inputs {
+        options.initial_inputs.push(parse_param(pair)?);
+    }
+    if args.free_inputs == Some(FreeInputs::Start) {
+        let held = free_input_values(dae, &options.initial_inputs);
+        if !held.is_empty() {
+            // Stated, because a finding under held inputs is a finding about
+            // that input history, not about every history.
+            eprintln!(
+                "holding {} free input(s) constant at their start values: {}",
+                held.len(),
+                held.iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        options.initial_inputs.extend(held);
     }
     if args.check {
         eprintln!(

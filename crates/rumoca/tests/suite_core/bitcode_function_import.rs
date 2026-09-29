@@ -423,3 +423,46 @@ fn the_text_profile_round_trips_a_carried_body_exactly() {
 fn text_of(output: &Output) -> String {
     text(output)
 }
+
+#[test]
+fn a_model_with_an_unconnected_input_runs_when_its_inputs_are_held() {
+    // A block tested standalone has top-level inputs nothing drives, and the
+    // simulator refused it ("has neither a checked default nor a runtime
+    // value"). `--input` holds one at a value; `--free-inputs start` holds
+    // every unbound one at its start value, else 0, and says which.
+    let work = tempdir().expect("temp dir");
+    let source = work.path().join("Held.mo");
+    fs::write(
+        &source,
+        "model Held\n  input Real u;\n  Real x(start = 1, fixed = true, max = 1.5);\n\
+         equation\n  der(x) = -x + u;\nend Held;\n",
+    )
+    .expect("write fixture");
+    let artifact = work.path().join("held.rbc");
+    let compiled = rumoca(&[
+        "compile",
+        source.to_str().unwrap(),
+        "--emit-bitcode",
+        artifact.to_str().unwrap(),
+    ]);
+    assert!(artifact.exists(), "fixture must compile: {}", text(&compiled));
+    let artifact = artifact.to_str().unwrap();
+    let simulate = |extra: &[&str]| {
+        let mut args = vec!["compile-bitcode", artifact, "--simulate", "--check", "--t-end", "1"];
+        args.extend_from_slice(extra);
+        rumoca(&args)
+    };
+    let refused = simulate(&[]);
+    assert!(
+        text(&refused).contains("has neither a checked default nor a runtime value"),
+        "{}",
+        text(&refused)
+    );
+    let held = simulate(&["--free-inputs", "start"]);
+    assert!(held.status.success(), "{}", text(&held));
+    assert!(text(&held).contains("holding 1 free input(s) constant"), "{}", text(&held));
+    // Held at 2 for the whole run, x crosses its max near t = ln 2; held
+    // only at t = 0 it would not.
+    let driven = simulate(&["--input", "u=2"]);
+    assert!(text(&driven).contains("above-max"), "{}", text(&driven));
+}

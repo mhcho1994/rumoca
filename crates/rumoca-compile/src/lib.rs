@@ -176,10 +176,10 @@ pub mod phase_structural {
 /// Compilation session API and result structures.
 pub mod compile {
     pub use rumoca_ir_dae::{
-        ClockOperation, ConditionId, ContinuousOwnerView, CoordinateView, Dae, DaeProvenance,
-        DaeView, DiscreteBranchActivation, DiscreteRealActivation, DiscreteRealEquationView,
-        ExprId, ExpressionOperation, ResidualEquationView, VariableId, VariableRole, VariableView,
-        for_each_expression,
+        ClockOperation, ConditionId, ContinuousOwnerView, CoordinateView, Dae, DaeLiteral,
+        DaeProvenance, DaeView, DiscreteBranchActivation, DiscreteRealActivation,
+        DiscreteRealEquationView, ExprId, ExpressionOperation, ResidualEquationView, VariableId,
+        VariableRole, VariableView, for_each_expression,
     };
     pub use rumoca_ir_flat::Model as FlatModel;
 
