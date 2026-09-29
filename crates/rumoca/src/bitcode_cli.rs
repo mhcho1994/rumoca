@@ -172,8 +172,11 @@ pub struct CompileBitcodeArgs {
     /// Simulate the reconstructed model and emit its trace points.
     #[arg(long)]
     pub simulate: bool,
+    /// Simulation start time, e.g. a model's `experiment(StartTime=...)`.
+    #[arg(long, default_value_t = 0.0, requires = "simulate", allow_hyphen_values = true)]
+    pub t_start: f64,
     /// Simulation end time.
-    #[arg(long, default_value_t = 1.0, requires = "simulate")]
+    #[arg(long, default_value_t = 1.0, requires = "simulate", allow_hyphen_values = true)]
     pub t_end: f64,
     /// Fixed output interval. Omitted lets the runtime choose.
     #[arg(long, requires = "simulate")]
@@ -873,7 +876,15 @@ fn run_trace(
         );
     }
 
+    if args.t_end <= args.t_start {
+        bail!(
+            "--t-end ({}) must be after --t-start ({})",
+            args.t_end,
+            args.t_start
+        );
+    }
     let mut options = SimOptions {
+        t_start: args.t_start,
         t_end: args.t_end,
         dt: args.dt,
         ..SimOptions::default()

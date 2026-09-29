@@ -1,4 +1,4 @@
-"""`free_inputs` on the Rumoca backend: holding unconnected inputs."""
+"""Rumoca backend options: holding unconnected inputs, and the simulation window."""
 import pytest
 
 from modelsan.backends.rumoca import RumocaBackend, held_inputs
@@ -20,3 +20,12 @@ def test_free_inputs_accepts_only_what_rumoca_implements():
     assert RumocaBackend("rumoca").free_inputs is None
     with pytest.raises(ValueError):
         RumocaBackend("rumoca", free_inputs="zero")
+
+
+def test_simulation_window_starts_where_the_model_says():
+    backend = RumocaBackend("rumoca", t_start=0.01, t_end=3.0)
+    assert (backend.t_start, backend.t_end) == (0.01, 3.0)
+    assert RumocaBackend("rumoca").t_start == 0.0
+    for start, end in ((1.0, 1.0), (2.0, 1.0), (float("nan"), 1.0)):
+        with pytest.raises(ValueError):
+            RumocaBackend("rumoca", t_start=start, t_end=end)

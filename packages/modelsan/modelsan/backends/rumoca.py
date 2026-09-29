@@ -109,10 +109,15 @@ class RumocaBackend:
     def __init__(self, executable: str = "./target/debug/rumoca",
                  t_end: float = 0.5, timeout: float = 90.0, *, replay=None,
                  source_roots=None, cache_dir=None, dt=None, freeze_parameters=False,
-                 free_inputs=None) -> None:
+                 free_inputs=None, t_start: float = 0.0) -> None:
         if dt is not None and (not math.isfinite(dt) or dt <= 0):
             raise ValueError("output interval must be finite and positive")
+        if not (math.isfinite(t_start) and math.isfinite(t_end) and t_end > t_start):
+            raise ValueError("simulation window must be finite with t_end after t_start")
         self.executable = executable
+        # The window a model's `experiment(StartTime=...)` names: some
+        # validations are only defined after their start (E1(0) = inf).
+        self.t_start = t_start
         self.t_end = t_end
         self.timeout = timeout
         roots = source_roots if source_roots is not None else (
@@ -278,7 +283,7 @@ class RumocaBackend:
         # observations. Letting the backend do it would move a sanitizer's
         # judgement inside the execution boundary and hide it from the planner.
         command = [self.executable, "compile-bitcode", str(self._artifact),
-                   "--simulate", "--t-end", str(self.t_end),
+                   "--simulate", "--t-start", repr(self.t_start), "--t-end", repr(self.t_end),
                    "--trace-out", str(trace_csv), "--domain-diagnostics", str(diagnostics_path)]
         if self.dt is not None:
             command += ["--dt", str(self.dt)]
