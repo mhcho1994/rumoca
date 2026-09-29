@@ -54,25 +54,25 @@
 //! [`solve::InitializationRowRole`] carries the difference to the runtime so a
 //! failure names the right defect instead of the friendliest one.
 //!
-//! **Algebraic and output reads fail closed until the reduced solve owns them.**
-//! The runtime reconstructs those coordinates before evaluating the complete
-//! initialization residual, so declaration seeds cannot certify a wrong initial
-//! state. The projection still cannot move an algebraic or account for its total
-//! derivative through the continuous system, so a row that needs that coupled
-//! capability remains typed as unowned rather than being admitted unsoundly.
-//! The two historical failure modes were:
+//! **Algebraic and output reads join the solve through algebraic refresh.**
+//! The runtime re-settles every algebraic/output coordinate from the current
+//! unknowns on each residual evaluation (`refreshes_algebraic_reads`), and
+//! takes the Jacobian-vector product through that refresh, so a row that
+//! reads one is a function of the projection unknowns. Its exact incidence
+//! through the continuous system is implicit, so such a row conservatively
+//! joins every unknown -- the rule `ImplicitAlgebraic` checks already use --
+//! and is recorded as `SolvedThroughAlgebraicRefresh` (or
+//! `SurplusAlgebraicCheck`). A zero sensitivity can make a block fail; it can
+//! never certify a wrong value, because the certificate itself evaluates the
+//! refreshed residual. This closes the two historical failure modes:
 //!
-//! * `a = 2*time + 5; der(x) = a - x;` with `initial equation der(x) = 0`
-//!   *silently simulates* `x(0) = 0` where OpenModelica gives `5`: the seeds
-//!   cancel, so the check passes and the stated initial condition vanishes.
-//! * the consistent `initial equation x = 5; x = a;` on the same model is
-//!   *refused* on the stale seed (`EX001`) where OpenModelica initializes.
+//! * `a = 2*time + 5; der(x) = a - x;` with `initial equation der(x) = 0` once
+//!   *silently simulated* `x(0) = 0` (the seeds cancelled) and later failed
+//!   closed; it now initializes to OpenModelica's `5`.
+//! * `initial equation x = a + 7` on the same model now gives `12`.
 //!
-//! The evaluation-local refresh closes the false-certificate hole without
-//! claiming the larger capability. The owner that makes the shape fully solvable
-//! remains algebraic refresh joining the initialization solve — folded into the
-//! projection loop, or the algebraics carried as unknowns over their own
-//! continuous rows with a checked total derivative.
+//! A row is admitted this way only when algebraic reads are its *only*
+//! obstacle; a discrete, unreadable or other coordinate still excludes it.
 //!
 //! **Discrete reads: the check is honest, and the refusal is an over-refusal.** A
 //! discrete coordinate *is* at its §8.6 value when the residual runs — the runtime
@@ -335,8 +335,17 @@ pub(super) fn plan_initialization_projection<'dae>(
     // and is downgraded or promoted below by what the walk and the matching find.
     let mut row_roles = vec![solve::InitializationRowRole::SurplusCheck; rows.len()];
     let mut incidence: Vec<(usize, BTreeSet<InitialUnknown>)> = Vec::new();
+    // Rows admitted through algebraic refresh; promoted with the implicit
+    // algebraic checks below.
+    let mut refreshed = vec![false; rows.len()];
     for (row, source) in rows.iter().enumerate() {
         match row_unknowns(space, source) {
+            RowIncidence::ThroughAlgebraicRefresh(unknowns) => {
+                refreshed[row] = true;
+                if !unknowns.is_empty() {
+                    incidence.push((row, unknowns));
+                }
+            }
             RowIncidence::Owned(unknowns) if !unknowns.is_empty() => {
                 incidence.push((row, unknowns));
             }
@@ -369,7 +378,7 @@ pub(super) fn plan_initialization_projection<'dae>(
         });
     }
     for (row, source) in rows.iter().enumerate() {
-        if !matches!(source, InitialRowIncidence::ImplicitAlgebraic) {
+        if !matches!(source, InitialRowIncidence::ImplicitAlgebraic) && !refreshed[row] {
             continue;
         }
         row_roles[row] = match row_roles[row] {
@@ -444,19 +453,14 @@ fn row_unknowns<'dae>(
     let mut incidence = InitialIncidence {
         unknowns: BTreeSet::new(),
         excluded: None,
+        other_than_algebraic: false,
         substituted: BTreeSet::new(),
         expanded: BTreeSet::new(),
         pending,
     };
-    // One coordinate the projection cannot own already disqualifies the row, but
-    // *which* one decides what the runtime is told, and the algebraic reading is
-    // the one worth reporting (see the module header). So the walk keeps going
-    // until it has found an algebraic or run out of expressions to expand.
-    while !matches!(
-        incidence.excluded,
-        Some(solve::InitializationCoordinateKind::Algebraic)
-    ) && let Some(expression) = incidence.pending.pop()
-    {
+    // Walked to the end: whether an algebraic is the row's *only* obstacle
+    // decides whether it can join the solve through algebraic refresh.
+    while let Some(expression) = incidence.pending.pop() {
         dae::for_each_expression(space.view, expression, |_, node| {
             let dae::ExpressionOperation::Coordinate(coordinate) = node.operation() else {
                 return;
@@ -466,6 +470,20 @@ fn row_unknowns<'dae>(
     }
     match incidence.excluded {
         None => RowIncidence::Owned(incidence.unknowns),
+        // An algebraic/output read is re-settled from the current unknowns on
+        // every residual evaluation (`refreshes_algebraic_reads`), and the
+        // Jacobian-vector product is taken through that refresh, so the row is
+        // a function of the projection unknowns after all. Its exact incidence
+        // through the continuous system is implicit, so -- exactly as for
+        // `ImplicitAlgebraic` -- it conservatively joins every unknown: a zero
+        // sensitivity can make the block fail, never certify a wrong value.
+        Some(solve::InitializationCoordinateKind::Algebraic)
+            if !incidence.other_than_algebraic =>
+        {
+            let mut unknowns = space.all_projection_unknowns();
+            unknowns.extend(incidence.unknowns);
+            RowIncidence::ThroughAlgebraicRefresh(unknowns)
+        }
         Some(kind) => RowIncidence::Unowned(kind),
     }
 }
@@ -477,6 +495,10 @@ enum RowIncidence {
     Owned(BTreeSet<InitialUnknown>),
     /// The row reads a coordinate outside the planned unknown space, of this kind.
     Unowned(solve::InitializationCoordinateKind),
+    /// The row reads algebraic/output coordinates and nothing else outside the
+    /// unknown space; it joins the solve through algebraic refresh over these
+    /// unknowns.
+    ThroughAlgebraicRefresh(BTreeSet<InitialUnknown>),
 }
 
 /// How loudly one exclusion kind deserves to be reported, largest first.
@@ -499,6 +521,8 @@ const fn exclusion_rank(kind: solve::InitializationCoordinateKind) -> u8 {
 struct InitialIncidence<'dae> {
     unknowns: BTreeSet<InitialUnknown>,
     excluded: Option<solve::InitializationCoordinateKind>,
+    /// Whether any exclusion other than an algebraic/output read was found.
+    other_than_algebraic: bool,
     /// Parameter bindings already followed, so a diamond is walked once.
     substituted: BTreeSet<u32>,
     /// State derivatives already followed, so a derivative that reads itself
@@ -554,6 +578,9 @@ impl<'dae> InitialIncidence<'dae> {
 
     /// Record why the row cannot be planned, keeping the loudest reason found.
     fn exclude(&mut self, kind: solve::InitializationCoordinateKind) {
+        if kind != solve::InitializationCoordinateKind::Algebraic {
+            self.other_than_algebraic = true;
+        }
         if self
             .excluded
             .is_none_or(|held| exclusion_rank(kind) > exclusion_rank(held))
