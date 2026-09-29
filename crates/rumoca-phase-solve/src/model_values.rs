@@ -356,7 +356,10 @@ where
             .evaluator
             .expression(expression)
             .map_err(evaluation_error)?;
-        if values.len() == 1 && variable.scalar_count() > 1 {
+        // A scalar applies to every element, including to none: `Xi[nXi]`
+        // with `nXi = 0` and a scalar `nominal` has nothing to apply it to,
+        // which is not a shape error.
+        if values.len() == 1 && variable.scalar_count() != 1 {
             values.resize(variable.scalar_count(), values[0]);
         }
         if values.len() != variable.scalar_count()

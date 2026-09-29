@@ -522,3 +522,36 @@ fn check_reports_each_array_element_against_its_declared_bound() {
     broken.sort();
     assert_eq!(broken, ["w[2]", "y[1]", "y[2]", "y[3]"]);
 }
+
+#[test]
+fn a_zero_size_array_with_a_scalar_attribute_simulates() {
+    // `Xi[nXi]` with `nXi = 0` and a scalar `nominal`/`start` has nothing to
+    // apply them to. A single value spread only over N > 1 elements, so this
+    // was refused as "nominal must contain 0 finite positive values".
+    let work = tempdir().expect("temp dir");
+    let source = work.path().join("ZeroSize.mo");
+    fs::write(
+        &source,
+        "model ZeroSize\n  parameter Integer n = 0;\n  Real v[n](each nominal = 2, each start = 1);\n  \
+         Real x(start = 1, fixed = true);\nequation\n  v = fill(x, n);\n  der(x) = -x;\n\
+         end ZeroSize;\n",
+    )
+    .expect("write fixture");
+    let artifact = work.path().join("zero.rbc");
+    let compiled = rumoca(&[
+        "compile",
+        source.to_str().unwrap(),
+        "--emit-bitcode",
+        artifact.to_str().unwrap(),
+    ]);
+    assert!(artifact.exists(), "fixture must compile: {}", text(&compiled));
+    let run = rumoca(&[
+        "compile-bitcode",
+        artifact.to_str().unwrap(),
+        "--simulate",
+        "--check",
+        "--t-end",
+        "0.1",
+    ]);
+    assert!(run.status.success(), "{}", text(&run));
+}

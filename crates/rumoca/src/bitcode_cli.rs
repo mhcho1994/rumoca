@@ -1081,7 +1081,9 @@ fn element_bounds(
     if let Some(declared) = bounds.get(column) {
         return Some(declared.clone());
     }
-    let (base, subscript) = column.strip_suffix(']')?.split_once('[')?;
+    // Only the trailing subscript is the element: `a.tf[1].x[2]` is element 2
+    // of `a.tf[1].x`, a variable inside an array of components.
+    let (base, subscript) = column.strip_suffix(']')?.rsplit_once('[')?;
     let declared = bounds.get(base)?;
     if declared.minimum.is_some() || declared.maximum.is_some() {
         return Some(declared.clone());
@@ -1259,6 +1261,18 @@ fn resolve_trace_plan(model: &RbcModel, names: &[String]) -> Vec<TracePlanRow> {
         .collect()
 }
 
+/// One CSV field, quoted when it must be (RFC 4180).
+///
+/// A two-dimensional array element is named `Y[1,2]`, and unquoted that
+/// comma split the row, so every trace of such a model was malformed.
+fn csv_field(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains([',', '"', '\n', '\r']) {
+        std::borrow::Cow::Owned(format!("\"{}\"", text.replace('"', "\"\"")))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 fn write_trace_csv(path: &Path, plan: &[TracePlanRow], sim: &rumoca_sim::SimResult) -> Result<()> {
     let mut out = String::from("time,trace_id,connection,variable,quantity,unit,value\n");
     for (index, time) in sim.times.iter().enumerate() {
@@ -1269,7 +1283,11 @@ fn write_trace_csv(path: &Path, plan: &[TracePlanRow], sim: &rumoca_sim::SimResu
             };
             out.push_str(&format!(
                 "{time},{},{},{},{},{},{value}\n",
-                row.id, row.connection, row.variable, row.quantity, row.unit
+                csv_field(&row.id),
+                csv_field(&row.connection),
+                csv_field(&row.variable),
+                csv_field(&row.quantity),
+                csv_field(&row.unit)
             ));
         }
     }
@@ -1331,6 +1349,14 @@ fn print_reconstructed(model: &RbcModel, dae: &rumoca_compile::compile::Dae) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_trace_field_with_a_comma_is_quoted() {
+        // A two-dimensional array element, `Y[1,2]`, split the trace row.
+        assert_eq!(super::csv_field("Y[1,2]"), "\"Y[1,2]\"");
+        assert_eq!(super::csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(super::csv_field("x[3]"), "x[3]");
+    }
+
     use super::*;
     use rumoca_bitcode::schema::*;
 

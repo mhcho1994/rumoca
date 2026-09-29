@@ -37,6 +37,8 @@ class ArrayObservations(unittest.TestCase):
         self.assertEqual(variable_of("w[2]"), "w")
         self.assertEqual(variable_of("w"), "w")
         self.assertEqual(variable_of("a.b[1,2]"), "a.b")
+        # A variable inside an array of components keeps its own subscript.
+        self.assertEqual(variable_of("a.TF1[1].x[2]"), "a.TF1[1].x")
 
     @unittest.skipUnless(RUMOCA.exists(), "needs a built rumoca")
     def test_each_element_is_checked_against_its_bound(self):

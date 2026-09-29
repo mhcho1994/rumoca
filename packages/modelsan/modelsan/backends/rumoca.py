@@ -55,9 +55,13 @@ CLASSIFIERS = (
 
 
 def variable_of(column: str) -> str:
-    """The variable an element column belongs to: `y[2]` -> `y`."""
+    """The variable an element column belongs to: `y[2]` -> `y`.
+
+    Only the trailing subscript is the element; `a.TF1[1].x[2]` belongs to
+    `a.TF1[1].x`, a variable inside an array of components.
+    """
     if column.endswith("]") and "[" in column:
-        return column[: column.index("[")]
+        return column[: column.rindex("[")]
     return column
 
 
@@ -169,6 +173,8 @@ class RumocaBackend:
         for variable in model.variables:
             if variable.is_parameter:
                 continue  # constant over the run; a column per sample says nothing
+            if 0 in variable.type.dimensions:
+                continue  # a zero-size array has no element to observe
             try:
                 model.add_trace_point(variable, label=variable.name,
                                       added_by="modelsan.RumocaBackend")

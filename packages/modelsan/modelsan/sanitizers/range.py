@@ -103,7 +103,8 @@ class RangeSan:
         """
         if not (name.endswith("]") and "[" in name):
             return None
-        base, subscript = name[: name.index("[")], name[name.index("[") + 1:-1]
+        # Only the trailing subscript is the element (`a.TF1[1].x[2]`).
+        base, subscript = name[: name.rindex("[")], name[name.rindex("[") + 1:-1]
         if base in bounds:
             return bounds[base]
         if base not in arrays or not subscript.isdigit():
