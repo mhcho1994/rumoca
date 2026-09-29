@@ -562,11 +562,12 @@ fn compare(left: &RbcModel, right: &RbcModel) -> Vec<String> {
             format!("{:?}", b.unit),
         );
     }
+    let (left_types, right_types) = structural_type_ids(left, right);
     for (a, b) in left.expressions.iter().zip(&right.expressions) {
         check(
             &format!("expression {} node", a.id),
-            format!("{:?}", a.node),
-            format!("{:?}", b.node),
+            format!("{:?}", node_with_type_ids(&a.node, &left_types)),
+            format!("{:?}", node_with_type_ids(&b.node, &right_types)),
         );
     }
     for (a, b) in left.equations.iter().zip(&right.equations) {
@@ -589,7 +590,6 @@ fn compare(left: &RbcModel, right: &RbcModel) -> Vec<String> {
         format!("{:?}", left.functions.len()),
         format!("{:?}", right.functions.len()),
     );
-    let (left_types, right_types) = structural_type_ids(left, right);
     for (a, b) in left.functions.iter().zip(&right.functions) {
         check(
             &format!("function {} ({})", a.id.0, a.name),
@@ -653,6 +653,26 @@ fn structural_type_ids(left: &RbcModel, right: &RbcModel) -> (Vec<u32>, Vec<u32>
         left.types.iter().map(index).collect(),
         right.types.iter().map(index).collect(),
     )
+}
+
+/// A node with the type ids it names renumbered by structure (see
+/// [`structural_type_ids`]).
+fn node_with_type_ids(
+    node: &rumoca_bitcode::schema::RbcExprNode,
+    ids: &[u32],
+) -> rumoca_bitcode::schema::RbcExprNode {
+    use rumoca_bitcode::schema::{RbcExprNode, TypeId};
+    let map = |ty: TypeId| TypeId(ids.get(ty.0 as usize).copied().unwrap_or(u32::MAX));
+    let mut node = node.clone();
+    match &mut node {
+        RbcExprNode::Record { ty, .. } => *ty = map(*ty),
+        RbcExprNode::Array {
+            empty_type: Some(ty),
+            ..
+        } => *ty = map(*ty),
+        _ => {}
+    }
+    node
 }
 
 fn with_type_ids(
