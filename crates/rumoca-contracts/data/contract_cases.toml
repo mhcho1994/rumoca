@@ -1242,14 +1242,14 @@ outcome = 'Reject'
 
 [[cases]]
 contract_id = 'INST-012'
-case_id = 'inst_012_outer_binding_is_rejected'
+case_id = 'inst_012_outer_binding_is_reported_and_ignored'
 test_file = 'tests/inst_contracts.rs'
 kind = 'Parse'
 outcome = 'Reject'
 
 [[cases]]
 contract_id = 'INST-012'
-case_id = 'inst_012_outer_modification_is_rejected'
+case_id = 'inst_012_outer_modification_is_reported_and_ignored'
 test_file = 'tests/inst_contracts.rs'
 kind = 'Parse'
 outcome = 'Reject'
