@@ -16,8 +16,10 @@ use rustc_hash::FxHashSet;
 /// - expandable connectors (TYPE-016)
 /// - purity: an impure replacement needs an impure constraint (TYPE-021)
 /// - finality: a final constraint requires a final replacement (TYPE-026)
-/// - transitively non-replaceable constraints require a transitively
-///   non-replaceable replacement (TYPE-022)
+///
+/// The TYPE-022 replaceability rule is separate
+/// ([`replaceability_compatible`]) because it only applies to structural
+/// acceptance.
 pub(crate) fn class_flags_compatible(
     tree: &ast::ClassTree,
     subtype: &ast::ClassDef,
@@ -50,10 +52,26 @@ pub(crate) fn class_flags_compatible(
     if supertype.is_final && !subtype.is_final {
         return false;
     }
-    if is_transitively_non_replaceable(supertype) && !is_transitively_non_replaceable(subtype) {
-        return false;
-    }
     true
+}
+
+/// TYPE-022 (MLS §6.4): a transitively non-replaceable constraint requires a
+/// transitively non-replaceable replacement.
+///
+/// Only applied when the replacement was accepted structurally (sibling
+/// classes). A class that nominally extends the constraint is its subtype by
+/// construction even when it adds replaceable elements of its own: the
+/// generalized electrical `Terminal extends BaseTerminal` adds a replaceable
+/// `PhaseSystem` package, and OpenModelica/Dymola accept
+/// `redeclare Terminal t` for `replaceable BaseTerminal t`.
+pub(crate) fn replaceability_compatible(
+    subtype: &ast::ClassDef,
+    supertype: Option<&ast::ClassDef>,
+) -> bool {
+    let Some(supertype) = supertype else {
+        return true;
+    };
+    !is_transitively_non_replaceable(supertype) || is_transitively_non_replaceable(subtype)
 }
 
 /// MLS §6.4: a class is transitively non-replaceable when neither it nor any

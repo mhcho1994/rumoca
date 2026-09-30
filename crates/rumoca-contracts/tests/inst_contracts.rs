@@ -1015,6 +1015,42 @@ fn inst_043_redeclare_must_still_be_subtype_without_explicit_constrainedby() {
     );
 }
 
+#[test]
+fn inst_043_explicit_constrainedby_overrides_declared_type_as_constraint() {
+    // MLS §7.3.2: with an explicit constraining clause the replacement only
+    // has to be a subtype of the constraining type, not of the declared
+    // default type (Buildings/IBPSA SolarCollectors `per` pattern).
+    expect_success(
+        r#"
+        record Generic
+            parameter Real A = 1;
+        end Generic;
+
+        record DataA
+            extends Generic;
+            parameter Real slope = 2;
+        end DataA;
+
+        record DataB
+            extends Generic;
+            parameter Real eta0 = 3;
+        end DataB;
+
+        partial model Container
+            replaceable parameter DataA per constrainedby Generic;
+            Real a;
+        equation
+            a = per.A;
+        end Container;
+
+        model Test
+            extends Container(redeclare DataB per);
+        end Test;
+    "#,
+        "Test",
+    );
+}
+
 // =============================================================================
 // INST-034: Encapsulated lookup stop
 // "Lookup stops if enclosing class is encapsulated"

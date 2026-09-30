@@ -203,8 +203,14 @@ fn validate_redeclaration(
             .map(|n| n.to_string())
             .unwrap_or_else(|| component.type_name.to_string());
 
-        // Try to resolve constraint type using def_id or tree lookup
-        let constraint_type = if let Some(def_id) = component.type_def_id
+        // Try to resolve constraint type using def_id or tree lookup. An
+        // explicit `constrainedby` clause is the constraint (MLS §7.3.2); the
+        // declared type is only the constraint when that clause is absent.
+        let constraint_def_id = match component.constrainedby.as_ref() {
+            Some(constraint) => constraint.def_id,
+            None => component.type_def_id,
+        };
+        let constraint_type = if let Some(def_id) = constraint_def_id
             && let Some(qualified) = tree.def_map.get(&def_id)
         {
             qualified.clone()
@@ -458,7 +464,8 @@ pub fn is_type_subtype_cached(
 
     // For class types, check if subtype's class extends supertype's class
     let result = if let Some(subtype_class) = find_class_in_tree(tree, subtype) {
-        let accepted = if class_extends_cached(tree, subtype_class, supertype, cache) {
+        let nominal = class_extends_cached(tree, subtype_class, supertype, cache);
+        let accepted = if nominal {
             true
         } else if let Some(supertype_class) = find_class_in_tree(tree, supertype) {
             // Check for sibling types: both extend the same base class.
@@ -483,6 +490,11 @@ pub fn is_type_subtype_cached(
                 subtype_class,
                 find_class_in_tree(tree, supertype),
             )
+            && (nominal
+                || crate::plug_compat::replaceability_compatible(
+                    subtype_class,
+                    find_class_in_tree(tree, supertype),
+                ))
     } else {
         false
     };
