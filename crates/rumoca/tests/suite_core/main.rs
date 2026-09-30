@@ -94,6 +94,7 @@ mod pipeline_test;
 mod prepared_vectors_refresh;
 mod replaceable_function_redeclare;
 mod semi_linear_zero_flow;
+mod structural_evaluation_regressions;
 mod type_level_bounds;
 // quadrotor_se23_regression_test.rs lives in `suite_heavy_solve`
 // (required-features = ["heavy-solve-tests"]): until the compact Solve
