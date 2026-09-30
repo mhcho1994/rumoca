@@ -136,10 +136,14 @@ default group. Only the known environment failures remained once two
 defects it exposed were fixed: bitcode export was exponential on nested loops
 (TOOLBUG-065) and the exported call graph missed calls with literal arguments,
 so `prune-functions` deleted a live function (TOOLBUG-066). The four owner
-tables that kept the stage opt-in are carried. On
-`Modelica.Fluid.Examples.HeatingSystem` (warm cache, bitcode emitted in all
-three) the plain compile, the round trip and the default group took 9.2 s,
-9.2 s and 10.0 s at the same peak memory.
+tables that kept the stage opt-in are carried. Compiling
+`Modelica.Mechanics.MultiBody.Examples.Elementary.DoublePendulum` and
+`Modelica.Electrical.Machines.Examples.InductionMachines.IMC_DOL` (warm
+cache, two runs each), the default pipeline took 7.68/7.85 s and 7.71/7.67 s
+against 7.59/7.56 s and 7.88/7.24 s for `--pass none`, at the same 2.2 GB
+peak: within run-to-run noise. (An earlier figure on
+`Modelica.Fluid.Examples.HeatingSystem` timed a compile that fails before the
+stage, EI012, and is withdrawn.)
 
 **What moved out of the frontend.**
 
