@@ -1616,6 +1616,14 @@ fn apply_collected_redeclarations(
     // This updates the component's type so that instantiation uses the new type's fields
     for (comp_name, new_type_name) in &redeclarations.types {
         if let Some(comp) = target.components.get_mut(comp_name) {
+            // MLS §7.3.2: without a constraining clause the *original*
+            // declaration's type is the constraint, and it stays the
+            // constraint for further redeclarations of the element.
+            if comp.constrainedby.is_none() {
+                let mut original = comp.type_name.clone();
+                original.def_id = comp.type_def_id.or(original.def_id);
+                comp.constrainedby = Some(original);
+            }
             comp.type_name = rumoca_ir_ast::Name::from_string(new_type_name);
             comp.type_def_id = tree.name_map.get(new_type_name).copied().or_else(|| {
                 // Try with shorter name (last segment) for unqualified lookups

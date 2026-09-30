@@ -49,6 +49,11 @@ Affected cluster-A models: `Fluid.Actuators.Valves.Examples.ThreeWayValves`
   (`collect_inherited_redeclarations`); the type/dimension application shared
   with `merge_class_content` moved into `apply_collected_redeclarations`.
   The innermost-first merge order makes the outermost redeclaration win.
+  A redeclaration without a constraining clause records the original
+  declaration's type as the element's constraint (MLS §7.3.2), so a further
+  redeclaration is checked against the original constraint, not against the
+  intermediate type (OpenIPSL `redeclare replaceable Integrator sISO` then
+  `redeclare replaceable IntegratorLimVar sISO`, both `SISO`s).
 - `crates/rumoca-phase-parse/src/expressions.rs`:
   `merge_redeclare_constraining_modifications` appends a redeclaration's
   constraining-clause modifiers to its class modification; a modifier the
