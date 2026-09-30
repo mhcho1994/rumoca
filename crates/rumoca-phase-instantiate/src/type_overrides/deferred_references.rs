@@ -133,7 +133,17 @@ impl ExpressionTransformer for DynamicExpressionTargetResolver<'_> {
         if self.error.is_some() || reference.target_def_id().is_some() {
             return reference;
         }
-        let Some(root_def_id) = reference.root_def_id() else {
+        // The deferred edge is the last resolved segment: the root for
+        // `Medium.f`, an inner replaceable class for `Pkg.Medium.f`.
+        let Some(deferred_index) = reference
+            .parts
+            .iter()
+            .position(|part| part.def_id.is_none())
+            .and_then(|first_missing| first_missing.checked_sub(1))
+        else {
+            return reference;
+        };
+        let Some(root_def_id) = reference.parts[deferred_index].def_id else {
             return reference;
         };
         // A replaceable class alias selects a class directly; a replaceable
@@ -146,9 +156,20 @@ impl ExpressionTransformer for DynamicExpressionTargetResolver<'_> {
         else {
             return reference;
         };
-        match resolve_member_reference_in_class(self.tree, target_class_def_id, &reference, 1) {
+        let first_member = deferred_index + 1;
+        match resolve_member_reference_in_class(
+            self.tree,
+            target_class_def_id,
+            &reference,
+            first_member,
+        ) {
             Ok(identities) => {
-                for (part, def_id) in reference.parts.iter_mut().skip(1).zip(identities) {
+                for (part, def_id) in reference
+                    .parts
+                    .iter_mut()
+                    .skip(first_member)
+                    .zip(identities)
+                {
                     part.def_id = Some(def_id);
                 }
             }

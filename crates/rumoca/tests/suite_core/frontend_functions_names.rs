@@ -296,3 +296,70 @@ fn short_function_alias_called_by_a_sibling_keeps_one_exposure() {
     let s = final_value(&compiled, "s");
     assert!((s - 4.0).abs() < 1e-6, "3 + 1 gives s(1) = 4, got {s}");
 }
+
+// TOOLBUG-107: `extends .Lib.Icons.Package` inside an `encapsulated package`
+// (Modelica_DeviceDrivers AVR functions) must look `Lib` up in the global
+// scope (MLS §5.3.3); the parser dropped the leading dot and lookup stopped at
+// the encapsulated boundary (ER003).
+const GLOBAL_EXTENDS_IN_ENCAPSULATED: &str = r#"
+package GlobalExtends
+  package Icons
+    partial package Package end Package;
+    partial function Function end Function;
+  end Icons;
+  encapsulated package Fns
+    extends .GlobalExtends.Icons.Package;
+    function f
+      extends .GlobalExtends.Icons.Function;
+      input Real x;
+      output Real y;
+    algorithm
+      y := 2*x;
+    end f;
+  end Fns;
+  model M
+    Real s(start = 0, fixed = true);
+  equation
+    der(s) = Fns.f(1.5);
+  end M;
+end GlobalExtends;
+"#;
+
+#[test]
+fn leading_dot_extends_crosses_an_encapsulated_boundary() {
+    let compiled = compile(GLOBAL_EXTENDS_IN_ENCAPSULATED, "GlobalExtends.M");
+    let s = final_value(&compiled, "s");
+    assert!((s - 3.0).abs() < 1e-6, "f(1.5) = 3 gives s(1) = 3, got {s}");
+}
+
+// TOOLBUG-108: a call through a replaceable package in the middle of a
+// qualified name (`ThermoSysPro.Properties.WaterSteam.IF97.Water_Ph`, where
+// `replaceable package IF97 = ...`) was reported unresolved (ER002), and the
+// member was never proved in the selected class (EF024).
+const CALL_THROUGH_INNER_REPLACEABLE_PACKAGE: &str = r#"
+package InnerReplaceable
+  package Props
+    package Impl
+      function f
+        input Real x;
+        output Real y;
+      algorithm
+        y := 2*x;
+      end f;
+    end Impl;
+    replaceable package P = InnerReplaceable.Props.Impl;
+  end Props;
+  model M
+    Real s(start = 0, fixed = true);
+  equation
+    der(s) = InnerReplaceable.Props.P.f(1.5);
+  end M;
+end InnerReplaceable;
+"#;
+
+#[test]
+fn call_through_an_inner_replaceable_package_uses_its_default() {
+    let compiled = compile(CALL_THROUGH_INNER_REPLACEABLE_PACKAGE, "InnerReplaceable.M");
+    let s = final_value(&compiled, "s");
+    assert!((s - 3.0).abs() < 1e-6, "f(1.5) = 3 gives s(1) = 3, got {s}");
+}

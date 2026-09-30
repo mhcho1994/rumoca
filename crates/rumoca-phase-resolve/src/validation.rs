@@ -126,7 +126,7 @@ impl Validator<'_> {
         if cr.target_def_id().is_none() && !cr.parts.is_empty() {
             // Receiver-qualified calls such as `world.gravityAcceleration(...)`
             // may require inherited/outer component type context from instantiation.
-            if self.is_proven_component_receiver(cr) {
+            if self.is_proven_component_receiver(cr) || self.passes_through_replaceable_class(cr) {
                 return;
             }
             let source_location = cr.parts[0]
@@ -139,6 +139,23 @@ impl Validator<'_> {
                 source_location,
             );
         }
+    }
+
+    /// A qualified callee whose resolved prefix passes through a replaceable
+    /// class (`Pkg.Medium.f`, MLS §7.3) was deliberately deferred by the
+    /// full-path traversal: the class occupying the slot is instance-selected.
+    fn passes_through_replaceable_class(&self, cr: &ComponentReference) -> bool {
+        let resolved_prefix = cr.parts.iter().take_while(|part| part.def_id.is_some());
+        resolved_prefix.count() < cr.parts.len()
+            && cr
+                .parts
+                .iter()
+                .filter_map(|part| part.def_id)
+                .any(|def_id| {
+                    self.tree
+                        .get_class_by_def_id(def_id)
+                        .is_some_and(|class| class.is_replaceable)
+                })
     }
 
     fn is_proven_component_receiver(&self, cr: &ComponentReference) -> bool {
