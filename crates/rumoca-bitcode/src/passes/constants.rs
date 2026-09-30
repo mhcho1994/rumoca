@@ -22,8 +22,19 @@ impl Pass for FoldConstants {
     }
     fn run(&self, model: &mut RbcModel) -> Result<usize, PassError> {
         let mut folded = 0;
+        // A relation's root stays relational: the DAE owns it as a zero
+        // crossing, and a literal is not one. `fold-asserts` evaluates such a
+        // comparison itself when it needs the value.
+        let relation_roots = model
+            .relations
+            .iter()
+            .map(|relation| relation.expression.0 as usize)
+            .collect::<std::collections::HashSet<_>>();
         // Operands precede their users, so one forward sweep folds chains.
         for index in 0..model.expressions.len() {
+            if relation_roots.contains(&index) {
+                continue;
+            }
             let value = match &model.expressions[index].node {
                 RbcExprNode::Unary { op, operand } => {
                     literal(model, *operand).and_then(|value| unary(*op, value))
@@ -45,7 +56,7 @@ impl Pass for FoldConstants {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Scalar {
+pub(super) enum Scalar {
     Real(f64),
     Integer(i64),
     Boolean(bool),
@@ -61,7 +72,7 @@ impl From<Scalar> for RbcLiteral {
     }
 }
 
-fn literal(model: &RbcModel, id: ExprId) -> Option<Scalar> {
+pub(super) fn literal(model: &RbcModel, id: ExprId) -> Option<Scalar> {
     match &model.expressions.get(id.0 as usize)?.node {
         RbcExprNode::Literal { value } => match value {
             RbcLiteral::Real { value } => Some(Scalar::Real(*value)),
@@ -87,7 +98,7 @@ fn unary(op: RbcUnaryOp, value: Scalar) -> Option<Scalar> {
     }
 }
 
-fn binary(op: RbcBinaryOp, lhs: Scalar, rhs: Scalar) -> Option<Scalar> {
+pub(super) fn binary(op: RbcBinaryOp, lhs: Scalar, rhs: Scalar) -> Option<Scalar> {
     use RbcBinaryOp as Op;
     match (lhs, rhs) {
         (Scalar::Integer(a), Scalar::Integer(b)) => match op {

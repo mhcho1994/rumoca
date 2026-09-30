@@ -34,6 +34,7 @@ mod balance_diagnostic;
 mod bitcode_disasm;
 mod bitcode_function_import;
 mod bitcode_simulation_window;
+mod package_constants_stay_named;
 mod cli_diagnostic_rendering;
 mod cli_emit;
 mod cli_fmt_lint;

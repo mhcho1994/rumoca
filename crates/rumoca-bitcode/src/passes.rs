@@ -14,9 +14,11 @@
 //! [`crate::import()`], so no pass can produce a model the compiler's own
 //! constructors would reject.
 
+mod asserts;
 mod constants;
 mod evaluate;
 mod functions;
+mod inline_constants;
 mod pure_calls;
 
 use crate::schema::*;
@@ -55,21 +57,26 @@ pub struct PassReport {
 
 static DEAD_EXPRESSIONS: DeadExpressions = DeadExpressions;
 static PRUNE_FUNCTIONS: functions::PruneFunctions = functions::PruneFunctions;
+static INLINE_CONSTANTS: inline_constants::InlineConstants = inline_constants::InlineConstants;
 static FOLD_CONSTANTS: constants::FoldConstants = constants::FoldConstants;
 static FOLD_PURE_CALLS: pure_calls::FoldPureCalls = pure_calls::FoldPureCalls;
+static FOLD_ASSERTS: asserts::FoldAsserts = asserts::FoldAsserts;
 
 /// Every pass this build knows, in the order `--pass default` runs them.
 ///
-/// Folding first, then pruning: a call folded to its value leaves its
+/// Constants are inlined before folding, so the arithmetic they feed folds
+/// in the same run. Folding first, then pruning: a call folded to its value leaves its
 /// callee unreachable, and dropping it is the point of asking for
 /// optimization. (The frontend must prune *before* it folds, because there
 /// the result is the compiler's default artifact and a declared function
 /// vanishing from it because of how one call site was written is not
 /// recoverable -- TOOLBUG-029. A pass runs only when asked.)
-pub fn catalog() -> [&'static dyn Pass; 4] {
+pub fn catalog() -> [&'static dyn Pass; 6] {
     [
+        &INLINE_CONSTANTS,
         &FOLD_CONSTANTS,
         &FOLD_PURE_CALLS,
+        &FOLD_ASSERTS,
         &PRUNE_FUNCTIONS,
         &DEAD_EXPRESSIONS,
     ]
@@ -93,14 +100,15 @@ pub fn run(file: &mut RbcFile, names: &[String]) -> Result<Vec<PassReport>, Pass
             continue;
         }
         // Round trip only: export and rebuild with nothing in between, which
-        // is how the stage's own fidelity is measured.
-        if name == "none" {
+        // is how the stage's own fidelity is measured. (`none` alone never
+        // reaches here: the compiler skips the stage for it.)
+        if name == "round-trip" || name == "none" {
             continue;
         }
         passes.push(find(name).ok_or_else(|| {
             let known: Vec<_> = catalog().iter().map(|pass| pass.name()).collect();
             PassError(format!(
-                "unknown pass `{name}`; known passes: default, none, {}",
+                "unknown pass `{name}`; known passes: default, none, round-trip, {}",
                 known.join(", ")
             ))
         })?);

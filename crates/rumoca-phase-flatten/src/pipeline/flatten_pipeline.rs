@@ -1031,7 +1031,7 @@ pub(crate) fn finalize_flat_model(
                 "AssertionLevel",
                 "error",
             ]));
-    constant_injection::fold_structural_initial_asserts(flat, ctx, assertion_error_literal)?;
+    constant_injection::check_structural_initial_asserts(flat, ctx, assertion_error_literal)?;
     flat.oc_break_edge_scalar_count = vcg::compute_break_edge_scalar_count(
         &flatten_graph.vcg_data.branches,
         &flatten_graph.optional_edges,

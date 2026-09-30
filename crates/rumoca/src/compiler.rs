@@ -298,7 +298,8 @@ pub struct Compiler {
     no_fold_parameter_bindings: bool,
     freeze_parameters: bool,
     /// Bitcode passes to run between the frontend's DAE and everything
-    /// downstream of it; empty skips the stage.
+    /// downstream of it. Empty runs the `default` group; `none` alone skips
+    /// the stage.
     passes: Vec<String>,
 }
 
@@ -340,9 +341,19 @@ impl Compiler {
         self
     }
 
-    /// The passes to run, as requested.
+    /// The passes to run: the `default` group unless others are named, and
+    /// none at all for `none` alone.
+    ///
+    /// The frontend only lowers; the optimizations it used to apply --
+    /// inlining package constants, dropping proven-true assertions, folding
+    /// pure calls -- are passes now (docs/design/minimal-frontend.md), so a
+    /// plain compile runs them to keep producing the same model.
     fn requested_passes(&self) -> Vec<String> {
-        self.passes.clone()
+        match self.passes.as_slice() {
+            [] => vec!["default".to_string()],
+            [only] if only == "none" => Vec::new(),
+            requested => requested.to_vec(),
+        }
     }
 
     /// Build an artifact specialized to the declared fixed parameter values.

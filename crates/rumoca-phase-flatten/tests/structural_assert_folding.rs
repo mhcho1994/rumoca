@@ -2,8 +2,9 @@
 //!
 //! An assertion whose condition is decided from translation-frozen values
 //! alone — constants, `annotation(Evaluate = true)` parameters, `final`
-//! parameters — folds away when proven true, becomes the EF030 translation
-//! diagnostic when proven false at error level, and stays untouched in every
+//! parameters — is kept when proven true (the `fold-asserts` bitcode pass
+//! removes it), becomes the EF030 translation diagnostic when proven false at
+//! error level, and stays untouched in every
 //! other case: warning level, undecidable conditions, and — the load-bearing
 //! adversary — an ordinary tunable parameter whose concrete default the
 //! broader structural context happens to know. Membership in the fold's
@@ -166,23 +167,26 @@ fn functions_with_identity(flat: &rumoca_ir_flat::Model, def_id: rumoca_core::De
 }
 
 #[test]
-fn proven_true_assert_over_an_evaluate_parameter_folds_away() {
+fn proven_true_assert_over_an_evaluate_parameter_is_kept_for_the_pass() {
+    // Dropping a check that cannot fail is an optimization: the frontend keeps
+    // it, and the `fold-asserts` bitcode pass removes it when optimizing
+    // (docs/design/minimal-frontend.md).
     let (flat, ids) = flatten_model("P.FoldsTrue");
     let flat = flat.expect("a proven-true assertion flattens");
-    assert_eq!(initial_asserts(&flat).len(), 0);
+    assert_eq!(initial_asserts(&flat).len(), 1);
     assert_eq!(
         functions_with_identity(&flat, ids.pow2),
-        0,
-        "the folded assertion was the sole call, so its function is pruned"
+        1,
+        "the kept assertion still calls its function"
     );
 }
 
 #[test]
-fn proven_true_assert_over_a_final_parameter_folds_away() {
+fn proven_true_assert_over_a_final_parameter_is_kept_for_the_pass() {
     let (flat, ids) = flatten_model("P.FinalFolds");
     let flat = flat.expect("a proven-true assertion flattens");
-    assert_eq!(initial_asserts(&flat).len(), 0);
-    assert_eq!(functions_with_identity(&flat, ids.pow2), 0);
+    assert_eq!(initial_asserts(&flat).len(), 1);
+    assert_eq!(functions_with_identity(&flat, ids.pow2), 1);
 }
 
 #[test]

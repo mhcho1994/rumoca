@@ -347,7 +347,7 @@ fn pure_call_folding_is_a_pass_not_a_frontend_step() {
     // body -- a loop carrying `s` through a conditional -- gives
     // 3 * 0.5 + 4 * 0.5 = 3.5.
     let work = tempdir().expect("temp dir");
-    let frontend = disassemble_compiled(work.path(), &[]);
+    let frontend = disassemble_compiled(work.path(), &["--pass", "none"]);
     assert!(
         frontend.contains("binding=tri(4, 0.5)"),
         "the frontend leaves the call in place:\n{frontend}"
@@ -356,6 +356,11 @@ fn pure_call_folding_is_a_pass_not_a_frontend_step() {
     assert!(
         folded.contains("binding=3.5"),
         "the pass evaluates the body:\n{folded}"
+    );
+    let default = disassemble_compiled(work.path(), &[]);
+    assert!(
+        default.contains("binding=3.5"),
+        "a plain compile runs the default group, which folds it:\n{default}"
     );
 }
 

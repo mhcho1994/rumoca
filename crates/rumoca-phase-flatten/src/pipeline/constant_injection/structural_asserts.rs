@@ -1,7 +1,7 @@
 use super::{Context, FlattenError, flat};
 
-/// Fold structurally decided `assert` statements out of the initial
-/// algorithms (MLS §8.3.7, §10.4).
+/// Report an initial `assert` that translation proves false (MLS §8.3.7,
+/// §10.4) -- the EF030 diagnostic.
 ///
 /// The evaluation context is built so that MEMBERSHIP IS THE STRUCTURAL
 /// PROOF: it carries only values whose declarations are translation-frozen —
@@ -9,8 +9,9 @@ use super::{Context, FlattenError, flat};
 /// parameters. An ordinary tunable parameter's default is deliberately
 /// absent, so an assertion over it stays undecided and untouched, whatever
 /// value the broader structural context happens to know. A condition proven
-/// true folds away (and any function it alone referenced stops needing a DAE
-/// owner); proven false at error level with an evaluable message is the
+/// true is kept: dropping a check that cannot fail is an optimization, done by
+/// the `fold-asserts` bitcode pass (docs/design/minimal-frontend.md). Proven
+/// false at error level with an evaluable message is the
 /// EF030 translation diagnostic at the assertion's own span; proven false at
 /// `AssertionLevel.warning`, or with a message this context cannot evaluate,
 /// keeps the statement for the runtime owner — MLS warning-level failures
@@ -20,7 +21,7 @@ use super::{Context, FlattenError, flat};
 /// identity from the scope tree: an explicit level counts as error only by
 /// that exact target identity, never by a rendered enum spelling. `None`
 /// fails closed — every explicitly leveled assertion is then kept.
-pub(crate) fn fold_structural_initial_asserts(
+pub(crate) fn check_structural_initial_asserts(
     flat: &mut flat::Model,
     ctx: &Context,
     error_literal: Option<rumoca_core::DefId>,
@@ -87,7 +88,8 @@ pub(crate) fn fold_structural_initial_asserts(
                 return true;
             };
             if holds {
-                return false;
+                // Kept: `fold-asserts` removes it when optimizing.
+                return true;
             }
             // MLS §8.3.7: an omitted level defaults to error. An explicit
             // level is error exactly when its structured reference targets

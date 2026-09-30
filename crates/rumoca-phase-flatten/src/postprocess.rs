@@ -15,6 +15,7 @@ mod function_shape_constants;
 mod index_collapse;
 mod indexed_dimension_recovery;
 mod occurrence_graph;
+mod package_constants;
 mod record_alias;
 #[cfg(test)]
 mod record_alias_postprocess_tests;
@@ -89,6 +90,9 @@ pub(super) fn substitute_known_constants_in_flat(
     flat: &mut flat::Model,
     ctx: &Context,
 ) -> Result<(), FlattenError> {
+    // Real package constants are declared, not inlined; the rest of this
+    // function then sees them as live variables and leaves them named.
+    package_constants::declare_real_package_constants(flat, ctx)?;
     let live_vars: rustc_hash::FxHashSet<String> = flat
         .variables
         .keys()

@@ -85,46 +85,54 @@ fn same_leaf_package_constants_materialize_by_exact_target_at_each_use_site() {
         collector.visit_expression(&equation.residual);
     }
 
+    // Real package constants stay named: each use names the exact
+    // declaration it resolved to, and that declaration is materialized once
+    // as a model constant carrying its value (docs/design/minimal-frontend.md).
     assert!(
-        !collector.references.iter().any(|name| {
-            name == "Library.Constants.eps"
-                || name == "Services.Machine.eps"
-                || name == "Other.Constants.eps"
-        }),
-        "package constants must be materialized, got {:?}",
+        collector
+            .references
+            .iter()
+            .any(|name| name == "Library.Constants.eps")
+            && collector
+                .references
+                .iter()
+                .any(|name| name == "Other.Constants.eps"),
+        "each use names its own declaration, got {:?}",
         collector.references
     );
-    let use_start = SOURCE
-        .rfind("Library.Constants.eps")
-        .expect("fixture contains the equation occurrence");
-    let expected_span = rumoca_core::Span::from_offsets(
-        rumoca_core::SourceId::from_source_name(SOURCE_NAME),
-        use_start,
-        use_start + "Library.Constants.eps".len(),
-    );
     assert!(
-        collector
-            .literals
+        !collector
+            .references
             .iter()
-            .any(|(value, span)| *value == 0.125 && *span == expected_span),
-        "the materialized value must retain the exact use-site span, got {:?}",
-        collector.literals
+            .any(|name| name == "Services.Machine.eps"),
+        "the transitive constant is folded into the value, not referenced: {:?}",
+        collector.references
     );
-
-    let other_start = SOURCE
-        .rfind("Other.Constants.eps")
-        .expect("fixture contains the second equation occurrence");
-    let other_span = rumoca_core::Span::from_offsets(
-        rumoca_core::SourceId::from_source_name(SOURCE_NAME),
-        other_start,
-        other_start + "Other.Constants.eps".len(),
+    let declared = |name: &str| {
+        let variable = model
+            .variables
+            .get(&rumoca_core::VarName::new(name))
+            .unwrap_or_else(|| panic!("`{name}` is materialized"));
+        assert!(
+            matches!(variable.variability, rumoca_core::Variability::Constant(_)),
+            "`{name}` is a constant"
+        );
+        match &variable.binding {
+            Some(rumoca_core::Expression::Literal {
+                value: rumoca_core::Literal::Real(value),
+                ..
+            }) => *value,
+            other => panic!("`{name}` is bound to its value, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        declared("Library.Constants.eps"),
+        0.125,
+        "resolved through Services.Machine.eps"
     );
-    assert!(
-        collector
-            .literals
-            .iter()
-            .any(|(value, span)| *value == 0.5 && *span == other_span),
-        "same-named leaves in another package cannot cross-bind, got {:?}",
-        collector.literals
+    assert_eq!(
+        declared("Other.Constants.eps"),
+        0.5,
+        "same-named leaves in another package cannot cross-bind"
     );
 }

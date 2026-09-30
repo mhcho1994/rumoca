@@ -106,3 +106,137 @@ fn an_unknown_pass_is_refused_by_name() {
     let error = run(&mut file, &["no-such-pass".into()]).unwrap_err();
     assert!(error.to_string().contains("unknown pass `no-such-pass`"));
 }
+
+/// der(x) = -(x * (c * p)) with `c` a constant and `p` a parameter, both
+/// bound to literals.
+fn constant_model() -> RbcModel {
+    let mut b = Builder::new("Constants");
+    let x = b.state("x", 1.0);
+    let c = b.parameter("P.c", 3.0);
+    let p = b.parameter("p", 2.0);
+    let c_ref = b.parameter_ref(c);
+    let p_ref = b.parameter_ref(p);
+    let product = b.binary(RbcBinaryOp::Multiply, c_ref, p_ref);
+    let xr = b.state_ref(x);
+    let scaled = b.binary(RbcBinaryOp::Multiply, xr, product);
+    let rhs = b.negate_of(scaled);
+    b.derivative_equation(x, rhs);
+    let mut model = b.finish();
+    let contract = model.variables[c.0 as usize]
+        .contract
+        .as_mut()
+        .expect("builder variables carry a contract");
+    contract.variability = RbcVariability::Constant;
+    model
+}
+
+#[test]
+fn constants_inline_parameters_stay_tunable() {
+    let mut file = file(constant_model());
+    let reports = run(
+        &mut file,
+        &["inline-constants".into(), "fold-constants".into()],
+    )
+    .expect("passes run");
+    assert_eq!(
+        reports[0].rewrites, 1,
+        "only the constant's reference is inlined"
+    );
+    assert!(
+        file.model.expressions.iter().any(|e| matches!(
+            e.node,
+            RbcExprNode::Coordinate {
+                coordinate: RbcCoordinate::Parameter { .. }
+            }
+        )),
+        "the parameter is still read: it can be changed without recompiling"
+    );
+    assert_eq!(
+        reports[1].rewrites, 0,
+        "3 * p does not fold while p is a parameter"
+    );
+}
+
+/// `assert(c > 1)` over a constant and `assert(p > 1)` over a parameter.
+fn assert_model() -> RbcModel {
+    let mut b = Builder::new("Asserts");
+    let x = b.state("x", 1.0);
+    let c = b.parameter("c", 3.0);
+    let p = b.parameter("p", 3.0);
+    let xr = b.state_ref(x);
+    let rhs = b.negate_of(xr);
+    b.derivative_equation(x, rhs);
+    for variable in [c, p] {
+        let reference = b.parameter_ref(variable);
+        let one = b.real(1.0);
+        let holds = b.binary(RbcBinaryOp::Greater, reference, one);
+        let relation = b.relation(holds);
+        let condition = b.condition(RbcConditionNode::Relation { relation });
+        let fails = b.condition(RbcConditionNode::Not { operand: condition });
+        let always = b.always();
+        let message = b.expr(RbcExprNode::Literal {
+            value: RbcLiteral::String {
+                value: "must exceed 1".into(),
+            },
+        });
+        b.event(
+            always,
+            fails,
+            RbcAction::Assert {
+                message,
+                level: None,
+            },
+        );
+    }
+    let mut model = b.finish();
+    model.variables[c.0 as usize]
+        .contract
+        .as_mut()
+        .expect("builder variables carry a contract")
+        .variability = RbcVariability::Constant;
+    model
+}
+
+#[test]
+fn an_assertion_that_folds_true_is_dropped_one_over_a_parameter_stays() {
+    let mut file = file(assert_model());
+    let reports = run(
+        &mut file,
+        &["inline-constants".into(), "fold-asserts".into()],
+    )
+    .expect("passes run");
+    assert_eq!(
+        reports[1].rewrites, 1,
+        "only the constant's assertion is decided"
+    );
+    assert_eq!(file.model.events.len(), 1);
+    assert_eq!(file.model.events[0].id.0, 0, "event ids stay dense");
+    assert!(
+        file.model.relations.iter().all(|relation| matches!(
+            file.model.expressions[relation.expression.0 as usize].node,
+            RbcExprNode::Binary { .. }
+        )),
+        "relation roots stay relational"
+    );
+}
+
+#[test]
+fn an_assertion_over_a_structural_parameter_folds_without_inlining_it() {
+    let mut model = assert_model();
+    // `p` becomes `annotation(Evaluate = true)`: frozen for translation, but
+    // still a parameter every backend may read as one.
+    model.variables[2]
+        .contract
+        .as_mut()
+        .expect("builder variables carry a contract")
+        .structural = true;
+    let mut file = file(model);
+    let reports = run(
+        &mut file,
+        &["inline-constants".into(), "fold-asserts".into()],
+    )
+    .expect("passes run");
+    assert_eq!(reports[0].rewrites, 1, "only the constant is inlined");
+    assert_eq!(reports[1].rewrites, 2, "both assertions are decided");
+    assert!(file.model.events.is_empty());
+}

@@ -110,48 +110,72 @@ separate optional section whose presence is what makes an artifact non-total.
 Stage 3 is the only part that trades away something real, and it should be
 decided deliberately rather than arrived at.
 
-## Status and measured reclassification (2026-09-29)
+## Status (2026-09-30)
 
-**The stage exists.** `rumoca compile --pass NAME` routes the frontend's DAE
-through `DAE -> RBC -> [passes] -> DAE` (`crates/rumoca/src/pass_stage.rs`,
-`crates/rumoca-bitcode/src/passes.rs`). Passes today: `prune-functions`,
-`fold-constants`, `dead-expressions`; `default` runs all, `none` round-trips
-with no rewrite. The pipeline removes dead expressions, revalidates and
-rebuilds through the checked constructors after every pass. Stage 2 (call
-edges) and Stage 3 (bodies, including import) are done; see
-[carry-function-bodies.md](carry-function-bodies.md).
+**The stage exists and is on by default.** A plain `rumoca compile` routes the
+frontend's DAE through `DAE -> RBC -> [default group] -> DAE`
+(`crates/rumoca/src/pass_stage.rs`, `crates/rumoca-bitcode/src/passes.rs`).
+`--pass NAME` (repeatable, in order) replaces the group; `--pass none`
+compiles the model exactly as the frontend lowered it, skipping the stage;
+`--pass round-trip` exports and rebuilds with no rewrite, which is how the
+stage's fidelity is measured. Each pass is followed by dead-expression
+removal, revalidation and a rebuild through the checked constructors.
 
-**The stage is opt-in, for a measured reason.** Routing the whole test suite
-through it (`--pass none`, every compile) left ~50 tests failing beyond the 4
-known, and every one is an explicit refusal, not a wrong result: owner tables
-bitcode v2 does not carry (`model_event_transactions`, `previous_values`,
-`delays`, `structured_roots`), plus element-wise operators and
-`clock_transfer`, both since added (TOOLBUG-042 and this change). Until the
-four owner tables are carried, a default-on stage would refuse models the
-frontend compiles.
+| Pass (default order) | What it does |
+|---|---|
+| `inline-constants` | a reference to a scalar constant with a literal binding becomes the literal (structural parameters stay parameters: the galec projection folds calls over them itself) |
+| `fold-constants` | scalar operators over literals; relation roots stay relational |
+| `fold-pure-calls` | scalar results of calls with literal arguments, by the fail-closed evaluator |
+| `fold-asserts` | an `assert` whose condition is true from literals, constants and structural (`Evaluate`/`final`) parameters is removed |
+| `prune-functions` | functions nothing reaches, over the exported call graph |
+| `dead-expressions` | expressions nothing references |
 
-**The inventory above was wrong about three of its seven rows.** Each step
-was switched off in turn and 1338 tests (flatten, compile and DAE crates;
-MSL-simulation, example, heavy-solve and template suites) were run:
+**Why default-on is now safe, measured.** Every compile in the suite was
+forced through the stage, first as a bare round trip, then with the whole
+default group. Only the known environment failures remained once two
+defects it exposed were fixed: bitcode export was exponential on nested loops
+(TOOLBUG-065) and the exported call graph missed calls with literal arguments,
+so `prune-functions` deleted a live function (TOOLBUG-066). The four owner
+tables that kept the stage opt-in are carried. On
+`Modelica.Fluid.Examples.HeatingSystem` (warm cache, bitcode emitted in all
+three) the plain compile, the round trip and the default group took 9.2 s,
+9.2 s and 10.0 s at the same peak memory.
 
-| Step | Failures when off | What it actually is |
+**What moved out of the frontend.**
+
+- *Pure-call folding* is `fold-pure-calls`; its one diagnostic (EF032, a
+  settled binding indexing out of bounds) stays as
+  `check_settled_binding_bounds`.
+- *Package-constant inlining.* A Real scalar package constant owned by its
+  declaration is declared once as a model constant under its qualified name
+  (`constant Real Modelica.Constants.pi = ...`) and the reference is kept;
+  `inline-constants` inlines it. Integer, Boolean and enumeration constants
+  are still substituted by the frontend -- they select branches and size and
+  index arrays, where lowering needs the literal and dead branches must not
+  survive -- as are Real arrays and constants specialized per instance (a
+  replaceable `Medium`), which have no single qualified name yet.
+- *Proven-true assertion folding.* The frontend keeps the assertion and only
+  reports one proven false (EF030, `check_structural_initial_asserts`);
+  `fold-asserts` removes the proven-true ones.
+
+**What stays in the frontend, and why.** Switching each step off in turn and
+running 1338 tests (flatten, compile and DAE crates; MSL-simulation, example,
+heavy-solve and template suites) gave:
+
+| Step | Failures when off | Why it stays |
 |---|---:|---|
-| `fold_pure_constant_calls` | 0 | optimization -- **moved**: now the `fold-pure-calls` pass; its one diagnostic (EF032, a settled binding indexing out of bounds) stays in the frontend as `check_settled_binding_bounds` |
 | `inject_referenced_qualified_class_constants` (late) | 2 | lowering: package constants must be materialized |
-| `fold_structural_initial_asserts` | 4 | the EF030 translation diagnostic, plus folding of proven-true asserts |
-| `substitute_known_constants_in_flat` | 7 | **lowering**: without it DAE construction fails, `ED008 unresolved Flat reference P.Constants.pi` |
-| `specialize_function_inputs` | 9 | **lowering**: a function-typed input cannot reach a DAE ("reachable function apply retains a functional input") |
-| `prune_unreachable_functions` | 17 | **lowering**: the functions it drops are the higher-order and package-constant templates specialization superseded, which the DAE cannot hold; the `prune-functions` pass repeats it after folding, where it is an optimization |
+| `substitute_known_constants_in_flat` | 7 | lowering for the structural constants above and loop indices; the Real-constant inlining it did is now declaration plus `inline-constants` |
+| `specialize_function_inputs` | 9 | monomorphization: a function-typed input cannot reach a DAE ("reachable function apply retains a functional input"), and the solver cannot execute a function value, so as a pass it would be mandatory on every compile |
+| `prune_unreachable_functions` | 17 | drops the templates specialization superseded, which the DAE cannot hold; `prune-functions` repeats it after folding, where it is an optimization |
 
-So the minimal frontend keeps constant materialization, constant
-substitution, higher-order specialization and template pruning: they make
-the model *representable*, which is the frontend's job by this document's
-own test. Pure-call folding has moved. What remains in the frontend that is
-purely an optimization is the proven-true half of structural assert folding,
-which is entangled with the EF030 diagnostic that must stay.
+**Still open.**
 
-`fold-pure-calls` is narrower than the frontend step was: it folds scalar
-results of calls whose arguments are literals, where the frontend also
-folded array results and used frozen parameter values. The model is the same
-either way -- an unfolded binding is evaluated at initialization -- and the
-evaluator (`passes/evaluate.rs`) fails closed on anything it does not model.
+- `finalize_flat_model` still runs some lowering steps more than once
+  (`mark_record_constructor_calls` four times; `collect_functions`,
+  `canonicalize_collected_function_calls` and
+  `materialize_flat_function_call_args` twice each). The repeats come from the
+  ordering of lowering steps, not from optimizations.
+- `fold-pure-calls` folds only scalar results with literal arguments, where
+  the frontend step also folded arrays and used frozen parameter values.
+- Declaring Real array constants and per-instance constants.

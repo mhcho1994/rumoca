@@ -10,7 +10,7 @@ mod structural_asserts;
 pub(crate) use component_binding_values::collect_component_binding_values;
 pub(crate) use context::{ConstantOccurrenceId, Context};
 pub(crate) use function_resolution::resolve_function_name;
-pub(crate) use structural_asserts::fold_structural_initial_asserts;
+pub(crate) use structural_asserts::check_structural_initial_asserts;
 
 const NAMED_CONSTRUCTOR_ARG_PREFIX: &str = "__rumoca_named_arg__.";
 

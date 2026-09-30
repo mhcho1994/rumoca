@@ -317,7 +317,9 @@ pub struct ModelOptions {
 
     /// Run a bitcode pass over the compiled model before it is simulated or
     /// generated: `DAE -> RBC -> [passes] -> DAE`. Repeatable; runs in the
-    /// order given. `default` runs every pass this build knows.
+    /// order given. Without it the `default` group runs (every pass this build
+    /// knows); `none` compiles the model exactly as the frontend lowered it;
+    /// `round-trip` exports and rebuilds with no rewrite.
     #[arg(long = "pass", value_name = "NAME", action = ArgAction::Append)]
     pub passes: Vec<String>,
 }
