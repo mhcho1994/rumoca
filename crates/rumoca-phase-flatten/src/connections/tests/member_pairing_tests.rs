@@ -189,6 +189,27 @@ fn structural_member_with_an_unresolvable_counterpart_is_connected() {
     );
 }
 
+/// TOOLBUG-123: a parameter member of an expandable connector read by a block
+/// input is connected (OpenModelica generates `u = bus.p`), in either order;
+/// the §9.3 rejection still holds for ordinary connectors.
+#[test]
+fn expandable_bus_parameter_paired_with_variable_connects() {
+    let mut bus_parameter = parameter_member(member_span(10));
+    bus_parameter.from_expandable_connector = true;
+    let flat = model_with(vec![
+        ("bus.p", bus_parameter),
+        ("g.u", member(member_span(30))),
+    ]);
+    assert_eq!(
+        classify(&flat, "bus.p", "g.u").expect("bus parameter feeds the input"),
+        MemberPairing::Connect
+    );
+    assert_eq!(
+        classify(&flat, "g.u", "bus.p").expect("the same holds in the opposite order"),
+        MemberPairing::Connect
+    );
+}
+
 /// An element path is resolved through its declared base, exactly like the
 /// `flow` and dimension questions asked about the same member.
 #[test]
