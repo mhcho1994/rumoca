@@ -1011,6 +1011,7 @@ pub(crate) fn finalize_flat_model(
         options.strict_connection_validation,
         flatten_graph,
     )?;
+    crate::algorithm_events::hoist_algorithm_event_actions(flat);
 
     seed_flat_functions_from_context(ctx, flat);
     rewrite_function_extends_aliases_in_flat_functions(flat, tree, class_index)?;

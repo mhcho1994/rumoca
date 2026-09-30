@@ -155,35 +155,6 @@ fn extract_extends_annotation(
     Ok(class_mod_opt.argument_list.args.clone())
 }
 
-/// Check if an outer component has illegal bindings or modifications.
-fn check_outer_component_restrictions(
-    value: &rumoca_ir_ast::Component,
-    ident: &rumoca_core::Token,
-) -> anyhow::Result<()> {
-    if value.has_explicit_binding || value.binding.is_some() {
-        return Err(semantic_error_from_token(
-            format!(
-                "Outer component '{}' shall not have a binding equation at line {}",
-                ident.text, ident.location.start_line
-            ),
-            ident,
-        ));
-    }
-
-    // Check for modifications (start=, fixed=, etc.)
-    if !value.modifications.is_empty() || value.start_is_modification {
-        return Err(semantic_error_from_token(
-            format!(
-                "Outer component '{}' shall not have modifications at line {}",
-                ident.text, ident.location.start_line
-            ),
-            ident,
-        ));
-    }
-
-    Ok(())
-}
-
 /// Check for duplicate component declaration.
 fn check_duplicate_component(
     def: &ElementListPayload,
@@ -555,10 +526,10 @@ fn process_single_component(
         process_component_modification(&mut value, modif)?;
     }
 
-    // Check outer component restrictions (MLS §5.4)
-    if ctx.is_outer && !ctx.is_inner {
-        check_outer_component_restrictions(&value, &c.declaration.ident)?;
-    }
+    // An outer component's modifications (MLS §5.4 forbids them) are
+    // reported and ignored by name resolution (WR007), not refused here: a
+    // parse error makes the whole file unreadable, and with it every class
+    // the file declares (TOOLBUG-036).
 
     let comp_name = c.declaration.ident.text.to_string();
     check_duplicate_component(def, &comp_name, &c.declaration.ident)?;

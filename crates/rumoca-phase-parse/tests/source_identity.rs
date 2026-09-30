@@ -255,3 +255,15 @@ fn path_equal_but_textually_distinct_names_do_not_share_a_source_id() {
         );
     }
 }
+
+/// TOOLBUG-033: a UTF-8 byte-order mark is an encoding signature, not a
+/// token, and the spans after it still point at the original bytes.
+#[test]
+fn a_leading_byte_order_mark_is_not_source_text() {
+    let source = "\u{feff}model M\n  Real x;\nequation\n  x = 1;\nend M;\n";
+    let definition = rumoca_phase_parse::parse_to_ast(source, "bom.mo")
+        .expect("a file that starts with a BOM parses");
+    let class = definition.classes.get("M").expect("M is declared");
+    let start = class.name.location.start as usize;
+    assert_eq!(&source[start..start + 1], "M");
+}

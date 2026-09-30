@@ -52,6 +52,31 @@ pub(crate) fn redirect_outer_refs(
         .map(|r| redirect_name_string(r, outer_to_inner).unwrap_or_else(|| r.clone()))
         .collect();
     flat.definite_roots = redirected_roots;
+    remove_outer_aliases(flat, outer_to_inner);
+}
+
+/// A primitive `outer` declaration (`outer Real x;`) is instantiated as a
+/// variable of its own, but it only names the inner one (MLS §5.4), and every
+/// reference to it now points there. Left in, it is an unknown no equation
+/// determines. Drop it when the inner variable it redirects to exists.
+fn remove_outer_aliases(
+    flat: &mut flat::Model,
+    outer_to_inner: &IndexMap<ComponentPath, ComponentPath>,
+) {
+    let aliases: Vec<_> = flat
+        .variables
+        .keys()
+        .filter(|name| {
+            redirect_name_string(name.as_str(), outer_to_inner).is_some_and(|inner| {
+                flat.variables
+                    .contains_key(&rumoca_core::VarName::new(&inner))
+            })
+        })
+        .cloned()
+        .collect();
+    for alias in aliases {
+        flat.variables.shift_remove(&alias);
+    }
 }
 
 fn redirect_variable_attributes(

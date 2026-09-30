@@ -691,6 +691,31 @@ struct ResolutionAttempt {
     diagnostics: Diagnostics,
 }
 
+/// MLS §5.4: an outer element denotes its inner element, so a modification
+/// written on it has nothing to apply to. Drop it, with the start value it
+/// set, from every pure `outer` component.
+fn strip_outer_modifications(class: &mut ast::ClassDef) {
+    for component in class.components.values_mut() {
+        if !component.outer || component.inner {
+            continue;
+        }
+        component.modifications.clear();
+        component.binding = None;
+        component.has_explicit_binding = false;
+        component.start_is_modification = false;
+        component.start_has_each = false;
+        component.source_modifications.clear();
+        component.source_modification_each_flags.clear();
+        component.source_modification_final_flags.clear();
+        component.source_modification_redeclare_flags.clear();
+        component.each_modifications.clear();
+        component.final_attributes.clear();
+    }
+    for nested in class.classes.values_mut() {
+        strip_outer_modifications(nested);
+    }
+}
+
 fn resolve_attempt(parsed: ParsedTree) -> ResolutionAttempt {
     let total_start = maybe_start_timer();
     let mut tree = parsed.into_inner();
@@ -703,6 +728,11 @@ fn resolve_attempt(parsed: ParsedTree) -> ResolutionAttempt {
     }
     for diag in semantic_checks::check_resolved_semantics(&tree) {
         resolver.diagnostics.emit(diag);
+    }
+    // Reported above (WR007); now actually ignored, so no later phase can
+    // mistake a modified outer element for a declaration of its own.
+    for class in tree.definitions.classes.values_mut() {
+        strip_outer_modifications(class);
     }
     let semantic_checks_ms = maybe_elapsed_ms(semantic_checks_start);
 

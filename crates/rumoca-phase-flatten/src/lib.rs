@@ -28,6 +28,7 @@
 //! let flat: flat::Model = flatten(instanced)?;
 //! ```
 
+mod algorithm_events;
 mod algorithms;
 mod alias_paths;
 mod array_comprehension;

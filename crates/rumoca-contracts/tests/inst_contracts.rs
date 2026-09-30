@@ -4,8 +4,8 @@
 
 use rumoca_compile::compile::FailedPhase;
 use rumoca_contracts::test_support::{
-    expect_balanced, expect_failure_in_phase_with_code, expect_parse_err_with_code,
-    expect_resolve_failure_with_code, expect_success,
+    expect_balanced, expect_compile_warning, expect_failure_in_phase_with_code,
+    expect_parse_err_with_code, expect_resolve_failure_with_code, expect_success,
 };
 
 fn flat_var_is_protected(result: &rumoca_compile::compile::CompilationResult, name: &str) -> bool {
@@ -328,27 +328,33 @@ fn inst_011_inner_must_match_outer_constraint() {
 // =============================================================================
 
 #[test]
-fn inst_012_outer_binding_is_rejected() {
-    expect_parse_err_with_code(
-        r#"
+fn inst_012_outer_binding_is_reported_and_ignored() {
+    let source = r#"
         model Test
-            outer Real x = 1;
+            model Sub
+                outer Real x = 1;
+                Real y = x;
+            end Sub;
+            inner Real x = 2;
+            Sub s;
         end Test;
-    "#,
-        "EP001",
-    );
+    "#;
+    expect_compile_warning(source, "Test", "WR007");
 }
 
 #[test]
-fn inst_012_outer_modification_is_rejected() {
-    expect_parse_err_with_code(
-        r#"
+fn inst_012_outer_modification_is_reported_and_ignored() {
+    let source = r#"
         model Test
-            outer Real x(start = 1);
+            model Sub
+                outer Real x(start = 1);
+                Real y = x;
+            end Sub;
+            inner Real x = 2;
+            Sub s;
         end Test;
-    "#,
-        "EP001",
-    );
+    "#;
+    expect_compile_warning(source, "Test", "WR007");
 }
 
 // =============================================================================

@@ -218,13 +218,30 @@ fn pkg_005_import_cannot_traverse_model_members() {
 
 #[test]
 fn pkg_006_directory_requires_package_mo() {
+    // `package.order` names `Sub`, so the library claims it as a package,
+    // and a package directory must carry its `package.mo`.
     expect_source_root_layout_error(
+        &[
+            ("package.mo", "package Pkg end Pkg;"),
+            ("package.order", "Sub\n"),
+            ("Sub/A.mo", "within Pkg.Sub; model A end A;"),
+        ],
+        "Pkg",
+        "PKG-006",
+    );
+}
+
+#[test]
+fn pkg_006_an_unnamed_directory_without_package_mo_is_not_a_package() {
+    // Nothing names `Sub` and it has no `package.mo`, so it is not a package
+    // (MLS §13.4.1) and no name resolves through it: a stray directory in a
+    // repository must not fail the library (TOOLBUG-035).
+    expect_source_root_layout_ok(
         &[
             ("package.mo", "package Pkg end Pkg;"),
             ("Sub/A.mo", "within Pkg.Sub; model A end A;"),
         ],
         "Pkg",
-        "PKG-006",
     );
 }
 

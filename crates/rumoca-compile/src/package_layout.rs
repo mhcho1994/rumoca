@@ -384,9 +384,8 @@ fn validate_directory(
         violations.push(CommonDiagnostic::global_warning(
             "PKG-006",
             format!(
-                "directory '{}' is missing package.mo; it is not listed in \
-                 '{}' either, so nothing in this package refers to it and it \
-                 is ignored",
+                "directory '{}' is missing package.mo and '{}' does not list \
+                 it, so nothing in this package refers to it and it is ignored",
                 child.display(),
                 dir.join("package.order").display()
             ),
@@ -634,9 +633,11 @@ fn partition_detached(
             return false;
         }
         match &declared {
-            // No `package.order`: the package makes no claim either way, so
-            // the child stays in scope and the stricter reading applies.
-            None => true,
+            // No `package.order`: nothing names the directory, and without
+            // `package.mo` it is not a package (MLS §13.4.1), so no name can
+            // resolve through it. OpenModelica ignores it the same way
+            // (TOOLBUG-035).
+            None => false,
             Some(declared) => declared.contains(name),
         }
     })

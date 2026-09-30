@@ -46,6 +46,7 @@ pub(super) const WR004_TESTCASE_USAGE: &str = "WR004";
 pub(super) const ER122_AMBIGUOUS_OPERATOR_OVERLOAD: &str = "ER122";
 pub(super) const ER123_CLASS_EXTENDS_NON_REPLACEABLE: &str = "ER123";
 pub(super) const WR005_EVALUATE_NOT_EVALUABLE: &str = "WR005";
+pub(super) const WR007_OUTER_MODIFICATION_IGNORED: &str = "WR007";
 pub(super) const ER124_NONEVAL_NESTED_FOR_RANGE: &str = "ER124";
 pub(super) const ER125_OPERATOR_CONSTRUCTOR_PAIR: &str = "ER125";
 
@@ -75,6 +76,7 @@ fn check_class_restrictions(
         check_derivative_annotations(class, def, ancestors, diags);
     } else {
         check_component_restrictions(class, def, diags);
+        check_outer_modifications(class, diags);
         check_modification_restrictions(class, def, diags);
         check_break_target_kinds(class, def, diags);
         let mut scan = EquationScan {
@@ -858,4 +860,33 @@ fn check_function_input_defaults(class: &ClassDef, diags: &mut Vec<Diagnostic>) 
 
 fn is_input(comp: &ast::Component) -> bool {
     matches!(comp.causality, Causality::Input(_))
+}
+
+/// MLS §5.4: "An outer element shall not have modifications (including
+/// binding equations)." The element denotes the matching inner one, so there
+/// is nothing for a modification to apply to; like OpenModelica, it is
+/// reported and ignored rather than failing the model (TOOLBUG-036).
+fn check_outer_modifications(class: &ClassDef, diags: &mut Vec<Diagnostic>) {
+    for (_, component) in &class.components {
+        let modified = component.has_explicit_binding
+            || component.binding.is_some()
+            || component.start_is_modification
+            || !component.modifications.is_empty();
+        if !component.outer || component.inner || !modified {
+            continue;
+        }
+        diags.push(Diagnostic::warning(
+            WR007_OUTER_MODIFICATION_IGNORED,
+            format!(
+                "outer component '{}' has a modification; an outer element denotes its inner \
+                 element and the modification is ignored (MLS §5.4)",
+                component.name
+            ),
+            label_from_token(
+                &component.name_token,
+                "restrictions/outer_modification",
+                "move the modification to the inner declaration",
+            ),
+        ));
+    }
 }

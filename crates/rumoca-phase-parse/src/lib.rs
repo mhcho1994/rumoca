@@ -342,6 +342,7 @@ pub fn parse_to_ast_with_errors(
 /// the syntax boundary never fails. Failures are carried in the returned value,
 /// alongside a best-effort recovered tree for editor-facing queries.
 pub fn parse_to_syntax(source: &str, file_name: &str) -> SyntaxFile {
+    let source = &*without_byte_order_mark(source);
     match parse_once_to_ast(source, file_name) {
         Ok(parsed) => SyntaxFile::from_parsed(parsed),
         Err(initial_errors) => {
@@ -363,6 +364,18 @@ pub fn parse_to_syntax(source: &str, file_name: &str) -> SyntaxFile {
     }
 }
 
+/// A leading UTF-8 byte-order mark (U+FEFF) is an encoding signature, not
+/// source text; editors on Windows write one and MLS §13.4 files are UTF-8.
+/// It becomes three spaces -- the same three bytes of width -- so every byte
+/// offset, and with it every span, still points at the original text
+/// (TOOLBUG-033).
+fn without_byte_order_mark(source: &str) -> std::borrow::Cow<'_, str> {
+    match source.strip_prefix('\u{feff}') {
+        Some(rest) => std::borrow::Cow::Owned(format!("   {rest}")),
+        None => std::borrow::Cow::Borrowed(source),
+    }
+}
+
 const MAX_SEMICOLON_RECOVERY_PASSES: usize = 32;
 
 #[cfg(test)]
@@ -370,6 +383,7 @@ fn parse_to_ast_internal(
     source: &str,
     file_name: &str,
 ) -> std::result::Result<ast::StoredDefinition, Vec<ParseError>> {
+    let source = &*without_byte_order_mark(source);
     match parse_once_to_ast(source, file_name) {
         Ok(ast) => Ok(ast),
         Err(initial_errors) => Err(collect_recovered_parse_errors(
