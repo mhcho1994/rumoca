@@ -1013,13 +1013,10 @@ pub(crate) fn finalize_flat_model(
     )?;
 
     seed_flat_functions_from_context(ctx, flat);
-    functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
     rewrite_function_extends_aliases_in_flat_functions(flat, tree, class_index)?;
     functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
-    mark_record_constructor_calls(flat, tree);
-    // Attach callable identity before the rewrite fixed point so rewritten
-    // calls retain the exact collected target.
-    functions::canonicalize_collected_function_calls(flat, class_index)?;
+    // Callable identity is attached once, after the rewrite fixed point below,
+    // where it also covers every call the fixed point introduced.
     mark_record_constructor_calls(flat, tree);
     canonicalize_varrefs_via_record_aliases(flat, ctx);
     normalize_record_array_field_access_bindings(flat);
@@ -1047,7 +1044,6 @@ pub(crate) fn finalize_flat_model(
         ctx.build_parameter_lookup(flat, tree);
     }
     recover_indexed_lhs_dimensions(flat);
-    mark_record_constructor_calls(flat, tree);
     let collected_new_functions = collect_rewritten_functions_to_fixed_point(
         flat,
         overlay,
@@ -1057,8 +1053,10 @@ pub(crate) fn finalize_flat_model(
         component_override_map,
         &ctx.component_members,
     )?;
+    // One marking after the fixed point covers the record constructors that
+    // collection, index collapse and dimension recovery introduced.
+    mark_record_constructor_calls(flat, tree);
     if collected_new_functions {
-        mark_record_constructor_calls(flat, tree);
         collapse_index_refs_to_known_varrefs(flat);
     }
     functions::canonicalize_collected_function_calls(flat, class_index)?;

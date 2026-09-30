@@ -175,11 +175,18 @@ heavy-solve and template suites) gave:
 
 **Still open.**
 
-- `finalize_flat_model` still runs some lowering steps more than once
-  (`mark_record_constructor_calls` four times; `collect_functions`,
-  `canonicalize_collected_function_calls` and
-  `materialize_flat_function_call_args` twice each). The repeats come from the
-  ordering of lowering steps, not from optimizations.
+- Repeated lowering steps in `finalize_flat_model`. Four were removed: the
+  first `collect_functions` (every collected function already has its extends
+  aliases rewritten at conversion), the first
+  `canonicalize_collected_function_calls` (the one after the rewrite fixed
+  point covers every call), and two of the four
+  `mark_record_constructor_calls` (one before the fixed point, one after it,
+  now unconditional). Each removal left the frontend's exported DAE
+  byte-identical on 80 models from MSL, IBPSA, TRANSFORM and OpenIPSL (59
+  compile, the same 21 fail as before) and passed the flatten, compile and DAE
+  crate tests. `materialize_flat_function_call_args` still runs twice: the
+  second pass also validates the call ABI that record-parameter decomposition
+  produced, which the first cannot see.
 - `fold-pure-calls` folds only scalar results with literal arguments, where
   the frontend step also folded arrays and used frozen parameter values.
 - Declaring Real array constants and per-instance constants.
