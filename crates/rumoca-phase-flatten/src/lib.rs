@@ -1153,6 +1153,7 @@ mod nested_class_constant_scope_tests {
         glycol.extends.push(ast::Extend {
             base_name: ast::Name::from_string("TableBased"),
             base_def_id: Some(table_based_def),
+            global_scope: false,
             location: rumoca_core::Location::default(),
             modifications: vec![],
             break_names: vec![],

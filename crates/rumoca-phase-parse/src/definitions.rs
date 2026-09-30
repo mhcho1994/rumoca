@@ -650,6 +650,7 @@ fn convert_extends_class_specifier(
     let inherited_extends = rumoca_ir_ast::Extend {
         base_name: extends_name,
         base_def_id: None,
+        global_scope: false,
         location: spec.ident.location.clone(),
         modifications: extends_modifiers,
         break_names: vec![],
@@ -770,6 +771,7 @@ fn convert_type_class_specifier(
     let extend = rumoca_ir_ast::Extend {
         base_name: base_type_name,
         base_def_id: None,
+        global_scope: type_spec.type_specifier.type_specifier_opt.is_some(),
         location: type_spec.ident.location.clone(),
         modifications,
         break_names: vec![],
@@ -850,6 +852,11 @@ fn convert_function_partial_class_specifier(
     let extend = rumoca_ir_ast::Extend {
         base_name: base_func_name,
         base_def_id: None,
+        global_scope: partial_spec
+            .function_partial_application
+            .type_specifier
+            .type_specifier_opt
+            .is_some(),
         location: partial_spec.ident.location.clone(),
         modifications,
         break_names: vec![],
@@ -915,6 +922,7 @@ fn convert_der_class_specifier(
     let extend = rumoca_ir_ast::Extend {
         base_name: der_spec.type_specifier.name.clone(),
         base_def_id: None,
+        global_scope: der_spec.type_specifier.type_specifier_opt.is_some(),
         location: der_spec.ident.location.clone(),
         modifications: vec![],
         break_names: vec![],

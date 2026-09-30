@@ -764,6 +764,11 @@ fn process_extends_clause(
     def.extends.push(rumoca_ir_ast::Extend {
         base_name: clause.extends_clause.type_specifier.name.clone(),
         base_def_id: None,
+        global_scope: clause
+            .extends_clause
+            .type_specifier
+            .type_specifier_opt
+            .is_some(),
         location: extend_location,
         modifications,
         break_names,
