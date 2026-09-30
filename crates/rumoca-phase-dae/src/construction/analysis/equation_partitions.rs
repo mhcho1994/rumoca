@@ -834,6 +834,16 @@ pub(in crate::construction) fn discrete_value_assignment<'flat>(
     owner: Span,
 ) -> Result<Option<DiscreteValueAssignmentPlan<'flat>>, ToDaeError> {
     match expression {
+        // A nested if-equation branch reaches Flat as `(if ... ) - 0.0`: the
+        // conditional residual minus a zero right side.
+        Expression::Binary {
+            op: OpBinary::Sub,
+            lhs,
+            rhs,
+            ..
+        } if matches!(lhs.as_ref(), Expression::If { .. }) && is_zero_literal(rhs) => {
+            discrete_value_assignment(lhs, roles, owner)
+        }
         Expression::Binary {
             op: OpBinary::Sub,
             lhs,
@@ -941,6 +951,19 @@ pub(in crate::construction) fn structured_discrete_assignments<'flat>(
             .map(|assignment| assignment.expect("the complete family is discrete-valued"))
             .collect(),
     ))
+}
+
+fn is_zero_literal(expression: &Expression) -> bool {
+    matches!(
+        expression,
+        Expression::Literal {
+            value: Literal::Integer(0),
+            ..
+        }
+    ) || matches!(
+        expression,
+        Expression::Literal { value: Literal::Real(value), .. } if *value == 0.0
+    )
 }
 
 fn expression_mentions_discrete_value(

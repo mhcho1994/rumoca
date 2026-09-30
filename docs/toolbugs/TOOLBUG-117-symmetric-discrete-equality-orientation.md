@@ -30,3 +30,13 @@ their written orientation.
 ## Test
 
 `frontend_event_lowering.rs::a_discrete_equality_defines_the_side_no_other_row_defines`.
+
+## Also: nested if-equation branches
+
+VehicleInterfaces `ShiftOutput` defines `Integer gear` in nested if-equations.
+Flat renders an inner if-equation branch as `(if c then gear - 1 else gear - 2)
+- 0.0`, which the B.1c recognizer rejected with `a discrete-valued equation
+must have one unsubscripted resolved coordinate as its left-hand side`.
+`discrete_value_assignment` now looks through a conditional residual minus a
+literal zero. Test:
+`frontend_event_lowering.rs::a_discrete_target_in_nested_if_equations_is_one_definition`.
