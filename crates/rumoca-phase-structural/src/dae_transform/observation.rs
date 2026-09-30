@@ -107,6 +107,10 @@ pub(super) enum AttemptOutcome<'a> {
     Held { residue: usize },
     /// The rebuilt system's residue is larger; never accepted.
     Raised { residue: usize },
+    /// A structural lower bound proves the residue cannot fall below `bound`,
+    /// at least the current residue, so the candidate was not reconstructed
+    /// while a reducing candidate was sought.
+    CannotReduce { bound: usize },
     /// Reconstruction failed, or the rebuilt system failed to sort for a
     /// reason other than an ordinary singularity; never accepted.
     NonSingularFailure { error: &'a StructuralError },
@@ -353,6 +357,7 @@ pub enum ReductionOutcome {
     Reduced { residue: usize },
     Held { residue: usize },
     Raised { residue: usize },
+    CannotReduce { bound: usize },
     NonSingularFailure { error: StructuralError },
     WouldDiscardInitial { variable: String, span: Span },
     WouldInvalidateManifold,
@@ -366,6 +371,7 @@ impl From<AttemptOutcome<'_>> for ReductionOutcome {
             AttemptOutcome::Reduced { residue } => Self::Reduced { residue },
             AttemptOutcome::Held { residue } => Self::Held { residue },
             AttemptOutcome::Raised { residue } => Self::Raised { residue },
+            AttemptOutcome::CannotReduce { bound } => Self::CannotReduce { bound },
             AttemptOutcome::NonSingularFailure { error } => Self::NonSingularFailure {
                 error: error.clone(),
             },

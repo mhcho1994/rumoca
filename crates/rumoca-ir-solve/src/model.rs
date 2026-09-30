@@ -3,10 +3,15 @@ use std::sync::Arc;
 
 mod affine_elimination;
 mod clock_partition;
+mod event_schedule;
 mod event_transaction;
 mod jacobian_outputs;
 
 pub use affine_elimination::AffineEliminationLayout;
+pub use event_schedule::{
+    CoupledNewtonPolicy, EventIterationSchedule, EventPassStep, EventScheduleError,
+    RelationPassStep, SettleStep,
+};
 pub use event_transaction::*;
 pub use jacobian_outputs::*;
 
@@ -43,6 +48,52 @@ pub struct ContinuousSolveSystem {
     /// still round-trips. Each alternate plan travels as a delta against this
     /// system (see `continuous_wire`).
     pub reduced_chart_set: ReducedChartSet,
+    /// Projection blocks whose own unknowns a relation under `noEvent`
+    /// switches, with no root to localize it (SPEC_0044 ME-EVENT-008, ES016).
+    /// Construction warns about each; a projection of such a block that
+    /// fails is a typed fold of the relation, never a generic failure.
+    pub unlocalizable_guards: Vec<UnlocalizableGuard>,
+}
+
+/// One ES016 fact: the solver unknowns of the block and the relation that
+/// switches them under `noEvent`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnlocalizableGuard {
+    /// Solver-Y indices of the block's unknowns.
+    pub y_indices: Vec<usize>,
+    /// The relation's source text.
+    pub relation: String,
+    /// The block's unknowns by name, as the warning states them.
+    pub unknown_names: String,
+}
+
+impl UnlocalizableGuard {
+    /// The ES016 failure every executor reports when the block's projection
+    /// fails: its branch ended at a fold of the relation.
+    #[must_use]
+    pub fn fold(&self) -> String {
+        format!(
+            "the algebraic loop over {} reached a fold of `{}`: the relation switches its own loop under `noEvent`, so no localized branch continues past it",
+            self.unknown_names, self.relation
+        )
+    }
+
+    /// The ES016 warning every executor states before it runs the model.
+    #[must_use]
+    pub fn warning(&self) -> String {
+        format!(
+            "the algebraic loop over {} switches on its own unknowns at `{}` under `noEvent`: MLS 3.7.3 forbids localizing that switch, so where the branch ends at a fold the simulation fails with a typed error; write the relation without `noEvent` so it owns an event, or give the switch hysteresis with events",
+            self.unknown_names, self.relation
+        )
+    }
+
+    /// The guard whose block contains solver unknown `y_index`, if any.
+    #[must_use]
+    pub fn covering(guards: &[Self], y_index: usize) -> Option<&Self> {
+        guards
+            .iter()
+            .find(|guard| guard.y_indices.contains(&y_index))
+    }
 }
 
 /// A bounded set of admissible reduced state-selection charts. Empty for every
@@ -348,6 +399,37 @@ pub struct InitializationProjectionBlock {
     /// Initialization unknowns may reside in either solver Y storage or
     /// parameter P storage.  Time and constant slots are invalid here.
     pub unknowns: Vec<ScalarSlot>,
+    /// The Newton scale of each unknown, aligned with `unknowns`.
+    pub scales: Vec<InitializationUnknownScale>,
+}
+
+/// The magnitude an initialization unknown is scaled by in the projection's
+/// Newton step (MLS 3.7 §4.8.1: `nominal` exists for solver scaling).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum InitializationUnknownScale {
+    /// A solver coordinate keeps its solver variable scale
+    /// ([`SolveModel::solver_variable_scale`]).
+    Solver,
+    /// A `fixed = false` parameter with a declared `nominal`, evaluated once
+    /// at construction; finite and positive.
+    Nominal(f64),
+    /// A `fixed = false` parameter without `nominal` is scaled by the
+    /// magnitude of its §8.6 start guess when the projection begins, or 1 when
+    /// that guess is zero or not finite. A fixed floor would treat a 1e-5 s
+    /// time constant as order 1 and let one Newton step leave its branch.
+    GuessMagnitude,
+}
+
+impl InitializationUnknownScale {
+    /// The scale of a parameter unknown whose projection begins at `guess`.
+    /// A solver coordinate's scale is not this table's; it reads 1 here.
+    pub fn at_guess(self, guess: f64) -> f64 {
+        match self {
+            Self::Nominal(nominal) => nominal,
+            Self::GuessMagnitude if guess.is_finite() && guess != 0.0 => guess.abs(),
+            Self::GuessMagnitude | Self::Solver => 1.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -676,6 +758,19 @@ pub struct EventIterationRun {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct EventIterationPlan {
     pub runs: Vec<EventIterationRun>,
+    /// How every executor walks the iteration (SPEC_0044 ME-EVENT-006).
+    #[serde(default)]
+    pub schedule: EventIterationSchedule,
+}
+
+impl EventIterationPlan {
+    /// A plan over `runs` walked by the standard schedule.
+    pub fn new(runs: Vec<EventIterationRun>) -> Self {
+        Self {
+            runs,
+            schedule: EventIterationSchedule::standard(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

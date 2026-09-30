@@ -110,6 +110,12 @@ impl SolveMeKernel {
             return Ok(false);
         };
         let t = self.continuous_eval_time();
+        // An importer-driven component decides from its committed seed, the
+        // accepted-point refresh (SPEC_0044 ME-PROJ-005), as the generated
+        // component does; an integrator-driven one keeps its warm start.
+        if let Err(error) = self.load_seed(t) {
+            return Err(error.at_stage(MeStage::Integration));
+        }
         let (solver_y, decision, conditioning) = match self.settled_chart_decision(charts, t) {
             Ok(decided) => decided,
             Err(error) => return Err(MeError::from(error).at_stage(MeStage::Integration)),

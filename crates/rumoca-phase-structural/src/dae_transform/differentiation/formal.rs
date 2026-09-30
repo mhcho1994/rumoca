@@ -45,8 +45,14 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
                     operator,
                     dae::UnaryOperator::Plus | dae::UnaryOperator::Negate
                 ),
-                dae::ExpressionOperation::Binary { operator, .. } => {
+                dae::ExpressionOperation::Binary { operator, lhs, rhs } => {
                     super::super::builtin_profiles::is_differentiable_binary(operator)
+                        || super::super::builtin_profiles::is_differentiable_power(
+                            self.source,
+                            operator,
+                            lhs,
+                            rhs,
+                        )
                 }
                 dae::ExpressionOperation::Builtin { builtin, .. } => {
                     super::super::builtin_profiles::is_differentiable_builtin(builtin, order)

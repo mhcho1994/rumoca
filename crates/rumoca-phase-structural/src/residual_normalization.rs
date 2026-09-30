@@ -31,12 +31,31 @@ pub(crate) fn equation_sides<'dae>(
                     expression = lhs;
                 } else if operator == dae::BinaryOperator::Subtract {
                     return Some((lhs, rhs));
+                } else if let Some(negated) = negated_operand(view, rhs) {
+                    // `a + (-b) = 0` states `a = b`, the form a connection
+                    // set's flow sum takes.
+                    return Some((lhs, negated));
+                } else if let Some(negated) = negated_operand(view, lhs) {
+                    return Some((rhs, negated));
                 } else {
                     return None;
                 }
             }
             _ => return zero.map(|zero| (expression, zero)),
         }
+    }
+}
+
+fn negated_operand<'dae>(
+    view: dae::DaeView<'dae>,
+    expression: dae::ExprId<'dae>,
+) -> Option<dae::ExprId<'dae>> {
+    match view.expression(expression)?.operation() {
+        dae::ExpressionOperation::Unary {
+            operator: dae::UnaryOperator::Negate,
+            operand,
+        } => Some(operand),
+        _ => None,
     }
 }
 

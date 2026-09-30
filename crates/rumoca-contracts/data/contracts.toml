@@ -155,6 +155,15 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'ALG-018'
+category = 'Algorithm'
+name = 'While loop execution'
+mls_ref = '§11.2.3'
+requirement = 'The body of a while-statement is executed as long as the condition is true'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'ANN-001'
 category = 'Annotation'
 name = 'Forbidden constructs'
@@ -1460,6 +1469,15 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'DECL-037'
+category = 'Declaration'
+name = 'Structural parameters'
+mls_ref = '§10.1, §8.3.3'
+requirement = 'The number of dimensions and the dimension sizes are fixed at translation; a for-equation range is evaluated at translation'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'EQN-001'
 category = 'Equation'
 name = 'Local balance'
@@ -2169,6 +2187,16 @@ mls_ref = '§3.7.2'
 requirement = 'div, ceil, floor, integer can only change values at events and will trigger events as needed'
 status = 'Partial'
 notes = 'div/ceil/floor/integer are constructed and lowered as pure builtins (Solve UnaryOp::Floor/Ceil, no relation-memory owner), so no event root is generated at their step points; the contract therefore holds only for arguments that are already discrete between events.'
+tier = 1
+
+[[contracts]]
+id = 'EXPR-041'
+category = 'Expression'
+name = 'smooth event freedom'
+mls_ref = '§3.7.5'
+requirement = 'A tool is free to not generate events for expressions inside smooth; smooth does not guarantee that no events will be generated'
+status = 'Implemented'
+notes = 'Rumoca takes the freedom except for a relation inside smooth(0, ..) whose operands are unknowns of its own algebraic block, which owns an event (SPEC_0044 ME-EVENT-008); crates/rumoca/tests/suite_core/loop_guarded_smooth_relations.rs checks both sides of the rule.'
 tier = 1
 
 [[contracts]]

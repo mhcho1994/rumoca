@@ -30,9 +30,9 @@ use rumoca_worker::{
     MSL_SIM_OUTPUT_INTERVALS, ModelFailureBucket, ModelFailureClassification, ModelWorkerCommand,
     ModelWorkerControlMessage, ModelWorkerRequest, ModelWorkerResponse, WorkerMemorySnapshot,
     WorkerModelResult, WorkerProgressEvent, WorkerProgressEventKind, WorkerProgressPhase,
-    embedded_diagnostic_code, pin_current_thread_to_cpu_core, read_model_worker_request_file,
-    sim_error_diagnostic_code, start_worker_memory_limit, strict_compile_failure_row,
-    write_model_worker_response_file,
+    WorkerSimSettings, embedded_diagnostic_code, pin_current_thread_to_cpu_core,
+    read_model_worker_request_file, sim_error_diagnostic_code, start_worker_memory_limit,
+    strict_compile_failure_row, write_model_worker_response_file,
 };
 
 const DEFAULT_SIM_END_TIME_SECS: f64 = 1.0;
@@ -354,12 +354,34 @@ impl WorkerErrorPhase {
     }
 }
 
-fn load_source_root(path: &Path) -> Result<Session, String> {
+/// A loaded source root and the one-time cost of preparing it, which every
+/// model this worker compiles shares.
+struct WorkerSourceRoot {
+    session: Session,
+    prepare_seconds: f64,
+    /// Why the resolution plan could not be built, recorded on every row.
+    plan_error: Option<String>,
+}
+
+/// Load the source root and construct its strict-compile resolution plan once,
+/// so each model's `compile_seconds` covers only its own work, as OMC's
+/// per-model timings exclude its per-session `loadModel`. A plan that cannot
+/// be constructed is recorded on every row, and each compile then starts cold.
+fn load_source_root(path: &Path) -> Result<WorkerSourceRoot, String> {
+    let started = Instant::now();
     let mut session = Session::new(SessionConfig::default());
     let report =
         session.load_source_root_tolerant("msl", SourceRootKind::DurableExternal, path, None);
     if report.diagnostics.is_empty() {
-        Ok(session)
+        let plan_error = session
+            .prepare_strict_compile_plan()
+            .err()
+            .map(|error| error.to_string());
+        Ok(WorkerSourceRoot {
+            session,
+            prepare_seconds: started.elapsed().as_secs_f64(),
+            plan_error,
+        })
     } else {
         Err(format!(
             "failed to load source root '{}': {}",
@@ -1310,11 +1332,15 @@ fn run_and_classify_simulation(
     progress: &ProgressLog,
 ) {
     rumoca_sim::reset_projection_fallbacks();
+    rumoca_sim::reset_step_counts();
+    let proof_failures_before = rumoca_sim::shared_value_proof_failures();
     let sim_start = Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_simulation_pipeline(result.dae.as_ref(), opts, progress, request)
     }));
     row.record_projection_fallbacks(&rumoca_sim::projection_fallbacks());
+    let proof_failures = rumoca_sim::shared_value_proof_failures() - proof_failures_before;
+    row.shared_value_proof_failures = (proof_failures > 0).then_some(proof_failures);
     let elapsed = sim_start.elapsed().as_secs_f64();
     match outcome {
         Ok(Ok(run)) => {
@@ -1330,6 +1356,11 @@ fn run_and_classify_simulation(
                 run.sim_run_seconds,
                 run.ic_seconds,
             );
+            row.sim_settings = Some(WorkerSimSettings::recorded(
+                opts,
+                &run.sim_result,
+                rumoca_sim::step_counts(),
+            ));
             if row.sim_status.as_deref() == Some("sim_ok") {
                 match write_sim_trace_artifact(request, &run.sim_result) {
                     Ok(path) => row.sim_trace_file = Some(path),
@@ -1465,10 +1496,17 @@ fn write_compile_artifacts(
     );
 }
 
-fn compile_request(session: &mut Session, request: ModelWorkerRequest) -> ModelWorkerResponse {
+fn compile_request(
+    root: &mut WorkerSourceRoot,
+    request: ModelWorkerRequest,
+) -> ModelWorkerResponse {
     rumoca_sim::nan_trace::set_nan_trace(request.nan_trace);
     let start = Instant::now();
-    let result = run_model_request(session, &request);
+    let strict_plan_warm = root.session.strict_compile_plan_ready();
+    let mut result = run_model_request(&mut root.session, &request);
+    result.strict_plan_warm = Some(strict_plan_warm);
+    result.worker_prepare_seconds = Some(root.prepare_seconds);
+    result.strict_plan_error.clone_from(&root.plan_error);
     let elapsed_secs = start.elapsed().as_secs_f64();
     ModelWorkerResponse {
         protocol_version: MODEL_WORKER_PROTOCOL_VERSION,
@@ -1514,12 +1552,12 @@ fn run_worker(args: Args) -> Result<(), String> {
         WorkerProgressPhase::SourceRootLoad,
         WorkerProgressEventKind::Started,
     );
-    let mut session = load_source_root(&request.source_root_path)?;
+    let mut root = load_source_root(&request.source_root_path)?;
     progress.event(
         WorkerProgressPhase::SourceRootLoad,
         WorkerProgressEventKind::Completed,
     );
-    let response = compile_request(&mut session, request.clone());
+    let response = compile_request(&mut root, request.clone());
     write_model_worker_response_file(
         &request.output_dir.join(MODEL_WORKER_RESULT_FILE),
         &response,
@@ -1583,7 +1621,7 @@ fn spawn_worker_command_reader() -> mpsc::Receiver<Result<ModelWorkerCommand, St
 }
 
 fn run_worker_daemon(source_root_path: &Path) -> Result<(), String> {
-    let mut session = load_source_root(source_root_path)?;
+    let mut root = load_source_root(source_root_path)?;
     write_control_message(&ModelWorkerControlMessage::Ready {
         protocol_version: MODEL_WORKER_PROTOCOL_VERSION,
     })?;
@@ -1604,7 +1642,7 @@ fn run_worker_daemon(source_root_path: &Path) -> Result<(), String> {
                 let _ = fs::remove_file(artifact_path(&request, "progress.jsonl"));
                 let _ = fs::remove_file(request.output_dir.join(MODEL_WORKER_RESULT_FILE));
                 let _ = fs::remove_file(request.output_dir.join(MODEL_WORKER_PARTIAL_RESULT_FILE));
-                let response = compile_request(&mut session, request.clone());
+                let response = compile_request(&mut root, request.clone());
                 write_model_worker_response_file(
                     &request.output_dir.join(MODEL_WORKER_RESULT_FILE),
                     &response,
@@ -1662,6 +1700,47 @@ fn main() {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Compile and simulate `source` as the MSL worker does, returning the
+    /// recorded settings and the number of output points.
+    fn simulate_like_msl(name: &str, source: &str) -> (WorkerSimSettings, usize) {
+        let mut session = Session::default();
+        session
+            .add_document(&format!("{name}.mo"), source)
+            .expect("parse the grid model");
+        let result = session
+            .compile_model_dae_strict_reachable_uncached_with_recovery(name)
+            .expect("compile the grid model");
+        let settings = simulation_settings(&result);
+        let opts = sim_options(&settings, MSL_SIM_OUTPUT_INTERVALS, 30.0);
+        rumoca_sim::reset_step_counts();
+        let sim = rumoca_sim::simulate_dae(result.dae.as_ref(), &opts).expect("simulate");
+        let points = sim.times.len();
+        (
+            WorkerSimSettings::recorded(&opts, &sim, rumoca_sim::step_counts()),
+            points,
+        )
+    }
+
+    /// Output density is equal to OMC's by construction: an annotated model
+    /// divides its span by the `Interval` (1 / 0.01 = 100 intervals), an
+    /// unannotated one takes OMC's default 500, and N intervals give N + 1
+    /// points on a model without events.
+    #[test]
+    fn msl_output_points_follow_omcs_interval_rule() {
+        let annotated = "model Annotated\n  Real x(start = 1, fixed = true);\nequation\n  der(x) = -x;\n  annotation(experiment(StopTime = 1, Interval = 0.01));\nend Annotated;\n";
+        let unannotated = "model Unannotated\n  Real x(start = 1, fixed = true);\nequation\n  der(x) = -x;\n  annotation(experiment(StopTime = 0.7));\nend Unannotated;\n";
+        for (name, source, omc_intervals) in [
+            ("Annotated", annotated, 100),
+            ("Unannotated", unannotated, 500),
+        ] {
+            let (settings, points) = simulate_like_msl(name, source);
+            assert_eq!(settings.output_intervals, Some(omc_intervals), "{name}");
+            assert_eq!(settings.output_points, omc_intervals + 1, "{name}");
+            assert_eq!(points, omc_intervals + 1, "{name}");
+            assert_ne!(settings.integrator, "not recorded", "{name}");
+        }
+    }
 
     fn compile_zero_sized_standalone_model() -> Box<DaeCompilationResult> {
         let mut session = Session::default();
@@ -1834,7 +1913,10 @@ mod tests {
             solver: "auto".to_string(),
         };
 
-        assert_eq!(sim_options(&settings, 100, 10.0).dt, settings.dt);
+        let dt = sim_options(&settings, 100, 10.0)
+            .dt
+            .expect("annotated output grid");
+        assert!((dt - 2.5e-10).abs() <= 4.0 * f64::EPSILON * 2.5e-10);
     }
 
     #[test]

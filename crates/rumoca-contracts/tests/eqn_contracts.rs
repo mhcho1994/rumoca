@@ -1453,3 +1453,136 @@ fn eqn_039_differentiated_branches_fix_the_parameter() {
     assert!(parameter_is_evaluable(source, "Test", "dynamic"));
     assert!(warns_translation_selection(source, "Test", "dynamic"));
 }
+
+/// Whether a target without dynamic derivative subscripts admits `model`;
+/// any refusal must be for dynamic derivative subscripts.
+fn admits_static_derivative_subscripts(source: &str, model: &str) -> bool {
+    use rumoca_compile::codegen::targets::{
+        parse_target_manifest, validate_dae_target_capabilities,
+    };
+    let manifest = parse_target_manifest(
+        r#"
+version = 1
+ir = "dae"
+name = "static-derivative-subscripts"
+readiness_level = 1
+
+[capabilities]
+continuous_states = true
+residual_equations = true
+events = true
+structured_equation_families = true
+dynamic_derivative_subscripts = false
+
+[[files]]
+path = "model.out"
+template = "model.out.jinja"
+"#,
+    )
+    .expect("parse the target manifest");
+    let capabilities = manifest.capabilities.as_ref().expect("capabilities");
+    let result = expect_success(source, model);
+    match validate_dae_target_capabilities(&result.dae, &manifest, capabilities) {
+        Ok(()) => true,
+        Err(error) => {
+            assert!(
+                error.to_string().contains("dynamic_derivative_subscripts"),
+                "{error}"
+            );
+            false
+        }
+    }
+}
+
+/// MLS §8.3.2: a for-equation's range is evaluable, so each binder value, and
+/// a derivative subscript built from binders, is fixed at translation; a
+/// target without dynamic derivative subscripts admits the family.
+#[test]
+fn eqn_009_binder_derivative_subscripts_are_static() {
+    assert!(admits_static_derivative_subscripts(
+        r#"
+        model Test
+            parameter Integer n = 3;
+            Real x[n](each start = 0, each fixed = true);
+        equation
+            der(x[1]) = sin(time) - x[1];
+            for i in 2:n loop
+                der(x[i]) = x[i - 1] - x[i];
+            end for;
+        end Test;
+    "#,
+        "Test",
+    ));
+}
+
+/// A derivative subscript read from a discrete variable changes at run time,
+/// so the same target still refuses it.
+#[test]
+fn eqn_009_variable_derivative_subscripts_stay_dynamic() {
+    assert!(!admits_static_derivative_subscripts(
+        r#"
+        model Test
+            Real x[2](each start = 0, each fixed = true);
+            Real y;
+            discrete Integer k(start = 1, fixed = true);
+        equation
+            der(x) = {1, 2};
+            y = der(x[k]);
+            when time > 0.5 then
+                k = 2;
+            end when;
+        end Test;
+    "#,
+        "Test",
+    ));
+}
+
+#[test]
+fn eqn_039_evaluate_false_guard_with_unequal_counts_rejected() {
+    // MLS 3.7 section 4.5: `Evaluate = false` makes the parameter
+    // non-evaluable, so branches with different equation counts are illegal.
+    expect_failure_in_phase_with_code(
+        r#"
+        model Test
+            parameter Boolean two = true annotation(Evaluate = false);
+            Real a;
+            Real b;
+        equation
+            if two then
+                a = 1;
+                b = 2;
+            else
+                a = 1;
+            end if;
+        end Test;
+    "#,
+        "Test",
+        FailedPhase::Flatten,
+        "EF004",
+    );
+}
+
+#[test]
+fn eqn_039_fixed_false_guard_with_unequal_counts_rejected() {
+    expect_failure_in_phase_with_code(
+        r#"
+        model Test
+            parameter Boolean two(fixed = false, start = true);
+            Real a;
+            Real b;
+        initial equation
+            two = true;
+        equation
+            if two then
+                a = 1;
+                b = 2;
+            else
+                a = 1;
+            end if;
+        end Test;
+    "#,
+        "Test",
+        FailedPhase::Flatten,
+        "EF004",
+    );
+}

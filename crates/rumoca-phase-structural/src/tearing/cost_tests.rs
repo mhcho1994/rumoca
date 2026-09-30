@@ -106,3 +106,39 @@ fn alternate_tearing_respects_restricted_candidates_and_input_order() {
     );
     assert_eq!(plan.causal_sequence, replay.causal_sequence);
 }
+
+#[test]
+fn unlock_counts_match_the_direct_count_for_every_tear() {
+    let graph = vector_balance_graph();
+    let n = graph.len();
+    // Restrict every third equation's candidates, and remove varying prefixes
+    // of equations and unknowns so lone, paired, and wider live sets all occur.
+    let candidates = graph
+        .iter()
+        .enumerate()
+        .map(|(eq, row)| {
+            row.iter()
+                .copied()
+                .filter(|var| eq % 3 != 0 || var % 2 == 0)
+                .collect::<HashSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    for removed in 0..n {
+        let remaining_eqs = (removed / 2..n).collect::<BTreeSet<_>>();
+        let remaining_unknowns = (removed..n).collect::<BTreeSet<_>>();
+        let unlocks = UnlockCounts::count(&remaining_eqs, &remaining_unknowns, &graph, &candidates);
+        for &var in &remaining_unknowns {
+            assert_eq!(
+                unlocks.for_tear(var),
+                causal_steps_unlocked_by_tearing(
+                    var,
+                    &remaining_eqs,
+                    &remaining_unknowns,
+                    &graph,
+                    &candidates,
+                ),
+                "tear {var} after removing {removed}"
+            );
+        }
+    }
+}

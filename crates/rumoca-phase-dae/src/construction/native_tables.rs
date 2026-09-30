@@ -125,16 +125,19 @@ fn native_table_handles(flat: &flat::Model) -> Vec<NativeTableHandle<'_>> {
     handles
 }
 
-/// The stable one-based table id of one native table handle variable.
+/// The stable one-based table id of each native table handle variable,
+/// computed once per DAE construction.
 ///
 /// Ids are assigned by declaration order so the DAE binding rewrite and the
 /// [`build_external_tables`] descriptor list agree without shared mutable
-/// state. The runtime requires a finite positive integer id.
-pub(crate) fn native_table_id(flat: &flat::Model, name: &VarName) -> Option<u64> {
-    native_table_handles(flat)
-        .iter()
-        .position(|handle| handle.name == name)
-        .map(|index| index as u64 + 1)
+/// state. The runtime requires a finite positive integer id. The map is a
+/// lookup only; nothing iterates it.
+pub(crate) fn native_table_ids(flat: &flat::Model) -> std::collections::HashMap<VarName, u64> {
+    let mut ids = std::collections::HashMap::new();
+    for (index, handle) in native_table_handles(flat).into_iter().enumerate() {
+        ids.insert(handle.name.clone(), index as u64 + 1);
+    }
+    ids
 }
 
 /// Fold every native table handle constructor into a loaded table descriptor.

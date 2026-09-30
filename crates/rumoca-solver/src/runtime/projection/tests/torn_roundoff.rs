@@ -126,7 +126,10 @@ fn rounded_tear_step_declines_and_restores_incoming_values() {
         &mut y,
         &[],
         0.0,
-        model.plan.blocks[0].tearing.as_ref().unwrap(),
+        TornBlock {
+            index: 0,
+            tearing: model.plan.blocks[0].tearing.as_ref().unwrap(),
+        },
         1e-8,
         true,
     )
@@ -177,7 +180,10 @@ fn well_conditioned_torn_block_still_settles_without_dense_recovery() {
         &mut y,
         &[],
         0.0,
-        model.plan.blocks[0].tearing.as_ref().unwrap(),
+        TornBlock {
+            index: 0,
+            tearing: model.plan.blocks[0].tearing.as_ref().unwrap(),
+        },
         1e-8,
         true,
     )

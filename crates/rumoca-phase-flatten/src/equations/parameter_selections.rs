@@ -11,9 +11,34 @@ use rumoca_ir_ast as ast;
 use rumoca_ir_flat as flat;
 
 use super::build_qualified_name;
+use crate::{Context, FlattenError};
 
-/// The record of a selection whose evaluated conditions are `conditions`.
+/// MLS 3.7 sections 4.5 and 18.6: a `fixed = false` or `Evaluate = false`
+/// parameter is not evaluable, so a for-equation range reading one has no
+/// translation value (section 8.3.3); refuse it before expansion reads it.
+pub(super) fn refuse_non_evaluable_range(
+    ctx: &Context,
+    indices: &[ast::ForIndex],
+    prefix: &ast::QualifiedName,
+    span: rumoca_core::Span,
+) -> Result<(), FlattenError> {
+    let Some(parameter) = indices.iter().find_map(|index| {
+        crate::boolean_eval::non_evaluable_parameter_read(ctx, &index.range, prefix)
+    }) else {
+        return Ok(());
+    };
+    Err(FlattenError::unsupported_equation(
+        format!(
+            "for-equation range reads non-evaluable parameter `{parameter}` (fixed = false or \
+             Evaluate = false); MLS 3.7 section 8.3.3 evaluates the range at translation"
+        ),
+        span,
+    ))
+}
+
+/// The record of a structural use whose evaluated expressions are `conditions`.
 pub(crate) fn parameter_branch_selection<'a>(
+    kind: flat::StructuralParameterUse,
     conditions: impl IntoIterator<Item = &'a ast::Expression>,
     prefix: &ast::QualifiedName,
     span: rumoca_core::Span,
@@ -22,7 +47,11 @@ pub(crate) fn parameter_branch_selection<'a>(
     for condition in conditions {
         collect_references(condition, prefix, &mut references);
     }
-    flat::ParameterBranchSelection { span, references }
+    flat::ParameterBranchSelection {
+        span,
+        kind,
+        references,
+    }
 }
 
 fn collect_references(
@@ -42,9 +71,26 @@ fn collect_references(
         ast::Expression::Parenthesized { inner, .. } => {
             collect_references(inner, prefix, references);
         }
-        ast::Expression::FunctionCall { args, .. } => {
-            for argument in args {
+        ast::Expression::FunctionCall { comp, args, .. } => {
+            // `size(a, k)` and `ndims(a)` read only the shape of `a`, which is
+            // fixed at translation whatever its values (MLS §10.1).
+            let shape_query = matches!(comp.to_string().as_str(), "size" | "ndims");
+            for argument in args.iter().skip(usize::from(shape_query)) {
                 collect_references(argument, prefix, references);
+            }
+        }
+        ast::Expression::Range {
+            start, step, end, ..
+        } => {
+            collect_references(start, prefix, references);
+            if let Some(step) = step {
+                collect_references(step, prefix, references);
+            }
+            collect_references(end, prefix, references);
+        }
+        ast::Expression::Array { elements, .. } => {
+            for element in elements {
+                collect_references(element, prefix, references);
             }
         }
         ast::Expression::If {

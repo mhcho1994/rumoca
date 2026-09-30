@@ -73,6 +73,9 @@ pub(super) fn source_balance(input: SourceBalanceInput<'_>) -> Result<BalanceDet
                 detail.discrete_value_definitions +=
                     plan.scalar_count.unwrap_or(equation.scalar_count);
             }
+            EquationPartition::MultiOutput { receivers, .. } => {
+                add_multi_output_receivers(&mut detail, flat, roles, &receivers)?;
+            }
             EquationPartition::ConsumedDiscreteValue => {}
         }
     }
@@ -106,6 +109,25 @@ pub(super) fn source_balance(input: SourceBalanceInput<'_>) -> Result<BalanceDet
         }
     }
     Ok(detail)
+}
+
+/// Each receiver of a multi-result equation is defined by that equation in
+/// the system its role selects.
+fn add_multi_output_receivers(
+    detail: &mut BalanceDetail,
+    flat: &flat::Model,
+    roles: &HashMap<VarName, PlannedRole>,
+    receivers: &[&VarName],
+) -> Result<(), ToDaeError> {
+    for receiver in receivers {
+        let scalar_count = checked_shape_size(receiver, &flat.variables[*receiver])?;
+        match roles[*receiver] {
+            PlannedRole::DiscreteReal => detail.discrete_real_equations += scalar_count,
+            PlannedRole::DiscreteValue => detail.discrete_value_definitions += scalar_count,
+            _ => detail.continuous_equations += scalar_count,
+        }
+    }
+    Ok(())
 }
 
 fn multi_output_equation_scalar_count(

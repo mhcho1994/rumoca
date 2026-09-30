@@ -57,7 +57,7 @@ fn structured_source_expression<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     context: &AlgorithmStatementContext<'_, '_, 'dae>,
     structured_source: &StructuredSource,
-    owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    owner_clock: Option<dae::ClockId<'dae>>,
     provenance: dae::DaeProvenance,
     span: Span,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
@@ -69,10 +69,10 @@ fn structured_source_expression<'dae>(
             let coordinate = context.coordinates[source_leaf];
             let previous = construction.temporal(|temporal| match coordinate {
                 Coordinate::DiscreteReal(variable) => {
-                    temporal.previous_discrete_real(owner_clock.into(), variable, provenance)
+                    temporal.previous_discrete_real(owner_clock, variable, provenance)
                 }
                 Coordinate::DiscreteValue(variable) => {
-                    temporal.previous_discrete_value(owner_clock.into(), variable, provenance)
+                    temporal.previous_discrete_value(owner_clock, variable, provenance)
                 }
                 _ => Err(dae::DaeConstructionError::InvalidVariableRole {
                     name: source_leaf.clone(),

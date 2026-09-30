@@ -1,8 +1,8 @@
 use rumoca_ir_solve::ScalarSlot;
 
 use super::event_boundary::event_boundary_horizon;
-use super::indicator_plan::{IndicatorPlanInputs, IndicatorReading, IndicatorZeroSide};
 use super::*;
+use rumoca_ir_solve::fmi::{FmiIndicatorPlan, IndicatorReading, IndicatorZeroSide};
 
 impl SolveMeKernel {
     pub(crate) fn continuous_state_derivatives_into(
@@ -73,11 +73,17 @@ impl SolveMeKernel {
         settled_guess: &mut Option<Vec<f64>>,
         indicators: &mut [f64],
     ) -> Result<(), MeError> {
-        let mut root_values = self.indicator_root_scratch.borrow_mut();
-        let mut deadlines = self.indicator_deadline_scratch.borrow_mut();
-        if self.indicator_plan.reads_deadlines() && settled_guess.is_none() {
+        // A dynamic-time deadline needs a settled coordinate of its own, and
+        // between events a root refresh starts from the committed seed
+        // (SPEC_0044 ME-PROJ-005), never from the declared start values; a
+        // root-only inventory without a seed keeps the root search's own
+        // restricted refresh.
+        let needs_settled = self.indicator_plan.reads_deadlines() || self.seed_active();
+        if needs_settled && settled_guess.is_none() {
             *settled_guess = Some(self.solver_y_at_parameters(time, params)?);
         }
+        let mut root_values = self.indicator_root_scratch.borrow_mut();
+        let mut deadlines = self.indicator_deadline_scratch.borrow_mut();
         if self.indicator_plan.reads_root_values() {
             root_values.fill(0.0);
             self.evaluate_root_conditions(time, params, settled_guess, &mut root_values)?;
@@ -517,10 +523,10 @@ impl SolveMeKernel {
         config: &MeInstanceConfig,
         execution_backend: Option<Rc<dyn crate::SolveExecutionBackend>>,
     ) -> Result<Self, MeError> {
-        let (model, event_indicator_sources, max_step_duration_value_reference, configuration) =
-            source
-                .into_parts()
-                .map_err(|error| contract(error.to_string()))?;
+        let root_location = source.root_location();
+        let (model, indicator_plan, max_step_duration_value_reference, configuration) = source
+            .into_parts()
+            .map_err(|error| contract(error.to_string()))?;
         let delay_bearing = !model.problem.events.delays.delay_time_rhs.is_empty();
         if max_step_duration_value_reference.is_some() != delay_bearing {
             return Err(contract(if delay_bearing {
@@ -548,18 +554,13 @@ impl SolveMeKernel {
         let stop_schedule =
             SolveStopSchedule::new(&runtime.model.problem, config.start_time, config.stop_time);
         let output_meta = convert_variable_meta(&runtime.model.variable_meta);
-        let events = &runtime.model.problem.events;
-        let indicator_plan = FmiIndicatorPlan::derive(
-            &event_indicator_sources,
-            IndicatorPlanInputs {
-                root_value_count: runtime.root_condition_count(),
-                model_root_count: events.root_conditions.output_count(),
-                deadline_count: events.dynamic_time_event_rhs.output_count(),
-                root_zero_domains: &events.root_zero_domains,
-                root_relation_memory_targets: &events.root_relation_memory_targets,
-            },
-        )
-        .map_err(|error| contract(error.to_string()))?;
+        // The Solve IR resolved the indicator table against the model's root
+        // and delay rows; this runtime's root vector must be that vector.
+        if runtime.root_condition_count() != indicator_plan.root_value_count() {
+            return Err(contract(
+                "the runtime root-condition vector differs from the resolved indicator table",
+            ));
+        }
         let scratch = reserve_indicator_scratch(&indicator_plan)?;
         let reduced_charts = dynamic_chart::build_reduced_charts(&runtime, state_count)
             .map_err(|error| contract(error.to_string()))?;
@@ -569,6 +570,7 @@ impl SolveMeKernel {
             active_reference: None,
             pending_basis_change: None,
             solver_y_guess: RefCell::new(runtime.model.initial_y.clone()),
+            committed_seed: RefCell::default(),
             indicator_root_scratch: RefCell::new(scratch.indicator_root_scratch),
             indicator_deadline_scratch: RefCell::new(scratch.indicator_deadline_scratch),
             indicator_value_scratch: scratch.indicator_value_scratch,
@@ -577,11 +579,13 @@ impl SolveMeKernel {
             delay_solver_y_scratch: RefCell::new(runtime.model.initial_y.clone()),
             runtime,
             indicator_plan,
+            root_location,
             instance_brand: Rc::new(()),
             instance_name: config.instance_name,
             lifecycle: MeLifecycle::instantiated(configuration),
             tolerance: config.tolerance,
             stop_time: config.stop_time,
+            refresh_executor: config.executor,
             time: config.start_time,
             event_boundary: None,
             post_event_eval_time: None,
@@ -677,9 +681,17 @@ impl SolveMeKernel {
         Ok(solver_y)
     }
 
-    pub(super) fn with_callback_solver_y<R>(&self, f: impl FnOnce(&mut Vec<f64>) -> R) -> R {
+    /// Run one continuous-time refresh from the committed seed (SPEC_0044
+    /// ME-PROJ-005). `f` also receives the derivative already settled at
+    /// `time` when that is the resolved accepted point.
+    pub(super) fn with_callback_solver_y<T>(
+        &self,
+        time: f64,
+        f: impl FnOnce(&mut Vec<f64>, Option<&[f64]>) -> Result<T, MeError>,
+    ) -> Result<T, MeError> {
+        let settled = self.load_seed(time)?;
         self.invalidate_continuous_linearization();
-        f(&mut self.solver_y_guess.borrow_mut())
+        f(&mut self.solver_y_guess.borrow_mut(), settled.as_deref())
     }
 
     pub(super) fn directional_derivative_at_parameters(
@@ -714,7 +726,7 @@ impl SolveMeKernel {
                     .map_err(MeError::from);
             }
         }
-        self.with_callback_solver_y(|guess| {
+        self.with_callback_solver_y(time, |guess, _| {
             let result = self
                 .runtime
                 .eval_state_jacobian_v_ad_with_guess_into(
@@ -741,7 +753,12 @@ impl SolveMeKernel {
         settle: AlgebraicSettle,
         derivatives: &mut [f64],
     ) -> Result<(), MeError> {
-        self.with_callback_solver_y(|guess| {
+        self.with_callback_solver_y(time, |guess, settled| {
+            if let Some(settled) = settled {
+                derivatives.copy_from_slice(settled);
+                self.cache_continuous_linearization(time, &self.states, parameters, guess);
+                return Ok(());
+            }
             let result = self
                 .runtime
                 .eval_state_derivatives_with_guess_into(
@@ -902,7 +919,7 @@ impl SolveMeKernel {
 
     fn solver_y_at_parameters(&self, time: f64, params: &[f64]) -> Result<Vec<f64>, MeError> {
         let settle = self.numerics_settle();
-        self.with_callback_solver_y(|guess| {
+        self.with_callback_solver_y(time, |guess, _| {
             self.runtime
                 .full_solver_y_with_guess(
                     time,
@@ -923,7 +940,20 @@ impl SolveMeKernel {
         }
     }
 
+    /// Evaluate `f` under the delay-refreshed parameters at `(time, state)`.
+    /// A pending committed-seed refresh (SPEC_0044 ME-PROJ-005) runs first:
+    /// it needs the same scratch, so it cannot run once `f` holds it.
     pub(super) fn with_delay_evaluation_params<R>(
+        &self,
+        time: f64,
+        state: &[f64],
+        f: impl FnOnce(&[f64]) -> R,
+    ) -> Result<R, MeError> {
+        self.resolve_seed()?;
+        self.with_delay_params_unseeded(time, state, f)
+    }
+
+    pub(super) fn with_delay_params_unseeded<R>(
         &self,
         time: f64,
         state: &[f64],
@@ -1590,7 +1620,6 @@ impl SolveMeKernel {
         entry: MeEventEntry,
     ) -> Result<MeDiscreteStates, MeError> {
         let continuous_states_before = self.states.clone();
-        let tolerance = self.tolerance.max(1.0e-10);
         match entry.cause {
             MeEventCause::StateEvent => {
                 self.advance_state_to_event_right_limit = false;
@@ -1620,8 +1649,7 @@ impl SolveMeKernel {
                     .map_or(entry.event_time.min(entry.horizon), |(_, event)| {
                         event_boundary_horizon(event, entry.horizon, self.stop_time)
                     });
-                let outcome =
-                    self.process_runtime_event_boundary(event_time, horizon_t, tolerance, event)?;
+                let outcome = self.process_runtime_event_boundary(event_time, horizon_t, event)?;
                 let right_limit_t = outcome.right_limit_t;
                 if coincident_time_event.is_some() {
                     self.stop_schedule.advance_past(event_time);
@@ -1645,7 +1673,6 @@ impl SolveMeKernel {
                 let outcome = self.process_runtime_event_boundary(
                     entry.event_time,
                     event_boundary_horizon(event, entry.horizon, self.stop_time),
-                    tolerance,
                     event,
                 )?;
                 self.advance_state_to_event_right_limit = false;

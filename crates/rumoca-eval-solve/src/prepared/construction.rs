@@ -38,7 +38,19 @@ struct PreparedRow {
     parameter_static_y_gradient_params: Option<Box<[usize]>>,
 }
 
-fn prepare_row(block: &ScalarProgramBlock, row_idx: usize) -> Result<PreparedRow, EvalSolveError> {
+/// Which facts preparing a program derives: every fact, or only those
+/// evaluating its outputs reads, leaving it without assignment certificates.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowFacts {
+    Full,
+    Evaluation,
+}
+
+fn prepare_row(
+    block: &ScalarProgramBlock,
+    row_idx: usize,
+    facts: RowFacts,
+) -> Result<PreparedRow, EvalSolveError> {
     let span = block.program_span(row_idx);
     let row = block.program(row_idx).ok_or_else(|| {
         invalid_row("prepared program is outside its block").with_source_span(span)
@@ -48,9 +60,12 @@ fn prepare_row(block: &ScalarProgramBlock, row_idx: usize) -> Result<PreparedRow
         invalid_row("checked block has no register certificate for its program")
             .with_source_span(span)
     })?;
-    let assignment_shapes = target_assignment_shapes_with_output_offsets(row)
-        .map_err(|error| error.with_source_span(span))?
-        .into_boxed_slice();
+    let assignment_shapes = match facts {
+        RowFacts::Full => target_assignment_shapes_with_output_offsets(row)
+            .map_err(|error| error.with_source_span(span))?
+            .into_boxed_slice(),
+        RowFacts::Evaluation => Box::default(),
+    };
     let tensor_affine_assignments =
         tensor_affine_assignment::prepare(row, &assignment_shapes, span)?;
     let parameter_indices = row_parameter_indices(row).into_boxed_slice();
@@ -97,6 +112,10 @@ pub fn replaced_programs(
 
 impl PreparedScalarProgramBlock {
     pub fn new(block: ScalarProgramBlock) -> Result<Self, EvalSolveError> {
+        Self::with_facts(block, RowFacts::Full)
+    }
+
+    fn with_facts(block: ScalarProgramBlock, facts: RowFacts) -> Result<Self, EvalSolveError> {
         let row_count = block.programs().len();
         let block_span = block.program_span(0);
         let output_count = checked_prepared_output_count(&block)?;
@@ -151,7 +170,7 @@ impl PreparedScalarProgramBlock {
             block,
         };
         for row_idx in 0..row_count {
-            let row = prepare_row(&prepared.block, row_idx)?;
+            let row = prepare_row(&prepared.block, row_idx, facts)?;
             prepared.requirements = prepared.requirements.merge(row.requirement);
             prepared.push_row(row);
         }
@@ -177,7 +196,7 @@ impl PreparedScalarProgramBlock {
         let mut prepared = base.clone();
         prepared.block = block;
         for &row_idx in replaced {
-            let row = prepare_row(&prepared.block, row_idx)?;
+            let row = prepare_row(&prepared.block, row_idx, RowFacts::Full)?;
             prepared.set_row(row_idx, row);
         }
         prepared.requirements = prepared
@@ -269,4 +288,33 @@ fn reverse_y_gradient_supported(row: &[LinearOp]) -> bool {
         .count()
         == 1
         && row.iter().all(crate::reverse::reverse_row_op_supported)
+}
+
+/// A prepared block that only evaluates its programs' outputs: it records no
+/// assignment certificates, and its type exposes no query that would read one.
+pub struct PreparedEvaluationBlock(PreparedScalarProgramBlock);
+
+impl PreparedEvaluationBlock {
+    pub fn new(block: ScalarProgramBlock) -> Result<Self, EvalSolveError> {
+        PreparedScalarProgramBlock::with_facts(block, RowFacts::Evaluation).map(Self)
+    }
+
+    #[must_use]
+    pub fn block(&self) -> &ScalarProgramBlock {
+        self.0.block()
+    }
+
+    /// [`PreparedScalarProgramBlock::eval_row_outputs_unchecked_with_context`].
+    pub fn eval_row_outputs_unchecked_with_context(
+        &self,
+        row_idx: usize,
+        y: &[f64],
+        p: &[f64],
+        t: f64,
+        context: RowEvalContext<'_>,
+        out: &mut Vec<f64>,
+    ) -> Result<(), EvalSolveError> {
+        self.0
+            .eval_row_outputs_unchecked_with_context(row_idx, y, p, t, context, out)
+    }
 }

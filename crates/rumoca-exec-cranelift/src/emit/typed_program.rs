@@ -1379,7 +1379,9 @@ impl ProgramLowerer<'_, '_> {
                     self.builder,
                     self.module,
                     self.math,
-                    map_binary(operator),
+                    map_binary(operator).ok_or_else(|| {
+                        CompileError::Backend("invalid typed Real binary operator".into())
+                    })?,
                     lhs,
                     rhs,
                 )?;
@@ -1389,7 +1391,23 @@ impl ProgramLowerer<'_, '_> {
                 solve::SolveBinaryOperator::Add => self.builder.ins().iadd(lhs, rhs),
                 solve::SolveBinaryOperator::Subtract => self.builder.ins().isub(lhs, rhs),
                 solve::SolveBinaryOperator::Multiply => self.builder.ins().imul(lhs, rhs),
-                solve::SolveBinaryOperator::Divide => self.builder.ins().sdiv(lhs, rhs),
+                solve::SolveBinaryOperator::IntegerQuotient => {
+                    // `sdiv` traps on a zero divisor and on `MIN / -1`; both are
+                    // reported through the kernel status instead.
+                    let ty = self.builder.func.dfg.value_type(rhs);
+                    let nonzero = self.builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0);
+                    let minus_one = self.builder.ins().icmp_imm(IntCC::Equal, rhs, -1);
+                    let minimum = self.builder.ins().icmp_imm(
+                        IntCC::Equal,
+                        lhs,
+                        i64::MIN >> (64 - ty.bits()),
+                    );
+                    let overflow = self.builder.ins().band(minus_one, minimum);
+                    let representable = self.builder.ins().bnot(overflow);
+                    let valid = self.builder.ins().band(nonzero, representable);
+                    status::require_integer_quotient(self.builder, valid);
+                    self.builder.ins().sdiv(lhs, rhs)
+                }
                 solve::SolveBinaryOperator::Min | solve::SolveBinaryOperator::Max => {
                     let code = if operator == solve::SolveBinaryOperator::Min {
                         IntCC::SignedLessThan
@@ -1406,8 +1424,14 @@ impl ProgramLowerer<'_, '_> {
                 }
             }),
             solve::SolveScalarType::Boolean => Ok(match operator {
-                solve::SolveBinaryOperator::And => self.builder.ins().band(lhs, rhs),
-                solve::SolveBinaryOperator::Or => self.builder.ins().bor(lhs, rhs),
+                // MLS §10.3.4 orders `false < true`: the least of two Booleans
+                // is their conjunction and the greatest their disjunction.
+                solve::SolveBinaryOperator::And | solve::SolveBinaryOperator::Min => {
+                    self.builder.ins().band(lhs, rhs)
+                }
+                solve::SolveBinaryOperator::Or | solve::SolveBinaryOperator::Max => {
+                    self.builder.ins().bor(lhs, rhs)
+                }
                 _ => {
                     return Err(CompileError::Backend(
                         "invalid typed Boolean binary operator".into(),
@@ -1561,9 +1585,10 @@ fn map_unary(operator: solve::SolveUnaryOperator) -> rumoca_ir_solve::UnaryOp {
     }
 }
 
-fn map_binary(operator: solve::SolveBinaryOperator) -> rumoca_ir_solve::BinaryOp {
+/// The Real binary operation of a typed operator; the Integer quotient has none.
+fn map_binary(operator: solve::SolveBinaryOperator) -> Option<rumoca_ir_solve::BinaryOp> {
     use rumoca_ir_solve::BinaryOp as Target;
-    match operator {
+    Some(match operator {
         solve::SolveBinaryOperator::Add => Target::Add,
         solve::SolveBinaryOperator::Subtract => Target::Sub,
         solve::SolveBinaryOperator::Multiply => Target::Mul,
@@ -1574,7 +1599,8 @@ fn map_binary(operator: solve::SolveBinaryOperator) -> rumoca_ir_solve::BinaryOp
         solve::SolveBinaryOperator::Atan2 => Target::Atan2,
         solve::SolveBinaryOperator::Min => Target::Min,
         solve::SolveBinaryOperator::Max => Target::Max,
-    }
+        solve::SolveBinaryOperator::IntegerQuotient => return None,
+    })
 }
 
 fn map_float_compare(operator: solve::SolveCompareOperator) -> FloatCC {

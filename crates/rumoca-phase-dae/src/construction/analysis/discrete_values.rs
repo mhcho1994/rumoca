@@ -131,16 +131,20 @@ fn collect_equation_owners(
     owners: &mut Vec<SourceOwner>,
 ) -> Result<(), ToDaeError> {
     for (row, equation) in flat.equations.iter().enumerate() {
-        let EquationPartition::DiscreteValue(plan) = equation_partition(
+        let plan = match equation_partition(
             flat,
             row,
             equation,
             roles,
             connection_ranks,
             aggregate_connections,
-        )?
-        else {
-            continue;
+        )? {
+            EquationPartition::DiscreteValue(plan) => plan,
+            EquationPartition::MultiOutput { receivers, call } => {
+                push_multi_output_owner(equation, call, &receivers, roles, owners);
+                continue;
+            }
+            _ => continue,
         };
         owners.push(SourceOwner {
             targets: vec![SourceTarget {
@@ -155,6 +159,35 @@ fn collect_equation_owners(
     Ok(())
 }
 
+/// One MLS §12.4.3 multi-result equation defines all its discrete-valued
+/// receivers from one call, so they share one owner whose dependencies are the
+/// call's current discrete reads.
+fn push_multi_output_owner(
+    equation: &flat::Equation,
+    call: &Expression,
+    receivers: &[&VarName],
+    roles: &HashMap<VarName, PlannedRole>,
+    owners: &mut Vec<SourceOwner>,
+) {
+    let dependencies = current_discrete_dependencies(call, roles);
+    let targets = receivers
+        .iter()
+        .filter(|receiver| matches!(roles.get(**receiver), Some(PlannedRole::DiscreteValue)))
+        .map(|receiver| SourceTarget {
+            name: (*receiver).clone(),
+            dependencies: dependencies.clone(),
+            span: equation.span,
+            ordered_scalar_self_dependencies: false,
+        })
+        .collect::<Vec<_>>();
+    if !targets.is_empty() {
+        owners.push(SourceOwner {
+            targets,
+            span: equation.span,
+        });
+    }
+}
+
 fn collect_algorithm_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
@@ -163,6 +196,8 @@ fn collect_algorithm_owners(
     for algorithm in &flat.algorithms {
         let target_names =
             stable_discrete_targets(flat, roles, model_algorithm_targets(flat, algorithm));
+        let event_algorithm =
+            super::model_algorithms::contains_event_control(&algorithm.statements);
         if target_names.is_empty() {
             continue;
         }
@@ -182,14 +217,19 @@ fn collect_algorithm_owners(
                     algorithm.span,
                     occurrence,
                 )?;
+                // MLS 3.7 §11.1.2: an event algorithm starts every discrete
+                // target at its `pre` value (lowering seeds it so), so a read
+                // before the target's own definition is a history read, not a
+                // current-value self-dependency (`last := f(last)` in a `when`).
                 let ordered_scalar_self_dependencies = dependencies.contains(&name)
-                    && !algorithm_reads_target_before_definition(
-                        &algorithm.statements,
-                        &name,
-                        roles,
-                        false,
-                    )
-                    .0;
+                    && (event_algorithm
+                        || !algorithm_reads_target_before_definition(
+                            &algorithm.statements,
+                            &name,
+                            roles,
+                            false,
+                        )
+                        .0);
                 Ok(SourceTarget {
                     name,
                     dependencies,
@@ -250,20 +290,17 @@ fn algorithm_reads_target_before_definition(
                     && cond_blocks
                         .iter()
                         .any(|block| expression_reads_current_target(&block.cond, target, roles));
-                let mut exits = cond_blocks
-                    .iter()
-                    .map(|block| {
-                        let (branch_read, branch_written) =
-                            algorithm_reads_target_before_definition(
-                                &block.stmts,
-                                target,
-                                roles,
-                                written,
-                            );
-                        entry_read |= branch_read;
-                        branch_written
-                    })
-                    .collect::<Vec<_>>();
+                let mut exits = Vec::with_capacity(cond_blocks.len() + 1);
+                for block in cond_blocks {
+                    let (branch_read, branch_written) = algorithm_reads_target_before_definition(
+                        &block.stmts,
+                        target,
+                        roles,
+                        written,
+                    );
+                    entry_read |= branch_read;
+                    exits.push(branch_written);
+                }
                 match else_block {
                     Some(branch) => {
                         let (branch_read, branch_written) =
@@ -630,6 +667,16 @@ fn collect_current_discrete_dependencies(
             function: BuiltinFunction::Previous,
             ..
         } => {}
+        // MLS §16.5.1: `sample(u, c)` has "the value of the left limit of u
+        // when c is active", so sampling a variable reads its pre value and no
+        // current value of this instant.
+        Expression::BuiltinCall {
+            function: BuiltinFunction::Sample,
+            args,
+            ..
+        } if args
+            .first()
+            .is_some_and(|value| matches!(value, Expression::VarRef { .. })) => {}
         Expression::VarRef { name, .. } => {
             if matches!(roles.get(name.var_name()), Some(PlannedRole::DiscreteValue)) {
                 dependencies.insert(name.var_name().clone());

@@ -169,13 +169,10 @@ fn nonlinear_drone_prepared(m: f64, j: f64, f: f64, g: f64) -> rumoca_ir_solve::
                 residual: zero_block.clone(),
                 derivative_rhs: solve.continuous.derivative_rhs.clone(),
                 algebraic_projection_plan: rumoca_ir_solve::AlgebraicProjectionPlan::default(),
-                manifold_residual: ComputeBlock::default(),
-                manifold_projection_plan: rumoca_ir_solve::AlgebraicProjectionPlan::default(),
-                // Not an authored field: the refresh owners are derived from
-                // the finished problem below, so the literal only reserves the
-                // slot Solve lowering fills.
-                refresh_owners: rumoca_ir_solve::ContinuousRefreshOwners::default(),
-                reduced_chart_set: rumoca_ir_solve::ReducedChartSet::default(),
+                // No manifold, charts, or noEvent loop switches. The refresh
+                // owners are not authored: they are derived from the finished
+                // problem below, into the slot Solve lowering fills.
+                ..ContinuousSolveSystem::default()
             },
             initialization: InitializationSolveSystem::construct(
                 rumoca_ir_solve::InitializationSystemInput {

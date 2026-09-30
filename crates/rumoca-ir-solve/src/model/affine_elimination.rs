@@ -10,7 +10,6 @@ use super::{AlgebraicProjectionBlock, StructuralPattern};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AffineEliminationLayout {
     pattern: StructuralPattern,
-    reduced_pattern: StructuralPattern,
     row_columns: Box<[Box<[usize]>]>,
     zero_guards: Box<[(usize, usize)]>,
     guard_steps: Box<[(usize, usize)]>,
@@ -74,18 +73,12 @@ impl AffineEliminationLayout {
         let row_columns = (0..n)
             .map(|row| {
                 let mut columns = Vec::new();
-                pattern.visit_row_columns(row, |column| columns.push(column));
+                pattern.visit_row_columns(row, &mut |column| columns.push(column));
                 columns.into_boxed_slice()
             })
             .collect();
         Some(Self {
             pattern: pattern.clone(),
-            reduced_pattern: StructuralPattern::full(
-                tears.len(),
-                tears.len(),
-                pattern.provenance(),
-            )
-            .ok()?,
             row_columns,
             zero_guards: zero_guards.into_boxed_slice(),
             guard_steps,
@@ -99,9 +92,6 @@ impl AffineEliminationLayout {
         &self.pattern
     }
 
-    pub const fn reduced_pattern(&self) -> &StructuralPattern {
-        &self.reduced_pattern
-    }
     pub fn row_columns(&self, row: usize) -> &[usize] {
         &self.row_columns[row]
     }
@@ -184,7 +174,7 @@ fn append_zero_guards(
     known_columns: &[bool],
     guards: &mut Vec<(usize, usize)>,
 ) {
-    pattern.visit_row_columns(row, |dependency| {
+    pattern.visit_row_columns(row, &mut |dependency| {
         if !known_columns[dependency] {
             guards.push((row, dependency));
         }

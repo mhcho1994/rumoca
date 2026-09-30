@@ -40,6 +40,7 @@ impl Context {
             structural_params: std::collections::HashSet::new(),
             non_structural_params: std::collections::HashSet::new(),
             tunable_params: std::collections::HashSet::new(),
+            non_evaluable_params: std::collections::HashSet::new(),
             functions: rustc_hash::FxHashMap::default(),
             function_result_shapes: crate::function_precollect::FunctionResultShapes::default(),
             record_aliases: rustc_hash::FxHashMap::default(),
@@ -177,6 +178,11 @@ impl Context {
                         && var.fixed_uniform() != Some(false);
                 if is_fixed_parameter && !var.evaluate {
                     self.tunable_params.insert(name.to_string());
+                }
+                if matches!(var.variability, rumoca_core::Variability::Parameter(_))
+                    && (var.fixed_uniform() == Some(false) || var.evaluate_refused)
+                {
+                    self.non_evaluable_params.insert(name.to_string());
                 }
                 let may_be_record_alias = !var.is_primitive;
                 if var.evaluate

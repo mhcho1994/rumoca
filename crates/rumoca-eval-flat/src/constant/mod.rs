@@ -15,6 +15,7 @@ pub mod value;
 
 mod array_construction;
 mod builtin_dispatch;
+mod comprehension_eval;
 mod context;
 mod environment;
 mod expr_eval;

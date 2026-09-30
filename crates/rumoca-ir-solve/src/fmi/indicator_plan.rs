@@ -11,11 +11,11 @@
 
 use std::fmt;
 
-use rumoca_ir_solve::{self as solve, ScalarSlot};
+use crate::{self as solve, ScalarSlot};
 
 /// Where one FMI event-indicator position reads its scalar value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IndicatorReading {
+pub enum IndicatorReading {
     /// Position `index` of the runtime root-condition vector.
     RootValue { index: usize },
     /// Dynamic-time deadline `index`, reported relative to evaluation time.
@@ -24,7 +24,7 @@ pub(crate) enum IndicatorReading {
 
 /// The side an exact zero is reported on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IndicatorZeroSide {
+pub enum IndicatorZeroSide {
     Positive,
     NonPositive,
     /// The side the previous completed point froze.
@@ -33,31 +33,31 @@ pub(crate) enum IndicatorZeroSide {
 
 /// One fully resolved FMI event-indicator position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct IndicatorEntry {
+pub struct IndicatorEntry {
     reading: IndicatorReading,
     zero_side: IndicatorZeroSide,
     crossing_root_index: Option<usize>,
 }
 
 impl IndicatorEntry {
-    pub(crate) const fn reading(&self) -> IndicatorReading {
+    pub const fn reading(&self) -> IndicatorReading {
         self.reading
     }
 
-    pub(crate) const fn zero_side(&self) -> IndicatorZeroSide {
+    pub const fn zero_side(&self) -> IndicatorZeroSide {
         self.zero_side
     }
 
     /// The root-condition position a located crossing arms, absent for a
     /// dynamic-time deadline, whose event is owned by the time schedule.
-    pub(crate) const fn crossing_root_index(&self) -> Option<usize> {
+    pub const fn crossing_root_index(&self) -> Option<usize> {
         self.crossing_root_index
     }
 }
 
 /// Why one inventory could not be resolved into a positional table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IndicatorPlanRejection {
+pub enum IndicatorPlanRejection {
     RootIndexOutOfRange,
     DeadlineIndexOutOfRange,
     DelayIndexOutOfRange,
@@ -86,7 +86,7 @@ impl fmt::Display for IndicatorPlanRejection {
 
 /// One rejected inventory position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct IndicatorPlanError {
+pub struct IndicatorPlanError {
     position: usize,
     rejection: IndicatorPlanRejection,
 }
@@ -103,22 +103,23 @@ impl fmt::Display for IndicatorPlanError {
 
 /// The runtime vectors an inventory resolves against.
 #[derive(Clone, Copy)]
-pub(crate) struct IndicatorPlanInputs<'model> {
+pub struct IndicatorPlanInputs<'model> {
     /// Length of the runtime root-condition vector: model roots then delays.
-    pub(crate) root_value_count: usize,
+    pub root_value_count: usize,
     /// Length of the model root prefix of that vector.
-    pub(crate) model_root_count: usize,
+    pub model_root_count: usize,
     /// Number of dynamic-time deadline rows.
-    pub(crate) deadline_count: usize,
-    pub(crate) root_zero_domains: &'model [solve::RootZeroDomain],
-    pub(crate) root_relation_memory_targets: &'model [Option<ScalarSlot>],
+    pub deadline_count: usize,
+    pub root_zero_domains: &'model [solve::RootZeroDomain],
+    pub root_relation_memory_targets: &'model [Option<ScalarSlot>],
 }
 
 /// The component-side FMI event-indicator table, built once.
-#[derive(Debug)]
-pub(crate) struct FmiIndicatorPlan {
+#[derive(Clone, Debug)]
+pub struct FmiIndicatorPlan {
     entries: Box<[IndicatorEntry]>,
     relation_memory_targets: Box<[Option<ScalarSlot>]>,
+    root_value_count: usize,
     root_value_len: usize,
     deadline_len: usize,
 }
@@ -129,7 +130,7 @@ impl FmiIndicatorPlan {
     /// This is the only constructor. It refuses an inventory whose sources
     /// leave the runtime vectors or abandon the checked order, so every later
     /// read is a positional lookup that cannot fall back to a raw vector.
-    pub(crate) fn derive(
+    pub fn derive(
         sources: &[solve::fmi::FmiEventIndicatorSource],
         inputs: IndicatorPlanInputs<'_>,
     ) -> Result<Self, IndicatorPlanError> {
@@ -170,6 +171,7 @@ impl FmiIndicatorPlan {
         Ok(Self {
             entries: entries.into_boxed_slice(),
             relation_memory_targets: relation_memory_targets.into_boxed_slice(),
+            root_value_count: inputs.root_value_count,
             root_value_len: if root_values_read {
                 inputs.root_value_count
             } else {
@@ -183,47 +185,56 @@ impl FmiIndicatorPlan {
         })
     }
 
-    pub(crate) const fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub(crate) const fn entries(&self) -> &[IndicatorEntry] {
+    pub const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub const fn entries(&self) -> &[IndicatorEntry] {
         &self.entries
     }
 
     /// Positional relation-memory targets, in FMI indicator order.
-    #[cfg(test)]
-    pub(crate) const fn relation_memory_targets(&self) -> &[Option<ScalarSlot>] {
+    pub const fn relation_memory_targets(&self) -> &[Option<ScalarSlot>] {
         &self.relation_memory_targets
     }
 
+    /// The model and delay root-condition count the plan was resolved
+    /// against; an executor's root vector must have exactly this length.
+    pub const fn root_value_count(&self) -> usize {
+        self.root_value_count
+    }
+
     /// Root-condition buffer length this plan reads, zero when it reads none.
-    pub(crate) const fn root_value_len(&self) -> usize {
+    pub const fn root_value_len(&self) -> usize {
         self.root_value_len
     }
 
     /// Deadline buffer length this plan reads, zero when it reads none.
-    pub(crate) const fn deadline_len(&self) -> usize {
+    pub const fn deadline_len(&self) -> usize {
         self.deadline_len
     }
 
     /// Whether any position reads the runtime root-condition vector.
-    pub(crate) const fn reads_root_values(&self) -> bool {
+    pub const fn reads_root_values(&self) -> bool {
         self.root_value_len != 0
     }
 
     /// Whether any position reads a dynamic-time deadline row.
-    pub(crate) const fn reads_deadlines(&self) -> bool {
+    pub const fn reads_deadlines(&self) -> bool {
         self.deadline_len != 0
     }
 
-    pub(crate) fn crossing_root_index(&self, position: usize) -> Option<usize> {
+    pub fn crossing_root_index(&self, position: usize) -> Option<usize> {
         self.entries
             .get(position)
             .and_then(IndicatorEntry::crossing_root_index)
     }
 
-    pub(crate) fn relation_memory_target(&self, position: usize) -> Option<ScalarSlot> {
+    pub fn relation_memory_target(&self, position: usize) -> Option<ScalarSlot> {
         self.relation_memory_targets
             .get(position)
             .copied()

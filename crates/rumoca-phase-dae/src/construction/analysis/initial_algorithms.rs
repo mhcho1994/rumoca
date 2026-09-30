@@ -41,6 +41,7 @@
 //! input coordinate from an algorithm, and inventing one would replace a
 //! missing capability with an unproven guess.
 mod checking_calls;
+mod loops;
 
 use super::*;
 use checking_calls::{checking_call, expand_checking_call, reject_unsupported_checking_call};
@@ -230,14 +231,17 @@ pub(super) fn reject_unsupported_initial_algorithm_statements(
 ) -> Result<(), ToDaeError> {
     for algorithm in &flat.initial_algorithms {
         require_span(algorithm.span, "initial algorithm")?;
-        reject_unsupported_statements(flat, &algorithm.statements)?;
+        reject_unsupported_statements(flat, &algorithm.statements, false)?;
     }
     Ok(())
 }
 
+/// `in_loop` defers the target check of an assignment inside a `for` body to
+/// the replay, which sees the target with its index bound.
 fn reject_unsupported_statements(
     flat: &flat::Model,
     statements: &[rumoca_core::Statement],
+    in_loop: bool,
 ) -> Result<(), ToDaeError> {
     for statement in statements {
         if let Some(assertion) = assertion_call(flat, statement) {
@@ -255,10 +259,10 @@ fn reject_unsupported_statements(
             rumoca_core::Statement::Empty { .. } => {}
             rumoca_core::Statement::Assignment { comp, span, .. } => {
                 require_span(*span, "initial algorithm assignment")?;
-                if comp.parts().is_empty() || comp.parts().iter().any(|part| !part.subs.is_empty())
-                {
+                if !in_loop && assignment_target(flat, comp).is_none() {
                     return Err(unsupported(
-                        "an assignment target must be one whole, unsubscripted coordinate",
+                        "an assignment target must be one whole declared coordinate, \
+                         addressed by literal subscripts at most",
                         *span,
                     ));
                 }
@@ -276,11 +280,19 @@ fn reject_unsupported_statements(
                     ));
                 }
                 for block in cond_blocks {
-                    reject_unsupported_statements(flat, &block.stmts)?;
+                    reject_unsupported_statements(flat, &block.stmts, in_loop)?;
                 }
                 if let Some(statements) = else_block {
-                    reject_unsupported_statements(flat, statements)?;
+                    reject_unsupported_statements(flat, statements, in_loop)?;
                 }
+            }
+            // A `for` unrolls over its evaluated range (see `loops`); its body
+            // obeys this same grammar.
+            rumoca_core::Statement::For {
+                equations, span, ..
+            } => {
+                require_span(*span, "initial algorithm for statement")?;
+                reject_unsupported_statements(flat, equations, true)?;
             }
             rumoca_core::Statement::FunctionCall {
                 comp,
@@ -307,8 +319,9 @@ fn reject_unsupported_statements(
                     required_statement_span(statement, "unsupported initial algorithm statement")?;
                 return Err(unsupported(
                     "an initial algorithm is accepted as sequential scalar assignments, `if` \
-                     conditionals, and `assert` statements; loops, `when`, and `reinit` carry \
-                     implicit memory with no checked initialization owner",
+                     conditionals, `for` loops over evaluable ranges, and `assert` statements; \
+                     `while`, `when`, and `reinit` carry implicit memory with no checked \
+                     initialization owner",
                     span,
                 ));
             }
@@ -323,6 +336,7 @@ pub(super) fn analyze_initial_algorithms(
     roles: &HashMap<VarName, PlannedRole>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
+    shapes: &ShapeEnvironment,
 ) -> Result<InitialAlgorithmAnalysis, ToDaeError> {
     let mut analysis = InitialAlgorithmAnalysis {
         parameters: HashMap::new(),
@@ -333,6 +347,7 @@ pub(super) fn analyze_initial_algorithms(
         let mut replay = Replay {
             flat,
             constants,
+            shapes,
             origin: flat::EquationOrigin::Algorithm {
                 component: algorithm.origin.clone(),
             },
@@ -664,6 +679,9 @@ struct Replay<'flat> {
     /// Parameter values and array shapes, so a checking call's loop bounds
     /// resolve to the iterations the model actually has.
     constants: &'flat EvalContext,
+    /// Evaluable model values, so a `for` range unrolls only when no
+    /// settable parameter bounds it.
+    shapes: &'flat ShapeEnvironment,
     origin: flat::EquationOrigin,
     assertions: Vec<flat::AssertEquation>,
 }
@@ -713,15 +731,15 @@ impl Replay<'_> {
         match statement {
             rumoca_core::Statement::Empty { .. } => Ok(()),
             rumoca_core::Statement::Assignment { comp, value, span } => {
-                let target = rumoca_core::component_ref_to_base_reference(comp)
-                    .var_name()
-                    .clone();
-                if !self.flat.variables.contains_key(&target) {
+                let Some(target) = assignment_target(self.flat, comp) else {
                     return Err(unsupported(
-                        format!("assignment target `{target}` is not a declared coordinate"),
+                        format!(
+                            "assignment target `{}` is not a declared coordinate",
+                            rumoca_core::component_ref_to_base_reference(comp).var_name()
+                        ),
                         *span,
                     ));
-                }
+                };
                 let expression = substitute(value, values);
                 values.insert(
                     target,
@@ -737,6 +755,11 @@ impl Replay<'_> {
                 else_block,
                 span,
             } => self.conditional(cond_blocks, else_block.as_deref(), guard, *span, values),
+            rumoca_core::Statement::For {
+                indices,
+                equations,
+                span,
+            } => self.unrolled(indices, equations, *span, guard, values),
             _ => unreachable!("the statement grammar is proven before analysis replays it"),
         }
     }
@@ -862,11 +885,11 @@ fn branch_value(
         })
 }
 
-struct AssertionCall<'statement> {
-    condition: &'statement Expression,
-    message: &'statement Expression,
-    level: Option<&'statement Expression>,
-    span: Span,
+pub(super) struct AssertionCall<'statement> {
+    pub(super) condition: &'statement Expression,
+    pub(super) message: &'statement Expression,
+    pub(super) level: Option<&'statement Expression>,
+    pub(super) span: Span,
 }
 
 /// Recognize MLS §8.3.7 `assert` in both forms Flat produces for a statement.
@@ -875,7 +898,7 @@ struct AssertionCall<'statement> {
 /// to the predefined operator, while an equation-section `assert` reaches it as
 /// the dedicated statement. A user function may not shadow the operator here: a
 /// callee the Flat function table registers is a user call, not the operator.
-fn assertion_call<'statement>(
+pub(super) fn assertion_call<'statement>(
     flat: &flat::Model,
     statement: &'statement rumoca_core::Statement,
 ) -> Option<AssertionCall<'statement>> {
@@ -954,6 +977,48 @@ fn negate(condition: &Expression, span: Span) -> Expression {
 
 fn unsupported(detail: impl Into<String>, span: Span) -> ToDaeError {
     ToDaeError::unsupported_algorithm("initial", detail, span)
+}
+
+/// The one declared scalar coordinate an assignment target names.
+///
+/// Flat declares each element of a component array as its own coordinate
+/// (`s[1].count`), so a target whose subscripts are all literal indices names
+/// exactly that coordinate; a computed subscript or an element of an array
+/// coordinate names no whole declared coordinate.
+fn assignment_target(
+    flat: &flat::Model,
+    comp: &rumoca_core::ComponentReference,
+) -> Option<VarName> {
+    let mut rendered = String::new();
+    for (position, part) in comp.parts().iter().enumerate() {
+        if position > 0 {
+            rendered.push('.');
+        }
+        rendered.push_str(&part.ident);
+        if part.subs.is_empty() {
+            continue;
+        }
+        let indices = part
+            .subs
+            .iter()
+            .map(|subscript| match subscript {
+                Subscript::Index { value, .. } => Some(value.to_string()),
+                Subscript::Expr { expr, .. } => match expr.as_ref() {
+                    Expression::Literal {
+                        value: rumoca_core::Literal::Integer(value),
+                        ..
+                    } => Some(value.to_string()),
+                    _ => None,
+                },
+                Subscript::Colon { .. } => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        rendered.push('[');
+        rendered.push_str(&indices.join(","));
+        rendered.push(']');
+    }
+    let target = VarName::new(&rendered);
+    flat.variables.contains_key(&target).then_some(target)
 }
 
 /// Substitute every coordinate the section has already written.

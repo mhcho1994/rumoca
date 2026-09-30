@@ -142,6 +142,9 @@ pub(super) struct InitializationUnknownSpace<'a, 'dae> {
     derivatives: &'a ContinuousRowIndex<'dae>,
     states: HashMap<(u32, usize), usize>,
     given_state_indices: BTreeSet<usize>,
+    /// The declared `nominal` of each `fixed = false` parameter scalar the
+    /// projection solves, keyed by P-slot index (MLS §4.8.1).
+    parameter_nominals: HashMap<usize, f64>,
 }
 
 /// Everything the initialization unknown space is assembled from.
@@ -170,7 +173,56 @@ pub(super) fn initialization_unknown_space<'a, 'dae>(
         derivatives,
         states: state_initial_slots(view, layout)?,
         given_state_indices: given_state_indices.iter().copied().collect(),
+        parameter_nominals: parameter_nominals(view, ownership)?,
     })
+}
+
+/// The declared `nominal` of every projection-owned `fixed = false` parameter
+/// scalar, evaluated once from parameters and constants. A parameter without
+/// `nominal` is absent, and the projection scales it by its start guess.
+fn parameter_nominals(
+    view: dae::DaeView<'_>,
+    ownership: &InitializationParameterOwnership<'_>,
+) -> Result<HashMap<usize, f64>, LowerError> {
+    let mut nominals = HashMap::new();
+    let mut evaluator = rumoca_eval_dae::NumericEvaluator::new(view);
+    for (id, variable) in view.variables() {
+        let (Some(slots), Some(nominal)) = (
+            ownership.projection_unknown_slots(id.index()),
+            variable.nominal(),
+        ) else {
+            continue;
+        };
+        let span = variable.declaration().span();
+        let mut values = evaluator.expression(nominal).map_err(|error| {
+            LowerError::contract(
+                format!(
+                    "nominal of `{}` does not evaluate: {error}",
+                    variable.name()
+                ),
+                span,
+            )
+        })?;
+        if values.len() == 1 && slots.len() > 1 {
+            values.resize(slots.len(), values[0]);
+        }
+        if values.len() != slots.len()
+            || values
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(LowerError::contract(
+                format!(
+                    "nominal of `{}` must be {} finite positive values",
+                    variable.name(),
+                    slots.len()
+                ),
+                span,
+            ));
+        }
+        nominals.extend(slots.iter().copied().zip(values));
+    }
+    Ok(nominals)
 }
 
 /// Exact state coordinates of the simultaneous initialization system.
@@ -284,7 +336,11 @@ pub(super) fn plan_initialization_projection<'dae>(
         if matched.is_empty() {
             continue;
         }
-        blocks.extend(ordered_projection_blocks(&component, &matched)?);
+        blocks.extend(ordered_projection_blocks(
+            &component,
+            &matched,
+            &space.parameter_nominals,
+        )?);
     }
     for row in algebraic_rows {
         row_roles[row] = match row_roles[row] {
@@ -318,6 +374,7 @@ pub(super) fn plan_initialization_projection<'dae>(
 fn ordered_projection_blocks(
     component: &ProjectionComponent,
     matched: &[(usize, InitialUnknown)],
+    nominals: &HashMap<usize, f64>,
 ) -> Result<Vec<solve::InitializationProjectionBlock>, LowerError> {
     let producer: BTreeMap<_, _> = matched
         .iter()
@@ -350,7 +407,7 @@ fn ordered_projection_blocks(
     Ok(components
         .into_iter()
         .map(|component| {
-            let (rows, unknowns) = component
+            let (rows, unknowns): (Vec<usize>, Vec<solve::ScalarSlot>) = component
                 .members
                 .iter()
                 .map(|position| {
@@ -358,7 +415,21 @@ fn ordered_projection_blocks(
                     (row, unknown.slot())
                 })
                 .unzip();
-            solve::InitializationProjectionBlock { rows, unknowns }
+            let scales = unknowns
+                .iter()
+                .map(|unknown| match unknown {
+                    solve::ScalarSlot::P { index, .. } => nominals.get(index).map_or(
+                        solve::InitializationUnknownScale::GuessMagnitude,
+                        |nominal| solve::InitializationUnknownScale::Nominal(*nominal),
+                    ),
+                    _ => solve::InitializationUnknownScale::Solver,
+                })
+                .collect();
+            solve::InitializationProjectionBlock {
+                rows,
+                unknowns,
+                scales,
+            }
         })
         .collect())
 }

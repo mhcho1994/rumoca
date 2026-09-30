@@ -2,7 +2,7 @@
 
 use super::super::builtin_profiles::is_materializable_builtin;
 use super::{
-    DifferentiationFacts, FunctionCallContext, Visit, has_invariant_subscripts,
+    DifferentiationFacts, FunctionCallContext, Visit, VisitMarks, has_invariant_subscripts,
     is_differentiable_binary, projected_element,
 };
 use rumoca_ir_dae as dae;
@@ -13,7 +13,7 @@ pub(super) fn can_materialize_holonomic_value<'dae>(
     view: dae::DaeView<'dae>,
     facts: &DifferentiationFacts,
     expression: dae::ExprId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
 ) -> bool {
     can_materialize_holonomic_value_in_context(
         view,
@@ -29,7 +29,7 @@ pub(super) fn can_materialize_holonomic_value_in_context<'dae>(
     view: dae::DaeView<'dae>,
     facts: &DifferentiationFacts,
     expression: dae::ExprId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
     context: &FunctionCallContext<'dae>,
     states: &mut Vec<u32>,
 ) -> bool {
@@ -71,7 +71,7 @@ fn materialize_operation<'dae>(
     view: dae::DaeView<'dae>,
     facts: &DifferentiationFacts,
     expression: dae::ExpressionView<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
     context: &FunctionCallContext<'dae>,
     states: &mut Vec<u32>,
 ) -> bool {
@@ -111,7 +111,7 @@ fn materialize_operation<'dae>(
             view, facts, operand, visited, context, states,
         ),
         dae::ExpressionOperation::Binary { operator, lhs, rhs }
-            if is_differentiable_binary(operator) =>
+            if is_differentiable_binary(operator) || operator == dae::BinaryOperator::Power =>
         {
             can_materialize_holonomic_value_in_context(view, facts, lhs, visited, context, states)
                 && can_materialize_holonomic_value_in_context(
@@ -165,7 +165,7 @@ fn materialize_algebraic<'dae>(
     view: dae::DaeView<'dae>,
     facts: &DifferentiationFacts,
     algebraic: dae::AlgebraicId<'dae>,
-    visited: &mut [Visit],
+    visited: &mut VisitMarks,
     context: &FunctionCallContext<'dae>,
     states: &mut Vec<u32>,
 ) -> bool {
@@ -184,6 +184,9 @@ fn materialize_algebraic<'dae>(
                 states,
             )
         });
+    }
+    if facts.is_zero_pinned(algebraic.index()) {
+        return true;
     }
     facts
         .algebraic_value_definition(view, algebraic)

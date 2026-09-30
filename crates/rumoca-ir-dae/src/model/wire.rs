@@ -1747,6 +1747,18 @@ fn reconstruct_clocks<'dae>(
                     clock.provenance,
                 )
                 .map(WireClockId::Triggered),
+            ClockKindWire::Shifted {
+                base,
+                counter,
+                condition,
+            } => clocks
+                .shifted(
+                    mapped(&ids.clocks, base, "clock", clock.provenance)?.clock_id(),
+                    counter,
+                    mapped(&ids.conditions, condition, "condition", clock.provenance)?,
+                    clock.provenance,
+                )
+                .map(WireClockId::Triggered),
         })?;
         expect_ordinal("clock", index, id.clock_id().index(), clock.provenance)?;
         ids.clocks.push(id);

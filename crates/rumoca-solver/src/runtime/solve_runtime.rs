@@ -34,6 +34,11 @@ use rumoca_eval_solve::{
     to_scalar_program_block,
 };
 
+/// The algebraic projection an event walk runs between its steps, reporting
+/// whether it changed the coordinate.
+pub(super) type ProjectAlgebraics<'a> =
+    dyn FnMut(&mut [f64], &mut [f64]) -> Result<bool, RuntimeSolveError> + 'a;
+
 mod block_residual_split;
 pub use block_residual_split::{
     BlockResidualSplitCounts, block_residual_split_counts, reset_block_residual_split_counts,
@@ -757,7 +762,7 @@ impl SolveRuntime {
         }
         trace_reverse_projection_coverage(model, &implicit_scalar_rhs);
         let visible_value_plan = visible_value_plan(model);
-        let root_condition_plan = root_condition_plan(model, &root_refresh);
+        let root_condition_plan = root_condition_plan(model);
         let compiled_root_conditions = BlockReuse::of(
             primary.map(|primary| &primary.root_condition_rows),
             &model.problem.events.root_conditions,
@@ -991,7 +996,8 @@ impl SolveRuntime {
             compiled_event_action_rows: RefCell::new(FxHashMap::default()),
             failed_event_action_rows: RefCell::new(BTreeSet::new()),
             compiled_assignment_schedules: RefCell::new(FxHashMap::default()),
-            interpreted_assignment_schedules: Default::default(),
+            interpreted_assignment_schedules:
+                interpreted_schedules::InterpretedSchedules::construct(model)?,
             native_projection_assignments: Default::default(),
             compiled_output_scratch: RefCell::new(Vec::new()),
             clock_activation_cache: RefCell::new(ClockActivationCache::default()),
@@ -1245,42 +1251,28 @@ impl SolveRuntime {
     /// The reduced tear Jacobian of a torn block from its tangent plan (see
     /// [`KernelRequest::TornJacobian`](crate::runtime::projection::KernelRequest)):
     /// `None` when the block has no plan, and a singular answer when a causal
-    /// coefficient vanishes at this point.
+    /// coefficient vanishes at this point. `index` is the block's position in
+    /// the algebraic projection plan, the same index its tangent plan was
+    /// issued under, so the lookup is direct.
     pub(crate) fn torn_tangent_jacobian(
         &self,
+        index: usize,
         tearing: &solve::BlockTearing,
         y: &[f64],
         p: &[f64],
         t: f64,
     ) -> Result<Option<Option<rumoca_eval_solve::TornTangentJacobian>>, RuntimeSolveError> {
-        if self.torn_tangents.iter().all(Option::is_none) {
-            return Ok(None);
-        }
-        // Projection blocks are borrowed from this runtime's plan, so a block
-        // is found by identity; the structural comparison serves a caller
-        // holding a copy of the plan.
-        let blocks = &self
-            .model
-            .problem
-            .continuous
-            .algebraic_projection_plan
-            .blocks;
-        let index = blocks
-            .iter()
-            .position(|block| {
-                block
-                    .tearing
-                    .as_ref()
-                    .is_some_and(|own| std::ptr::eq(own, tearing))
-            })
-            .or_else(|| {
-                blocks
-                    .iter()
-                    .position(|block| block.tearing.as_ref() == Some(tearing))
-            });
-        let evaluator = index
-            .and_then(|index| self.torn_tangents.get(index))
-            .and_then(Option::as_ref);
+        debug_assert!(
+            self.model
+                .problem
+                .continuous
+                .algebraic_projection_plan
+                .blocks
+                .get(index)
+                .is_some_and(|block| block.tearing.as_ref() == Some(tearing)),
+            "a torn block index names the plan block that owns its tearing"
+        );
+        let evaluator = self.torn_tangents.get(index).and_then(Option::as_ref);
         let Some(evaluator) = evaluator else {
             return Ok(None);
         };
@@ -1774,7 +1766,6 @@ impl SolveRuntime {
         self.validate_root_plan_output_len(plan, out)?;
         for (slot, entry) in out.iter_mut().zip(plan.entries.iter().copied()) {
             *slot = match entry {
-                RootConditionPlanEntry::ConstantNonZero(value) => value,
                 RootConditionPlanEntry::DirectTime(root) => {
                     direct_time_root_value(root, params, t)?
                 }
@@ -1807,9 +1798,7 @@ impl SolveRuntime {
         self.validate_root_plan_output_len(plan, out)?;
         for (slot, entry) in out.iter_mut().zip(plan.entries.iter().copied()) {
             *slot = match entry {
-                RootConditionPlanEntry::ConstantNonZero(_)
-                | RootConditionPlanEntry::ContinuousStatic
-                | RootConditionPlanEntry::Dynamic => 1.0,
+                RootConditionPlanEntry::ContinuousStatic | RootConditionPlanEntry::Dynamic => 1.0,
                 RootConditionPlanEntry::DirectTime(root) => {
                     direct_time_root_search_default(root, params, t)?
                 }
@@ -1957,6 +1946,8 @@ fn torn_tangent_evaluators(
     jvp: &solve::ScalarProgramBlock,
     compiled: bool,
 ) -> Rc<[Option<rumoca_eval_solve::TornTangentEvaluator>]> {
+    // One-direction plans all read the same JVP rows; prepare them once.
+    let mut shared = None;
     plan.blocks
         .iter()
         .map(|block| {
@@ -1969,7 +1960,7 @@ fn torn_tangent_evaluators(
                 solve::TornTangentPlan::derive(tearing, jvp)
             }
             .ok()?;
-            rumoca_eval_solve::TornTangentEvaluator::new(plan, jvp).ok()
+            rumoca_eval_solve::TornTangentEvaluator::sharing_directions(plan, jvp, &mut shared).ok()
         })
         .collect()
 }

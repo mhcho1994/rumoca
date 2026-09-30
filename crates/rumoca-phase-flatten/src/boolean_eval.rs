@@ -215,6 +215,36 @@ pub(crate) fn reads_tunable_parameter(
         .any(|reference| scoped_set_contains(&ctx.tunable_params, &reference.to_string(), prefix))
 }
 
+/// The first non-evaluable parameter (MLS 3.7 section 4.5: `fixed = false`
+/// or `Evaluate = false`) `expr` reads; a condition reading one is not
+/// evaluable, so no branch is selected on it at translation.
+pub(crate) fn non_evaluable_parameter_read(
+    ctx: &Context,
+    expr: &ast::Expression,
+    prefix: &ast::QualifiedName,
+) -> Option<String> {
+    ast::collect_component_refs(expr)
+        .iter()
+        .map(ToString::to_string)
+        .find(|name| scoped_set_contains(&ctx.non_evaluable_params, name, prefix))
+}
+
+/// Whether `expr` reads any parameter, `final` and `Evaluate = true` ones
+/// included: a `final` parameter bound to an ordinary one still carries that
+/// parameter's value into a structural use (SPEC_0022 DECL-037), and DAE
+/// construction closes the recorded reads over their bindings.
+pub(crate) fn reads_parameter(
+    ctx: &Context,
+    expr: &ast::Expression,
+    prefix: &ast::QualifiedName,
+) -> bool {
+    ast::collect_component_refs(expr).iter().any(|reference| {
+        let name = reference.to_string();
+        scoped_set_contains(&ctx.structural_params, &name, prefix)
+            || scoped_set_contains(&ctx.non_structural_params, &name, prefix)
+    })
+}
+
 /// Whether `name` denotes a parameter or a constant from `prefix`.
 pub(crate) fn names_parameter_or_constant(
     ctx: &Context,

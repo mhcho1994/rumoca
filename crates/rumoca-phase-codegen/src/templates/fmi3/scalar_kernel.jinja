@@ -238,7 +238,113 @@
 {%- endfor %}
 {%- endmacro %}
 
-{%- macro assertions(solve, fmi, messages, prefix) %}
+{#- Assertion message assembly (rumoca-eval-solve eval_event_action_message):
+    literal segments verbatim, each String(...) conversion formatted as the
+    linked runtime formats it. -#}
+{%- macro message_support(rows, prefix) %}
+typedef struct { char* data; size_t len; size_t cap; bool failed; } RmcMessage;
+static void rmc_message_push(RmcMessage* msg, const char* text, size_t len) {
+    if (msg->failed) return;
+    if (msg->len + len + 1 > msg->cap) {
+        size_t cap = msg->cap ? msg->cap : 64;
+        while (cap < msg->len + len + 1) cap *= 2;
+        char* data = realloc(msg->data, cap);
+        if (!data) { msg->failed = true; return; }
+        msg->data = data; msg->cap = cap;
+    }
+    memcpy(msg->data + msg->len, text, len);
+    msg->len += len;
+    msg->data[msg->len] = '\0';
+}
+{%- if rows.programs|length > 0 %}
+/* Rust's `f64` Display for non-finite and zero values. */
+static int rmc_format_special(char* out, size_t cap, double value) {
+    if (isnan(value)) return snprintf(out, cap, "NaN");
+    if (isinf(value)) return snprintf(out, cap, value < 0.0 ? "-inf" : "inf");
+    return snprintf(out, cap, signbit(value) ? "-0" : "0");
+}
+/* trim_fraction_zeros: drop trailing fraction zeros and a bare point before
+   the exponent marker (or the end). */
+static void rmc_trim_fraction(char* text, char marker) {
+    char* exponent = marker ? strchr(text, marker) : NULL;
+    char* end = exponent ? exponent : text + strlen(text);
+    if (!strchr(text, '.')) return;
+    char* cut = end;
+    while (cut > text && cut[-1] == '0') --cut;
+    if (cut > text && cut[-1] == '.') --cut;
+    memmove(cut, end, strlen(end) + 1);
+}
+/* format_significant_digits: `{:.*e}` or `{:.N}`, then trimmed. Rust writes
+   the exponent without a sign for positive powers and without padding. */
+static void rmc_format_real(char* out, size_t cap, double value, long digits) {
+    if (!isfinite(value) || value == 0.0) { rmc_format_special(out, cap, value); return; }
+    int exponent = (int)floor(log10(fabs(value)));
+    if (exponent < -4 || exponent >= digits) {
+        char raw[1200];
+        snprintf(raw, sizeof raw, "%.*e", (int)(digits - 1), value);
+        char* e = strchr(raw, 'e');
+        int power = atoi(e + 1);
+        *e = '\0';
+        rmc_trim_fraction(raw, '\0');
+        snprintf(out, cap, "%se%d", raw, power);
+        return;
+    }
+    long fractional = digits - exponent - 1;
+    snprintf(out, cap, "%.*f", (int)(fractional > 0 ? fractional : 0), value);
+    rmc_trim_fraction(out, '\0');
+}
+/* eval_event_message_conversion; `false` for an option the runtime refuses. */
+static bool rmc_message_convert(RmcMessage* msg, int source, double value, double minimum_length, double left_justified, double significant_digits) {
+    char text[1400];
+    if (!isfinite(minimum_length) || minimum_length != floor(minimum_length) || minimum_length < 0.0 || minimum_length > 1048576.0) return false;
+    if (!isfinite(significant_digits) || significant_digits != floor(significant_digits) || significant_digits < 1.0 || significant_digits > 1024.0) return false;
+    if (left_justified != 0.0 && left_justified != 1.0) return false;
+    if (source == 0) rmc_format_real(text, sizeof text, value, (long)significant_digits);
+    else if (source == 1) { if (!isfinite(value) || value != floor(value)) return false; snprintf(text, sizeof text, "%.0f", value); }
+    else { if (value != 0.0 && value != 1.0) return false; snprintf(text, sizeof text, "%s", value == 1.0 ? "true" : "false"); }
+    size_t len = strlen(text), width = (size_t)minimum_length;
+    if (len < width && left_justified == 0.0) for (size_t k = len; k < width; ++k) rmc_message_push(msg, " ", 1);
+    rmc_message_push(msg, text, len);
+    if (len < width && left_justified != 0.0) for (size_t k = len; k < width; ++k) rmc_message_push(msg, " ", 1);
+    return true;
+}
+static {{ prefix }}Status rmc_message_rows(ModelInstance* m, double* rows) {
+{%- for program in rows.programs %}
+    {
+    double r[{{ program.temporary_count if program.temporary_count > 0 else 1 }}]; (void)r;
+{%- for op in program.ops %}
+{{ scalar_op(op, "rows", prefix ~ "Error") }}
+{%- endfor %}
+    }
+{%- endfor %}
+    return {{ prefix }}OK;
+}
+{%- endif %}
+{%- endmacro %}
+
+{%- macro log_message(parts, rows, prefix) %}
+        {
+        RmcMessage msg = {0};
+{%- if rows.programs|length > 0 %}
+        double rows[{{ rows.programs|length }}];
+        bool rows_ok = rmc_message_rows(m, rows) == {{ prefix }}OK; (void)rows_ok;
+{%- endif %}
+{%- for part in parts %}
+{%- if part.text is defined %}
+        rmc_message_push(&msg, {{ c_string(part.text) }}, {{ part.text|length }});
+{%- else %}{% set c = part.conversion %}
+        if (!rows_ok || !rmc_message_convert(&msg, {{ 0 if c.source == "real" else (1 if c.source == "integer" else 2) }}, rows[{{ c.value }}], {% if c.minimum_length is not none %}rows[{{ c.minimum_length }}]{% else %}0.0{% endif %}, {% if c.left_justified is not none %}rows[{{ c.left_justified }}]{% else %}1.0{% endif %}, {% if c.significant_digits is not none %}rows[{{ c.significant_digits }}]{% else %}6.0{% endif %})) msg.failed = true;
+{%- endif %}
+{%- endfor %}
+        log_assertion(m, msg.failed || !msg.data ? "assertion failed (its message could not be formatted)" : msg.data);
+        free(msg.data);
+        }
+{%- endmacro %}
+
+{%- macro assertions(solve, fmi, messages, rows, prefix) %}
+{%- if fmi.assertions and solve.events.actions|length > 0 %}
+{{ message_support(rows, prefix) }}
+{%- endif %}
 static {{ prefix }}Status check_assertions(ModelInstance* m) {
     (void)m;
 {%- if fmi.assertions and solve.events.actions|length > 0 %}
@@ -254,7 +360,7 @@ static {{ prefix }}Status check_assertions(ModelInstance* m) {
 {%- endfor %}
 {%- for action in solve.events.actions %}
     if (actions[{{ loop.index0 }}] != 0.0) {
-        log_assertion(m, {{ c_string(messages[loop.index0]) }});
+{{- log_message(messages[loop.index0], rows, prefix) }}
         m->assertion_failed = true;
         return {{ prefix }}Error;
     }
@@ -280,7 +386,7 @@ static {{ prefix }}Status update_assertion_memory(ModelInstance* m) {
 }
 {%- endmacro %}
 
-{%- macro assertion_lifecycle(prefix) %}
+{%- macro assertion_lifecycle(prefix, scalar_events=none) %}
 static {{ prefix }}Status settle_values(ModelInstance* m) {
     if (refresh_algebraics(m) != {{ prefix }}OK) return {{ prefix }}Error;
     return m->assertions_initialized ? check_assertions(m) : {{ prefix }}OK;
@@ -289,11 +395,13 @@ static {{ prefix }}Status settle_derivative_values(ModelInstance* m) {
     if (refresh_derivative_values(m) != {{ prefix }}OK) return {{ prefix }}Error;
     return m->assertions_initialized ? check_assertions(m) : {{ prefix }}OK;
 }
+{%- if not scalar_events %}
 static {{ prefix }}Status initialize_assertions(ModelInstance* m) {
     if (refresh_algebraics(m) != {{ prefix }}OK || update_assertion_memory(m) != {{ prefix }}OK) return {{ prefix }}Error;
     m->assertions_initialized = true;
     return check_assertions(m);
 }
+{%- endif %}
 static {{ prefix }}Status settle_assertion_event(ModelInstance* m) {
     if (settle_values(m) != {{ prefix }}OK) return {{ prefix }}Error;
     return update_assertion_memory(m);
@@ -354,4 +462,12 @@ static bool rmc_set_text(ModelInstance* m, size_t index, const char* value) { (v
 static void rmc_release_text(ModelInstance* m) { (void)m; }
 static inline bool rmc_own_text(ModelInstance* dst, const ModelInstance* src) { (void)dst; (void)src; return true; }
 {%- endif %}
+{%- endmacro %}
+
+{#- The component's Co-Simulation step rule (ir-solve fmi::CoSimulationStepPlan,
+    SPEC_0044 ME-LSW-001): the name of the substep integrator it selects. -#}
+{%- macro cs_integrator(fmi) -%}
+{%- if fmi.co_simulation.method == "ClassicalRk4" and fmi.co_simulation.substep == "CommunicationStep" -%}integrate_rk4
+{%- else -%}{{ fail("unsupported-feature:fmi.c.co-simulation-step " ~ fmi.co_simulation.method ~ "/" ~ fmi.co_simulation.substep) }}
+{%- endif -%}
 {%- endmacro %}

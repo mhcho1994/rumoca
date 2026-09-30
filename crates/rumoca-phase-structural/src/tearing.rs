@@ -18,7 +18,7 @@
 #[cfg(test)]
 mod cost_tests;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Result of tearing an algebraic loop.
 #[derive(Debug, Clone)]
@@ -107,6 +107,10 @@ fn count_var_appearances(
     var_count
 }
 
+/// The number of remaining equations that tearing `tear_var` leaves with exactly
+/// one live unknown the equation can solve causally. [`UnlockCounts`] answers
+/// this for every unknown in one pass; this direct count is its reference.
+#[cfg(test)]
 fn causal_steps_unlocked_by_tearing(
     tear_var: usize,
     remaining_eqs: &BTreeSet<usize>,
@@ -127,6 +131,67 @@ fn causal_steps_unlocked_by_tearing(
             live.next().is_none() && causal_candidates[eq].contains(&candidate)
         })
         .count()
+}
+
+/// [`causal_steps_unlocked_by_tearing`] for every remaining unknown from one pass
+/// over the remaining equations. Tearing `v` removes it from each equation's live
+/// unknowns, so an equation unlocks exactly when its live set without `v` is a
+/// single causal candidate: a lone live candidate `c` unlocks for every `v` but
+/// `c`, and a live pair `{a, b}` unlocks for `a` when `b` is a candidate and for
+/// `b` when `a` is. Larger live sets never unlock.
+struct UnlockCounts {
+    lone: usize,
+    lone_on: HashMap<usize, usize>,
+    paired: HashMap<usize, usize>,
+}
+
+impl UnlockCounts {
+    fn count(
+        remaining_eqs: &BTreeSet<usize>,
+        remaining_unknowns: &BTreeSet<usize>,
+        eq_unknowns: &[HashSet<usize>],
+        causal_candidates: &[HashSet<usize>],
+    ) -> Self {
+        let mut unlocks = Self {
+            lone: 0,
+            lone_on: HashMap::new(),
+            paired: HashMap::new(),
+        };
+        for &eq in remaining_eqs {
+            let mut live = eq_unknowns[eq]
+                .iter()
+                .copied()
+                .filter(|var| remaining_unknowns.contains(var));
+            let Some(first) = live.next() else {
+                continue;
+            };
+            let candidates = &causal_candidates[eq];
+            match (live.next(), live.next()) {
+                (None, _) if candidates.contains(&first) => {
+                    unlocks.lone += 1;
+                    *unlocks.lone_on.entry(first).or_default() += 1;
+                }
+                (Some(second), None) => unlocks.count_pair(candidates, first, second),
+                _ => {}
+            }
+        }
+        unlocks
+    }
+
+    /// A live pair unlocks each member whose partner the equation can solve.
+    fn count_pair(&mut self, candidates: &HashSet<usize>, first: usize, second: usize) {
+        if candidates.contains(&second) {
+            *self.paired.entry(first).or_default() += 1;
+        }
+        if candidates.contains(&first) {
+            *self.paired.entry(second).or_default() += 1;
+        }
+    }
+
+    fn for_tear(&self, tear_var: usize) -> usize {
+        self.lone - self.lone_on.get(&tear_var).copied().unwrap_or(0)
+            + self.paired.get(&tear_var).copied().unwrap_or(0)
+    }
 }
 
 /// Apply greedy Cellier-style tearing to an algebraic loop.
@@ -242,6 +307,12 @@ fn tear_with_priority(
         }
 
         let var_count = count_var_appearances(&remaining_eqs, eq_unknowns, &remaining_unknowns);
+        let unlocks = UnlockCounts::count(
+            &remaining_eqs,
+            &remaining_unknowns,
+            eq_unknowns,
+            causal_candidates,
+        );
 
         if var_count.is_empty() {
             // No progress possible
@@ -250,19 +321,7 @@ fn tear_with_priority(
 
         let &tear_var = var_count
             .iter()
-            .max_by_key(|&(v, count)| {
-                priority.score(
-                    causal_steps_unlocked_by_tearing(
-                        *v,
-                        &remaining_eqs,
-                        &remaining_unknowns,
-                        eq_unknowns,
-                        causal_candidates,
-                    ),
-                    *count,
-                    *v,
-                )
-            })
+            .max_by_key(|&(v, count)| priority.score(unlocks.for_tear(*v), *count, *v))
             .map(|(v, _)| v)
             .unwrap();
 

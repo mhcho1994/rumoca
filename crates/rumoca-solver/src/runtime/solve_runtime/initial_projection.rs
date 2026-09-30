@@ -664,7 +664,7 @@ fn read_cones(
     (0..residual.rows() as usize)
         .map(|row| {
             let mut read = vec![false; columns];
-            residual.visit_row_columns(row, |column| read[column] = true);
+            residual.visit_row_columns(row, &mut |column| read[column] = true);
             let mut needed = vec![false; blocks.len()];
             // Plan order puts most readers after the blocks they read, so a
             // sweep from the last block back usually closes the set in one
@@ -694,7 +694,7 @@ fn add_blocks_read(
         needed[position] = true;
         grew = true;
         for &row in &block.rows {
-            implicit.visit_row_columns(row, |column| read[column] = true);
+            implicit.visit_row_columns(row, &mut |column| read[column] = true);
         }
     }
     grew
@@ -1019,6 +1019,7 @@ mod tests {
                             blocks: vec![solve::InitializationProjectionBlock {
                                 rows: vec![0],
                                 unknowns: vec![solve::scalar_slot_y(0)],
+                                scales: vec![solve::InitializationUnknownScale::Solver],
                             }],
                         },
                         ..Default::default()
@@ -1097,6 +1098,7 @@ mod tests {
                             blocks: vec![solve::InitializationProjectionBlock {
                                 rows: vec![0],
                                 unknowns: vec![solve::scalar_slot_y(0)],
+                                scales: vec![solve::InitializationUnknownScale::Solver],
                             }],
                         },
                         ..Default::default()
@@ -1244,6 +1246,7 @@ mod tests {
                             blocks: vec![solve::InitializationProjectionBlock {
                                 rows: vec![0],
                                 unknowns: vec![solve::scalar_slot_p(0)],
+                                scales: vec![solve::InitializationUnknownScale::GuessMagnitude],
                             }],
                         },
                         update_rhs: to_scalar_program_block(&dependent_update)

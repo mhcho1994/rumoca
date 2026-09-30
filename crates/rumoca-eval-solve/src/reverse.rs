@@ -114,6 +114,8 @@ pub struct ReverseInputs<'a> {
 pub struct ReverseScratch {
     regs: Vec<f64>,
     adj: Vec<f64>,
+    /// Registers reached only from the unselected arm of a selection.
+    untaken: Vec<bool>,
 }
 
 /// Reverse-accumulate `Jᵀ · output_cotangents` of a scalar program block into
@@ -159,8 +161,7 @@ pub fn reverse_scalar_block_vjp(
             output_cotangents,
             &mut scratch.adj,
         );
-        reverse_row_adjoints(row, &scratch.regs, &mut scratch.adj, cot)
-            .map_err(|error| error.with_source_span(span))?;
+        reverse_row_adjoints(row, scratch, cot).map_err(|error| error.with_source_span(span))?;
         debug_assert!(scratch.adj.iter().all(|value| *value == 0.0));
     }
     Ok(())
@@ -200,8 +201,7 @@ pub fn reverse_scalar_row_y_gradient(
     y_gradient.fill(0.0);
     reverse_row_adjoints(
         row,
-        &scratch.regs,
-        &mut scratch.adj,
+        scratch,
         &mut ReverseCotangents {
             y: y_gradient,
             p: &mut [],
@@ -217,6 +217,8 @@ impl ReverseScratch {
     fn prepare(&mut self, register_count: usize) {
         self.regs.resize(register_count, 0.0);
         self.adj.resize(register_count, 0.0);
+        self.untaken.clear();
+        self.untaken.resize(register_count, false);
         debug_assert!(self.adj.iter().all(|value| *value == 0.0));
     }
 }
@@ -346,10 +348,11 @@ fn forward_row_tape(
 /// observationally, since a written register is not touched again going backward.
 fn reverse_row_adjoints(
     row: &[LinearOp],
-    regs: &[f64],
-    adj: &mut [f64],
+    scratch: &mut ReverseScratch,
     cot: &mut ReverseCotangents<'_>,
 ) -> Result<(), EvalSolveError> {
+    let ReverseScratch { regs, adj, untaken } = scratch;
+    let regs = regs.as_slice();
     for op in row.iter().rev() {
         match *op {
             // No destination register: nothing to consume.
@@ -376,24 +379,32 @@ fn reverse_row_adjoints(
             LinearOp::LoadSeed { dst, index } => accumulate(cot.seed, index, take_adj(adj, dst)),
             LinearOp::Move { dst, src } => {
                 let dst_adj = take_adj(adj, dst);
+                // A copy carries an unselected arm's mark to its source.
+                if skips_untaken(untaken, adj, dst, dst_adj, &[src]) {
+                    continue;
+                }
                 add_adj(adj, src, dst_adj);
             }
-            // A zero adjoint contributes nothing, whatever the local partial: a
-            // selection eagerly evaluates its unselected arm, whose partials may
-            // be infinite there, and `0 * inf` would poison the operands.
+            // A selection eagerly evaluates its unselected arm, whose partials may
+            // be infinite there; that arm's zero adjoint adds nothing, since
+            // `0 * inf` would poison the shared operands. Every other operation
+            // multiplies as forward mode does, so a singular point on the taken
+            // path still yields a non-finite derivative.
             LinearOp::Unary { dst, op, arg } => {
                 let dst_adj = take_adj(adj, dst);
-                if dst_adj != 0.0 {
-                    add_adj(adj, arg, dst_adj * unary_derivative(op, reg(regs, arg)));
+                if skips_untaken(untaken, adj, dst, dst_adj, &[arg]) {
+                    continue;
                 }
+                add_adj(adj, arg, dst_adj * unary_derivative(op, reg(regs, arg)));
             }
             LinearOp::Binary { dst, op, lhs, rhs } => {
                 let dst_adj = take_adj(adj, dst);
-                if dst_adj != 0.0 {
-                    let (dl, dr) = binary_partials(op, reg(regs, lhs), reg(regs, rhs));
-                    add_adj(adj, lhs, dst_adj * dl);
-                    add_adj(adj, rhs, dst_adj * dr);
+                if skips_untaken(untaken, adj, dst, dst_adj, &[lhs, rhs]) {
+                    continue;
                 }
+                let (dl, dr) = binary_partials(op, reg(regs, lhs), reg(regs, rhs));
+                add_adj(adj, lhs, dst_adj * dl);
+                add_adj(adj, rhs, dst_adj * dr);
             }
             LinearOp::Select {
                 dst,
@@ -403,11 +414,13 @@ fn reverse_row_adjoints(
             } => {
                 // The adjoint flows to whichever branch the primal condition took.
                 let dst_adj = take_adj(adj, dst);
-                if reg(regs, cond) != 0.0 {
-                    add_adj(adj, if_true, dst_adj);
+                let (taken, unselected) = if reg(regs, cond) != 0.0 {
+                    (if_true, if_false)
                 } else {
-                    add_adj(adj, if_false, dst_adj);
-                }
+                    (if_false, if_true)
+                };
+                add_adj(adj, taken, dst_adj);
+                untaken[unselected as usize] = true;
             }
             LinearOp::LinearSolveComponent {
                 dst,
@@ -628,6 +641,28 @@ fn set(regs: &mut [f64], r: Reg, value: f64) {
     regs[r as usize] = value;
 }
 
+/// Whether an operation writing `dst` passes nothing back because `dst` holds
+/// only an unselected arm's value with a zero adjoint; its operands then
+/// inherit that mark. A register the taken path also reads carries that
+/// path's adjoint and is never skipped for a nonzero one.
+fn skips_untaken(
+    untaken: &mut [bool],
+    adj: &[f64],
+    dst: Reg,
+    dst_adj: f64,
+    operands: &[Reg],
+) -> bool {
+    let skip = dst_adj == 0.0 && std::mem::take(&mut untaken[dst as usize]);
+    if skip {
+        for &operand in operands {
+            if adj[operand as usize] == 0.0 {
+                untaken[operand as usize] = true;
+            }
+        }
+    }
+    skip
+}
+
 fn add_adj(adj: &mut [f64], r: Reg, value: f64) {
     adj[r as usize] += value;
 }
@@ -678,7 +713,75 @@ mod tests {
     use super::*;
     use rumoca_ir_solve::ScalarProgramBlock;
 
-    /// `if true then y0 else y0 * (1 / y1)` at `y1 = 0`: the unselected arm
+    /// `0 * (y0 * (1 / y1))` at `y1 = 0` on a taken path: forward mode gives
+    /// `0 * inf`, NaN, for the tangent in `y0`, and so must the reverse sweep,
+    /// whose zero adjoint here comes from a product, not an unselected arm.
+    #[test]
+    fn a_zero_adjoint_on_the_taken_path_still_signals_a_singular_point() {
+        let block = ScalarProgramBlock::with_output_indices(
+            vec![vec![
+                LinearOp::LoadY { dst: 0, index: 0 },
+                LinearOp::LoadY { dst: 1, index: 1 },
+                LinearOp::Const { dst: 2, value: 1.0 },
+                LinearOp::Const { dst: 3, value: 0.0 },
+                LinearOp::Binary {
+                    dst: 4,
+                    op: BinaryOp::Div,
+                    lhs: 2,
+                    rhs: 1,
+                },
+                LinearOp::Binary {
+                    dst: 5,
+                    op: BinaryOp::Mul,
+                    lhs: 0,
+                    rhs: 4,
+                },
+                LinearOp::Binary {
+                    dst: 6,
+                    op: BinaryOp::Mul,
+                    lhs: 3,
+                    rhs: 5,
+                },
+                LinearOp::StoreOutput { src: 6 },
+            ]],
+            vec![fixture_span()],
+            vec![0],
+        )
+        .expect("valid scalar block");
+        let row_registers: Vec<usize> = block
+            .programs()
+            .iter()
+            .map(|row| crate::required_registers(row).expect("register count"))
+            .collect();
+        let requirements =
+            crate::scalar_program_block_input_requirements(&block).expect("requirements");
+        let mut cot_y = [0.0_f64; 2];
+        reverse_scalar_block_vjp(
+            &ScalarVjpProgram {
+                block: &block,
+                row_registers: &row_registers,
+                requirements,
+            },
+            &ReverseInputs {
+                y: &[2.0, 0.0],
+                p: &[],
+                t: 0.0,
+                context: RowEvalContext::default(),
+            },
+            &[1.0],
+            &mut ReverseCotangents {
+                y: &mut cot_y,
+                p: &mut [],
+                seed: &mut [],
+            },
+            &mut ReverseScratch::default(),
+        )
+        .expect("reverse sweep");
+        assert!(cot_y[0].is_nan(), "{cot_y:?}");
+    }
+
+    /// `if true then y0 else copy(y0 * (1 / y1))` at `y1 = 0`: the unselected arm,
+    /// reached through a copy,
     /// evaluates `y0 * inf`, whose partial in `y0` is infinite. Its adjoint is
     /// zero, so it must add nothing, leaving `df/dy0 = 1` and `df/dy1 = 0`.
     #[test]
@@ -700,11 +803,12 @@ mod tests {
                     lhs: 0,
                     rhs: 3,
                 },
+                LinearOp::Move { dst: 6, src: 4 },
                 LinearOp::Select {
                     dst: 5,
                     cond: 2,
                     if_true: 0,
-                    if_false: 4,
+                    if_false: 6,
                 },
                 LinearOp::StoreOutput { src: 5 },
             ]],

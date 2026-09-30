@@ -58,13 +58,11 @@ fn event_iteration_contract_fixture() -> SolveProblem {
             ..SolveLayout::default()
         },
         discrete: DiscreteSolveSystem {
-            event_iteration_plan: EventIterationPlan {
-                runs: vec![EventIterationRun {
-                    variable: 0,
-                    pre_binding_start: 0,
-                    owner: EventIterationOwner::ScalarRows { start_row: 0 },
-                }],
-            },
+            event_iteration_plan: EventIterationPlan::new(vec![EventIterationRun {
+                variable: 0,
+                pre_binding_start: 0,
+                owner: EventIterationOwner::ScalarRows { start_row: 0 },
+            }]),
             rhs: ScalarProgramBlock::with_source_span(
                 vec![vec![
                     LinearOp::Const { dst: 0, value: 1.0 },
@@ -642,6 +640,7 @@ fn representative_continuous_system() -> ContinuousSolveSystem {
         derivative_rhs: representative_derivative_rhs(),
         refresh_owners: ContinuousRefreshOwners::default(),
         reduced_chart_set: ReducedChartSet::default(),
+        unlocalizable_guards: Vec::new(),
     }
 }
 
@@ -1034,16 +1033,14 @@ fn solve_model_wire_rejects_a_forged_event_transaction_call_owner() {
         observation_refresh: vec![false; 2],
         integrator_history_effects: vec![IntegratorHistoryEffect::Preserve; 2],
         clock_owners: vec![None; 2],
-        event_iteration_plan: EventIterationPlan {
-            runs: vec![EventIterationRun {
-                variable: 0,
-                pre_binding_start: 0,
-                owner: EventIterationOwner::EventTransaction {
-                    program_index: 0,
-                    target_index: 0,
-                },
-            }],
-        },
+        event_iteration_plan: EventIterationPlan::new(vec![EventIterationRun {
+            variable: 0,
+            pre_binding_start: 0,
+            owner: EventIterationOwner::EventTransaction {
+                program_index: 0,
+                target_index: 0,
+            },
+        }]),
         event_transactions: vec![transaction.clone()],
         ..DiscreteSolveSystem::default()
     };
@@ -1963,6 +1960,7 @@ fn solve_problem_shape_contract_rejects_duplicate_initial_projection_unknown() {
         blocks: vec![InitializationProjectionBlock {
             rows: vec![0, 0],
             unknowns: vec![scalar_slot_y(1), scalar_slot_y(1)],
+            scales: vec![InitializationUnknownScale::Solver; 2],
         }],
     };
     assert!(InitializationSolveSystem::construct(input).is_err());
@@ -2342,4 +2340,28 @@ fn nonempty_alternate_charts_are_serialized() {
         restored, block,
         "serialization round-trip must preserve the block"
     );
+}
+
+/// An ES016 fact is omitted from human-readable Solve IR when absent, and
+/// round-trips both ways when present.
+#[test]
+fn unlocalizable_guards_round_trip_and_are_omitted_when_empty() {
+    let empty = representative_continuous_system();
+    let json = serde_json::to_value(&empty).expect("serialize");
+    assert!(json.get("unlocalizable_guards").is_none());
+    let mut guarded = empty;
+    guarded.unlocalizable_guards = vec![UnlocalizableGuard {
+        y_indices: vec![0],
+        relation: "V0*v_in > vps".to_string(),
+        unknown_names: "`v_out`, `v_in`".to_string(),
+    }];
+    let text = serde_json::to_string(&guarded).expect("serialize");
+    let back: ContinuousSolveSystem = serde_json::from_str(&text).expect("deserialize");
+    assert_eq!(back.unlocalizable_guards, guarded.unlocalizable_guards);
+    assert_eq!(
+        UnlocalizableGuard::covering(&back.unlocalizable_guards, 0)
+            .map(|guard| guard.relation.as_str()),
+        Some("V0*v_in > vps")
+    );
+    assert!(UnlocalizableGuard::covering(&back.unlocalizable_guards, 1).is_none());
 }

@@ -76,7 +76,7 @@ impl RefreshProjectionModel<'_> {
             }
             let linearization = Rc::new(SeedBlockLinearization::build(
                 self,
-                block_index,
+                (block_index, self.projection_site(block_index)),
                 block,
                 y,
                 args,
@@ -84,6 +84,13 @@ impl RefreshProjectionModel<'_> {
             *entry = Some(linearization.clone());
             return Ok(linearization);
         }
-        SeedBlockLinearization::build(self, block_index, block, y, args).map(Rc::new)
+        SeedBlockLinearization::build(
+            self,
+            (block_index, self.projection_site(block_index)),
+            block,
+            y,
+            args,
+        )
+        .map(Rc::new)
     }
 }

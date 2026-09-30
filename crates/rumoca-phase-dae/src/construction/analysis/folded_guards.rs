@@ -4,20 +4,21 @@
 //! An equation conditional whose guard reads an ordinary parameter stays a
 //! run-time branch when its arms are structurally equal; otherwise equation
 //! lowering folds it as a structural selection. A variable's attribute or
-//! binding value folds such a guard only when an arm calls a user function. A
-//! folded guard freezes the parameter at its translation-time value, so a
-//! later set of it could not take effect. Each such parameter, and every
-//! parameter its binding reads, is therefore evaluable: fixed at translation
-//! and exported non-settable.
+//! binding value folds such a guard when an arm calls a user function or its
+//! arms are not proven to share one shape. A folded guard freezes the
+//! parameter at its translation-time value, so a later set of it could not
+//! take effect. Each such parameter, and every parameter its binding reads,
+//! is therefore evaluable: fixed at translation and exported non-settable.
 
 use std::collections::HashSet;
 
 use rumoca_core::{Expression, ExpressionVisitor};
 
 use super::super::expression::conditional_guards::{
-    conditional_calls_a_user_function, retains_flat_guard,
+    attribute_conditional_folds, retains_flat_guard,
 };
 use super::super::function_shapes::{ProvenValue, ShapeEnvironment};
+use super::clocks::when_conditional_selects_clock_structure;
 use super::{ValueReads, VarName, Variability, flat};
 
 /// One owner whose folded guard fixes parameters at translation: the equation
@@ -26,6 +27,7 @@ use super::{ValueReads, VarName, Variability, flat};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructuralSelection {
     pub span: rumoca_core::Span,
+    pub kind: flat::StructuralParameterUse,
     pub parameters: Vec<String>,
 }
 
@@ -67,11 +69,17 @@ pub(super) fn folded_guard_parameters(
             scan.visit_expression(start);
         }
     }
+    for chain in &flat.when_chains {
+        for branch in chain.branches() {
+            scan.owner = Some(branch.span);
+            scan.visit_clock_structure_conditionals(&branch.equations);
+        }
+    }
     for selection in &flat.parameter_branch_selections {
         let read = flatten_selection_parameters(flat, evaluable, selection);
         if !read.is_empty() {
             scan.owner = Some(selection.span);
-            scan.record(read);
+            scan.record_use(selection.kind, read);
         }
     }
     let selections = scan.selections;
@@ -97,14 +105,67 @@ impl GuardScan<'_> {
         ordinary_parameters(self.flat, self.evaluable, expression)
     }
 
+    /// Record the guard parameters of every `when`-body conditional that
+    /// selects clock structure: DAE construction decides it at translation
+    /// (see [`when_conditional_selects_clock_structure`]).
+    fn visit_clock_structure_conditionals(&mut self, equations: &[flat::WhenEquation]) {
+        for equation in equations {
+            let flat::WhenEquation::Conditional {
+                branches,
+                else_branch,
+                ..
+            } = equation
+            else {
+                continue;
+            };
+            let decided =
+                when_conditional_selects_clock_structure(branches, else_branch.as_deref());
+            for (condition, _) in branches.iter().filter(|_| decided) {
+                self.record_decided_guard(condition);
+            }
+            for (_, nested) in branches {
+                self.visit_clock_structure_conditionals(nested);
+            }
+            if let Some(nested) = else_branch {
+                self.visit_clock_structure_conditionals(nested);
+            }
+        }
+    }
+
+    /// Record the parameters of one guard the parameter values decide.
+    fn record_decided_guard(&mut self, condition: &Expression) {
+        let read = self.ordinary_parameters(condition);
+        if !read.is_empty()
+            && matches!(
+                self.values.proven_value(condition),
+                Some(ProvenValue::Boolean(_))
+            )
+        {
+            self.record(read);
+        }
+    }
+
     /// Record parameters a folded guard of the current owner reads.
     fn record(&mut self, read: Vec<VarName>) {
+        self.record_use(flat::StructuralParameterUse::BranchSelection, read);
+    }
+
+    /// Record parameters one structural use of the current owner reads, once
+    /// per owner, use, and parameter set (a nested for-equation reports its
+    /// range once, not once per enclosing iteration).
+    fn record_use(&mut self, kind: flat::StructuralParameterUse, read: Vec<VarName>) {
         let mut parameters = read.iter().map(ToString::to_string).collect::<Vec<_>>();
         parameters.sort();
         parameters.dedup();
         if let Some(span) = self.owner {
-            self.selections
-                .push(StructuralSelection { span, parameters });
+            let selection = StructuralSelection {
+                span,
+                kind,
+                parameters,
+            };
+            if !self.selections.contains(&selection) {
+                self.selections.push(selection);
+            }
         }
         self.found.extend(read);
     }
@@ -124,7 +185,7 @@ impl ExpressionVisitor for GuardScan<'_> {
             .take()
             .is_some_and(|span| self.values.is_structural_selection(span));
         let folds = if self.attribute_scope {
-            conditional_calls_a_user_function(branches, else_branch)
+            attribute_conditional_folds(branches, else_branch, self.values)
         } else {
             structural || !retains_flat_guard(self.flat, self.evaluable, branches, else_branch)
         };
@@ -167,6 +228,17 @@ fn ordinary_parameters(
         .collect()
 }
 
+/// Whether `name` is a `fixed = false` or `Evaluate = false` parameter.
+fn non_evaluable_parameter(flat: &flat::Model, name: &VarName) -> bool {
+    flat.variables.get(name).is_some_and(|variable| {
+        variable.evaluate_refused
+            || variable
+                .fixed
+                .as_ref()
+                .is_some_and(|fixed| fixed.iter().any(|value| !value))
+    })
+}
+
 /// `found` with every ordinary parameter a member's binding reads, so each
 /// member's binding reads only constants and evaluable parameters.
 fn close_over_bindings(
@@ -177,7 +249,10 @@ fn close_over_bindings(
     let mut closed = HashSet::new();
     let mut pending = found.into_iter().collect::<Vec<_>>();
     while let Some(name) = pending.pop() {
-        if !closed.insert(name.clone()) {
+        // MLS 3.7 sections 4.5 and 18.6: a `fixed = false` or
+        // `Evaluate = false` parameter is never evaluable, so it is never
+        // closed over; flatten refuses a structural use that reads one.
+        if non_evaluable_parameter(flat, &name) || !closed.insert(name.clone()) {
             continue;
         }
         if let Some(binding) = flat

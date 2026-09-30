@@ -14,7 +14,7 @@
   The including template defines `ModelInstance` (with `time`, `y`, `p`),
   `Y_LEN`, and `RMC_LOG(m, message)`, and imports `scalar_op`.
 -#}
-{%- from "fmi-c-kernel.jinja" import scalar_op %}
+{%- from "fmi-c-kernel.jinja" import scalar_op, c_string %}
 
 {%- macro c_array(name, type, values) -%}
 {%- if values|length > 0 %}
@@ -41,12 +41,14 @@ static int {{ name }}({{ signature }}) {
     tolerance and uncertified refresh during initialization. -#}
 {%- macro workspace_fields(me) -%}
 {%- if me.kernel %} double rmc_d[{{ me.work.doubles }}]; size_t rmc_s[{{ me.work.sizes }}]; size_t rmc_dtop; size_t rmc_stop; double rmc_tol; bool rmc_certify;{% endif -%}
+{%- if me.blocks|length > 0 and me.seed_rule == "CommittedAcceptedPoint" %} double rmc_commit_y[Y_LEN]; double rmc_mark_x[STATE_LEN]; double rmc_mark_t; bool rmc_seeding; bool rmc_mark_pending; bool rmc_mark_resolved;{% endif -%}
 {%- if me.blocks|length > 0 %} double rmc_seed[{{ me.seed_len if me.seed_len > 0 else 1 }}]; size_t rmc_fb_calls[{{ me.blocks|length + 1 }}]; size_t rmc_fb_count[{{ me.blocks|length + 1 }}]; size_t rmc_fb_mark[{{ me.blocks|length + 1 }}]; bool rmc_fb_active[{{ me.blocks|length + 1 }}]; bool rmc_fb_reported[{{ me.blocks|length + 1 }}];{% endif -%}
 {%- if me.lane_max > 0 %} double rmc_lane_seed[{{ (me.seed_len if me.seed_len > 0 else 1) * me.lane_max }}];{% endif -%}
 {%- if me.switching %} size_t rmc_chart; size_t rmc_chart_target; bool rmc_chart_pending; double rmc_chart_reference; double rmc_chart_target_reference; bool rmc_chart_log; double rmc_chart_y[Y_LEN];{% endif -%}
 {%- endmacro %}
 {%- macro workspace_reset(me) -%}
 {%- if me.kernel %} m->rmc_dtop = 0; m->rmc_stop = 0; m->rmc_tol = {{ me.policy.tolerance }}; m->rmc_certify = true;{% endif -%}
+{%- if me.blocks|length > 0 and me.seed_rule == "CommittedAcceptedPoint" %} m->rmc_seeding = false; m->rmc_mark_pending = false; m->rmc_mark_resolved = false;{% endif -%}
 {%- if me.blocks|length > 0 %} memset(m->rmc_seed, 0, sizeof(m->rmc_seed)); memset(m->rmc_fb_calls, 0, sizeof(m->rmc_fb_calls)); memset(m->rmc_fb_count, 0, sizeof(m->rmc_fb_count)); memset(m->rmc_fb_mark, 0, sizeof(m->rmc_fb_mark)); memset(m->rmc_fb_active, 0, sizeof(m->rmc_fb_active)); memset(m->rmc_fb_reported, 0, sizeof(m->rmc_fb_reported));{% endif -%}
 {%- if me.lane_max > 0 %} memset(m->rmc_lane_seed, 0, sizeof(m->rmc_lane_seed));{% endif -%}
 {%- if me.switching %} m->rmc_chart = 0; m->rmc_chart_target = 0; m->rmc_chart_pending = false; m->rmc_chart_reference = {{ me.switching[0].trial_rcond }}; m->rmc_chart_target_reference = 0.0;{% endif -%}
@@ -271,6 +273,19 @@ static const RmcBlock rmc_blocks[{{ me.blocks|length }}] = {
     { {{ b.canonical }}, {{ b.n }}, RMC_P({{ b.y }}), RMC_P({{ b.row_target }}), RMC_P({{ b.row_program }}), RMC_P({{ b.row_offset }}), {{ b.max_outputs }}, {{ "true" if b.affine else "false" }}, {{ "true" if b.singleton_exact else "false" }}, {{ "true" if b.has_tearing else "false" }}, RMC_P({{ b.row_ptr }}), RMC_P({{ b.col_idx }}), {{ b.nnz }}, {{ b.ncolors }}, RMC_P({{ b.colors }}), RMC_P({{ b.color_seeds }}), RMC_P({{ b.color_calls }}), RMC_P({{ b.placements }}), {{ b.jvp_max_outputs }}, {{ "true" if b.torn else "false" }}, {{ b.k }}, RMC_P({{ b.tear_col }}), RMC_P({{ b.residual_row }}), {{ b.ncausal }}, {{ b.ncruns }}, RMC_P({{ b.cruns }}), RMC_P({{ b.causal_target }}), RMC_P({{ b.causal_col }}), {{ "true" if b.elimination else "false" }}, {{ b.nelim }}, RMC_P({{ b.elim_row }}), RMC_P({{ b.elim_col }}), {{ b.nelim_tear }}, RMC_P({{ b.elim_residual }}), RMC_P({{ b.elim_tear }}), {{ b.nguards }}, RMC_P({{ b.guards }}), RMC_P({{ b.guard_step }}), {{ b.elim_capacity }}, RMC_P({{ b.iso_default }}), RMC_P({{ b.iso_start }}), RMC_P({{ b.iso_entries }}), {{ b.nlane_calls }}, RMC_P({{ b.lane_calls }}), {{ b.lane_max_outputs }}, {{ b.lane_max }}, {{ b.nsplit }}, RMC_P({{ b.split }}), RMC_P({{ b.row_split }}), {{ b.inv_len }}, {{ b.tangent_lanes }}, {{ "true" if b.tangent_directional else "false" }}, {{ b.ntangent_steps }}, RMC_P({{ b.tangent_steps }}), RMC_P({{ b.tangent_residuals }}) },
 {%- endfor %}
 };
+/* The ES016 fold each block reports when its projection fails (Solve IR
+   `UnlocalizableGuard`, SPEC_0044 ME-EVENT-008), or NULL. */
+static const char* const rmc_block_fold[{{ me.blocks|length }}] = {
+{%- for fold in me.block_folds %}
+    {% if fold %}{{ c_string(fold) }}{% else %}NULL{% endif %},
+{%- endfor %}
+};
+/* The failure a stage or complete projection logs: the block's ES016 fold
+   when it has one, else the generic convergence failure. */
+static const char* rmc_projection_failure(const RmcBlock* b, const char* generic) {
+    const char* fold = rmc_block_fold[b - rmc_blocks];
+    return fold ? fold : generic;
+}
 #define RMC_FB_PLAN {{ me.blocks|length }}
 #define RMC_FALLBACK_RATE {{ me.policy.fallback_rate }}
 #define RMC_FALLBACK_MIN_CALLS {{ me.policy.fallback_min_calls }}
@@ -1278,7 +1293,7 @@ static {{ prefix }}Status rmc_refresh(ModelInstance* m, const RmcStep* steps, si
                 }
             }
 {%- endif %}
-            if (rmc_project_stage(m, &rmc_blocks[step->block]) != 0) { RMC_LOG(m, "algebraic projection did not establish coordinate convergence"); goto fail; }
+            if (rmc_project_stage(m, &rmc_blocks[step->block]) != 0) { RMC_LOG(m, rmc_projection_failure(&rmc_blocks[step->block], "algebraic projection did not establish coordinate convergence")); goto fail; }
             break;
 {%- endif %}
         default: goto fail;
@@ -1379,17 +1394,19 @@ static {{ prefix }}Status refresh_parameters(ModelInstance* m) {
 }
 {{ projection_kernel(me) }}
 {{ refresh_kernel(me, prefix) }}
+{%- set plan_suffix = "_plan" if me.blocks|length > 0 and me.seed_rule == "CommittedAcceptedPoint" else "" %}
 {%- if me.switching %}
 {%- for chart in me.charts %}
-{{ refresh_function("refresh_derivative_values_c" ~ loop.index0, chart.derivative, prefix) }}
-{{ refresh_function("refresh_algebraics_c" ~ loop.index0, chart.algebraic, prefix) }}
+{{ refresh_function("refresh_derivative_values" ~ plan_suffix ~ "_c" ~ loop.index0, chart.derivative, prefix) }}
+{{ refresh_function("refresh_algebraics" ~ plan_suffix ~ "_c" ~ loop.index0, chart.algebraic, prefix) }}
 {%- endfor %}
-{{ chart_dispatch("refresh_derivative_values", me, prefix) }}
-{{ chart_dispatch("refresh_algebraics", me, prefix) }}
+{{ chart_dispatch("refresh_derivative_values" ~ plan_suffix, me, prefix) }}
+{{ chart_dispatch("refresh_algebraics" ~ plan_suffix, me, prefix) }}
 {%- else %}
-{{ refresh_function("refresh_derivative_values", me.derivative, prefix) }}
-{{ refresh_function("refresh_algebraics", me.algebraic, prefix) }}
+{{ refresh_function("refresh_derivative_values" ~ plan_suffix, me.derivative, prefix) }}
+{{ refresh_function("refresh_algebraics" ~ plan_suffix, me.algebraic, prefix) }}
 {%- endif %}
+{{ committed_seed(me, prefix) }}
 {{ initialization_kernel(me, prefix) }}
 {{- chart_kernel(solve, me, prefix) }}
 {%- endmacro %}
@@ -1957,7 +1974,12 @@ RMC_COLD static int rmc_init_project(ModelInstance* m) {
     RMC_MARK; int result = 1;
     double* pscale = rmc_dalloc(m, P_LEN); double* residual = rmc_dalloc(m, RMC_INIT_ROWS); double* scales = rmc_dalloc(m, RMC_INIT_ROWS);
     if (!pscale || !residual || !scales) { RMC_RELEASE; return rmc_exhausted(m); }
-    for (size_t k = 0; k < P_LEN; ++k) pscale[k] = isfinite(m->p[k]) ? fmax(fabs(m->p[k]), 1.0) : 1.0;
+    /* InitializationUnknownScale::at_guess: the start guess magnitude, or 1
+       when it is zero or not finite; a declared nominal replaces it. */
+    for (size_t k = 0; k < P_LEN; ++k) pscale[k] = (isfinite(m->p[k]) && m->p[k] != 0.0) ? fabs(m->p[k]) : 1.0;
+{%- for index in init.nominal_indices %}
+    pscale[{{ index }}] = {{ init.nominal_values[loop.index0] }};
+{%- endfor %}
     for (int iteration = 0; iteration < RMC_REFINE_ITERS && result == 1; ++iteration) {
         bool changed = false;
         rmc_init_seed(m);
@@ -2140,5 +2162,65 @@ RMC_API const RmcProgram rmc_iso_fn[{{ me.table.isolators.programs|length }}] = 
 RMC_API const size_t rmc_iso_group[{{ me.table.isolator_group|length }}] = { {% for value in me.table.isolator_group %}{{ value }},{% endfor %} };
 RMC_API const size_t rmc_iso_slot[{{ me.table.isolator_slot|length }}] = { {% for value in me.table.isolator_slot %}{{ value }},{% endfor %} };
 {%- endif %}
+{%- endif %}
+{%- endmacro %}
+
+{#- committed_seed.rs (SPEC_0044 ME-PROJ-005): a continuous-time refresh is a
+    function of (t, x, p, relation memory, committed seed), never of the
+    trial evaluations the importer made since the last accepted point. The
+    seed is the settled coordinate at the last event exit or, after a
+    completed integrator step, the derivative refresh at the accepted point
+    from the previous seed; that refresh runs once, on the first refresh
+    after the step, and a derivative query at the accepted point reads it.
+    Event Mode and Co-Simulation keep their own iteration's warm start. -#}
+{%- macro committed_seed(me, prefix) %}
+{%- if me.blocks|length > 0 and me.seed_rule == "CommittedAcceptedPoint" %}
+static bool rmc_at_mark(const ModelInstance* m) {
+    return memcmp(&m->time, &m->rmc_mark_t, sizeof(double)) == 0 && memcmp(m->y, m->rmc_mark_x, sizeof(m->rmc_mark_x)) == 0;
+}
+/* Commit the settled coordinate (event exit) as the continuous-time seed. */
+static inline void rmc_seed_commit(ModelInstance* m) {
+    memcpy(m->rmc_commit_y, m->y, sizeof(m->y));
+    m->rmc_mark_pending = false; m->rmc_mark_resolved = false; m->rmc_seeding = true;
+}
+/* Mark the accepted point of a completed integrator step. */
+static inline void rmc_seed_mark(ModelInstance* m) {
+    m->rmc_mark_t = m->time; memcpy(m->rmc_mark_x, m->y, sizeof(m->rmc_mark_x));
+    m->rmc_mark_pending = true; m->rmc_mark_resolved = false;
+}
+/* Event Mode keeps its own iteration warm start. */
+static inline void rmc_seed_suspend(ModelInstance* m) { m->rmc_seeding = false; }
+static void rmc_seed_load(ModelInstance* m) {
+    double x[STATE_LEN]; memcpy(x, m->y, sizeof(x));
+    memcpy(m->y, m->rmc_commit_y, sizeof(m->y)); memcpy(m->y, x, sizeof(x));
+}
+/* The next seed: the derivative refresh at the marked point from the
+   current seed. */
+static {{ prefix }}Status rmc_seed_resolve(ModelInstance* m) {
+    if (!m->rmc_mark_pending) return {{ prefix }}OK;
+    double t = m->time; double x[STATE_LEN]; memcpy(x, m->y, sizeof(x));
+    memcpy(m->y, m->rmc_commit_y, sizeof(m->y)); memcpy(m->y, m->rmc_mark_x, sizeof(x)); m->time = m->rmc_mark_t;
+    {{ prefix }}Status status = refresh_derivative_values_plan(m);
+    if (status == {{ prefix }}OK) { memcpy(m->rmc_commit_y, m->y, sizeof(m->y)); m->rmc_mark_pending = false; m->rmc_mark_resolved = true; }
+    m->time = t; memcpy(m->y, x, sizeof(x));
+    return status;
+}
+static {{ prefix }}Status refresh_derivative_values(ModelInstance* m) {
+    if (!m->rmc_seeding) return refresh_derivative_values_plan(m);
+    if (rmc_seed_resolve(m) != {{ prefix }}OK) return {{ prefix }}Error;
+    rmc_seed_load(m);
+    if (m->rmc_mark_resolved && rmc_at_mark(m)) return {{ prefix }}OK;
+    return refresh_derivative_values_plan(m);
+}
+static {{ prefix }}Status refresh_algebraics(ModelInstance* m) {
+    if (!m->rmc_seeding) return refresh_algebraics_plan(m);
+    if (rmc_seed_resolve(m) != {{ prefix }}OK) return {{ prefix }}Error;
+    rmc_seed_load(m);
+    return refresh_algebraics_plan(m);
+}
+{%- else %}
+static inline void rmc_seed_commit(ModelInstance* m) { (void)m; }
+static inline void rmc_seed_mark(ModelInstance* m) { (void)m; }
+static inline void rmc_seed_suspend(ModelInstance* m) { (void)m; }
 {%- endif %}
 {%- endmacro %}

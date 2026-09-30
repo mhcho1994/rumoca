@@ -194,6 +194,9 @@ enum ActivationCondition<'dae> {
     Expression(dae::ExprId<'dae>),
     GuardedAssignment {
         clock: Option<dae::ClockId<'dae>>,
+        /// Whether `clock` is periodic, so the activation is the guard's level
+        /// rather than the rise of the trigger.
+        periodic: bool,
         trigger: dae::ConditionId<'dae>,
         guard: dae::ConditionId<'dae>,
         trigger_memory: usize,

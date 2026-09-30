@@ -1,10 +1,10 @@
 use std::{cell::RefCell, rc::Rc};
 
 mod chart_switch;
+mod committed_seed;
 mod component;
 mod dynamic_chart;
 mod event_boundary;
-mod indicator_plan;
 
 use super::lifecycle::{MeLifecycle, MeLifecycleCommand, MeLifecycleViolation, MeState};
 use super::{
@@ -31,7 +31,7 @@ use crate::runtime::solve_runtime::{
 use crate::runtime::time::time_match_with_tol;
 use crate::solver::{SimTermination, SimVariableMeta};
 use crate::timeline;
-use indicator_plan::FmiIndicatorPlan;
+use rumoca_ir_solve::fmi::FmiIndicatorPlan;
 
 /// Residual tolerance for the component's internal algebraic refresh.
 const ALGEBRAIC_REFRESH_TOL: f64 =
@@ -141,6 +141,8 @@ pub struct SolveMeKernel {
     pending_basis_change: Option<dynamic_chart::PendingBasisChange>,
     /// The FMI event-indicator table, resolved once at instantiation.
     indicator_plan: FmiIndicatorPlan,
+    /// The component's root-location rules (SPEC_0044 ME-EVENT-004).
+    root_location: rumoca_ir_solve::fmi::RootLocationPlan,
     instance_brand: Rc<()>,
     instance_name: &'static str,
     lifecycle: MeLifecycle,
@@ -179,6 +181,9 @@ pub struct SolveMeKernel {
     boundary_event_pre_p: Option<Vec<f64>>,
 
     solver_y_guess: RefCell<Vec<f64>>,
+    committed_seed: RefCell<committed_seed::CommittedSeed>,
+    /// Who orders this instance's evaluations (Solve IR `RefreshExecutor`).
+    refresh_executor: rumoca_ir_solve::RefreshExecutor,
     /// Indicator working storage sized once from [`FmiIndicatorPlan`], so an
     /// indicator read reserves nothing proportional to the model.
     indicator_root_scratch: RefCell<Vec<f64>>,
@@ -231,6 +236,7 @@ pub(crate) struct MeKernelSnapshot {
     boundary_event_pre_y: Option<Vec<f64>>,
     boundary_event_pre_p: Option<Vec<f64>>,
     solver_y_guess: Vec<f64>,
+    committed_seed: committed_seed::CommittedSeed,
     delay_params_scratch: Vec<f64>,
     delay_solver_y_scratch: Vec<f64>,
     derivative_cache: Option<CachedDerivative>,
@@ -269,6 +275,11 @@ pub(super) fn event_right_limit_state_derivatives(
 }
 
 impl SolveMeKernel {
+    /// The component's root-location rules.
+    pub(crate) const fn root_location(&self) -> &rumoca_ir_solve::fmi::RootLocationPlan {
+        &self.root_location
+    }
+
     pub(crate) fn model_description(&self) -> MeModelDescription<'_> {
         MeModelDescription {
             continuous_state_count: self.state_count,
@@ -358,6 +369,7 @@ impl SolveMeKernel {
         // mode accepted-point cache is no longer authoritative. This replaces
         // the retired Rumoca-only `AtStateEvent` completed-step variant.
         self.clear_runtime_caches();
+        self.suspend_seed();
         self.last_event_entry = Some(entry);
         self.pending_event_entry = Some(entry);
         self.commit_lifecycle_transition(MeLifecycleCommand::EnterEventMode)
@@ -399,6 +411,7 @@ impl SolveMeKernel {
         // clearing scheduled relation memory changed a parameter slot, the
         // complete parameter-vector cache key forces the ordinary full solve.
         self.clear_callback_value_caches();
+        self.commit_seed();
         self.seed_settled_indicator_domains()?;
         self.commit_lifecycle_transition(MeLifecycleCommand::EnterContinuousTimeMode)
     }
@@ -518,6 +531,7 @@ impl SolveMeKernel {
     ) -> Result<MeCompletedIntegratorStep, MeError> {
         self.require_active_lifecycle("completed_integrator_step")?;
         self.post_event_eval_time = None;
+        self.mark_seed();
         let mut enter_event_mode = self.complete_indicator_domains()?;
         // A located indicator event takes precedence; a basis change is only
         // requested when the step is otherwise accepted, and is re-detected on
@@ -784,6 +798,7 @@ impl SolveMeKernel {
                 boundary_event_pre_y: self.boundary_event_pre_y.clone(),
                 boundary_event_pre_p: self.boundary_event_pre_p.clone(),
                 solver_y_guess: self.solver_y_guess.borrow().clone(),
+                committed_seed: self.committed_seed.borrow().clone(),
                 delay_params_scratch: self.delay_params_scratch.borrow().clone(),
                 delay_solver_y_scratch: self.delay_solver_y_scratch.borrow().clone(),
                 derivative_cache: self.derivative_cache.borrow().clone(),
@@ -842,6 +857,9 @@ impl SolveMeKernel {
         self.solver_y_guess
             .borrow_mut()
             .clone_from(&state.solver_y_guess);
+        self.committed_seed
+            .borrow_mut()
+            .clone_from(&state.committed_seed);
         self.delay_params_scratch
             .borrow_mut()
             .clone_from(&state.delay_params_scratch);

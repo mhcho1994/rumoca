@@ -443,6 +443,11 @@ pub(super) struct EventActionEntryWire {
 pub(super) enum ClockKindWire {
     Periodic(PeriodicClockScheduleWire),
     Triggered(u32),
+    Shifted {
+        base: u32,
+        counter: u32,
+        condition: u32,
+    },
 }
 
 #[derive(Deserialize, Clone, Copy)]

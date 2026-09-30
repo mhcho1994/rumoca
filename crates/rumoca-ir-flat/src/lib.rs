@@ -1551,12 +1551,26 @@ impl Algorithm {
     }
 }
 
-/// One flatten branch selection that evaluated its conditions with parameter
-/// values (SPEC_0040 DAE-C22).
+/// What a structural parameter read fixes at translation (SPEC_0040 DAE-C22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StructuralParameterUse {
+    /// A guard selecting between structurally different branches (MLS §8.3.4).
+    BranchSelection,
+    /// A declared array dimension (MLS §10.1).
+    ArrayDimension,
+    /// A for-equation range (MLS §8.3.3).
+    ForRange,
+}
+
+/// One flatten use that evaluated parameter values at translation
+/// (SPEC_0040 DAE-C22): a branch selection, an array dimension, or a
+/// for-equation range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParameterBranchSelection {
-    /// The selected if-equation.
+    /// The selected if-equation, the declaration, or the for-equation.
     pub span: Span,
+    /// The structural use the read parameters fix.
+    pub kind: StructuralParameterUse,
     /// Per component reference its evaluated conditions read, the flat names
     /// it can denote, the innermost enclosing scope first.
     pub references: Vec<Vec<String>>,

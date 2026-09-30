@@ -182,12 +182,32 @@ fn dynamic_subscript<'dae>(view: dae::DaeView<'dae>, subscript: dae::SubscriptVi
     let dae::SubscriptView::Index { expression, .. } = subscript else {
         return true;
     };
-    view.expression(expression).is_none_or(|expression| {
-        !matches!(
-            expression.operation(),
+    !static_index(view, expression)
+}
+
+/// Whether an integer subscript is fixed at every point it is evaluated: a
+/// literal, a binder of a structured equation family (whose checked domain is
+/// finite and compact, so each scalar row of the family has a literal index),
+/// or integer arithmetic of those.
+fn static_index<'dae>(view: dae::DaeView<'dae>, expression: dae::ExprId<'dae>) -> bool {
+    view.expression(expression)
+        .is_some_and(|expression| match expression.operation() {
             dae::ExpressionOperation::Literal(dae::DaeLiteral::Integer(_))
-        )
-    })
+            | dae::ExpressionOperation::Coordinate(dae::CoordinateView::Binder(_)) => true,
+            dae::ExpressionOperation::Unary {
+                operator: dae::UnaryOperator::Negate | dae::UnaryOperator::Plus,
+                operand,
+            } => static_index(view, operand),
+            dae::ExpressionOperation::Binary {
+                operator:
+                    dae::BinaryOperator::Add
+                    | dae::BinaryOperator::Subtract
+                    | dae::BinaryOperator::Multiply,
+                lhs,
+                rhs,
+            } => static_index(view, lhs) && static_index(view, rhs),
+            _ => false,
+        })
 }
 
 fn calls_named(view: dae::DaeView<'_>, predicate: impl Fn(&str) -> bool) -> bool {

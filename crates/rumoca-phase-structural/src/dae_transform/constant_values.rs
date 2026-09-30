@@ -81,9 +81,17 @@ pub(super) fn constant_call_plan(view: dae::DaeView<'_>) -> Result<LiteralPlan, 
     Ok(plan)
 }
 
-/// Every continuous residual root and structured family body.
+/// Every continuous residual root, structured family body, and parameter
+/// binding. A parameter binding is evaluated once at initialization, so a
+/// constant call inside it is as unconditional as one in a residual; folding
+/// the call leaves the binding's other reads, and so the parameter's
+/// tunability, untouched.
 fn continuous_roots<'dae>(view: dae::DaeView<'dae>) -> Vec<dae::ExprId<'dae>> {
-    let mut roots = Vec::new();
+    let mut roots: Vec<_> = view
+        .variables()
+        .filter(|(_, variable)| variable.role() == dae::VariableRole::Parameter)
+        .filter_map(|(_, variable)| variable.binding())
+        .collect();
     for owner in view.continuous_owners() {
         match owner {
             dae::ContinuousOwnerView::Residual { equation, .. } => {

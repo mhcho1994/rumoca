@@ -59,6 +59,17 @@ struct TornSystem {
     offsets: Box<[usize]>,
     values: Box<[f64]>,
     recovery: Box<[f64]>,
+    /// For every block coordinate, the recovery columns its row can hold
+    /// nonzero, ascending: a tear's own column, and for a causal target the
+    /// union of its dependencies' columns. Every other entry of the row is an
+    /// exact zero that is neither stored nor read.
+    support: Vec<Vec<usize>>,
+    /// Per recovery column, the recovery that last added it to a support
+    /// union, numbered by `unions` (zero is never).
+    union_marks: Box<[u64]>,
+    /// Recoveries computed over this cache's lifetime, so a union mark is
+    /// never mistaken for one left by an earlier factorization.
+    unions: u64,
     /// Causal positions promoted by a nonzero raw guard.
     guarded: Box<[bool]>,
     next_guarded: Box<[bool]>,
@@ -107,6 +118,9 @@ impl TornSystem {
             values: vec![0.0; offsets[n]].into_boxed_slice(),
             offsets: offsets.into_boxed_slice(),
             recovery: vec![0.0; n.checked_mul(capacity)?].into_boxed_slice(),
+            support: vec![Vec::new(); n],
+            union_marks: vec![0; capacity].into_boxed_slice(),
+            unions: 0,
             guarded: vec![false; steps].into_boxed_slice(),
             next_guarded: vec![false; steps].into_boxed_slice(),
             promoted: vec![false; steps].into_boxed_slice(),
@@ -199,23 +213,25 @@ impl TornSystem {
         }
         let (row, target) = self.layout.causal()[position];
         self.promoted[position] = true;
-        self.recovery[target * self.capacity + column] = 1.0;
+        self.set_unit(target, column);
         self.tear_columns.push(target);
         self.residual_rows.push(row);
         Some(())
     }
 
     fn initialize_tears(&mut self) -> Option<()> {
-        let stride = self.capacity;
-        self.recovery.fill(0.0);
         self.promoted.fill(false);
+        for support in &mut self.support {
+            support.clear();
+        }
         self.residual_rows.clear();
         self.residual_rows
             .extend_from_slice(self.layout.residuals());
         self.tear_columns.clear();
         self.tear_columns.extend_from_slice(self.layout.tears());
-        for (column, &target) in self.layout.tears().iter().enumerate() {
-            self.recovery[target * stride + column] = 1.0;
+        for column in 0..self.layout.tears().len() {
+            let target = self.layout.tears()[column];
+            self.set_unit(target, column);
         }
         for position in 0..self.guarded.len() {
             if self.guarded[position] {
@@ -241,24 +257,30 @@ impl TornSystem {
                 }
                 Pivot::NonFinite => return None,
             };
-            self.recover(row, target, pivot);
+            self.recover((row, target), pivot);
         }
         let k = self.tear_columns.len();
-        let reduced = DMatrix::from_fn(k, k, |row, column| {
-            let source = self.residual_rows[row];
-            self.layout
+        let mut reduced = DMatrix::from_element(k, k, -0.0);
+        for (row, &source) in self.residual_rows.iter().enumerate() {
+            for (&dependency, &value) in self
+                .layout
                 .row_columns(source)
                 .iter()
                 .zip(self.row_values(source))
-                .map(|(&dependency, &value)| value * self.recovery[dependency * stride + column])
-                .sum()
-        });
-        if !self
-            .recovery
+            {
+                self.add_recovered(&mut reduced, row, (dependency, value));
+            }
+        }
+        let recovered_finite = self
+            .support
             .iter()
-            .chain(reduced.iter())
-            .all(|value| value.is_finite())
-        {
+            .enumerate()
+            .all(|(coordinate, columns)| {
+                columns
+                    .iter()
+                    .all(|&column| self.recovery[coordinate * stride + column].is_finite())
+            });
+        if !recovered_finite || !reduced.iter().all(|value| value.is_finite()) {
             return None;
         }
         if self.reduced_rhs.len() != k {
@@ -269,15 +291,24 @@ impl TornSystem {
     }
 
     /// The recovery row of causal target `target` from its row `row`: for
-    /// every tear column, minus the row's other entries against their
-    /// recovery rows, over the pivot. Each column accumulates the entries in
-    /// pattern order, so one pass over the row serves every column exactly as
-    /// one pass per column would.
-    fn recover(&mut self, row: usize, target: usize, pivot: f64) {
-        let columns = self.tear_columns.len();
+    /// every column its dependencies can hold, minus the row's other entries
+    /// against their recovery rows, over the pivot. Each column accumulates
+    /// the entries in pattern order; a dependency without the column holds an
+    /// exact zero there, whose product leaves the (never negative-zero) sum
+    /// unchanged, so skipping it is exact.
+    fn recover(&mut self, (row, target): (usize, usize), pivot: f64) {
         let stride = self.capacity;
-        let accumulator = &mut self.accumulator[..columns];
-        accumulator.fill(0.0);
+        self.unions += 1;
+        let mark = self.unions;
+        let mut union = std::mem::take(&mut self.support[target]);
+        union.clear();
+        for index in 0..self.layout.row_columns(row).len() {
+            let dependency = self.layout.row_columns(row)[index];
+            if dependency != target {
+                self.open_columns(dependency, mark, &mut union);
+            }
+        }
+        union.sort_unstable();
         let entries = self.offsets[row]..self.offsets[row + 1];
         for (&dependency, &value) in self
             .layout
@@ -288,15 +319,47 @@ impl TornSystem {
             if dependency == target {
                 continue;
             }
-            let recovery = &self.recovery[dependency * stride..dependency * stride + columns];
-            for (sum, &coefficient) in accumulator.iter_mut().zip(recovery) {
-                *sum -= value * coefficient;
+            for &column in &self.support[dependency] {
+                self.accumulator[column] -= value * self.recovery[dependency * stride + column];
             }
         }
-        let out = &mut self.recovery[target * stride..target * stride + columns];
-        for (value, &sum) in out.iter_mut().zip(accumulator.iter()) {
-            *value = sum / pivot;
+        for &column in &union {
+            self.recovery[target * stride + column] = self.accumulator[column] / pivot;
         }
+        self.support[target] = union;
+    }
+
+    /// Add `dependency`'s recovery columns not yet in the union marked `mark`,
+    /// starting their accumulators at zero.
+    fn open_columns(&mut self, dependency: usize, mark: u64, union: &mut Vec<usize>) {
+        for &column in &self.support[dependency] {
+            if self.union_marks[column] != mark {
+                self.union_marks[column] = mark;
+                union.push(column);
+                self.accumulator[column] = 0.0;
+            }
+        }
+    }
+
+    /// Add `value` times `dependency`'s recovery row to row `row` of `reduced`.
+    fn add_recovered(
+        &self,
+        reduced: &mut DMatrix<f64>,
+        row: usize,
+        (dependency, value): (usize, f64),
+    ) {
+        let stride = self.capacity;
+        for &column in &self.support[dependency] {
+            reduced[(row, column)] += value * self.recovery[dependency * stride + column];
+        }
+    }
+
+    /// Make `target`'s recovery row the unit row of `column`.
+    fn set_unit(&mut self, target: usize, column: usize) {
+        self.recovery[target * self.capacity + column] = 1.0;
+        let support = &mut self.support[target];
+        support.clear();
+        support.push(column);
     }
 
     fn causal_rhs(&self, row: usize, target: usize, mut value: f64) -> f64 {
@@ -341,16 +404,14 @@ impl TornSystem {
         if !factor.solve_mut(&mut self.reduced_rhs) {
             return None;
         }
-        let k = self.reduced_rhs.len();
         for (position, &(_, target)) in self.layout.causal().iter().enumerate() {
             if self.promoted[position] {
                 continue;
             }
             let start = target * self.capacity;
-            let correction: f64 = self.recovery[start..start + k]
+            let correction: f64 = self.support[target]
                 .iter()
-                .zip(self.reduced_rhs.iter())
-                .map(|(a, b)| a * b)
+                .map(|&column| self.recovery[start + column] * self.reduced_rhs[column])
                 .sum();
             self.work[target] += correction;
         }

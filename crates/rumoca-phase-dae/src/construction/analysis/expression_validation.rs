@@ -1,3 +1,4 @@
+use super::super::function_shapes::ProvenValue;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -77,15 +78,21 @@ pub(super) fn validate_when_expression(
     roles: &HashMap<VarName, PlannedRole>,
     states: &HashSet<VarName>,
     clocked: bool,
-    enumeration_literals: &ShapeEnvironment,
+    model_values: &ShapeEnvironment,
 ) -> Result<(), ToDaeError> {
-    validate_expression_in_context_with_literals(
-        expression,
+    // The body reads the same model scope as a plain equation, so a range
+    // bound such as `1:n` over a settled parameter is proven the same way.
+    let binders = HashSet::new();
+    ExpressionValidator {
         roles,
         states,
-        when_body_context(clocked),
-        Some(enumeration_literals),
-    )
+        binders: &binders,
+        record_array_fields: None,
+        enumeration_literals: Some(model_values),
+        values: Some(model_values),
+        when_clause: when_body_context(clocked),
+    }
+    .validate(expression)
 }
 
 /// The `pre()` context of a when-clause body with the given clock ownership.
@@ -524,9 +531,19 @@ impl ExpressionValidator<'_> {
                 span,
             ));
         }
+        // A structural selection (SPEC_0040 DAE-C22) is folded at translation:
+        // the arms it never selects are not part of the canonical DAE, so only
+        // the arms lowering can reach are validated.
+        let selection = self
+            .values
+            .filter(|values| values.is_structural_selection(span));
         for (condition, value) in branches {
             self.validate(condition)?;
-            self.validate(value)?;
+            match selection.and_then(|values| values.proven_value(condition)) {
+                Some(ProvenValue::Boolean(false)) => {}
+                Some(ProvenValue::Boolean(true)) => return self.validate(value),
+                _ => self.validate(value)?,
+            }
         }
         self.validate(else_branch)
     }
@@ -599,7 +616,10 @@ impl ExpressionValidator<'_> {
                 ))
             };
         }
-        if function == BuiltinFunction::Interval {
+        if matches!(
+            function,
+            BuiltinFunction::Interval | BuiltinFunction::FirstTick
+        ) {
             if arguments.len() > 1 {
                 return Err(ToDaeError::unsupported_runtime_operator(
                     function.name(),
@@ -872,6 +892,7 @@ fn is_supported_builtin(function: BuiltinFunction) -> bool {
             | BuiltinFunction::Hold
             | BuiltinFunction::Previous
             | BuiltinFunction::Interval
+            | BuiltinFunction::FirstTick
             | BuiltinFunction::SubSample
             | BuiltinFunction::SuperSample
             | BuiltinFunction::ShiftSample

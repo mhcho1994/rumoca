@@ -234,6 +234,7 @@ pub(crate) fn reduced_chart_continuous_artifacts(
         derivative_rhs: plan.derivative_rhs.clone(),
         refresh_owners: plan.refresh_owners.clone(),
         reduced_chart_set: solve::ReducedChartSet::default(),
+        unlocalizable_guards: base.continuous.unlocalizable_guards.clone(),
     };
     Ok(lower_solve_artifacts(&assembled)?.continuous)
 }

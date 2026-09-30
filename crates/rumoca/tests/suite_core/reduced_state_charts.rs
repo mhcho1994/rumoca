@@ -267,6 +267,7 @@ fn alternate_chart_model(model: &SolveModel) -> SolveModel {
         derivative_rhs: plan.derivative_rhs.clone(),
         refresh_owners: plan.refresh_owners.clone(),
         reduced_chart_set: Default::default(),
+        unlocalizable_guards: model.problem.continuous.unlocalizable_guards.clone(),
     };
     alternate.artifacts.continuous = plan.artifacts.clone();
     alternate

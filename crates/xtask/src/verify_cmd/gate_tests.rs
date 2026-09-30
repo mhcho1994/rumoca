@@ -211,10 +211,8 @@ fn gate_steps_follow_the_blocking_list_in_order() {
             "fmt",
             "clippy",
             "lint",
-            "crate-tests",
-            "suite_core",
-            "msl-sim-tests",
-            "arch-gates",
+            "workspace-tests",
+            "msl-harness-tests",
             "doc",
             "template-runtime"
         ]
@@ -225,25 +223,28 @@ fn gate_steps_follow_the_blocking_list_in_order() {
             .windows(2)
             .any(|pair| pair == ["--exclude", "rumoca-phase-instantiate"])
     );
-    assert!(
-        steps[3]
-            .args
-            .windows(2)
-            .any(|pair| pair == ["-p", "rumoca-solver"])
-    );
+    // Every crate's tests run, whatever the change touched, with only the
+    // snapshot-only test skipped.
+    assert!(steps[3].args.contains(&"--workspace".to_string()));
+    assert!(!steps[3].args.contains(&"-p".to_string()));
     assert!(
         steps[3]
             .args
             .ends_with(&["--skip".to_string(), "commit_messages".to_string()])
     );
-    assert_eq!(steps[7].env, [("RUSTDOCFLAGS", "-D warnings")]);
-    assert!(steps[8].template_runtime);
-    // No changed crate: no crate tests or docs.
-    assert!(!names(&gate_steps(&[], false)).contains(&"crate-tests"));
+    // The MSL harness unit tests run with their feature and no environment.
+    assert!(steps[4].env.is_empty());
+    assert!(steps[4].args.contains(&"msl-full-test".to_string()));
+    assert_eq!(steps[5].env, [("RUSTDOCFLAGS", "-D warnings")]);
+    assert!(steps[6].template_runtime);
+    // No changed crate: the workspace tests still run, but no docs.
+    let unchanged = names(&gate_steps(&[], false));
+    assert!(unchanged.contains(&"workspace-tests"));
+    assert!(!unchanged.contains(&"doc"));
     // Coverage appends CI's run, report, and trim gate.
     let coverage = gate_steps(&packages, true);
     assert_eq!(
-        names(&coverage)[9..],
+        names(&coverage)[7..],
         [
             "coverage-run",
             "coverage-summary",
@@ -251,8 +252,10 @@ fn gate_steps_follow_the_blocking_list_in_order() {
             "coverage-gate"
         ]
     );
+    // A failing test fails the coverage run, as in CI.
+    assert!(!coverage[7].args.contains(&"--ignore-run-fail".to_string()));
     assert!(
-        coverage[12]
+        coverage[10]
             .args
             .contains(&"--enforce-trim-regressions".to_string())
     );

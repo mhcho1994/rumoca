@@ -205,7 +205,7 @@ fn sparse_jacobian_row_scales(
 ) -> Vec<f64> {
     let mut scales = vec![0.0_f64; jacobian.nrows()];
     for (row, scale) in scales.iter_mut().enumerate() {
-        pattern.visit_row_columns(row, |column| {
+        pattern.visit_row_columns(row, &mut |column| {
             let contribution =
                 jacobian[(row, column)].abs() * valid_variable_scale(variable_scales[column]);
             if contribution.is_finite() {

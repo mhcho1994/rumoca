@@ -658,7 +658,7 @@ fn a_split_circle_renders_both_charts_for_switching() {
         for plan in ["refresh_derivative_values", "refresh_algebraics"] {
             for chart in 0..2 {
                 assert!(
-                    source.contains(&format!("case {chart}: return {plan}_c{chart}(m);")),
+                    source.contains(&format!("case {chart}: return {plan}_plan_c{chart}(m);")),
                     "{target} {plan} {chart}"
                 );
             }

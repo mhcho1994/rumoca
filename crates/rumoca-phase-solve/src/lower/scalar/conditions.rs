@@ -149,7 +149,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let mut prior = Vec::with_capacity(branch_count);
         for ordinal in 0..branch_count {
             let branch = self.dynamic_guarded_branches(&targets[0])[ordinal];
-            let owner = Self::guarded_activation_owner(clock, branch);
+            let owner = Self::guarded_activation_owner(clock, targets[0].clock.is_some(), branch);
             let condition =
                 self.guarded_assignment_condition_region(&prior, owner, targets[0].span)?;
             let mut selected = prior.clone();
@@ -221,13 +221,21 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             .and_then(|index| target.branches.get(index).copied())
     }
 
+    /// A periodic clock ticks once per instant, so its partition's rows are
+    /// active at the level of their guard. An unclocked `when` and an MLS
+    /// §16.3 event clock activate on the rise of their trigger instead: an
+    /// event clock ticks when `edge(pre(condition))` becomes true, and a
+    /// condition that stays true through later iterations or events does not
+    /// tick it again.
     const fn guarded_activation_owner(
         clock: Option<dae::ClockId<'dae>>,
+        periodic: bool,
         branch: super::super::events::GuardedAssignment<'dae>,
     ) -> ActivationCondition<'dae> {
         let (trigger, guard, _, trigger_memory) = branch;
         ActivationCondition::GuardedAssignment {
             clock,
+            periodic,
             trigger,
             guard,
             trigger_memory,
@@ -325,6 +333,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             ActivationCondition::Expression(expression) => self.expression(expression, 0),
             ActivationCondition::GuardedAssignment {
                 clock,
+                periodic,
                 trigger,
                 guard,
                 trigger_memory,
@@ -335,7 +344,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                         span,
                     ));
                 }
-                if clock.is_some() {
+                if periodic {
                     return self.condition(guard);
                 }
                 let edge = self.trigger_edge(trigger, trigger_memory, span)?;

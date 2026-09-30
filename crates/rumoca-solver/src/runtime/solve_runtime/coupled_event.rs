@@ -92,8 +92,13 @@ impl SolveRuntime {
             time = input.t,
             "event fixed-point iteration stalled; starting coupled Newton recovery"
         );
-        solve_coupled_event_newton(&system, &mut unknowns, input.tol, input.max_iters)
-            .map_err(|error| coupled_recovery_error(input.t, &error.to_string()))?;
+        solve_coupled_event_newton(
+            &system,
+            &mut unknowns,
+            input.tol,
+            self.event_schedule().stalled_settle(),
+        )
+        .map_err(|error| coupled_recovery_error(input.t, &error.to_string()))?;
         write_unknowns(&inventory.unknowns, &unknowns, input.y, input.p)?;
         self.apply_root_relation_memory_overrides(
             snapshot.root_relation_overrides,

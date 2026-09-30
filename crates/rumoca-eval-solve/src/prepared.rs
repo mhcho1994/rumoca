@@ -58,7 +58,7 @@ use assignment_shape::checked_expr_eval_len;
 use assignment_shape::eval_assignment_shape;
 use assignment_shape::target_assignment_shapes_with_output_offsets;
 pub use assignment_shape::{target_assignment_shape, target_assignment_shapes};
-pub use construction::replaced_programs;
+pub use construction::{PreparedEvaluationBlock, replaced_programs};
 use dependency::{parameter_static_y_gradient, row_parameter_indices};
 pub(crate) use dependency::{row_reads_y_index, row_y_input_ranges};
 pub use isolation_program::{TargetIsolationProgram, TornSweepRun};

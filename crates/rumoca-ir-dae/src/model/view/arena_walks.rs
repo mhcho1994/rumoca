@@ -156,6 +156,15 @@ fn clock_view(entry: &ClockEntry) -> ClockView<'_> {
         crate::clocks::ClockKind::Triggered(condition) => {
             ClockOperation::Triggered(ConditionId::from_raw(*condition))
         }
+        crate::clocks::ClockKind::Shifted {
+            base,
+            counter,
+            condition,
+        } => ClockOperation::Shifted {
+            base: ClockId::from_raw(*base),
+            counter: *counter,
+            condition: ConditionId::from_raw(*condition),
+        },
     };
     ClockView {
         operation,

@@ -1571,3 +1571,33 @@ fn every_variable_role_can_reserve_a_header_for_forward_attributes() {
 }
 
 mod b1c_owners;
+
+/// A second variable with a reserved name is refused at its own declaration.
+#[test]
+fn a_duplicate_variable_name_is_refused() {
+    let source = TestSource::new("Real x; Real x;");
+    let first = source.source("Real x", 0);
+    let second = source.source("Real x", 1);
+    let error = Dae::construct(source.map, |dae| {
+        let real = dae.types(|types| {
+            types.intern(TypeId::new(0), ValueType::scalar(ScalarType::Real), first)
+        })?;
+        for (name, declaration) in [("x", first), ("y", first), ("x", second)] {
+            dae.variables(|variables| {
+                variables.algebraic(
+                    VarName::new(name),
+                    real,
+                    declaration,
+                    VariableAttributes::default(),
+                )
+            })?;
+        }
+        Ok(())
+    })
+    .expect_err("a duplicate variable name is refused");
+    assert!(matches!(
+        error,
+        DaeConstructionError::DuplicateKey { kind: "variable", ref key, span }
+            if key == "x" && span == second.span()
+    ));
+}

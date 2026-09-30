@@ -121,7 +121,7 @@ pub(super) fn initialization_value(
         {
             let (mut row_ptr, mut col_idx) = (vec![0], Vec::new());
             for row in 0..n {
-                pattern.visit_row_columns(row, |column| col_idx.push(column));
+                pattern.visit_row_columns(row, &mut |column| col_idx.push(column));
                 row_ptr.push(col_idx.len());
             }
             record.pattern = true;
@@ -132,6 +132,7 @@ pub(super) fn initialization_value(
         unknown_count += n;
         blocks.push(record);
     }
+    let (nominal_indices, nominal_values) = parameter_nominals(init.projection_plan());
     let (tangent, tangent_doubles) = tangent_value(problem, artifacts, tangent, &mut pool)?;
     // The deepest initialization frame chain: the plan's parameter scales and
     // residual rows, one block's scaled Newton system with its dense factor
@@ -151,9 +152,28 @@ pub(super) fn initialization_value(
             row_targets => (0..rows).map(row_target).collect::<Vec<_>>(),
             sizes => 2 * max_n + 8,
             tangent => tangent,
+            nominal_indices => nominal_indices,
+            nominal_values => nominal_values,
         },
         doubles,
     ))
+}
+
+/// Solve IR scales every `fixed = false` parameter unknown by its declared
+/// nominal or, without one, by its start guess; only the nominals are data:
+/// their P indices and values.
+fn parameter_nominals(plan: &solve::InitializationProjectionPlan) -> (Vec<usize>, Vec<f64>) {
+    plan.blocks
+        .iter()
+        .flat_map(|block| block.unknowns.iter().zip(&block.scales))
+        .filter_map(|(unknown, scale)| match (*unknown, *scale) {
+            (
+                solve::ScalarSlot::P { index, .. },
+                solve::InitializationUnknownScale::Nominal(value),
+            ) => Some((index, value)),
+            _ => None,
+        })
+        .unzip()
 }
 
 fn push(pool: &mut Vec<usize>, values: impl IntoIterator<Item = usize>) -> usize {

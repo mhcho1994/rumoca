@@ -44,7 +44,9 @@ use super::*;
 use clocks::SampledTarget;
 use clocks::{ClockAnalysis, ClockDomainAnalysis, analyze_clocks};
 pub(super) use clocks::{
-    ClockPlan, ClockedValuePlan, is_inferred_clock_condition, is_whole_clock_coordinate,
+    ClockPlan, ClockSchedule, ClockedValuePlan, EventClockPlan, WhenBranchKey,
+    inferred_clock_transfer, is_inferred_clock_condition, is_whole_clock_coordinate,
+    when_conditional_selects_clock_structure,
 };
 use comprehensions::analyze_comprehensions;
 pub(super) use comprehensions::{
@@ -66,8 +68,7 @@ use equation_partitions::{
 };
 use event_conditions::{
     evaluate_clock_seconds, evaluate_sample_schedule, validate_algorithm_condition,
-    validate_condition_expression, validate_when_activation_condition,
-    validate_when_condition_expression,
+    validate_condition_expression, validate_when_condition_expression,
 };
 use expression_events::analyze_expression_events;
 pub(super) use expression_events::{
@@ -118,8 +119,8 @@ pub(super) use history_operators::HistoryOperatorPlans;
 use history_operators::analyze_history_operators;
 pub(super) use initial_algorithms::InitialDiscreteValue;
 use initial_algorithms::{
-    InitialAlgorithmAnalysis, analyze_initial_algorithms, claim_initial_discrete_equations,
-    reject_unsupported_initial_algorithm_statements,
+    InitialAlgorithmAnalysis, analyze_initial_algorithms, assertion_call,
+    claim_initial_discrete_equations, reject_unsupported_initial_algorithm_statements,
 };
 use loop_compaction::compact_function_loops;
 use model_algorithm_calls::analyze_event_function_calls;
@@ -144,6 +145,7 @@ use record_array_fields::{
 use record_equations::analyze_record_equations;
 use sample_aliases::analyze_sample_aliases;
 use source_balance::{SourceBalanceInput, source_balance};
+pub(super) use structured_families::materialized_discrete_real_family;
 use structured_families::validate_structured_families;
 use unexecuted_branches::{check_function_assignment_shapes, check_unexecuted_branches};
 use when_chains::validate_when_chains;
@@ -170,11 +172,14 @@ pub(super) struct Analysis {
     /// the typed periodic clock instead of buffering a held B.1c coordinate.
     pub(super) sample_alias_schedules: HashMap<VarName, PeriodicClockSchedule>,
     pub(super) clock_plans: HashMap<InstanceId, ClockPlan>,
+    /// MLS §16.3 event clocks, keyed by the clock coordinate their constructor
+    /// defines.
+    pub(super) event_clocks: HashMap<InstanceId, EventClockPlan>,
     pub(super) clock_equation_rows: HashSet<usize>,
     pub(super) clocked_equation_owners: HashMap<usize, ClockPlan>,
     pub(super) clocked_value_owners: HashMap<InstanceId, ClockedValuePlan>,
-    /// Owning clock of every `when Clock()` branch, keyed by the branch span.
-    pub(super) clocked_when_owners: HashMap<Span, ClockPlan>,
+    /// Owning clock of every `when Clock()` branch, keyed by its position.
+    pub(super) clocked_when_owners: HashMap<WhenBranchKey, ClockPlan>,
     /// Owning clock of every runtime coordinate in a clocked partition.
     pub(super) clocked_coordinate_owners: HashMap<InstanceId, ClockPlan>,
     pub(super) model_algorithm_plans: Vec<ModelAlgorithmPlan>,
@@ -184,6 +189,8 @@ pub(super) struct Analysis {
     pub(super) evaluable_parameters: HashSet<VarName>,
     /// The owners whose folded guards fixed parameters at translation.
     pub(super) structural_selections: Vec<StructuralSelection>,
+    /// The one-based id of each native table handle, computed once.
+    pub(super) native_table_ids: HashMap<VarName, u64>,
     /// Discrete coordinates whose initialization-instant value an initial
     /// algorithm determines (MLS §8.6).
     pub(super) initial_discrete_values: HashMap<VarName, InitialDiscreteValue>,
@@ -225,7 +232,10 @@ pub(super) enum FunctionPlan {
         source: Vec<rumoca_core::Statement>,
         statements: Vec<FunctionStatementPlan>,
         generated_booleans: Vec<(VarName, Span)>,
-        certified_output_seeds: Vec<(VarName, FunctionValueSeed)>,
+        /// Values defined at function entry: outputs a disjoint early-return
+        /// certificate proves total, and values with a zero extent, which have
+        /// no element to write (MLS §12.4.4).
+        entry_seeds: Vec<(VarName, FunctionValueSeed)>,
     },
     GuardedReturn {
         branches: Vec<Vec<FunctionStatementPlan>>,
@@ -539,7 +549,13 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         states,
         variables: mut roles,
         expressions: mut expression_roles,
-    } = analyze_model_roles(flat, &clocks.sampled_targets)?;
+        structural_selections: folded_conditionals,
+    } = analyze_model_roles(
+        flat,
+        &clocks.sampled_targets,
+        function_shapes.model_values(),
+    )?;
+    function_shapes.add_structural_selections(folded_conditionals);
     validate_runtime_coordinates(flat, &roles, &record_array_fields)?;
     let derived_parameters = analyze_derived_parameters(flat, &roles)?;
     apply_derived_parameter_roles(&derived_parameters.plans, &mut roles, &mut expression_roles);
@@ -569,7 +585,18 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
     )?;
     let (discrete_connection_ranks, aggregate_discrete_connections, discrete_value_topology) =
         analyze_discrete_connections(flat, &roles)?;
-    let initial = analyze_initial_owners(flat, &roles, &states, &constants, &mut sample_lattices)?;
+    let initial = analyze_initial_owners(
+        flat,
+        &roles,
+        AssertionScope {
+            roles: &expression_roles,
+            enumeration_literals: function_shapes.model_values(),
+        },
+        &states,
+        &constants,
+        function_shapes.model_values(),
+        &mut sample_lattices,
+    )?;
     let balance = analyze_source_balance(SourceBalanceAnalysisInput {
         flat,
         roles: &roles,
@@ -605,6 +632,7 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         expression_events,
         sample_alias_schedules,
         clock_plans: clocks.plans,
+        event_clocks: clocks.event_clocks,
         clock_equation_rows: clocks.equation_rows,
         clocked_equation_owners: clock_domains.equation_owners,
         clocked_value_owners: clock_domains.value_owners,
@@ -614,6 +642,7 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         initial_parameters: initial.algorithms.parameters,
         evaluable_parameters: evaluable,
         structural_selections,
+        native_table_ids: super::native_tables::native_table_ids(flat),
         initial_discrete_values: initial.algorithms.discrete_values,
         initial_algorithm_assertions: initial.algorithms.assertions,
         function_plans,
@@ -805,12 +834,20 @@ struct InitialOwners {
 fn analyze_initial_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
+    assertions: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
+    shapes: &ShapeEnvironment,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<InitialOwners, ToDaeError> {
-    let mut algorithms =
-        analyze_initial_algorithm_owners(flat, roles, states, constants, sample_lattices)?;
+    let mut algorithms = analyze_initial_algorithm_owners(
+        flat,
+        assertions,
+        states,
+        constants,
+        shapes,
+        sample_lattices,
+    )?;
     let discrete_equation_rows =
         claim_initial_discrete_equations(flat, roles, &mut algorithms.discrete_values)?;
     let parameter_equations = initial_parameter_equations::analyze(flat, roles)?;
@@ -1145,18 +1182,22 @@ fn analyze_source_balance(
 /// produced — against one condition grammar.
 fn analyze_initial_algorithm_owners(
     flat: &flat::Model,
-    roles: &HashMap<VarName, PlannedRole>,
+    assertion_scope: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
+    shapes: &ShapeEnvironment,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<InitialAlgorithmAnalysis, ToDaeError> {
-    let initial_algorithms = analyze_initial_algorithms(flat, roles, states, constants)?;
+    // The replay reads initialization values, where MLS §4.9.5 makes an
+    // enumeration literal an ordinary value, so it takes the expression roles.
+    let initial_algorithms =
+        analyze_initial_algorithms(flat, assertion_scope.roles, states, constants, shapes)?;
     validate_assertions(
         flat.assert_equations
             .iter()
             .chain(&flat.initial_assert_equations)
             .chain(&initial_algorithms.assertions),
-        roles,
+        assertion_scope,
         states,
         constants,
         sample_lattices,
@@ -1164,9 +1205,21 @@ fn analyze_initial_algorithm_owners(
     Ok(initial_algorithms)
 }
 
+/// The name scope an assertion's expressions are read in.
+///
+/// MLS §8.3.7 makes an assertion condition an ordinary Boolean expression, and
+/// MLS §4.9.5 makes `E.lit` an ordinary value in it, so the roles here are the
+/// *expression* roles that catalog enumeration literals, paired with the
+/// literal catalog that proves each literal's enumeration identity.
+#[derive(Clone, Copy)]
+struct AssertionScope<'scope> {
+    roles: &'scope HashMap<VarName, PlannedRole>,
+    enumeration_literals: &'scope ShapeEnvironment,
+}
+
 fn validate_assertions<'flat>(
     assertions: impl IntoIterator<Item = &'flat flat::AssertEquation>,
-    roles: &HashMap<VarName, PlannedRole>,
+    scope: AssertionScope<'_>,
     states: &HashSet<VarName>,
     constants: &EvalContext,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
@@ -1175,14 +1228,15 @@ fn validate_assertions<'flat>(
         require_span(assertion.span, "assert equation")?;
         validate_condition_expression(
             &assertion.condition,
-            roles,
+            scope.roles,
             states,
             constants,
             sample_lattices,
+            scope.enumeration_literals,
         )?;
-        validate_expression(&assertion.message, roles, states)?;
+        validate_expression(&assertion.message, scope.roles, states)?;
         if let Some(level) = &assertion.level {
-            validate_expression(level, roles, states)?;
+            validate_expression(level, scope.roles, states)?;
         }
     }
     Ok(())

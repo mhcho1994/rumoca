@@ -82,17 +82,40 @@ pub fn derive_target_assignment_shapes(
     program: &[LinearOp],
 ) -> Vec<(usize, TargetAssignmentShape)> {
     let mut shapes = Vec::new();
+    // The outputs of one range store share their prefix, so its producers,
+    // dependencies, and loaded targets are derived once per store.
+    let mut store: Option<PrefixAnalysis<'_>> = None;
     for (output_offset, (output, store_position)) in store_output_registers(program).enumerate() {
         let Some(prefix) = program.get(..store_position) else {
             continue;
         };
-        let Some(producers) = UniqueProgram::new(prefix) else {
+        if store
+            .as_ref()
+            .is_none_or(|analysis| analysis.position != store_position)
+        {
+            // A prefix without unique producers exposes no certificate, so its
+            // dependencies and targets are never needed.
+            store = Some(PrefixAnalysis {
+                position: store_position,
+                analysis: UniqueProgram::new(prefix).map(|producers| {
+                    (
+                        producers,
+                        ScalarProgramYDependency::new(prefix),
+                        y_load_indices(prefix),
+                    )
+                }),
+            });
+        }
+        let Some(PrefixAnalysis {
+            analysis: Some((producers, dependencies, targets)),
+            ..
+        }) = store.as_ref()
+        else {
             continue;
         };
-        let dependencies = ScalarProgramYDependency::new(prefix);
-        for target in y_load_indices(prefix) {
+        for &target in targets {
             let Some(shape) =
-                canonical_assignment_shape(producers.view(), output, target, &dependencies)
+                canonical_assignment_shape(producers.view(), output, target, dependencies)
             else {
                 continue;
             };
@@ -107,6 +130,16 @@ pub fn derive_target_assignment_shapes(
         }
     }
     shapes
+}
+
+/// One store position's prefix analyses, shared by the outputs it stores.
+struct PrefixAnalysis<'a> {
+    position: usize,
+    analysis: Option<(
+        UniqueProgram<'a>,
+        ScalarProgramYDependency<'a>,
+        std::collections::BTreeSet<usize>,
+    )>,
 }
 
 /// The construction proof that the isolator of `target_y_index` in output
@@ -168,16 +201,41 @@ pub fn isolator_coefficient_proof(
     }
 }
 
-/// Whether output `output_offset` of `program` depends on solver-Y `y_index`.
+/// The solver-Y indices output `output_offset` of `program` depends on,
+/// derived once for every [`OutputYReads::contains`] query.
 #[must_use]
-pub fn output_reads_y(program: &[LinearOp], output_offset: usize, y_index: usize) -> bool {
-    store_output_registers(program)
-        .nth(output_offset)
-        .and_then(|(output, store_position)| {
-            let prefix = program.get(..store_position)?;
-            Some(ScalarProgramYDependency::new(prefix).depends_on(output, y_index))
-        })
-        .unwrap_or(false)
+pub fn output_y_reads(program: &[LinearOp], output_offset: usize) -> OutputYReads {
+    let Some((output, store_position)) = store_output_registers(program).nth(output_offset) else {
+        return OutputYReads::Absent;
+    };
+    let Some(prefix) = program.get(..store_position) else {
+        return OutputYReads::Absent;
+    };
+    match ScalarProgramYDependency::new(prefix).register_dependencies(output) {
+        Some(reads) => OutputYReads::Bounded(reads),
+        None => OutputYReads::Unbounded,
+    }
+}
+
+/// The solver-Y reads of one program output: none for an output the program
+/// does not store, an exact set, or every index when the dependency analysis
+/// cannot bound the output's register.
+#[derive(Clone, Debug)]
+pub enum OutputYReads {
+    Absent,
+    Bounded(std::collections::BTreeSet<usize>),
+    Unbounded,
+}
+
+impl OutputYReads {
+    #[must_use]
+    pub fn contains(&self, y_index: usize) -> bool {
+        match self {
+            Self::Absent => false,
+            Self::Bounded(reads) => reads.contains(&y_index),
+            Self::Unbounded => true,
+        }
+    }
 }
 
 /// Whether solver-Y `target_y_index` enters output `output_offset` of

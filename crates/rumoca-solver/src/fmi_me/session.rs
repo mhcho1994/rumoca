@@ -162,7 +162,8 @@ fn build_host_state(
     let mut trace = MeTraceRecorder::new(names, meta, state_count, capacity)?;
     let outcome =
         run_fmi_initialization(&mut kernel.borrow_mut(), &options, options.records_trace())?;
-    let policy = build_policy(&options, &outcome, state_count)?;
+    let root_location = *kernel.borrow().root_location();
+    let policy = build_policy(&options, &outcome, state_count, &root_location)?;
     if let Some(values) = &outcome.initial_values {
         trace.record_slice(
             TraceObservationRole::Initialization,
@@ -204,6 +205,7 @@ fn build_policy(
     options: &MeSessionOptions,
     outcome: &InitializationOutcome,
     state_count: usize,
+    root_location: &rumoca_ir_solve::fmi::RootLocationPlan,
 ) -> Result<Option<MeRootSearchPolicy>, MeSessionError> {
     if outcome.termination.is_some() {
         // A session that terminated during initialization never scans, so it
@@ -217,6 +219,7 @@ fn build_policy(
         options.relative_tolerance(),
         outcome.nominals.clone(),
         state_count,
+        root_location.refinement_iteration_cap(),
     )
     .map(Some)
 }
@@ -434,7 +437,13 @@ impl MeSimulationSession<'_, '_> {
             &self.host.options,
             self.host.options.records_trace(),
         )?;
-        self.host.policy = build_policy(&self.host.options, &outcome, self.host.state_count)?;
+        let root_location = *self.host.kernel.borrow().root_location();
+        self.host.policy = build_policy(
+            &self.host.options,
+            &outcome,
+            self.host.state_count,
+            &root_location,
+        )?;
         if let Some(values) = &outcome.initial_values {
             self.host
                 .record_initialization(self.host.options.start_time(), values)?;
@@ -800,12 +809,36 @@ impl MeSimulationSession<'_, '_> {
         let located = self.scan_with_retained(&step, &retained);
         self.host.retained_indicators = retained;
         match located? {
-            Some(application) => {
+            Some(application) if !self.coincides_with_time_event(&step, &application) => {
                 crate::runtime::hotpath_stats::inc_root_hit();
                 self.apply_located_root(&step, &application, cursor)
             }
-            None => self.commit_accepted_endpoint(&step, cursor),
+            _ => self.commit_accepted_endpoint(&step, cursor),
         }
+    }
+
+    /// Whether a located root is the scheduled time event this step reaches,
+    /// under the component's `RootLocationPlan` (SPEC_0044 ME-EVENT-004); the
+    /// endpoint's time-event iteration then handles it.
+    fn coincides_with_time_event(
+        &self,
+        step: &MeAcceptedStep,
+        application: &MeRootApplication,
+    ) -> bool {
+        let Some(event_time) = self.host.reached_cached_event_time(step.accepted().time()) else {
+            return false;
+        };
+        let start = step.previous().time();
+        self.host
+            .kernel
+            .borrow()
+            .root_location()
+            .coincides_with_time_event(
+                application.application().time(),
+                event_time,
+                start,
+                step.accepted().time() - start,
+            )
     }
 
     /// The scan's view of the component and the plugin's continuous extension.
@@ -815,6 +848,7 @@ impl MeSimulationSession<'_, '_> {
             derivatives: &self.host.derivatives,
             backend: self.backend.as_ref(),
             budget: &self.host.budget,
+            event_boundary: self.host.next_event_time,
         }
     }
 
@@ -1343,6 +1377,11 @@ struct SessionScanTarget<'a> {
     derivatives: &'a MeDerivativeController,
     backend: &'a dyn MeIntegratorBackend,
     budget: &'a TimeoutBudget,
+    /// The scheduled time event the accepted step stops at: an indicator at
+    /// or past it is the event's left limit, exactly as the integrator
+    /// evaluated the step, so a crossing before the event is not hidden by
+    /// its post-event relations.
+    event_boundary: Option<f64>,
 }
 
 impl RootScanTarget for SessionScanTarget<'_> {
@@ -1365,7 +1404,7 @@ impl RootScanTarget for SessionScanTarget<'_> {
         indicators: &mut Vec<f64>,
     ) -> Result<(), MeSessionError> {
         let mut kernel = self.kernel.borrow_mut();
-        kernel.set_time(MeTime::at(time))?;
+        kernel.set_time(MeTime::new(time, self.event_boundary))?;
         kernel.set_continuous_states(states)?;
         indicators.clear();
         kernel.get_event_indicators(indicators)?;

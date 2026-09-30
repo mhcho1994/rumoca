@@ -94,7 +94,7 @@ pub struct TornTangentEvaluator {
     plan: TornTangentPlan,
     programs: Vec<PreparedTangentLaneProgram>,
     /// The JVP rows a one-direction plan evaluates.
-    directions: Option<crate::PreparedScalarProgramBlock>,
+    directions: Option<std::rc::Rc<crate::PreparedScalarProgramBlock>>,
 }
 
 impl TornTangentEvaluator {
@@ -103,17 +103,33 @@ impl TornTangentEvaluator {
         plan: TornTangentPlan,
         jvp: &rumoca_ir_solve::ScalarProgramBlock,
     ) -> Result<Self, EvalSolveError> {
+        Self::sharing_directions(plan, jvp, &mut None)
+    }
+
+    /// [`Self::new`] for one of several evaluators over the same JVP rows
+    /// `jvp`: the first one-direction plan prepares them into `shared`, and
+    /// every later one reads that same preparation.
+    pub fn sharing_directions(
+        plan: TornTangentPlan,
+        jvp: &rumoca_ir_solve::ScalarProgramBlock,
+        shared: &mut Option<std::rc::Rc<crate::PreparedScalarProgramBlock>>,
+    ) -> Result<Self, EvalSolveError> {
+        let directions = if plan.directional() {
+            if shared.is_none() {
+                *shared = Some(std::rc::Rc::new(crate::PreparedScalarProgramBlock::new(
+                    jvp.clone(),
+                )?));
+            }
+            shared.clone()
+        } else {
+            None
+        };
         let programs = plan
             .programs()
             .iter()
             .cloned()
             .map(PreparedTangentLaneProgram::new)
             .collect();
-        let directions = if plan.directional() {
-            Some(crate::PreparedScalarProgramBlock::new(jvp.clone())?)
-        } else {
-            None
-        };
         Ok(Self {
             plan,
             programs,

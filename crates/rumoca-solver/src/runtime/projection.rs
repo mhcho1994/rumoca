@@ -85,7 +85,14 @@ pub(crate) trait ImplicitProjectionModel {
     where
         Self: Sized,
     {
-        SeedBlockLinearization::build(self, block_index, block, y, args).map(Rc::new)
+        SeedBlockLinearization::build(
+            self,
+            (block_index, self.projection_site(block_index)),
+            block,
+            y,
+            args,
+        )
+        .map(Rc::new)
     }
 
     /// Evaluate construction-issued output groups at one immutable point.
@@ -126,6 +133,12 @@ pub(crate) trait ImplicitProjectionModel {
     /// aggregate rather than a third-party runtime plan.
     fn algebraic_projection_plan_is_validated(&self) -> bool {
         false
+    }
+
+    /// The ES016 facts of the Solve model (SPEC_0044 ME-EVENT-008): blocks
+    /// whose own unknowns a relation under `noEvent` switches.
+    fn unlocalizable_guards(&self) -> &[solve::UnlocalizableGuard] {
+        &[]
     }
 
     /// Return the diagnostic name for a solver variable. Implementations may
@@ -257,6 +270,17 @@ pub(crate) trait ImplicitProjectionModel {
         None
     }
 
+    /// The cache that retains block `block_index`'s affine Jacobian between
+    /// solves: block-shaped and zero at every entry outside the block's
+    /// structural pattern. `None` when the model retains none. One hook
+    /// serves take and retain, so implementors compile one default.
+    fn affine_jacobian_cache(
+        &self,
+        _block_index: usize,
+    ) -> Option<&std::cell::RefCell<SparseNewtonCache>> {
+        None
+    }
+
     /// The canonical projection block that fallback counts attribute block
     /// `block_index` of this model's plan to; `None` leaves it uncounted.
     fn projection_site(&self, _block_index: usize) -> Option<usize>
@@ -368,9 +392,17 @@ pub(crate) enum KernelRequest<'a> {
     /// tangent plan; declined where the plan declines (a vanished causal
     /// coefficient), and the caller then differences the sweep.
     TornJacobian {
-        tearing: &'a solve::BlockTearing,
+        block: TornBlock<'a>,
         point: (&'a [f64], &'a [f64], f64),
     },
+}
+
+/// A torn projection block: its index among the calling model's projection
+/// blocks (the index `project_algebraic_block` receives) and its tearing.
+#[derive(Clone, Copy)]
+pub(crate) struct TornBlock<'a> {
+    pub(crate) index: usize,
+    pub(crate) tearing: &'a solve::BlockTearing,
 }
 
 /// The answer to a [`KernelRequest`].
@@ -668,6 +700,15 @@ fn project_algebraics_with_plan_inner<M: ImplicitProjectionModel>(
         "selected algebraic projection",
     )?;
     let row_scales = algebraic_plan_row_scales(model, y, args.parameters, args.time, plan)?;
+    if let Some(fold) = unlocalizable_fold(
+        model.unlocalizable_guards(),
+        plan,
+        &rows,
+        (&residual, &row_scales),
+        args,
+    ) {
+        return Err(fold);
+    }
     if certify_coordinates {
         return Err(projection_error_for_rows(
             model,
@@ -745,14 +786,18 @@ fn try_torn_algebraic_block<M: ImplicitProjectionModel>(
     y: &mut [f64],
     p: &[f64],
     t: f64,
-    block: &solve::AlgebraicProjectionBlock,
+    (block_index, block): (usize, &solve::AlgebraicProjectionBlock),
     tol: f64,
     certify_coordinates: bool,
 ) -> Result<Option<ProjectionBlockUpdate>, RuntimeSolveError> {
     let Some(tearing) = block.tearing.as_ref() else {
         return Ok(None);
     };
-    tearing::project_torn_algebraic_block(model, y, p, t, tearing, tol, certify_coordinates)
+    let block = TornBlock {
+        index: block_index,
+        tearing,
+    };
+    tearing::project_torn_algebraic_block(model, y, p, t, block, tol, certify_coordinates)
 }
 
 fn project_algebraic_block<M: ImplicitProjectionModel>(
@@ -806,8 +851,15 @@ fn project_algebraic_block<M: ImplicitProjectionModel>(
     // and corpus-pin gates rather than by any runtime cross-check (there is no
     // second ground truth to compare against, and re-solving densely would give
     // back the cost the tearing removes).
-    if let Some(update) = try_torn_algebraic_block(model, y, p, t, block, tol, certify_coordinates)?
-    {
+    if let Some(update) = try_torn_algebraic_block(
+        model,
+        y,
+        p,
+        t,
+        (block_index, block),
+        tol,
+        certify_coordinates,
+    )? {
         return Ok(update);
     }
     if block.tearing.is_some() {
@@ -1634,3 +1686,39 @@ pub(crate) use initial::{
     InitialHomotopySystem, project_initial_variables_with_homotopy,
     project_initial_variables_with_plan,
 };
+
+/// The typed ES016 failure when an unsettled row belongs to a block that a
+/// `noEvent` relation switches on its own unknowns (SPEC_0044 ME-EVENT-008):
+/// that block's projection ended at a fold of the relation.
+fn unlocalizable_fold(
+    guards: &[solve::UnlocalizableGuard],
+    plan: &solve::AlgebraicProjectionPlan,
+    rows: &[usize],
+    (residual, row_scales): (&[f64], &[f64]),
+    args: AlgebraicProjectionArgs<'_>,
+) -> Option<RuntimeSolveError> {
+    if guards.is_empty() {
+        return None;
+    }
+    let unsettled = rows
+        .iter()
+        .zip(residual.iter().zip(row_scales))
+        .filter(|(_, (value, scale))| {
+            !value.is_finite() || value.abs() > scaled_tolerance(args.tolerance, **scale)
+        })
+        .map(|(row, _)| *row)
+        .collect::<std::collections::BTreeSet<_>>();
+    plan.blocks
+        .iter()
+        .filter(|block| block.rows.iter().any(|row| unsettled.contains(row)))
+        .find_map(|block| {
+            block
+                .y_indices
+                .iter()
+                .find_map(|&y_index| solve::UnlocalizableGuard::covering(guards, y_index))
+        })
+        .map(|guard| RuntimeSolveError::UnlocalizableFold {
+            fold: guard.fold(),
+            time: args.time,
+        })
+}

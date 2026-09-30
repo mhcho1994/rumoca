@@ -86,6 +86,17 @@ impl<'a> ScalarProgramYDependency<'a> {
         }
     }
 
+    /// The exact solver-Y dependencies of `register`, or `None` when the
+    /// analysis cannot bound them and [`Self::depends_on`] answers `true` for
+    /// every target.
+    pub fn register_dependencies(&self, register: u32) -> Option<BTreeSet<usize>> {
+        self.dependencies
+            .as_ref()
+            .and_then(|dependencies| dependencies.get(register as usize))
+            .and_then(Option::as_ref)
+            .cloned()
+    }
+
     pub fn depends_on(&self, register: u32, target: usize) -> bool {
         self.dependencies
             .as_ref()

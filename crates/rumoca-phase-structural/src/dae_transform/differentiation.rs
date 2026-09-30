@@ -565,7 +565,8 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
                 self.target.at(provenance).unary(operator, operand)
             }
             dae::ExpressionOperation::Binary { operator, lhs, rhs }
-                if super::builtin_profiles::is_differentiable_binary(operator) =>
+                if super::builtin_profiles::is_differentiable_binary(operator)
+                    || operator == dae::BinaryOperator::Power =>
             {
                 let lhs = self.materialize_exact_value(lhs, provenance)?;
                 let rhs = self.materialize_exact_value(rhs, provenance)?;
@@ -680,6 +681,17 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
         {
             return self.materialize_component_value(&definition, provenance);
         }
+        if self.facts.is_zero_pinned(algebraic.index()) {
+            let variable = self
+                .source
+                .variable(algebraic.into())
+                .expect("materialized algebraic declaration resolves");
+            return super::expressions::shaped_zero(
+                self.target,
+                variable.value_type().dimensions(),
+                provenance,
+            );
+        }
         let (anchor, sign) = self
             .facts
             .algebraic_value_definition(self.source, algebraic)
@@ -787,6 +799,7 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             dae::BinaryOperator::Divide | dae::BinaryOperator::ElementwiseDivide => {
                 self.differentiate_quotient(operator, lhs, rhs, order, provenance)
             }
+            dae::BinaryOperator::Power => self.differentiate_power(lhs, rhs, order, provenance),
             _ => unreachable!("differentiability preflight rejects this binary operator"),
         }
     }
@@ -809,6 +822,9 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             }
             Builtin::Sin | Builtin::Cos | Builtin::Sqrt => {
                 self.differentiate_unary_geometry(builtin, arguments, order, provenance)
+            }
+            Builtin::Exp | Builtin::Log => {
+                self.differentiate_exponential(builtin, arguments, order, provenance)
             }
             Builtin::Atan2 => self.differentiate_atan2_builtin(arguments, order, provenance),
             Builtin::LinearSolve => self.differentiate_linear_solve(arguments, order, provenance),

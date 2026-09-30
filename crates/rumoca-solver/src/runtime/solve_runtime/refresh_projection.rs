@@ -395,11 +395,17 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
                 .eval_colored_tangent_entries(structure, coordinates, point)?
                 .map_or(KernelAnswer::Declined, KernelAnswer::ColoredEntries),
             KernelRequest::TornJacobian {
-                tearing,
+                block,
                 point: (y, p, t),
             } if self.jacobian_v.is_solver_y_only() => self
-                .runtime
-                .torn_tangent_jacobian(tearing, y, p, t)?
+                .block_indices
+                .get(block.index)
+                .map(|&index| {
+                    self.runtime
+                        .torn_tangent_jacobian(index, block.tearing, y, p, t)
+                })
+                .transpose()?
+                .flatten()
                 .map_or(KernelAnswer::Declined, |jacobian| {
                     jacobian.map_or(
                         KernelAnswer::TornJacobianSingular,
@@ -791,6 +797,14 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
         delta
     }
 
+    fn affine_jacobian_cache(
+        &self,
+        block_index: usize,
+    ) -> Option<&std::cell::RefCell<crate::runtime::projection::SparseNewtonCache>> {
+        let index = self.block_indices.get(block_index).copied()?;
+        self.runtime.algebraic_newton_caches.get(index)
+    }
+
     fn solve_algebraic_newton_delta(
         &self,
         block_index: usize,
@@ -951,6 +965,10 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
 
     fn algebraic_projection_plan_is_validated(&self) -> bool {
         self.plan_validated
+    }
+
+    fn unlocalizable_guards(&self) -> &[solve::UnlocalizableGuard] {
+        &self.runtime.model.problem.continuous.unlocalizable_guards
     }
 
     fn target_name_for_row(&self, row_idx: usize) -> Option<&str> {

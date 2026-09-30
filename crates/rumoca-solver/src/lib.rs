@@ -29,7 +29,11 @@ pub use runtime::event_newton::{CoupledEventNewtonModel, solve_coupled_event_new
 #[cfg(not(kani))]
 pub use runtime::fallbacks::{
     ProjectionFallback, ProjectionFallbackCounts, ProjectionFallbackReport, ProjectionSite,
-    projection_fallbacks, reset_projection_fallbacks,
+    projection_fallbacks, reset_projection_fallbacks, shared_value_proof_failures,
+};
+#[cfg(not(kani))]
+pub use runtime::hotpath_stats::{
+    HotpathStatsSnapshot, note_integrator, reset as reset_step_counts, snapshot as step_counts,
 };
 #[cfg(not(kani))]
 pub use runtime::jacobian::{

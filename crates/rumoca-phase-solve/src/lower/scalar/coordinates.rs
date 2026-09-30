@@ -343,9 +343,9 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     /// A state derivative has no Solve storage of its own: it is the output of
     /// the continuous row the structural proof matched to it. Reading one from
     /// a different row therefore recomputes that row's defining right-hand
-    /// side here. The definition is proven derivative-free before it is
-    /// accepted, so this substitution is exact and cannot nest; the active
-    /// stack keeps that guarantee checked rather than assumed.
+    /// side here. A definition may itself read another state's derivative,
+    /// which substitutes the same way; the active stack rejects a cycle, so
+    /// the nesting is finite and exact.
     fn derivative_value(
         &mut self,
         state: dae::StateId<'dae>,

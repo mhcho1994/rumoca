@@ -1,5 +1,7 @@
 mod calls;
+mod clock_transfer;
 pub(super) mod conditional_guards;
+mod integer_steps;
 mod operators;
 mod temporal;
 
@@ -7,8 +9,9 @@ use super::*;
 
 use calls::*;
 pub(super) use calls::{FunctionCallLowering, classify_function_call};
+use clock_transfer::{lower_clock_transfer, lower_event_interval};
 use conditional_guards::{
-    conditional_calls_a_user_function, guard_reads_tunable_parameter, retains_equation_guard,
+    attribute_conditional_folds, guard_reads_tunable_parameter, retains_equation_guard,
 };
 use operators::*;
 use temporal::*;
@@ -44,14 +47,14 @@ pub(super) struct LoweringSymbols<'symbols, 'dae> {
     pub(super) shapes: &'symbols ShapeEnvironment,
     pub(super) function_body: Option<&'symbols dae::FunctionBody<'dae>>,
     pub(super) values: Option<&'symbols HashMap<VarName, dae::ExprId<'dae>>>,
-    pub(super) owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    pub(super) owner_clock: Option<dae::ClockId<'dae>>,
 }
 
 pub(super) fn lower_clocked_expression<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     coordinates: &HashMap<VarName, Coordinate<'dae>>,
     functions: &FunctionRegistry<'_, 'dae>,
-    owner_clock: dae::PeriodicClockId<'dae>,
+    owner_clock: dae::ClockId<'dae>,
     expression: &Expression,
     generated_root: Option<dae::DaeGeneration>,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
@@ -94,7 +97,7 @@ pub(super) fn lower_clocked_model_algorithm_expression<'dae>(
     coordinates: &HashMap<VarName, Coordinate<'dae>>,
     functions: &FunctionRegistry<'_, 'dae>,
     values: &HashMap<VarName, dae::ExprId<'dae>>,
-    owner_clock: dae::PeriodicClockId<'dae>,
+    owner_clock: dae::ClockId<'dae>,
     expression: &Expression,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
     lower_scoped_model_algorithm_expression(
@@ -113,7 +116,7 @@ pub(super) fn lower_scoped_model_algorithm_expression<'dae>(
     coordinates: &HashMap<VarName, Coordinate<'dae>>,
     functions: &FunctionRegistry<'_, 'dae>,
     values: &HashMap<VarName, dae::ExprId<'dae>>,
-    owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    owner_clock: Option<dae::ClockId<'dae>>,
     binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
     expression: &Expression,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
@@ -531,7 +534,7 @@ fn lower_builtin_expression<'dae>(
             let Some(value) = clocked_value_sample(symbols.functions.flat, arguments) else {
                 return lower_sample_event_operator(construction, symbols, arguments, provenance);
             };
-            lower_temporal_identity(construction, symbols, binders, value, provenance)
+            lower_value_sample(construction, symbols, binders, value, provenance)
         }
         BuiltinFunction::Hold => lower_hold(construction, symbols, binders, arguments, provenance),
         BuiltinFunction::Previous => {
@@ -548,10 +551,39 @@ fn lower_builtin_expression<'dae>(
             let owner_clock = symbols
                 .owner_clock
                 .ok_or(dae::DaeConstructionError::MissingClockDomainOwner { span })?;
+            match symbols.functions.clocks.periodic(owner_clock) {
+                Some(periodic) => construction.expressions(|expressions| {
+                    expressions
+                        .at(provenance)
+                        .coordinate(dae::CoordinateInput::ClockInterval(periodic))
+                }),
+                None => {
+                    lower_event_interval(construction, symbols, binders, owner_clock, provenance)
+                }
+            }
+        }
+        BuiltinFunction::FirstTick => {
+            if arguments.len() > 1 {
+                return Err(dae::DaeConstructionError::InvalidArity {
+                    expected: 1,
+                    found: arguments.len(),
+                    span,
+                });
+            }
+            let owner_clock = symbols
+                .owner_clock
+                .ok_or(dae::DaeConstructionError::MissingClockDomainOwner { span })?;
+            let previous = symbols.functions.clocks.first_tick(owner_clock, span)?;
             construction.expressions(|expressions| {
+                let indicator = expressions
+                    .at(provenance)
+                    .coordinate(dae::CoordinateInput::Previous(previous))?;
+                let half = expressions
+                    .at(provenance)
+                    .literal(dae::DaeLiteral::Real(0.5))?;
                 expressions
                     .at(provenance)
-                    .coordinate(dae::CoordinateInput::ClockInterval(owner_clock))
+                    .binary(dae::BinaryOperator::Greater, indicator, half)
             })
         }
         BuiltinFunction::Clock | BuiltinFunction::NoClock => {
@@ -683,172 +715,6 @@ fn lower_cat<'dae>(
         }
     }
     construction.expressions(|expressions| expressions.at(provenance).array(elements))
-}
-
-fn lower_clock_transfer<'dae>(
-    construction: &mut dae::DaeConstruction<'dae>,
-    symbols: LoweringSymbols<'_, 'dae>,
-    binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
-    function: BuiltinFunction,
-    arguments: &[Expression],
-    provenance: dae::DaeProvenance,
-) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
-    let (source, kind) = clock_transfer_input(
-        function,
-        arguments,
-        symbols.functions.constants,
-        provenance.span(),
-    )?;
-    let source_plan = expression_clock_plan(source, symbols.functions).ok_or(
-        dae::DaeConstructionError::MissingClockDomainOwner {
-            span: provenance.span(),
-        },
-    )?;
-    let source_clock = symbols
-        .functions
-        .clocks
-        .id(&source_plan, provenance.span())?;
-    let target_clock =
-        symbols
-            .owner_clock
-            .ok_or(dae::DaeConstructionError::MissingClockDomainOwner {
-                span: provenance.span(),
-            })?;
-    let mut source_symbols = symbols;
-    source_symbols.owner_clock = Some(source_clock);
-    let source = lower_expression_scoped(construction, source_symbols, binders, source, None)?;
-    construction.expressions(|expressions| {
-        expressions.at(provenance).clock_transfer(
-            kind,
-            source,
-            source_clock.into(),
-            target_clock.into(),
-        )
-    })
-}
-
-fn clock_transfer_input<'expression>(
-    function: BuiltinFunction,
-    arguments: &'expression [Expression],
-    constants: &EvalContext,
-    span: Span,
-) -> Result<(&'expression Expression, dae::ClockTransferKind), dae::DaeConstructionError> {
-    let invalid = || dae::DaeConstructionError::InvalidClockedOperand {
-        operator: function.name(),
-        span,
-    };
-    let integer = |expression: &Expression| {
-        eval_expr(expression, constants)
-            .ok()
-            .and_then(|value| value.as_integer())
-            .ok_or_else(invalid)
-    };
-    match (function, arguments) {
-        (BuiltinFunction::SubSample, [source, factor]) => Ok((
-            source,
-            dae::ClockTransferKind::SubSample {
-                factor: integer(factor)?,
-            },
-        )),
-        (BuiltinFunction::SuperSample, [source, factor]) => Ok((
-            source,
-            dae::ClockTransferKind::SuperSample {
-                factor: integer(factor)?,
-            },
-        )),
-        (BuiltinFunction::ShiftSample, [source, counter]) => Ok((
-            source,
-            dae::ClockTransferKind::ShiftSample {
-                counter: integer(counter)?,
-                resolution: 1,
-            },
-        )),
-        (BuiltinFunction::ShiftSample, [source, counter, resolution]) => Ok((
-            source,
-            dae::ClockTransferKind::ShiftSample {
-                counter: integer(counter)?,
-                resolution: integer(resolution)?,
-            },
-        )),
-        (BuiltinFunction::BackSample, [source, counter]) => Ok((
-            source,
-            dae::ClockTransferKind::BackSample {
-                counter: integer(counter)?,
-                resolution: 1,
-            },
-        )),
-        (BuiltinFunction::BackSample, [source, counter, resolution]) => Ok((
-            source,
-            dae::ClockTransferKind::BackSample {
-                counter: integer(counter)?,
-                resolution: integer(resolution)?,
-            },
-        )),
-        _ => Err(invalid()),
-    }
-}
-
-fn expression_clock_plan(
-    expression: &Expression,
-    functions: &FunctionRegistry<'_, '_>,
-) -> Option<ClockPlan> {
-    if let Expression::BuiltinCall {
-        function,
-        args,
-        span,
-        ..
-    } = expression
-        && matches!(
-            function,
-            BuiltinFunction::SubSample
-                | BuiltinFunction::SuperSample
-                | BuiltinFunction::ShiftSample
-                | BuiltinFunction::BackSample
-        )
-    {
-        let (source, kind) =
-            clock_transfer_input(*function, args, functions.constants, *span).ok()?;
-        let source = expression_clock_plan(source, functions)?;
-        let lattice = match kind {
-            dae::ClockTransferKind::SubSample { factor } => source.lattice.sub_sample(factor),
-            dae::ClockTransferKind::SuperSample { factor } => source.lattice.super_sample(factor),
-            dae::ClockTransferKind::ShiftSample {
-                counter,
-                resolution,
-            } => source.lattice.shift_sample(counter, resolution),
-            dae::ClockTransferKind::BackSample {
-                counter,
-                resolution,
-            } => source.lattice.back_sample(counter, resolution),
-        }
-        .ok()?;
-        return Some(ClockPlan {
-            lattice,
-            constructor_span: *span,
-        });
-    }
-    let mut owner = None;
-    collect_expression_clock_plan(expression, functions, &mut owner);
-    owner
-}
-
-fn collect_expression_clock_plan(
-    expression: &Expression,
-    functions: &FunctionRegistry<'_, '_>,
-    owner: &mut Option<ClockPlan>,
-) {
-    if let Expression::VarRef { name, .. } = expression
-        && let Some(variable) = functions.flat.variables.get(name.var_name())
-        && let Some(plan) = functions
-            .clocked_coordinate_owners
-            .get(&variable.instance_id)
-    {
-        debug_assert!(owner.is_none_or(|existing| existing.lattice == plan.lattice));
-        owner.get_or_insert(*plan);
-    }
-    for child in expression_children(expression) {
-        collect_expression_clock_plan(child, functions, owner);
-    }
 }
 
 /// Lower MLS §8.6 `terminal()` to the unique typed terminal coordinate.
@@ -1272,6 +1138,7 @@ fn lower_builtin_call<'dae>(
     // extents only from the trailing arguments, and `linspace(x1, x2, n)`
     // declares its extent in the third; the extent positions are named per
     // builtin so a non-extent argument is never mistaken for one.
+    let source_arguments = arguments;
     let arguments = arguments
         .iter()
         .enumerate()
@@ -1318,7 +1185,19 @@ fn lower_builtin_call<'dae>(
         }
         return construction.runtime_quotient(builtin, [lhs, rhs], provenance);
     }
-    construction.expressions(|expressions| expressions.at(provenance).builtin(builtin, arguments))
+    let lowered = construction.expressions(|expressions| {
+        expressions
+            .at(provenance)
+            .builtin(builtin, arguments.clone())
+    })?;
+    integer_steps::own_integer_step(
+        construction,
+        symbols,
+        source_arguments,
+        &arguments,
+        provenance,
+    )?;
+    Ok(lowered)
 }
 
 fn lower_function_call<'dae>(
@@ -1669,15 +1548,16 @@ fn lower_conditional_expression<'dae>(
     // re-selects the branch after the code is generated (an eFMI `Recalibrate`
     // runs the same statement). Folding it to the parameter's translation-time
     // value silently freezes the branch. The conditional is preserved only when
-    // no arm calls a user function: shape discovery prunes a dead arm's calls,
-    // so preserving an arm whose call carries no shape certificate could not be
-    // built. A structural guard, and any conditional with a call in an arm, keep
-    // folding exactly as before.
+    // no arm calls a user function and every arm has one proven shape
+    // ([`attribute_conditional_folds`]): shape discovery prunes a dead arm's
+    // calls, so preserving an arm whose call carries no shape certificate could
+    // not be built, and arms of different sizes select structure. A structural
+    // guard, and any such conditional, keep folding.
     // In an equation, such a guard is kept as a run-time branch when its arms
     // are structurally equal (SPEC_0040 DAE-C22); only a structural selection
     // is evaluated at translation.
     let preserve_tunable_conditional = if symbols.shapes.is_attribute_scope() {
-        !conditional_calls_a_user_function(branches, else_branch)
+        !attribute_conditional_folds(branches, else_branch, symbols.shapes)
             && branches
                 .iter()
                 .any(|(condition, _)| guard_reads_tunable_parameter(symbols.coordinates, condition))

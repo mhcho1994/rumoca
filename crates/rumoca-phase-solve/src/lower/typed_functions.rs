@@ -194,6 +194,15 @@ struct LoweredValue<'program, 'dae> {
 }
 
 impl<'program, 'dae> LoweredValue<'program, 'dae> {
+    /// A value with a zero extent: it holds no scalar, so it holds no leaf
+    /// (the rule [`lower_value_type_leaves`] applies to interfaces).
+    fn empty(value_type: dae::ValueTypeId<'dae>) -> Self {
+        Self {
+            value_type,
+            leaves: Vec::new(),
+        }
+    }
+
     fn scalar(
         value_type: dae::ValueTypeId<'dae>,
         register: solve::ProgramRegister<'program>,
@@ -1077,6 +1086,9 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             }
             dae::ExpressionOperation::Unary { operator, operand } => {
                 let operand = self.expression(operand)?;
+                if operand.leaves.is_empty() && self.is_zero_size(node.value_type_id())? {
+                    return Ok(LoweredValue::empty(node.value_type_id()));
+                }
                 let register = operand.only_register(at)?;
                 let result = match operator {
                     dae::UnaryOperator::Plus => register,
@@ -1126,7 +1138,14 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                 subscripts,
             } => self.array_update(node.value_type_id(), base, value, subscripts, at)?,
             dae::ExpressionOperation::Index { base, subscripts } => {
-                self.index(node.value_type_id(), base, subscripts, at)?
+                if self.is_zero_size(node.value_type_id())? {
+                    // A zero-size slice holds no leaf; its base is still
+                    // lowered so a call inside it keeps its evaluation.
+                    self.expression(base)?;
+                    LoweredValue::empty(node.value_type_id())
+                } else {
+                    self.index(node.value_type_id(), base, subscripts, at)?
+                }
             }
             dae::ExpressionOperation::FunctionValue { definition, .. } => {
                 self.function_definition_value(definition)?
@@ -1151,6 +1170,20 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         };
         self.cache.insert(expression, value.clone());
         Ok(value)
+    }
+
+    /// Whether `value_type` has a zero extent (MLS 3.7 §10.1), so a value of it
+    /// holds no scalar and lowers to no leaf.
+    fn is_zero_size(
+        &self,
+        value_type: dae::ValueTypeId<'dae>,
+    ) -> Result<bool, solve::SolveProgramConstructionError> {
+        Ok(self
+            .view
+            .value_type(value_type)
+            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
+            .dimensions()
+            .contains(&0))
     }
 
     fn record(
@@ -1293,6 +1326,10 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         body: dae::ExprId<'dae>,
         at: rumoca_core::Span,
     ) -> Result<LoweredValue<'program, 'dae>, solve::SolveProgramConstructionError> {
+        // A zero-size comprehension holds no scalar, so it holds no leaf.
+        if self.is_zero_size(value_type)? {
+            return Ok(LoweredValue::empty(value_type));
+        }
         let body_node = self
             .view
             .expression(body)

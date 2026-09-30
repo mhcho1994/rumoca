@@ -37,7 +37,14 @@ pub(super) enum EqualityAnchor {
     /// equals when the pinning residual states that value directly, and is
     /// `None` when the residual only proves the class constant. `ordinal` is
     /// the pinning residual, which keeps anchor selection deterministic.
-    Invariant { value: Option<u32>, ordinal: u32 },
+    /// `zero` records a residual that is the lone signed member itself
+    /// (`x = 0` as an unconnected flow states it): the class is pinned to zero
+    /// although no expression names that value.
+    Invariant {
+        value: Option<u32>,
+        zero: bool,
+        ordinal: u32,
+    },
     /// The state the class keeps; every other state in the class is redundant.
     State(u32),
 }
@@ -524,7 +531,9 @@ fn anchor_rank(view: dae::DaeView<'_>, anchor: EqualityAnchor) -> (u8, u8, u8) {
     match anchor {
         // A time-invariant pin proves the whole class constant, which is
         // strictly more information than any state selection.
-        EqualityAnchor::Invariant { value, .. } => (u8::MAX, u8::from(value.is_some()), u8::MAX),
+        EqualityAnchor::Invariant { value, zero, .. } => {
+            (u8::MAX, u8::from(value.is_some() || zero), u8::MAX)
+        }
         EqualityAnchor::State(variable) => {
             let Some(variable) = view
                 .variable_id(variable as usize)
@@ -664,6 +673,7 @@ impl AdditiveOperands {
                 variable,
                 anchor: EqualityAnchor::Invariant {
                     value: self.pinned_value(negated),
+                    zero: self.invariants.is_empty(),
                     ordinal: residual,
                 },
             }),
@@ -721,13 +731,11 @@ fn is_state_or_algebraic_variable(view: dae::DaeView<'_>, variable: u32) -> bool
 }
 
 fn invariant_anchor_is_zero(view: dae::DaeView<'_>, anchor: EqualityAnchor) -> bool {
-    let EqualityAnchor::Invariant {
-        value: Some(value), ..
-    } = anchor
-    else {
+    let EqualityAnchor::Invariant { value, zero, .. } = anchor else {
         return false;
     };
-    view.expression_id(value as usize)
+    zero || value
+        .and_then(|value| view.expression_id(value as usize))
         .is_some_and(|value| is_zero_literal(view, value))
 }
 

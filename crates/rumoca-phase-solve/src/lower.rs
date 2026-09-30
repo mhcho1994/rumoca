@@ -103,6 +103,8 @@ struct StructuralMatching<'dae> {
     rows: HashMap<usize, UnknownId<'dae>>,
     algebraic_blocks: Vec<AlgebraicBlockMatch<'dae>>,
     derivative_blocks: Vec<Vec<(usize, UnknownId<'dae>)>>,
+    /// ES016 facts: blocks whose own unknowns a `noEvent` relation switches.
+    unlocalizable_guards: Vec<structural::UnlocalizableGuard<'dae>>,
 }
 
 /// One algebraic projection block's matched `(equation row, unknown)` pairs,
@@ -134,6 +136,7 @@ fn structural_matching<'dae>(
             rows: HashMap::new(),
             algebraic_blocks: Vec::new(),
             derivative_blocks: Vec::new(),
+            unlocalizable_guards: Vec::new(),
         });
     }
     let sorted = sorted.expect("non-empty prepared DAE carries its structural analysis");
@@ -149,6 +152,7 @@ fn structural_matching<'dae>(
         rows,
         algebraic_blocks,
         derivative_blocks,
+        unlocalizable_guards: structural::unlocalizable_loop_guards(view, sorted),
     })
 }
 
@@ -571,7 +575,37 @@ fn lower_continuous<'dae>(
         )?,
         refresh_owners: solve::ContinuousRefreshOwners::default(),
         reduced_chart_set: solve::ReducedChartSet::default(),
+        unlocalizable_guards: lower_unlocalizable_guards(layout, &structural.unlocalizable_guards)?,
     })
+}
+
+/// Each ES016 fact over its block's solver unknowns (SPEC_0044 ME-EVENT-008).
+fn lower_unlocalizable_guards(
+    layout: &LoweredLayout<'_>,
+    guards: &[structural::UnlocalizableGuard<'_>],
+) -> Result<Vec<solve::UnlocalizableGuard>, LowerError> {
+    guards
+        .iter()
+        .map(|guard| {
+            let mut y_indices = Vec::with_capacity(guard.unknowns.len());
+            for unknown in &guard.unknowns {
+                let UnknownId::Algebraic { variable, scalar } = unknown else {
+                    continue;
+                };
+                if let solve::ScalarSlot::Y { index, .. } =
+                    variable_scalar_slot(layout, variable.index(), *scalar as usize, guard.span)?
+                {
+                    y_indices.push(index);
+                }
+            }
+            y_indices.sort_unstable();
+            Ok(solve::UnlocalizableGuard {
+                y_indices,
+                relation: guard.relation.clone(),
+                unknown_names: guard.unknown_names.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Rebind the reduced state-selection charts from finalized-DAE variable
@@ -1224,7 +1258,8 @@ fn lower_derivative_scalar_outputs<'dae>(
                     })
         });
     let compiler = ScalarCompiler::new(context.view, context.layout, None)
-        .with_function_conditional_owners(context.function_conditional_owners);
+        .with_function_conditional_owners(context.function_conditional_owners)
+        .with_derivative_definitions(context.derivatives);
     let program = if let Some(expression) = complete_expression {
         compiler.aggregate_program([expression])?
     } else {
@@ -1341,10 +1376,12 @@ fn lower_continuous_row<'dae>(
             let program = match rhs {
                 DerivativeRhs::Affine(proof) => ScalarCompiler::new(view, layout, domain_point)
                     .with_function_conditional_owners(function_conditional_owners)
+                    .with_derivative_definitions(derivatives)
                     .affine_derivative_program(&proof)?,
                 DerivativeRhs::Explicit { expression, scalar } => {
                     ScalarCompiler::new(view, layout, domain_point)
                         .with_function_conditional_owners(function_conditional_owners)
+                        .with_derivative_definitions(derivatives)
                         .program(expression, scalar)?
                 }
                 DerivativeRhs::Scaled {
@@ -1355,6 +1392,7 @@ fn lower_continuous_row<'dae>(
                     span,
                 } => ScalarCompiler::new(view, layout, domain_point)
                     .with_function_conditional_owners(function_conditional_owners)
+                    .with_derivative_definitions(derivatives)
                     .scaled_derivative_program(ScaledDerivativeProgram {
                         numerator,
                         numerator_scalar,
@@ -1627,14 +1665,33 @@ fn expression_contains_derivative<'dae>(
     view: dae::DaeView<'dae>,
     expression: dae::ExprId<'dae>,
 ) -> bool {
+    expression_contains_derivative_where(view, expression, |_| true)
+}
+
+/// Whether `expression` reads the derivative of `state` (any scalar).
+fn expression_contains_state_derivative<'dae>(
+    view: dae::DaeView<'dae>,
+    expression: dae::ExprId<'dae>,
+    state: dae::StateId<'dae>,
+) -> bool {
+    expression_contains_derivative_where(view, expression, |found| found == state)
+}
+
+fn expression_contains_derivative_where<'dae>(
+    view: dae::DaeView<'dae>,
+    expression: dae::ExprId<'dae>,
+    matches: impl Fn(dae::StateId<'dae>) -> bool,
+) -> bool {
     let mut pending = vec![expression];
     while let Some(expression) = pending.pop() {
         let node = view
             .expression(expression)
             .expect("branded expression resolves");
         match node.operation() {
-            dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(_)) => {
-                return true;
+            dae::ExpressionOperation::Coordinate(dae::CoordinateView::Derivative(state)) => {
+                if matches(state) {
+                    return true;
+                }
             }
             dae::ExpressionOperation::Literal(_)
             | dae::ExpressionOperation::Coordinate(_)
@@ -1774,13 +1831,13 @@ fn derivative_rhs<'dae>(
     let rhs = selector.structural_branch(rhs, scalar)?;
     let lhs_direct = is_target_derivative(&selector, lhs, scalar, state, state_scalar)?;
     let rhs_direct = is_target_derivative(&selector, rhs, scalar, state, state_scalar)?;
-    if lhs_direct && !expression_contains_derivative(view, rhs) {
+    if lhs_direct && !expression_contains_state_derivative(view, rhs, state) {
         return Ok(DerivativeRhs::Explicit {
             expression: rhs,
             scalar,
         });
     }
-    if rhs_direct && !expression_contains_derivative(view, lhs) {
+    if rhs_direct && !expression_contains_state_derivative(view, lhs, state) {
         return Ok(DerivativeRhs::Explicit {
             expression: lhs,
             scalar,
@@ -1790,7 +1847,7 @@ fn derivative_rhs<'dae>(
     let rhs_scaled = scaled_derivative_factor(&selector, rhs, scalar, state, state_scalar)?;
     match (lhs_scaled, rhs_scaled) {
         (Some((coefficient, coefficient_scalar)), None)
-            if !expression_contains_derivative(view, rhs) =>
+            if !expression_contains_state_derivative(view, rhs, state) =>
         {
             Ok(DerivativeRhs::Scaled {
                 numerator: rhs,
@@ -1801,7 +1858,7 @@ fn derivative_rhs<'dae>(
             })
         }
         (None, Some((coefficient, coefficient_scalar)))
-            if !expression_contains_derivative(view, lhs) =>
+            if !expression_contains_state_derivative(view, lhs, state) =>
         {
             Ok(DerivativeRhs::Scaled {
                 numerator: lhs,

@@ -40,6 +40,11 @@ pub(super) fn validate_structured_families(
                 family.span,
             ));
         }
+        if materialized_discrete_real_family(family, runtime_roles) {
+            // Its materialized rows are discrete Real definitions; each row
+            // keeps its own ordinary owner.
+            continue;
+        }
         if let Some(template) = &family.template {
             // A materialized element-assignment family is validated together
             // with all other element rows for its target. The aggregate pass
@@ -85,6 +90,39 @@ pub(super) fn validate_structured_families(
         }
     }
     Ok(covered)
+}
+
+/// Whether a materialized family defines discrete Real coordinates: every body
+/// is `v - expr` over a whole discrete Real `v`.
+///
+/// MLS Appendix B keeps a discrete Real definition out of the continuous
+/// residual system, so such a family is not a continuous structured owner; its
+/// materialized rows are the discrete Real equations, each lowered with its own
+/// activation (for a clocked row, its partition's clock).
+pub(in crate::construction) fn materialized_discrete_real_family(
+    family: &flat::StructuredEquationFamily,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> bool {
+    let Some(template) = family.template.as_ref() else {
+        return false;
+    };
+    family.interiors_materialized
+        && !template.body.is_empty()
+        && template.body.iter().all(|body| {
+            matches!(
+                body,
+                Expression::Binary {
+                    op: OpBinary::Sub,
+                    lhs,
+                    ..
+                } if matches!(
+                    lhs.as_ref(),
+                    Expression::VarRef { name, subscripts, .. }
+                        if subscripts.is_empty()
+                            && matches!(roles.get(name.var_name()), Some(PlannedRole::DiscreteReal))
+                )
+            )
+        })
 }
 
 fn represented_template_rows(

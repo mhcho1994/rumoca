@@ -172,10 +172,20 @@ fn certified_torn_projection_checks_recovered_coordinates() {
         },
     };
     let mut y = [0.0, 0.0];
-    let update =
-        tearing::project_torn_algebraic_block(&model, &mut y, &[], 0.0, &tearing, 1e-10, true)
-            .unwrap()
-            .expect("the affine torn block converges without a dense fallback");
+    let update = tearing::project_torn_algebraic_block(
+        &model,
+        &mut y,
+        &[],
+        0.0,
+        TornBlock {
+            index: 0,
+            tearing: &tearing,
+        },
+        1e-10,
+        true,
+    )
+    .unwrap()
+    .expect("the affine torn block converges without a dense fallback");
     assert!(update.settled);
     assert!((y[0] - 2e-11).abs() < 1e-18, "current: {y:?}");
     assert!((y[1] - 2e-5).abs() < 1e-12, "voltage: {y:?}");

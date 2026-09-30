@@ -20,11 +20,11 @@ This document catalogs the implicit and explicit contracts from the Modelica Lan
 | §2. Compilation Pipeline | 58–73 | Source → Class Tree → Instance Tree → Flat → DAE → Simulation |
 | §3. Data Structures | 74–325 | Class tree, instance tree, modification env, connection set, DAE, type attributes, variability, class types, prefixes, arrays, state machines |
 | §4.1 LEX contracts | 326–345 | Contract catalog heading + lexical rules (13 contracts) |
-| §4.2 DECL contracts | 346–386 | Declaration rules (36 contracts) |
+| §4.2 DECL contracts | 346–386 | Declaration rules (37 contracts) |
 | §4.3 INST contracts | 387–444 | Instantiation rules (53 contracts) |
-| §4.4 EXPR contracts | 445–489 | Expression/operator rules (40 contracts) |
+| §4.4 EXPR contracts | 445–489 | Expression/operator rules (41 contracts) |
 | §4.5 EQN contracts | 490–532 | Equation rules (38 contracts) |
-| §4.6 ALG contracts | 533–554 | Algorithm rules (17 contracts) |
+| §4.6 ALG contracts | 533–554 | Algorithm rules (18 contracts) |
 | §4.7 CONN contracts | 555–589 | Connection rules (30 contracts) |
 | §4.8 FUNC contracts | 590–632 | Function rules (38 contracts) |
 | §4.9 TYPE contracts | 633–673 | Type/interface rules (36 contracts) |
@@ -389,6 +389,7 @@ Defines state-to-state transitions with priority and timing control.
 | DECL-034 | Array class extends | §4.6.2 | "Not legal to combine equations/algorithms/components with extends from array class or simple type" |
 | DECL-035 | Local class flattenable | §4.6.3 | "Local class should be statically flattenable with partially flattened enclosing class" |
 | DECL-036 | Type class contents | §4.7 | "type – May only be predefined types, enumerations, array of type, or classes extending from type"
+| DECL-037 | Structural parameters | §10.1, §8.3.3 | "The number of dimensions and the dimension sizes are fixed at translation"; a for-equation range is evaluated at translation. Rumoca: an ordinary parameter read by a declared array dimension or a for-equation range, directly or through a `final` or `Evaluate = true` parameter whose binding reads it (a `size`/`ndims` operand contributes only its fixed shape, so `size` of an input array is constant), is structural: flatten records the use (`flat::ParameterBranchSelection` with `ArrayDimension`/`ForRange`), DAE construction marks it evaluable with every parameter its binding reads (SPEC_0040 DAE-C22), WD001 names it at the use, and it exports as `calculatedParameter`; an ordinary parameter no structure reads stays settable. Tested in `suite_core/structural_parameters.rs` |
 
 ### 4.3 Instantiation Contracts (INST)
 
@@ -492,7 +493,8 @@ Defines state-to-state transitions with priority and timing control.
 | EXPR-037 | pre not in function | §3.7.5 | "pre operator is not allowed inside function classes" |
 | EXPR-038 | smooth differentiability | §3.7.5 | "smooth(p, expr) treats expression as p times continuously differentiable" |
 | EXPR-039 | noEvent event suppression | §3.3 | "noEvent suppresses event generation for relational operators within its scope" |
-| EXPR-040 | Event triggering operators | §3.7.2 | "div, ceil, floor, integer can only change values at events and will trigger events as needed" |
+| EXPR-040 | Event triggering operators | §3.7.2 | "div, ceil, floor, integer can only change values at events and will trigger events as needed". Rumoca: a model-level `floor`, `ceil`, or `integer` of a varying argument `x` outside `noEvent`/`smooth` owns one state-event root on `sin(pi*x) >= 0`, so a discrete target defined from it changes at each integer crossing; function bodies generate no events. Tested in `suite_core/integer_step_events.rs` |
+| EXPR-041 | smooth event freedom | §3.7.5 | "A tool is free to not generate events for expressions inside smooth. However, smooth does not guarantee that no events will be generated." Rumoca takes the freedom except for a relation inside `smooth(0, ..)` whose operands are unknowns of its own algebraic block, which owns an MLS §8.5 event (SPEC_0044 ME-EVENT-008) |
 
 ### 4.5 Equation Contracts (EQN)
 
@@ -536,7 +538,7 @@ Defines state-to-state transitions with priority and timing control.
 | EQN-036 | Assert evaluable level | §8.3.7 | "assertionLevel is an optional evaluable expression" |
 | EQN-037 | When not in initial eq | §8.6 | "It is not allowed to use when-clauses in initial equation/algorithm sections" |
 | EQN-038 | Connections.branch scope | §8.3.3 | "Connections.branch/root/potentialRoot same restrictions as connect in for/if-equations"
-| EQN-039 | If-equation evaluable conditions | §8.3.4 | "The if-equations which do not have exclusively evaluable expressions as switching conditions shall satisfy the following: [...] Have the same number of equations in each branch, where the number of equations is defined as in definition 4.4." A conditional whose guard reads a non-evaluable parameter and whose branches have the same scalar equation count and the same unknown incidence is kept as a run-time branch; otherwise the guard is evaluated at translation (structural selection), and each parameter it reads is fixed at translation, published non-settable, with a warning naming the equation |
+| EQN-039 | If-equation evaluable conditions | §8.3.4 | "The if-equations which do not have exclusively evaluable expressions as switching conditions shall satisfy the following: [...] Have the same number of equations in each branch, where the number of equations is defined as in definition 4.4." An ordinary parameter (MLS 3.7 §4.5: evaluable, and neither `final` nor `Evaluate = true`) is determined by the initialization problem, which §4.5 leaves to the tool, so a guard reading one over branches with the same scalar equation count and the same unknown incidence is kept as a run-time branch; otherwise the tool determines those parameters during translation instead (structural selection), publishes them non-settable, and warns at the equation (WD001). A guard reading a non-evaluable parameter (§4.5: `fixed = false`, `Evaluate = false`, or a binding that is not an evaluable expression) is never selected at translation, so an if-equation whose branches differ in equation count under such a guard is rejected |
 
 ### 4.6 Algorithm Contracts (ALG)
 
@@ -557,9 +559,9 @@ Defines state-to-state transitions with priority and timing control.
 | ALG-013 | return scope | §11.2 | "return can only be used inside functions" |
 | ALG-014 | terminate not in function | §11.2 | "terminate-statement shall not be used in functions" |
 | ALG-015 | Assert execution halt | §11.2.8.1 | "A failed assert stops the execution of the current algorithm" |
-| ALG-016 | For range fixed | §11.2.2 | "For-statement range expressions are evaluated once before entering loop" |
-| ALG-017 | LHS initialization | §11.1 | "Variables on the left-hand side of := must be initialized when algorithm is invoked"
-
+| ALG-016 | For range fixed | §11.2.2 | "For-statement range expressions are evaluated once before entering loop". Rumoca: an `initial algorithm` `for` whose range bounds read only literals, constants, and evaluable parameters unrolls into its iterations, each replayed with the index bound, so `y[i]` names the element coordinate `y[k]`; a range that reads a settable parameter is refused (ED013). Tested in `suite_core/initial_algorithm_test.rs` |
+| ALG-017 | LHS initialization | §11.1 | "Variables on the left-hand side of := must be initialized when algorithm is invoked". Rumoca: an event algorithm seeds every discrete target with its `pre` value (§11.1.2), so a read before the target's own definition is a history read and no current-value self-dependency in the Appendix B solved-form proof |
+| ALG-018 | While loop execution | §11.2.3 | "The body of a while-statement is executed as long as the condition is true". Rumoca: a function `while` loop with a proven iteration bound (a counter conjunct `k < N`, `k <= N` with `N` settled at translation, one top-level `k := k + d` with `d > 0` and otherwise only `k := N` before it, no `break`/`return`, and `k >= 1` proven by a subscript it indexes or a dominating literal assignment or declaration default) lowers to `for w in 1:N loop if c then S end if; end for`, exact because a false condition changes no value; a loop inside a conditional branch runs as statements guarded by the branch's immutable guard, and the loop-free remainder stays one conditional. Any other `while` keeps its typed rejection. Tested in `suite_core/function_while_loops.rs` |
 ### 4.7 Connection Contracts (CONN)
 
 | ID | Contract | MLS | Requirement |
@@ -845,6 +847,50 @@ areas.
   and `shiftSample`/`backSample` compositions over statically scheduled base
   clocks. `Clock(condition)` is preserved as a dynamic event clock; unresolved
   or unsupported constructor forms must report `ED009` before simulation.
+  A Clock defined by a parameter-selected `if` (equation or expression form)
+  takes the branch the parameter values select (§16.7).
+- Clock inference (§16.5.1, §16.5.2): `subSample(u)`/`superSample(u)` without
+  `factor` take the exact integer ratio of the source and target partitions'
+  clocks, proven per component instance; a `sample(u)` partition is owned
+  through the conversions it takes part in before any fallback to a unique
+  model clock; declaration bindings and clocked `when` bodies contribute
+  conversions like equations, and a `when`-body `if` whose arms state a
+  conversion is decided by its parameter values.
+- Clocked values: `sample(u)` of a discrete `u` reads its left limit (the pre
+  value); a vector `sample` defines clocked discrete Real elements; an MLS
+  §12.4.3 multi-result call equation may define discrete receivers (one pure
+  call per discrete owner); the condition of an `if` inside a clocked `when`
+  body is a clocked value of the partition; `firstTick()` (§16.10) reads the
+  `previous` of a generated clocked indicator of its partition clock; the
+  scalar elements of a discrete Real array may each be defined by their own
+  row (`y[1] = u[1]`, a connection `d.u = y[1]`), oriented like whole
+  coordinates and issued as one producer per array coordinate.
+- Functions (§3.7.2, §12): `div`/`mod`/`rem` of Integer operands in a
+  function body are exact Integer quotients (truncating `div`, flooring `mod`)
+  in the typed Solve program, and a function-body quotient needs no event owner
+  whatever its operands' variability.
+- Event clocks (§16.3 Operator 16.4): `Clock(condition, startInterval)` whose
+  condition names a scalar Boolean coordinate ticks when `edge(pre(condition))`
+  becomes true, once per rise: a condition that stays true through later event
+  iterations or events does not tick it again. Its partition's rows are guarded
+  updates on the tick, ordered over the whole partition so a row observes the
+  tick's values of the rows it reads while `sample(u)` reads `u` at its left
+  limit (§16.5.1), before the tick's own `hold` updates;
+  `previous` reads the value of the previous tick, and `interval()` (§16.10)
+  is `startInterval` at the first tick and the time since the previous tick
+  afterwards. `shiftSample(u, k)` of an event clock (§16.5.2, resolution 1) is
+  the clock that skips its first `k` ticks and then ticks with it, for a
+  `Clock` and for a clocked value alike. Any other clock conversion of an
+  event clock, and a condition that is not a Boolean coordinate, are refused
+  at construction.
+- Clock arrays (a `ClockVectorInput`): each element of a clock array is a
+  connection hub that carries the scalar clock connected to it; an element
+  with no connected clock, or a clock array used other than through element
+  connections, has no resolved schedule and is refused.
+- Not yet supported: `Clock(c, solverMethod)` discretized
+  partitions (§16.8.1), refused at construction when a clock-owned equation
+  contains `der()` so a partition is never integrated continuously; external C noise generators with Integer state
+  arrays (`Xorshift64star`).
 - State-machine support currently covers library-style `Modelica.StateGraph`
   models that lower as ordinary discrete/event equations, with
   `Modelica.StateGraph.Examples.ExecutionPaths` as the OMC-backed
@@ -911,11 +957,11 @@ areas.
 | Category | Prefix | Count |
 |----------|--------|-------|
 | Lexical | LEX | 13 |
-| Declarations | DECL | 36 |
+| Declarations | DECL | 37 |
 | Instantiation | INST | 54 |
-| Expressions | EXPR | 40 |
+| Expressions | EXPR | 41 |
 | Equations | EQN | 39 |
-| Algorithms | ALG | 17 |
+| Algorithms | ALG | 18 |
 | Connections | CONN | 30 |
 | Functions | FUNC | 38 |
 | Types/Interfaces | TYPE | 36 |
@@ -928,7 +974,7 @@ areas.
 | State Machines | SM | 8 |
 | Annotations | ANN | 17 |
 | Unit Expressions | UNIT | 9 |
-| **Total** | | **443** |
+| **Total** | | **446** |
 
 ---
 

@@ -2,6 +2,7 @@ mod algorithm;
 mod algorithm_lowering;
 mod analysis;
 pub use analysis::StructuralSelection;
+mod clock_operator_hosts;
 mod clocks;
 mod conditions;
 mod discrete_values;
@@ -21,6 +22,7 @@ mod model_algorithm;
 mod model_events;
 mod multi_output_equations;
 mod native_tables;
+mod ordinary_equations;
 mod record_equation;
 mod structured_body;
 #[cfg(test)]
@@ -58,14 +60,16 @@ use analysis::{
     ModelEventFunctionCallPlan, ModelEventFunctionOutputPlan, ModelEventTensorLoopPlan,
     MultiOutputEquationPlan, PlannedRole, RecordArrayFieldPlan, RecordArrayFieldPlans,
     RecordEquationFieldValue, RecordEquationPlan, RuntimeVariableRole, SemiLinearRules,
-    StructuredSource, analyze, assigned_function_targets, discrete_value_assignment,
+    StructuredSource, WhenBranchKey, analyze, assigned_function_targets, discrete_value_assignment,
     effective_function_scalar_type, effective_variable_scalar_type,
     empty_array_bound_to_declaration, equation_partition, flattened_function_loop_source,
-    function_assertion, function_record_field_name, is_event_condition,
-    is_inferred_clock_condition, is_whole_clock_coordinate, model_algorithm_targets,
-    record_field_projections, selected_conditional_statements, specialized_comprehension_plan,
-    structured_assignment_names,
+    function_assertion, function_record_field_name, inferred_clock_transfer, is_event_condition,
+    is_inferred_clock_condition, is_whole_clock_coordinate, materialized_discrete_real_family,
+    model_algorithm_targets, record_field_projections, selected_conditional_statements,
+    specialized_comprehension_plan, structured_assignment_names,
+    when_conditional_selects_clock_structure,
 };
+use clock_operator_hosts::clock_operator_hosts;
 use clocks::{LoweredClocks, lower_clocked_value_owners, lower_clocks};
 use conditions::{combine_conditions, condition_owner_clock, lower_condition, negate_condition};
 use discrete_values::{DiscreteValueOwnerHandle, DiscreteValueStaging};
@@ -111,7 +115,8 @@ use model_algorithm::{
     lower_separated_array_sum_model_algorithm, lower_total_array_model_algorithm,
 };
 use model_events::{WhenChainsRequest, always_condition, lower_when_assignment, lower_when_chains};
-use multi_output_equations::lower_multi_output_equation;
+use multi_output_equations::{MultiOutputDiscreteOwners, lower_multi_output_equation};
+use ordinary_equations::{OrdinaryEquationRow, lower_ordinary_equation};
 use record_equation::lower_record_equation;
 use structured_body::{lower_structured_body, normalize_conditional_residual};
 use variable_construction::{
@@ -264,7 +269,7 @@ fn build_checked<'dae>(
         construction.register_predefined_string(declaration)?;
     }
     let value_types = reserve_value_types(flat, analysis, construction)?;
-    let clocks = lower_analysis_clocks(construction, flat, analysis)?;
+    let mut clocks = lower_analysis_clocks(construction, flat, analysis)?;
     let no_function_ids = HashMap::new();
     let no_coordinate_instances = HashMap::new();
     let analysis_functions = model_function_registry(
@@ -283,6 +288,7 @@ fn build_checked<'dae>(
         variable_plan,
     )?;
     let coordinates = variable_identities.coordinates;
+    clocks.define_event_conditions(construction, &coordinates)?;
     let function_ids = construct_functions(
         flat,
         &analysis.function_shapes,
@@ -320,6 +326,7 @@ fn build_checked<'dae>(
             derived_parameters: &analysis.derived_parameters,
             initial_parameters: &analysis.initial_parameters,
             evaluable_parameters: &analysis.evaluable_parameters,
+            native_table_ids: &analysis.native_table_ids,
         },
         variable_plan,
         variable_identities.reserved,
@@ -386,10 +393,11 @@ fn lower_analysis_clocks<'dae>(
     flat: &flat::Model,
     analysis: &Analysis,
 ) -> Result<LoweredClocks<'dae>, dae::DaeConstructionError> {
-    lower_clocks(
+    let mut clocks = lower_clocks(
         construction,
         flat,
         &analysis.clock_plans,
+        &analysis.event_clocks,
         &analysis.clocked_value_owners,
         analysis
             .expression_events
@@ -400,7 +408,22 @@ fn lower_analysis_clocks<'dae>(
                 };
                 Some((schedule, span))
             }),
-    )
+    )?;
+    // MLS §16.10: `interval()` of an event clock reads the clock's first tick
+    // and the time of its previous tick.
+    let event_intervals = clock_operator_hosts(flat, analysis, BuiltinFunction::Interval)
+        .into_iter()
+        .filter(|(plan, _)| plan.lattice().is_none())
+        .collect::<Vec<_>>();
+    clocks.issue_first_ticks(
+        construction,
+        clock_operator_hosts(flat, analysis, BuiltinFunction::FirstTick)
+            .into_iter()
+            .chain(event_intervals.iter().copied()),
+    )?;
+    clocks.issue_event_intervals(construction, event_intervals)?;
+    clocks.issue_tick_counters(construction)?;
+    Ok(clocks)
 }
 
 /// Build the MLS §8.5 time events proven by expression analysis.
@@ -1306,7 +1329,7 @@ fn lower_assertions<'dae, 'flat>(
 struct EventGuard<'dae> {
     trigger: dae::ConditionId<'dae>,
     condition: dae::ConditionId<'dae>,
-    owner_clock: Option<dae::PeriodicClockId<'dae>>,
+    owner_clock: Option<dae::ClockId<'dae>>,
     branch_provenance: dae::DaeProvenance,
     always: bool,
     parent_activation: Option<(dae::ConditionId<'dae>, dae::ConditionId<'dae>)>,
@@ -1340,7 +1363,11 @@ fn lower_structured_equations<'dae>(
     rows: StructuredEquationRows<'_, 'dae>,
 ) -> Result<(), dae::DaeConstructionError> {
     for (family_index, family) in rows.families.iter().enumerate() {
-        if rows.excluded_families.contains(&family_index) {
+        if rows.excluded_families.contains(&family_index)
+            || rows.environment.is_some_and(|environment| {
+                materialized_discrete_real_family(family, environment.roles)
+            })
+        {
             continue;
         }
         let owner = equation_owner_provenance(&family.origin, family.span)?;
@@ -1510,7 +1537,9 @@ fn structured_family_partition<'flat>(
                 {
                     EquationPartition::DiscreteValue(plan) => Some(Ok(plan)),
                     EquationPartition::ConsumedDiscreteValue => Some(Err(())),
-                    EquationPartition::Continuous | EquationPartition::DiscreteReal { .. } => None,
+                    EquationPartition::Continuous
+                    | EquationPartition::DiscreteReal { .. }
+                    | EquationPartition::MultiOutput { .. } => None,
                 };
             }
             discrete_value_assignment(body, environment.roles, family.span)
@@ -1803,15 +1832,6 @@ impl<'scope> EquationRows<'scope, '_> {
     }
 }
 
-struct OrdinaryEquationRow<'input, 'scope, 'dae> {
-    input: &'input EquationRows<'scope, 'dae>,
-    index: usize,
-    equation: &'scope flat::Equation,
-    owner: dae::DaeProvenance,
-    generation: Option<dae::DaeGeneration>,
-    owner_clock: Option<dae::PeriodicClockId<'dae>>,
-}
-
 fn lower_equations<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     discrete_values: &mut DiscreteValueStaging<'dae>,
@@ -1838,7 +1858,11 @@ fn lower_equations<'dae>(
                 equation,
                 plan,
                 owner,
-                input.initialization,
+                (!input.initialization).then_some(MultiOutputDiscreteOwners {
+                    discrete_values: &mut *discrete_values,
+                    topology: input.topology,
+                    owner_clock,
+                }),
             )?;
             continue;
         }
@@ -1868,94 +1892,6 @@ fn lower_equations<'dae>(
                 owner_clock,
             },
         )?;
-    }
-    Ok(())
-}
-
-fn lower_ordinary_equation<'dae>(
-    construction: &mut dae::DaeConstruction<'dae>,
-    discrete_values: &mut DiscreteValueStaging<'dae>,
-    coordinates: &HashMap<VarName, Coordinate<'dae>>,
-    functions: &FunctionRegistry<'_, 'dae>,
-    row: OrdinaryEquationRow<'_, '_, 'dae>,
-) -> Result<(), dae::DaeConstructionError> {
-    let OrdinaryEquationRow {
-        input,
-        index,
-        equation,
-        owner,
-        generation,
-        owner_clock,
-    } = row;
-    if input.initialization {
-        let residual = lower_expression(
-            construction,
-            coordinates,
-            functions,
-            &equation.residual,
-            generation,
-        )?;
-        construction.initialization(|system| system.value_equation(owner, residual))?;
-        return Ok(());
-    }
-    match input.partition(index, equation) {
-        EquationPartition::Continuous => {
-            let (source, generation) = match input.semi_linear.residual(index) {
-                Some(replacement) => (replacement, Some(dae::DaeGeneration::SemiLinearLowering)),
-                None => (&equation.residual, generation),
-            };
-            let residual = lower_equation_expression(
-                construction,
-                coordinates,
-                functions,
-                owner_clock,
-                source,
-                generation,
-            )?;
-            construction.continuous(|system| system.value_equation(owner, residual))?;
-        }
-        EquationPartition::DiscreteReal { .. } => {
-            let residual = lower_equation_expression(
-                construction,
-                coordinates,
-                functions,
-                owner_clock,
-                &equation.residual,
-                generation,
-            )?;
-            construction.discrete(|system| {
-                system.real_equation(owner, |equation| equation.residual(residual))
-            })?;
-        }
-        EquationPartition::DiscreteValue(plan) => {
-            let generation = if plan.generated {
-                Some(dae::DaeGeneration::DiscreteUpdate)
-            } else {
-                generation
-            };
-            let value = lower_equation_expression(
-                construction,
-                coordinates,
-                functions,
-                owner_clock,
-                plan.value.as_ref(),
-                generation,
-            )?;
-            let Coordinate::DiscreteValue(target) = coordinates[plan.target] else {
-                unreachable!("analysis classifies the equation target as discrete-valued")
-            };
-            let semantic_owner = discrete_values
-                .owner(owner, [plan.target.clone()], coordinates, input.topology)?
-                .expect("a discrete equation has one planned B.1c owner");
-            discrete_values.always(
-                semantic_owner,
-                target,
-                value,
-                owner,
-                dae::DaeProvenance::source(equation.span)?,
-            )?;
-        }
-        EquationPartition::ConsumedDiscreteValue => {}
     }
     Ok(())
 }

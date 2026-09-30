@@ -5,7 +5,7 @@
   modelName="{{ model_name | xml_escape }}"
   generationTool="Rumoca"
   guid="{ {{- artifact.identities.fmu -}} }"
-  numberOfEventIndicators="0">
+  numberOfEventIndicators="{{ fmi.event_indicator_roots|length }}">
   <ModelExchange modelIdentifier="{{ model_identifier }}">
     <SourceFiles>
       <File name="model.c"/>

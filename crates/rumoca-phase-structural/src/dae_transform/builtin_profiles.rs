@@ -29,6 +29,8 @@ pub(super) fn is_materializable_builtin(builtin: dae::PureBuiltin) -> bool {
                 | dae::PureBuiltin::Sin
                 | dae::PureBuiltin::Cos
                 | dae::PureBuiltin::Sqrt
+                | dae::PureBuiltin::Exp
+                | dae::PureBuiltin::Log
                 | dae::PureBuiltin::Atan2
                 | dae::PureBuiltin::LinearSolve
         )
@@ -47,6 +49,23 @@ pub(super) fn is_differentiable_binary(operator: dae::BinaryOperator) -> bool {
             | dae::BinaryOperator::ElementwiseMultiply
             | dae::BinaryOperator::ElementwiseDivide
     )
+}
+
+/// Scalar `u ^ v` whose exponent `v` is time-invariant has the closed
+/// derivative `v * u^(v-1) * du` (and, at order two,
+/// `v*(v-1)*u^(v-2)*du^2 + v*u^(v-1)*d2u`). Only the base is differentiated.
+pub(super) fn is_differentiable_power<'dae>(
+    view: dae::DaeView<'dae>,
+    operator: dae::BinaryOperator,
+    lhs: dae::ExprId<'dae>,
+    rhs: dae::ExprId<'dae>,
+) -> bool {
+    operator == dae::BinaryOperator::Power
+        && super::equalities::is_time_invariant(view, rhs)
+        && [lhs, rhs].into_iter().all(|operand| {
+            view.expression(operand)
+                .is_some_and(|node| node.value_type().dimensions().is_empty())
+        })
 }
 
 /// The structural preflight and reconstruction share this closed derivative profile.

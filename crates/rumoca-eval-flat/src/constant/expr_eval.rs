@@ -56,10 +56,18 @@ pub fn eval_expr_with_span(
         Expression::Range {
             start, step, end, ..
         } => eval_range(start, step.as_deref(), end, ctx, span),
-        Expression::ArrayComprehension { .. } => Err(EvalError::UnsupportedExpression {
-            kind: "ArrayComprehension".to_string(),
+        Expression::ArrayComprehension {
+            expr: body,
+            indices,
+            filter,
+            ..
+        } => super::comprehension_eval::eval_comprehension(
+            body,
+            indices,
+            filter.as_deref(),
+            ctx,
             span,
-        }),
+        ),
         Expression::Index {
             base, subscripts, ..
         } => eval_flat_index(base, subscripts, ctx, span),

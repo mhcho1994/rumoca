@@ -21,9 +21,20 @@ pub(crate) struct SparseNewtonCache {
     system: Option<PreparedSparseSystem>,
     torn: torn::TornNewtonCache,
     dense: dense::DenseNewtonFactor,
+    /// The block Jacobian of the last affine solve, zero outside the block's
+    /// structural pattern, kept so the next solve refills only its pattern.
+    affine_jacobian: Option<DMatrix<f64>>,
 }
 
 impl SparseNewtonCache {
+    pub(crate) fn take_affine_jacobian(&mut self) -> Option<DMatrix<f64>> {
+        self.affine_jacobian.take()
+    }
+
+    pub(crate) fn retain_affine_jacobian(&mut self, jacobian: DMatrix<f64>) {
+        self.affine_jacobian = Some(jacobian);
+    }
+
     /// Dense scaled Newton solve reusing this block's factorization while
     /// its Jacobian and scales are bitwise unchanged.
     pub(super) fn solve_dense_scaled(

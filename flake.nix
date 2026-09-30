@@ -482,7 +482,23 @@
         );
         devShells.ci-template-fmi = fmiShell;
         devShells.ci-template-modelica = modelicaShell;
-        devShells.ci-template-wasm = templateRuntimeShell [ pkgs.wasm-tools ];
+        devShells.ci-template-wasm =
+          let
+            wasiCc = pkgs.pkgsCross.wasi32.stdenv.cc;
+          in
+          (templateRuntimeShell [
+            pkgs.wasm-tools
+            wasiCc
+          ]).overrideAttrs
+            (old: {
+              # The fmi-ls-wasm target compiles the shared FMI 3 C kernel for
+              # wasm32-wasip2 through the cc crate, which reads these variables.
+              shellHook = (old.shellHook or "") + ''
+                export CC_wasm32_wasip2="${wasiCc}/bin/wasm32-unknown-wasi-clang"
+                export AR_wasm32_wasip2="${wasiCc}/bin/wasm32-unknown-wasi-ar"
+                export NIX_CC_WRAPPER_SUPPRESS_TARGET_WARNING=1
+              '';
+            });
         devShells.ci-template-python = templateRuntimeShell [ ciPython ];
         devShells.ci-template-julia = juliaShell;
       }

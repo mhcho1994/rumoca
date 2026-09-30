@@ -19,14 +19,15 @@ pub use rumoca_phase_solve::{
     lower_solve_artifacts, lower_solve_problem, solve_model_wire,
 };
 pub use rumoca_solver::{
-    DiffsolMethod, ProjectionFallback, ProjectionFallbackCounts, ProjectionFallbackReport,
-    ProjectionSite, RuntimeProgressSnapshot, RuntimeStopSchedule, RuntimeTraceContext, SimBackend,
-    SimOptions, SimPacingMode, SimResult, SimSolverMode, SimVariableMeta, SimulationRequestSummary,
-    SimulationRunMetrics, SolverDeadlineGuard, TimeoutBudget, TimeoutExceeded,
-    build_simulation_metrics_value, build_simulation_payload, is_solver_timeout_panic,
-    panic_on_expired_solver_deadline, projection_fallbacks, projection_fallbacks_value,
-    reset_projection_fallbacks, run_timeout_result, run_timeout_step, run_timeout_step_result,
-    runtime_progress_snapshot, stop_time_reached_with_tol, time_advanced_with_tol,
+    DiffsolMethod, HotpathStatsSnapshot, ProjectionFallback, ProjectionFallbackCounts,
+    ProjectionFallbackReport, ProjectionSite, RuntimeProgressSnapshot, RuntimeStopSchedule,
+    RuntimeTraceContext, SimBackend, SimOptions, SimPacingMode, SimResult, SimSolverMode,
+    SimVariableMeta, SimulationRequestSummary, SimulationRunMetrics, SolverDeadlineGuard,
+    TimeoutBudget, TimeoutExceeded, build_simulation_metrics_value, build_simulation_payload,
+    is_solver_timeout_panic, panic_on_expired_solver_deadline, projection_fallbacks,
+    projection_fallbacks_value, reset_projection_fallbacks, reset_step_counts, run_timeout_result,
+    run_timeout_step, run_timeout_step_result, runtime_progress_snapshot,
+    shared_value_proof_failures, step_counts, stop_time_reached_with_tol, time_advanced_with_tol,
     time_match_with_tol, trace_runtime_done, trace_runtime_progress, trace_runtime_start,
     trace_runtime_step_fail, trace_runtime_timeout,
 };
@@ -168,7 +169,9 @@ fn simulate_artifact_auto(
     match diffsol::select_auto_integrator(&artifact, opts, execution_backend.clone())
         .map_err(|error| SimulationDiagnosticError::Solver(error.to_string()))?
     {
-        diffsol::SelectedAutoIntegrator::Bdf => {
+        diffsol::SelectedAutoIntegrator::Bdf(Some(prepared)) => diffsol::simulate_probed(&prepared)
+            .map_err(|err| SimulationDiagnosticError::Solver(err.to_string())),
+        diffsol::SelectedAutoIntegrator::Bdf(None) => {
             simulate_artifact_diffsol(artifact, opts, execution_backend)
         }
         diffsol::SelectedAutoIntegrator::RkLike => {

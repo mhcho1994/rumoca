@@ -53,23 +53,24 @@ fn retear_block(
     if block.y_indices.len() != n {
         return;
     }
-    let incidence = |row: usize, y_index: usize| {
+    // One dependency analysis per row serves every unknown of the block.
+    let reads = |row: usize| {
         prepared
             .row_output_position(row)
             .and_then(|(program, output)| {
-                Some(solve::output_reads_y(
+                Some(solve::output_y_reads(
                     prepared.block().program(program)?,
                     output,
-                    y_index,
                 ))
             })
-            .unwrap_or(false)
+            .unwrap_or(solve::OutputYReads::Absent)
     };
     let mut eq_unknowns = vec![HashSet::new(); n];
     let mut candidates = vec![HashSet::new(); n];
     for (equation, &row) in block.rows.iter().enumerate() {
+        let row_reads = reads(row);
         for (unknown, &y_index) in block.y_indices.iter().enumerate() {
-            if !incidence(row, y_index) {
+            if !row_reads.contains(y_index) {
                 continue;
             }
             eq_unknowns[equation].insert(unknown);

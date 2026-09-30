@@ -41,6 +41,7 @@ pub(super) fn insert_variable_identities<'flat, 'dae>(
                     derived_parameters: &analysis.derived_parameters,
                     initial_parameters: &analysis.initial_parameters,
                     evaluable_parameters: &analysis.evaluable_parameters,
+                    native_table_ids: &analysis.native_table_ids,
                 },
                 VariableSpec {
                     flat: variable,
@@ -154,6 +155,8 @@ pub(super) struct VariableDefinitionContext<'scope, 'dae> {
     pub(super) initial_parameters: &'scope HashMap<VarName, Expression>,
     /// Parameters STRUCT-T10(a) may fold (MLS §18.6).
     pub(super) evaluable_parameters: &'scope HashSet<VarName>,
+    /// The one-based id of each native table handle (MLS §12.9.7).
+    pub(super) native_table_ids: &'scope HashMap<VarName, u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -269,8 +272,7 @@ fn lower_variable_attributes<'dae>(
     // A native table handle is folded to its opaque integer id by the binding
     // above; its declared `start` is the same ExternalObject constructor call,
     // which is not numeric, so no start attribute is materialized for it.
-    let is_native_table_handle =
-        super::native_tables::native_table_id(context.flat, &variable.flat.name).is_some();
+    let is_native_table_handle = context.native_table_ids.contains_key(&variable.flat.name);
     let start = if is_native_table_handle {
         None
     } else {
@@ -371,7 +373,7 @@ fn lower_variable_binding<'dae>(
     context: VariableDefinitionContext<'_, 'dae>,
     variable: VariableSpec<'_, 'dae>,
 ) -> Result<Option<dae::ExprId<'dae>>, dae::DaeConstructionError> {
-    if let Some(id) = super::native_tables::native_table_id(context.flat, &variable.flat.name) {
+    if let Some(&id) = context.native_table_ids.get(&variable.flat.name) {
         // MLS §12.9.7: a native table handle is folded to its opaque integer
         // table id here; the ExternalObject constructor call is not lowered,
         // and the loaded table descriptor travels with the DAE (see to_dae).

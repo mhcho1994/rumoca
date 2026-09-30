@@ -32,29 +32,40 @@ pub const MSL_SIM_TIMEOUT_SECS: f64 = 12.0;
 /// intervals. Solver event instants remain additional output points.
 pub const MSL_SIM_OUTPUT_INTERVALS: usize = 500;
 
-/// Select the observation interval for an MSL simulation.
-///
-/// A valid Modelica experiment interval owns the grid. Otherwise the grid is
-/// scale invariant and uses the caller-provided uniform interval count.
+/// The number of output intervals of an MSL simulation, by the rule OMC's
+/// `simulate` applies: a valid experiment `Interval` gives the span divided
+/// by it, rounded to the nearest count, and a model without one takes
+/// `default_intervals`. N intervals are N + 1 grid points; event instants are
+/// additional points on both tools.
+pub fn msl_output_intervals(
+    t_start: f64,
+    t_end: f64,
+    experiment_interval: Option<f64>,
+    default_intervals: usize,
+) -> Option<usize> {
+    let span = (t_end - t_start).abs();
+    let intervals = match experiment_interval.filter(|value| value.is_finite() && *value > 0.0) {
+        Some(interval) => (span / interval).round(),
+        None => default_intervals as f64,
+    };
+    (intervals.is_finite() && intervals >= 1.0 && span > 0.0).then_some(intervals as usize)
+}
+
+/// Select the observation interval for an MSL simulation: the span divided
+/// into [`msl_output_intervals`] equal intervals, as OMC divides it, so the
+/// grid is scale invariant and matches OMC's point for point.
 pub fn msl_sim_output_dt(
     t_start: f64,
     t_end: f64,
     experiment_interval: Option<f64>,
-    output_intervals: usize,
+    default_intervals: usize,
 ) -> Option<f64> {
-    experiment_interval
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .or_else(|| {
-            if output_intervals == 0 {
-                return None;
-            }
-            let span = (t_end - t_start).abs();
-            let dt = span / output_intervals as f64;
-            (dt.is_finite() && dt > 0.0).then_some(dt)
-        })
+    let intervals = msl_output_intervals(t_start, t_end, experiment_interval, default_intervals)?;
+    let dt = (t_end - t_start).abs() / intervals as f64;
+    (dt.is_finite() && dt > 0.0).then_some(dt)
 }
 
-pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 2;
+pub const MODEL_WORKER_PROTOCOL_VERSION: u32 = 5;
 pub const MODEL_WORKER_RESULT_FILE: &str = "result.json";
 pub const MODEL_WORKER_PARTIAL_RESULT_FILE: &str = "partial_result.json";
 /// Resident-plus-swap ceiling for one persistent MSL model worker.
@@ -783,6 +794,14 @@ pub struct WorkerModelResult {
     pub typecheck_seconds: Option<f64>,
     pub flatten_seconds: Option<f64>,
     pub dae_seconds: Option<f64>,
+    /// Whether this compile started from the source root's strict-compile
+    /// resolution plan already constructed in this worker.
+    pub strict_plan_warm: Option<bool>,
+    /// One-time source-root load and plan construction cost of the worker that
+    /// compiled this model, shared by all of that worker's models.
+    pub worker_prepare_seconds: Option<f64>,
+    /// Why the compiling worker could not build its resolution plan.
+    pub strict_plan_error: Option<String>,
     pub compile_perf_profile_file: Option<String>,
     pub ir_ast_file: Option<String>,
     pub ir_flat_file: Option<String>,
@@ -829,6 +848,18 @@ pub struct WorkerModelResult {
     /// The run's fallback warnings behind `projection_fallback_rate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_fallback_detail: Option<String>,
+    /// How the simulation integrated: its solver, tolerances, output points,
+    /// and the accepted steps and located events it took. Absent when no
+    /// simulation completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_settings: Option<WorkerSimSettings>,
+    /// Single-program sharings whose shared-value proof failed while this
+    /// model was simulated (each ran unshared); absent when none failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_value_proof_failures: Option<u64>,
+    /// Relation settles kept on a coordinate surface (SPEC_0044 ME-EVENT-008),
+    /// summed over roots; absent when none.
+    pub relation_surface_settles: Option<u64>,
     pub ir_dae_file: Option<String>,
     pub ir_solve_file: Option<String>,
     pub ir_solve_error: Option<String>,
@@ -864,6 +895,56 @@ pub struct WorkerModelResult {
     pub failure_error_code: Option<String>,
 }
 
+/// The integration settings and work of one simulation, recorded so a speed
+/// report can state what each tool was asked to compute (SPEC_0025).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkerSimSettings {
+    /// The requested solver family (`auto`, `bdf`, or `rk`).
+    pub requested_solver: String,
+    /// The integration method that actually ran (`bdf`, `rk45`, or none for
+    /// a model without continuous states).
+    pub integrator: String,
+    pub rtol: f64,
+    pub atol: f64,
+    /// Output grid intervals by the OMC rule ([`msl_output_intervals`]); the
+    /// grid has one more point.
+    pub output_intervals: Option<usize>,
+    /// Recorded output points, including both end points.
+    pub output_points: usize,
+    /// Accepted integration steps.
+    pub steps: u64,
+    /// Located state and time events.
+    pub events: u64,
+}
+
+impl WorkerSimSettings {
+    /// The settings `options` asked for and the work `counts` recorded while
+    /// producing `result`.
+    #[must_use]
+    pub fn recorded(
+        options: &rumoca_sim::SimOptions,
+        result: &rumoca_sim::SimResult,
+        counts: rumoca_sim::HotpathStatsSnapshot,
+    ) -> Self {
+        let solver = match options.solver_mode {
+            rumoca_sim::SimSolverMode::Auto => "auto",
+            rumoca_sim::SimSolverMode::Bdf => "bdf",
+            rumoca_sim::SimSolverMode::RkLike => "rk",
+        };
+        let span = (options.t_end - options.t_start).abs();
+        Self {
+            requested_solver: solver.to_string(),
+            integrator: counts.integrator.unwrap_or("not recorded").to_string(),
+            output_intervals: options.dt.map(|dt| (span / dt).round() as usize),
+            rtol: options.rtol,
+            atol: options.atol,
+            output_points: result.times.len(),
+            steps: counts.solver_steps,
+            events: counts.root_hits,
+        }
+    }
+}
+
 impl WorkerModelResult {
     /// Record the run's worst projection fallback rate over the policy rate,
     /// and its warnings, on the row (SPEC_0044 ME-PROJ-003).
@@ -873,7 +954,10 @@ impl WorkerModelResult {
             worst = Some(worst.map_or(counts.rate(), |rate| rate.max(counts.rate())));
         }
         self.projection_fallback_rate = worst;
-        self.projection_fallback_detail = worst.map(|_| report.warnings().join("; "));
+        let surfaces = report.relation_surface_total();
+        self.relation_surface_settles = (surfaces > 0).then_some(surfaces);
+        self.projection_fallback_detail =
+            (worst.is_some() || surfaces > 0).then(|| report.warnings().join("; "));
     }
 
     pub fn phase_failure(
@@ -907,6 +991,9 @@ impl WorkerModelResult {
             typecheck_seconds: None,
             flatten_seconds: None,
             dae_seconds: None,
+            strict_plan_warm: None,
+            worker_prepare_seconds: None,
+            strict_plan_error: None,
             compile_perf_profile_file: None,
             ir_ast_file: None,
             ir_flat_file: None,
@@ -936,6 +1023,9 @@ impl WorkerModelResult {
             sim_trace_error: None,
             projection_fallback_rate: None,
             projection_fallback_detail: None,
+            sim_settings: None,
+            shared_value_proof_failures: None,
+            relation_surface_settles: None,
             ir_dae_file: None,
             ir_solve_file: None,
             ir_solve_error: None,
@@ -1054,7 +1144,7 @@ mod tests {
             rows: 3,
             calls,
             fallback_calls,
-            fallbacks: [fallback_calls, 0, 0, 0, 0],
+            fallbacks: [fallback_calls, 0, 0, 0, 0, 0],
         };
         let mut report = rumoca_sim::ProjectionFallbackReport::default();
         report
@@ -1097,9 +1187,21 @@ mod tests {
     #[test]
     fn explicit_experiment_interval_owns_the_msl_output_grid() {
         assert_eq!(
-            msl_sim_output_dt(0.0, 1.0e-7, Some(2.5e-10), 500),
-            Some(2.5e-10)
+            msl_output_intervals(0.0, 1.0e-7, Some(2.5e-10), 500),
+            Some(400)
         );
+        let dt = msl_sim_output_dt(0.0, 1.0e-7, Some(2.5e-10), 500).expect("grid");
+        assert!((dt - 2.5e-10).abs() <= 4.0 * f64::EPSILON * 2.5e-10);
+    }
+
+    /// OMC's rule: an annotated `Interval` divides the span into the nearest
+    /// count (a span that is not a float multiple of it still rounds), and an
+    /// unannotated model takes 500 intervals, whatever its span.
+    #[test]
+    fn msl_output_intervals_follow_the_omc_rule() {
+        assert_eq!(msl_output_intervals(0.0, 1.5, Some(0.001), 500), Some(1500));
+        assert_eq!(msl_output_intervals(0.0, 1.5, None, 500), Some(500));
+        assert_eq!(msl_output_intervals(0.0, 0.0, None, 500), None);
     }
 
     #[test]

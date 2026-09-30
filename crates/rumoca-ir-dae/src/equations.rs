@@ -805,6 +805,18 @@ fn expect_clock_owned_discrete_reals(
             continue;
         }
         let node = &storage.expressions.nodes[expression as usize];
+        // MLS §16.5.2: a clock conversion's operand is read on its source
+        // clock, and the conversion itself yields a value of its target clock;
+        // its construction already proved the operand's source ownership.
+        if let ExprNode::ClockTransfer { target_clock, .. } = node {
+            if *target_clock != clock {
+                return Err(DaeConstructionError::InvalidClockedOperand {
+                    operator: "clocked value conversion",
+                    span: owner.span(),
+                });
+            }
+            continue;
+        }
         if let ExprNode::Coordinate(Coordinate::DiscreteReal(variable)) = node
             && storage
                 .clock_ownership_by_variable

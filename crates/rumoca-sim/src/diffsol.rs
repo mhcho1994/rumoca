@@ -12,6 +12,11 @@ use crate::me_backend::{
     BackendSimulationSession, batch_options, instance_config, plugin_for_host,
 };
 use crate::simulation_session::SessionState;
+
+const BDF_INTEGRATOR: crate::me_backend::IntegratorFactory = crate::me_backend::IntegratorFactory {
+    method: "bdf",
+    build: rumoca_solver_diffsol::model_exchange_integrator,
+};
 use crate::solve_lowering::{
     SimulationDiagnosticError, apply_correlated_simulation_overrides, finish_runtime_fmi_artifact,
     lower_correlated_for_simulation_with_stage_timing_and_param_overrides, tunable_param_overrides,
@@ -28,6 +33,7 @@ use crate::{SimError, SimFailureStage};
 
 pub struct PreparedSimulation {
     opts: rumoca_solver::SimOptions,
+    root_location: rumoca_ir_solve::fmi::RootLocationPlan,
     retained: RefCell<rumoca_solver::fmi_me::session::MeRetainedComponent>,
 }
 
@@ -38,10 +44,11 @@ pub(crate) enum BdfCapability {
     InitialLinearizationUnavailable { reason: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(all(feature = "solver-diffsol", feature = "solver-rk45"))]
 pub(crate) enum SelectedAutoIntegrator {
-    Bdf,
+    /// BDF, with the component the capability probe instantiated and checked
+    /// under the simulation's own configuration when there was one to probe.
+    Bdf(Option<Box<PreparedSimulation>>),
     RkLike,
 }
 
@@ -50,20 +57,29 @@ pub(crate) fn assess_bdf_capability(
     artifact: &rumoca_solver::fmi_me::MeModelArtifact,
     opts: &rumoca_solver::SimOptions,
     execution_backend: Option<rumoca_solver::fmi_me::MeExecutionBackend>,
-) -> Result<BdfCapability, SimError> {
+) -> Result<(BdfCapability, Option<PreparedSimulation>), SimError> {
     if artifact.continuous_state_count() == 0 {
-        return Ok(BdfCapability::Eligible);
+        return Ok((BdfCapability::Eligible, None));
     }
+    // The probe is the BDF simulation's own component: the same admitted
+    // backend and instance configuration, instantiated and checked once.
+    let Ok(execution_backend) =
+        rumoca_solver::fmi_me::admit_execution_backend(opts.execution_policy, execution_backend)
+    else {
+        return Ok((BdfCapability::Eligible, None));
+    };
     let retained = rumoca_solver::fmi_me::session::MeRetainedComponent::instantiate(
         artifact.source(),
-        &instance_config("bdf-capability", opts)?,
+        &instance_config("bdf", opts)?,
         execution_backend,
     )?;
     let prepared = PreparedSimulation {
         opts: opts.clone(),
+        root_location: artifact.root_location(),
         retained: RefCell::new(retained),
     };
-    classify_bdf_capability(check_prepared_component(&prepared))
+    let capability = classify_bdf_capability(check_prepared_component(&prepared))?;
+    Ok((capability, Some(prepared)))
 }
 
 #[cfg(all(feature = "solver-diffsol", feature = "solver-rk45"))]
@@ -94,8 +110,10 @@ pub(crate) fn select_auto_integrator(
     execution_backend: Option<rumoca_solver::fmi_me::MeExecutionBackend>,
 ) -> Result<SelectedAutoIntegrator, SimError> {
     match assess_bdf_capability(artifact, opts, execution_backend)? {
-        BdfCapability::Eligible => Ok(SelectedAutoIntegrator::Bdf),
-        BdfCapability::InitialLinearizationUnavailable { reason } => {
+        (BdfCapability::Eligible, prepared) => {
+            Ok(SelectedAutoIntegrator::Bdf(prepared.map(Box::new)))
+        }
+        (BdfCapability::InitialLinearizationUnavailable { reason }, _) => {
             tracing::debug!(
                 target: "rumoca_sim::solver_selection",
                 %reason,
@@ -217,6 +235,7 @@ fn build_simulation_artifact(
     )?;
     let prepared = PreparedSimulation {
         opts: opts.clone(),
+        root_location: artifact.root_location(),
         retained: RefCell::new(retained),
     };
     drop(check_prepared_component(&prepared));
@@ -233,8 +252,17 @@ pub(crate) fn simulate_artifact(
     simulate_prepared(&prepared)
 }
 
+/// Simulate the component a BDF capability probe already instantiated and
+/// checked, exactly as [`simulate_artifact`] simulates the one it builds.
+#[cfg(all(feature = "solver-diffsol", feature = "solver-rk45"))]
+pub(crate) fn simulate_probed(
+    prepared: &PreparedSimulation,
+) -> Result<rumoca_solver::SimResult, SimError> {
+    simulate_prepared(prepared)
+}
+
 fn simulate_prepared(prepared: &PreparedSimulation) -> Result<rumoca_solver::SimResult, SimError> {
-    let options = batch_options(&prepared.opts)?;
+    let options = batch_options(&prepared.root_location, &prepared.opts)?;
     let mut cursor = rumoca_solver::fmi_me::driver::batch_output_cursor(&options)?;
     let mut retained =
         prepared
@@ -248,18 +276,14 @@ fn simulate_prepared(prepared: &PreparedSimulation) -> Result<rumoca_solver::Sim
     if host.is_terminated() {
         return Ok(host.finish());
     }
-    let plugin = plugin_for_host(
-        &host,
-        &prepared.opts,
-        rumoca_solver_diffsol::model_exchange_integrator,
-    )?;
+    let plugin = plugin_for_host(&host, &prepared.opts, BDF_INTEGRATOR)?;
     let mut session = host.into_session(plugin)?;
     session.run_to_stop(&mut cursor)?;
     Ok(session.finish())
 }
 
 fn check_prepared_component(prepared: &PreparedSimulation) -> Result<(), SimError> {
-    let options = batch_options(&prepared.opts)?;
+    let options = batch_options(&prepared.root_location, &prepared.opts)?;
     let mut retained =
         prepared
             .retained
@@ -272,11 +296,7 @@ fn check_prepared_component(prepared: &PreparedSimulation) -> Result<(), SimErro
     if host.is_terminated() {
         return Ok(());
     }
-    let plugin = plugin_for_host(
-        &host,
-        &prepared.opts,
-        rumoca_solver_diffsol::model_exchange_integrator,
-    )?;
+    let plugin = plugin_for_host(&host, &prepared.opts, BDF_INTEGRATOR)?;
     drop(host.into_session(plugin)?);
     Ok(())
 }
@@ -333,7 +353,7 @@ impl SimulationSession {
             &opts,
             execution_backend,
             "diffsol",
-            rumoca_solver_diffsol::model_exchange_integrator,
+            BDF_INTEGRATOR,
         )
         .map_err(|err| SimulationDiagnosticError::Solver(err.to_string()))?;
         Ok(Self { inner })

@@ -14,6 +14,9 @@ rumoca-ir-solve = { workspace = true }
 tracing = { workspace = true }
 nalgebra = "0.34"
 
+[target.'cfg(not(kani))'.dependencies]
+faer = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 # SPEC_0039 / SOLVE-C17: pattern fixtures are a test-only surface. Declaring

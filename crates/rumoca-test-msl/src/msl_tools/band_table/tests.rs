@@ -106,6 +106,7 @@ fn meta(tag: &str) -> BandTableMeta {
             results_digest: format!("results-digest-{tag}"),
             exclusions_file: "msl_trace_compare_exclusions.json".to_string(),
             exclusions_digest: "exclusions-digest".to_string(),
+            exclusions_sha256: "exclusions-sha256".to_string(),
         },
     }
 }
@@ -1424,6 +1425,8 @@ fn the_table_records_the_exclusion_list_that_attributed_it() {
         !table.source.exclusions_digest.is_empty(),
         "the list's digest must travel with the table"
     );
+    // The SHA-256 a reviewed baseline boundary pins travels too.
+    assert_eq!(table.source.exclusions_sha256.len(), 64);
 }
 
 /// An unreadable exclusion list used to yield an empty map, which silently
@@ -1591,4 +1594,33 @@ fn a_fallback_rate_on_a_row_of_another_band_is_refused() {
     table.rows[0].fallback_rate = Some(0.5);
     table.rows_digest = rows_digest(&table.rows);
     assert!(ensure_comparable(&table).is_err());
+}
+
+/// Run A simulates all three models: strict-high `Alpha` and excluded `Gamma`
+/// are accounted for, and deviating `Beta` is the one completion the gate
+/// cannot certify.
+#[test]
+fn only_uncertified_completions_without_a_typed_exception_join_the_roster() {
+    let table = run_a();
+    let roster = table
+        .unexcepted_non_high_rows()
+        .map(|row| row.model_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(roster, ["Beta"]);
+
+    let failed = run_b();
+    let alpha = failed.row("Alpha").expect("row");
+    assert!(
+        !alpha.is_unexcepted_non_high(),
+        "a failed simulation is not a completion"
+    );
+}
+
+#[test]
+fn triage_packages_are_the_first_three_name_segments() {
+    assert_eq!(
+        triage_package("Modelica.Electrical.Analog.Examples.ChuaCircuit"),
+        "Modelica.Electrical.Analog"
+    );
+    assert_eq!(triage_package("Modelica.Blocks"), "Modelica.Blocks");
 }

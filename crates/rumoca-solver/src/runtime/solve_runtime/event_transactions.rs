@@ -526,16 +526,16 @@ mod tests {
                 observation_refresh: vec![false],
                 integrator_history_effects: vec![solve::IntegratorHistoryEffect::Preserve],
                 clock_owners: vec![None],
-                event_iteration_plan: solve::EventIterationPlan {
-                    runs: vec![solve::EventIterationRun {
+                event_iteration_plan: solve::EventIterationPlan::new(vec![
+                    solve::EventIterationRun {
                         variable: 0,
                         pre_binding_start: 0,
                         owner: solve::EventIterationOwner::EventTransaction {
                             program_index: 0,
                             target_index: 0,
                         },
-                    }],
-                },
+                    },
+                ]),
                 event_transactions: vec![transaction],
                 ..solve::DiscreteSolveSystem::default()
             },

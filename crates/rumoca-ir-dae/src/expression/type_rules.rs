@@ -10,17 +10,11 @@ pub(super) fn validate_static_quotient(
         unreachable!("builtin result validation proves quotient arity")
     };
     let operator = quotient_name(builtin);
-    let Some(lhs) = static_numeric_value(storage, lhs.index()) else {
-        return Err(DaeConstructionError::NonStaticDiscontinuity {
-            operator,
-            span: at.span(),
-        });
-    };
-    let Some(rhs) = static_numeric_value(storage, rhs.index()) else {
-        return Err(DaeConstructionError::NonStaticDiscontinuity {
-            operator,
-            span: at.span(),
-        });
+    let (Some(lhs), Some(rhs)) = (
+        static_numeric_value(storage, lhs.index()),
+        static_numeric_value(storage, rhs.index()),
+    ) else {
+        return validate_time_invariant_quotient(storage, operator, [*lhs, *rhs], at);
     };
     let function = match builtin {
         PureBuiltin::Div => rumoca_core::BuiltinFunction::Div,
@@ -39,10 +33,21 @@ pub(super) fn validate_static_quotient(
     }
 }
 
+/// Where a runtime quotient is evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuotientScope {
+    /// A model equation: its discontinuities are event roots (MLS §3.7.2).
+    Model,
+    /// A function body: MLS §3.7.2 generates no events inside a function, so
+    /// the quotient is plain arithmetic whatever its operands' variability.
+    FunctionBody,
+}
+
 pub(super) fn validate_runtime_quotient(
     storage: &Storage,
     builtin: PureBuiltin,
     arguments: &[ExprId<'_>],
+    scope: QuotientScope,
     at: DaeProvenance,
 ) -> Result<(), DaeConstructionError> {
     if !matches!(
@@ -66,6 +71,9 @@ pub(super) fn validate_runtime_quotient(
         }
         return Ok(());
     }
+    if scope == QuotientScope::FunctionBody {
+        return Ok(());
+    }
     // A non-literal divisor is admitted when its constructor-derived
     // variability is at most Parameter: the sin(pi·lhs/rhs) indicator the
     // runtime owner builds is well-defined for every nonzero divisor, and a
@@ -84,6 +92,42 @@ pub(super) fn validate_runtime_quotient(
                 span: at.span(),
             })
         }
+    }
+}
+
+/// MLS §3.7.2: `div`, `mod`, and `rem` trigger events where their result
+/// changes discontinuously during continuous integration. Operands of constant
+/// variability, such as the binders of a structured domain, never change, so
+/// the quotient needs no event owner. A statically proven zero divisor is still
+/// an undefined domain. Parameter-variability operands keep their checked
+/// runtime owner, which proves the divisor for the parameter values in use.
+fn validate_time_invariant_quotient(
+    storage: &Storage,
+    operator: &'static str,
+    [lhs, rhs]: [ExprId<'_>; 2],
+    at: DaeProvenance,
+) -> Result<(), DaeConstructionError> {
+    for operand in [lhs, rhs] {
+        if matches!(
+            storage.expr_variability(operand, at)?,
+            ExpressionVariability::Parameter
+                | ExpressionVariability::Discrete
+                | ExpressionVariability::Continuous
+        ) {
+            return Err(DaeConstructionError::NonStaticDiscontinuity {
+                operator,
+                span: at.span(),
+            });
+        }
+    }
+    match static_numeric_value(storage, rhs.index()) {
+        Some(divisor) if divisor == 0.0 || !divisor.is_finite() => {
+            Err(DaeConstructionError::UndefinedBuiltinDomain {
+                operator,
+                span: at.span(),
+            })
+        }
+        _ => Ok(()),
     }
 }
 
@@ -387,6 +431,9 @@ pub(super) fn builtin_result<'dae>(
     if builtin == PureBuiltin::Integer {
         return integer_result(arguments, &first, at);
     }
+    if matches!(builtin, PureBuiltin::Min | PureBuiltin::Max) {
+        return extremum_result(storage, arguments, first, at);
+    }
     expect_numeric(first.scalar_type(), at)?;
     match builtin {
         PureBuiltin::Abs | PureBuiltin::Sign => {
@@ -431,14 +478,6 @@ pub(super) fn builtin_result<'dae>(
             expect_arity(arguments, 1, at)?;
             Ok(ValueType::scalar(first.scalar_type()))
         }
-        PureBuiltin::Min | PureBuiltin::Max if arguments.len() == 1 => {
-            Ok(ValueType::scalar(first.scalar_type()))
-        }
-        PureBuiltin::Min | PureBuiltin::Max => {
-            arguments[1..].iter().try_fold(first, |common, argument| {
-                common_value_type(&common, storage.expr_type(*argument, at)?, at)
-            })
-        }
         PureBuiltin::Zeros
         | PureBuiltin::Ones
         | PureBuiltin::Fill
@@ -455,10 +494,36 @@ pub(super) fn builtin_result<'dae>(
         | PureBuiltin::LinearSolve => {
             unreachable!("array constructors return before numeric builtins")
         }
-        PureBuiltin::NoEvent | PureBuiltin::Integer | PureBuiltin::Homotopy | PureBuiltin::Size => {
+        PureBuiltin::NoEvent
+        | PureBuiltin::Integer
+        | PureBuiltin::Homotopy
+        | PureBuiltin::Size
+        | PureBuiltin::Min
+        | PureBuiltin::Max => {
             unreachable!("type-directed builtins return before numeric dispatch")
         }
     }
+}
+
+/// MLS §10.3.4 (ARR-040): `min` and `max` order Boolean, Integer, and Real
+/// elements, with `false < true` for Boolean. One argument reduces an array to
+/// its element type; several arguments take their common type.
+fn extremum_result(
+    storage: &Storage,
+    arguments: &[ExprId<'_>],
+    first: ValueType,
+    at: DaeProvenance,
+) -> Result<ValueType, DaeConstructionError> {
+    let scalar = first.scalar_type();
+    if scalar != ScalarType::Boolean {
+        expect_numeric(scalar, at)?;
+    }
+    if arguments.len() == 1 {
+        return Ok(ValueType::scalar(scalar));
+    }
+    arguments[1..].iter().try_fold(first, |common, argument| {
+        common_value_type(&common, storage.expr_type(*argument, at)?, at)
+    })
 }
 
 /// MLS §4.9.5.2: `Integer(e)` is the Integer ordinal of an enumeration value,

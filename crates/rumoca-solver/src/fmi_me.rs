@@ -119,7 +119,7 @@ enum MeModelSourceInner<'a> {
 /// and the structural-configuration capability.
 type MeModelParts<'a> = (
     &'a rumoca_ir_solve::SolveModel,
-    Vec<rumoca_ir_solve::fmi::FmiEventIndicatorSource>,
+    rumoca_ir_solve::fmi::FmiIndicatorPlan,
     Option<u32>,
     lifecycle::MeConfigurationCapability,
 );
@@ -170,6 +170,16 @@ impl<'a> MeModelSource<'a> {
         })
     }
 
+    /// The root-location rules the component was constructed with; a test
+    /// fixture has no component and takes the standard plan.
+    pub(crate) fn root_location(&self) -> rumoca_ir_solve::fmi::RootLocationPlan {
+        match &self.0 {
+            MeModelSourceInner::Correlated(view) => *view.root_location(),
+            #[cfg(test)]
+            MeModelSourceInner::Fixture { .. } => rumoca_ir_solve::fmi::RootLocationPlan::STANDARD,
+        }
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> Result<MeModelParts<'a>, rumoca_ir_solve::fmi::FmiComponentError> {
@@ -189,7 +199,7 @@ impl<'a> MeModelSource<'a> {
                 let (model, metadata, inventory) = view.into_parts();
                 Ok((
                     model,
-                    inventory.sources().to_vec(),
+                    inventory.plan().clone(),
                     metadata
                         .max_step_duration()
                         .map(rumoca_ir_solve::fmi::FmiVariable::value_reference_fmi3),
@@ -204,8 +214,8 @@ impl<'a> MeModelSource<'a> {
             } => Ok((
                 model,
                 rumoca_ir_solve::fmi::FmiEventIndicatorInventory::derive(model)?
-                    .sources()
-                    .to_vec(),
+                    .plan()
+                    .clone(),
                 max_step_duration_value_reference,
                 configuration,
             )),
@@ -299,6 +309,13 @@ pub fn admit_execution_backend(
 pub struct MeModelArtifact(rumoca_ir_solve::fmi::FmiComponent);
 
 impl MeModelArtifact {
+    /// The root-location rules of the artifact's component (SPEC_0044
+    /// ME-EVENT-004), which a driver derives its session options from.
+    #[must_use]
+    pub fn root_location(&self) -> rumoca_ir_solve::fmi::RootLocationPlan {
+        *self.0.root_location()
+    }
+
     #[must_use]
     pub fn new(component: rumoca_ir_solve::fmi::FmiComponent) -> Self {
         Self(component)
@@ -491,6 +508,11 @@ impl From<crate::runtime::solve_ops::RuntimeSolveError> for MeError {
             non_finite @ Runtime::NonFiniteValue { .. } => Self::Evaluation {
                 message: non_finite.to_string(),
             },
+            // The bracketed `[ES016]` code travels with the message, the
+            // SPEC_0008 delegation every host reads (`embedded_diagnostic_code`).
+            fold @ Runtime::UnlocalizableFold { .. } => Self::Evaluation {
+                message: fold.to_string(),
+            },
         }
     }
 }
@@ -515,6 +537,9 @@ pub struct MeInstanceConfig {
     start_time: f64,
     /// FMI `stopTime` (`stopTimeDefined = true`).
     stop_time: f64,
+    /// Who orders this instance's continuous-time evaluations, which selects
+    /// its refresh warm start (Solve IR `RefreshSeedRule`).
+    executor: rumoca_ir_solve::RefreshExecutor,
 }
 
 impl MeInstanceConfig {
@@ -550,7 +575,16 @@ impl MeInstanceConfig {
             tolerance: relative_tolerance,
             start_time,
             stop_time,
+            executor: rumoca_ir_solve::RefreshExecutor::IntegratorDriven,
         })
+    }
+
+    /// The same request for an importer-driven component, whose trial
+    /// evaluations arrive in an order the model does not control.
+    #[must_use]
+    pub const fn importer_driven(mut self) -> Self {
+        self.executor = rumoca_ir_solve::RefreshExecutor::ImporterDriven;
+        self
     }
 }
 

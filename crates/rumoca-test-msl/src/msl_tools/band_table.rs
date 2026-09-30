@@ -78,10 +78,7 @@
 //! this module only records what that classifier decided, per model, alongside
 //! the reason every other cohort model was not classified at all.
 
-use super::common::{
-    TRACE_EXCLUSIONS_FILE_REL, git_worktree_content_digest, load_trace_exclusions_file,
-    unix_timestamp_seconds, write_pretty_json,
-};
+use super::common::{git_worktree_content_digest, unix_timestamp_seconds, write_pretty_json};
 use crate::repo_root;
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
@@ -423,6 +420,10 @@ pub struct BandTableSource {
     pub exclusions_file: String,
     #[serde(default)]
     pub exclusions_digest: String,
+    /// SHA-256 of the same list: the digest a reviewed baseline boundary pins,
+    /// so the quality gate can prove the list it read is the reviewed one.
+    #[serde(default)]
+    pub exclusions_sha256: String,
 }
 
 /// Which run wrote a table.
@@ -1382,46 +1383,10 @@ pub fn derive_band_table_from_dir(
             results_digest: optional_file_digest(&results_file)?,
             exclusions_file: exclusions.file,
             exclusions_digest: exclusions.digest,
+            exclusions_sha256: exclusions.sha256,
         },
     };
     derive_band_table(&trace, results.as_ref(), &exclusions.entries, meta)
-}
-
-/// The tracked policy exclusions, keyed by model name, with the digest of the
-/// list they came from.
-///
-/// The list *decides* attribution: an untyped `skipped` entry is a policy
-/// exclusion when the model is on this list and a comparator defect when it is
-/// not. Reading it must therefore never fall back to "no exclusions" — that
-/// default silently reclassifies every policy skip as a defect, and it would do
-/// so as a function of the working directory, since the path is resolved from
-/// the workspace root found by walking up from the CWD. A list that cannot be
-/// read is a hard error, and the digest travels into the table so the reading is
-/// attributable after the fact.
-#[derive(Debug)]
-struct TrackedExclusions {
-    entries: BTreeMap<String, String>,
-    file: String,
-    digest: String,
-}
-
-fn tracked_exclusions() -> Result<TrackedExclusions> {
-    exclusions_from(&crate::repo_root().join(TRACE_EXCLUSIONS_FILE_REL))
-}
-
-fn exclusions_from(path: &Path) -> Result<TrackedExclusions> {
-    let entries = load_trace_exclusions_file(path).with_context(|| {
-        format!(
-            "cannot attribute policy exclusions without the tracked list '{}'; every `skipped` \
-             model would be recorded as a comparator defect instead",
-            path.display()
-        )
-    })?;
-    Ok(TrackedExclusions {
-        entries,
-        file: path.display().to_string(),
-        digest: file_digest(path)?,
-    })
 }
 
 /// The persisted table when one exists and belongs to this directory, else a
@@ -1976,7 +1941,13 @@ fn print_band_table_summary(results_dir: &Path, table: &BandTable, previous: Opt
     }
 }
 
+mod exclusions;
+mod soundness;
+#[cfg(test)]
+use exclusions::exclusions_from;
+use exclusions::tracked_exclusions;
 mod trace_exit;
+pub use soundness::triage_package;
 pub use trace_exit::{TraceExitKind, TraceExitRecord};
 
 #[cfg(test)]

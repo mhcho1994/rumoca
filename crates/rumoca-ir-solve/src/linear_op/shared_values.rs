@@ -177,21 +177,43 @@ pub fn share_program_values(program: Vec<LinearOp>) -> Vec<LinearOp> {
             .collect::<Vec<_>>();
         let mut builder = Builder::default();
         builder.append(0, &targets, &fusible);
-        let shared = builder.finish();
-        // Sharing is admitted only with its proof; the program as written is
-        // its own proof.
-        let proven = shared.check(&[AssignmentProgram {
-            ops: &program,
-            targets: &targets,
-        }]);
-        proven
-            .ok()
-            .and_then(|()| shared.segments.into_iter().next())
+        admit_proven(builder.finish(), &program, &targets)
     };
     match shared {
         Some(segment) if segment.ops.len() <= program.len() => segment.ops,
         _ => program,
     }
+}
+
+/// Sharings whose proof failed, so their program kept its unshared operations.
+static SHARED_VALUE_PROOF_FAILURES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// How many single-program sharings failed their proof in this process. Each
+/// is a construction defect: the program runs unshared, and the count makes
+/// that visible to the harness that reports it.
+#[must_use]
+pub fn shared_value_proof_failures() -> u64 {
+    SHARED_VALUE_PROOF_FAILURES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The single segment of `shared` when it proves equal to `program`; a failed
+/// proof is counted and admits nothing, since the program as written is its
+/// own proof.
+fn admit_proven(
+    shared: SharedValueSegments,
+    program: &[LinearOp],
+    targets: &[usize],
+) -> Option<SharedValueSegment> {
+    let proven = shared.check(&[AssignmentProgram {
+        ops: program,
+        targets,
+    }]);
+    if proven.is_err() {
+        SHARED_VALUE_PROOF_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+    shared.segments.into_iter().next()
 }
 
 /// A program a segment may absorb, classified once: every operation is a

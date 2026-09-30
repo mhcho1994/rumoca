@@ -594,14 +594,14 @@ fn lower_function_plan<'dae>(
         FunctionPlan::Statements {
             source,
             statements,
-            certified_output_seeds,
+            entry_seeds,
             ..
         } => {
             let body = lower_named_function_seeds(
                 construction,
                 symbols,
                 body,
-                certified_output_seeds,
+                entry_seeds,
                 function.span,
             )?;
             let body = lower_function_sequence_seeds(

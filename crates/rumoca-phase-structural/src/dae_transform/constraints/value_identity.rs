@@ -85,6 +85,11 @@ fn variable_atom(
                 ValueAtom::Invariant(value)
             }
         }
+        EqualityAnchor::Invariant {
+            value: None,
+            zero: true,
+            ..
+        } => ValueAtom::Zero,
         EqualityAnchor::Invariant { value: None, .. } => return None,
     };
     Some((atom, sign == EqualitySign::Opposite))

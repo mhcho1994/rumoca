@@ -21,6 +21,7 @@ use std::path::PathBuf;
 /// dependency on a Tier 4/5 crate is a deliberate, reviewable change rather
 /// than an accident.
 const EVAL_SOLVE_DEPENDENCIES: &[&str] = &[
+    "faer",
     "indexmap",
     "nalgebra",
     "rumoca-core",
@@ -52,7 +53,7 @@ fn test_eval_solve_dependency_set_is_pinned() {
     assert_eq!(
         names, expected,
         "rumoca-eval-solve [dependencies] must stay exactly {expected:?} \
-(SPEC_0029 Dependency Tiers: a Tier 3 evaluation crate may not depend on a \
+(faer is the pure numeric dense-SVD library, not a solver crate; SPEC_0029 Dependency Tiers: a Tier 3 evaluation crate may not depend on a \
 Tier 4/5 crate such as rumoca-solver). Found {names:?}."
     );
 }

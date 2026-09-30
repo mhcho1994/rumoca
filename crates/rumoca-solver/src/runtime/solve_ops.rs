@@ -53,6 +53,13 @@ pub enum RuntimeSolveError {
         kind: &'static str,
         span: Option<rumoca_core::Span>,
     },
+
+    /// The projection of a block whose own unknowns a relation under `noEvent`
+    /// switches did not converge (SPEC_0044 ME-EVENT-008, ES016): the branch
+    /// its warm start held ended at a fold of the relation, and MLS 3.7.3
+    /// forbids the event that would continue it.
+    #[error("[ES016] {fold} (t={time})")]
+    UnlocalizableFold { fold: String, time: f64 },
 }
 
 fn span_suffix(span: Option<rumoca_core::Span>) -> String {

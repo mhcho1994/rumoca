@@ -242,6 +242,39 @@ impl FunctionDefinitions {
         }
     }
 
+    /// Define every undefined output or local whose proven shape has a zero
+    /// extent, and return the entry seed of each.
+    ///
+    /// MLS §12.4.4 leaves an unwritten value without an initial value, but a
+    /// value with a zero extent has no element to leave undefined: it is total
+    /// from function entry, and its one possible value is the empty aggregate
+    /// (`Real den2[0, 2]` passed on in `Blocks.Continuous.Internal.Filter`).
+    pub(super) fn empty_value_seeds(
+        &mut self,
+        context: FunctionValidationContext<'_>,
+    ) -> Result<Vec<(VarName, FunctionValueSeed)>, ToDaeError> {
+        let mut seeds = Vec::new();
+        let function = context.function;
+        for value in function.outputs.iter().chain(&function.locals) {
+            let name = VarName::new(&value.name);
+            if value.default.is_some()
+                || self.is_defined(&name)
+                || !context
+                    .shapes
+                    .get(&name)
+                    .is_some_and(|shape| shape.contains(&0))
+            {
+                continue;
+            }
+            seeds.push((
+                name.clone(),
+                self.whole_loop_seed(&name, context, value.span)?,
+            ));
+            self.define_whole(&name);
+        }
+        Ok(seeds)
+    }
+
     /// Describe the dead initial slot a loop-carried value needs when its first
     /// iteration defines the whole value before any read.
     pub(super) fn whole_loop_seed(

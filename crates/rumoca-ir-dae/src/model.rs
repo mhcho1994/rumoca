@@ -159,7 +159,8 @@ pub(crate) use construction_checks::{
 /// 38 preserves source-call ownership for supplied derivative invocations.
 /// 39 records checked evaluability of `final` and `Evaluate=true` parameters.
 /// 40 carries each function's MLS §18.3 inline request on the wire.
-pub const DAE_SCHEMA_VERSION: u16 = 40;
+/// 41 adds the MLS §16.5.2 shifted event clock kind.
+pub const DAE_SCHEMA_VERSION: u16 = 41;
 
 pub use domains::Domains;
 pub(crate) use domains::insert_domain;
@@ -498,6 +499,9 @@ pub(crate) struct Storage {
     flat_type_lookup: rustc_hash::FxHashMap<TypeId, u32>,
     structural_type_lookup: rustc_hash::FxHashMap<ValueType, u32>,
     pub(crate) variables: Vec<VariableEntry>,
+    /// Arena index of each reserved variable by name, so the duplicate-name
+    /// check of a reservation is one lookup; internal only, never iterated.
+    variable_by_name: rustc_hash::FxHashMap<VarName, u32>,
     pub(crate) functions: Vec<FunctionEntry>,
     pub(crate) function_folds: Vec<FunctionFoldEntry>,
     domains: Vec<DomainEntry>,
@@ -1047,12 +1051,7 @@ impl<'dae> Variables<'_, 'dae> {
         capability: VariableTypeCapability<'dae>,
         declaration: DaeProvenance,
     ) -> Result<VariableId<'dae>, DaeConstructionError> {
-        if self
-            .storage
-            .variables
-            .iter()
-            .any(|entry| entry.name == name)
-        {
+        if self.storage.variable_by_name.contains_key(&name) {
             return Err(DaeConstructionError::DuplicateKey {
                 kind: "variable",
                 key: name.to_string(),
@@ -1060,6 +1059,7 @@ impl<'dae> Variables<'_, 'dae> {
             });
         }
         let raw = checked_u32(self.storage.variables.len(), "variable arena", declaration)?;
+        self.storage.variable_by_name.insert(name.clone(), raw);
         self.storage.variables.push(VariableEntry {
             name,
             role: capability.role(),

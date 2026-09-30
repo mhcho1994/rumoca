@@ -565,15 +565,27 @@ fn discrete_value(handle: SolveRenderHandle) -> Result<Value, CodegenError> {
     let rhs_plan = Value::from_object(super::scalar_program_plan::ScalarProgramPlan::new(
         Arc::new(handle.problem().discrete.rhs.clone()),
     )?);
+    let runtime_assignment_plan =
+        Value::from_object(super::scalar_program_plan::ScalarProgramPlan::new(
+            Arc::new(handle.problem().discrete.runtime_assignment_rhs.clone()),
+        )?);
+    let post_commit_assignment_plan =
+        Value::from_object(super::scalar_program_plan::ScalarProgramPlan::new(
+            Arc::new(handle.problem().discrete.post_commit_assignment_rhs.clone()),
+        )?);
+    let guarded_assignment_plan = guarded_assignment_plan(&handle.problem().discrete)?;
     let targets = scalar.targets;
     let pre_modes = scalar.pre_modes;
     let observation_refresh = scalar.observation_refresh;
     Ok(lazy_map(
         &[
             "runtime_assignment_rhs",
+            "runtime_assignment_plan",
             "runtime_assignment_targets",
             "runtime_assignment_roles",
             "post_commit_assignment_rhs",
+            "post_commit_assignment_plan",
+            "guarded_assignment_plan",
             "post_commit_assignment_targets",
             "post_commit_assignment_runtime_rows",
             "rhs",
@@ -587,6 +599,9 @@ fn discrete_value(handle: SolveRenderHandle) -> Result<Value, CodegenError> {
             match k {
                 "rhs" => Some(rhs.clone()),
                 "rhs_plan" => Some(rhs_plan.clone()),
+                "runtime_assignment_plan" => Some(runtime_assignment_plan.clone()),
+                "post_commit_assignment_plan" => Some(post_commit_assignment_plan.clone()),
+                "guarded_assignment_plan" => Some(guarded_assignment_plan.clone()),
                 "runtime_assignment_rhs" => Some(scalar_program_block_value(Arc::new(
                     d.runtime_assignment_rhs.clone(),
                 ))),
@@ -757,4 +772,19 @@ pub(super) fn nodes_value(block: Arc<solve::ComputeBlock>) -> Result<Value, Code
     }
     let nodes = Arc::new(nodes);
     Ok(lazy_seq(len, move |i| nodes[i].clone()))
+}
+
+/// The guarded assignments as one renderable plan, their outputs numbered in
+/// program order (the order `fmi.scalar_events.guarded_targets` lists).
+fn guarded_assignment_plan(discrete: &solve::DiscreteSolveSystem) -> Result<Value, CodegenError> {
+    let (programs, spans) = discrete
+        .guarded_assignments
+        .iter()
+        .map(|program| (program.program().to_vec(), program.span()))
+        .unzip();
+    let block = solve::ScalarProgramBlock::with_program_spans(programs, spans)
+        .map_err(|error| CodegenError::template(error.to_string()))?;
+    Ok(Value::from_object(
+        super::scalar_program_plan::ScalarProgramPlan::new(Arc::new(block))?,
+    ))
 }

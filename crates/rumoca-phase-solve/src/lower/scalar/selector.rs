@@ -58,19 +58,8 @@ impl<'dae> ScalarSelector<'dae> {
                 )
             }
             dae::ExpressionOperation::Comprehension { domain, body } => {
-                let body_count = scalar_count(self.view, body);
-                let point = scalar / body_count;
-                let values = self
-                    .view
-                    .domain(domain)
-                    .expect("checked comprehension domain resolves")
-                    .structured()
-                    .index_tuple_at(point)
-                    .expect("checked domain remains valid")
-                    .expect("checked scalar selects a domain point");
-                let mut nested = self.clone();
-                nested.domain_points.push((domain, values));
-                nested.coordinate(body, scalar % body_count)
+                let (nested, body_scalar) = self.comprehension_point(domain, body, scalar)?;
+                nested.coordinate(body, body_scalar)
             }
             dae::ExpressionOperation::Index { base, subscripts } => {
                 let selected = self.indexed_base_scalar(
@@ -90,6 +79,29 @@ impl<'dae> ScalarSelector<'dae> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// The selector at the comprehension point one scalar of `domain`'s
+    /// comprehension reads, with the scalar it selects inside `body`.
+    pub(super) fn comprehension_point(
+        &self,
+        domain: dae::DomainId<'dae>,
+        body: dae::ExprId<'dae>,
+        scalar: usize,
+    ) -> Result<(Self, usize), LowerError> {
+        let span = self.node(body).provenance().span();
+        let body_count = scalar_count(self.view, body);
+        let values = self
+            .view
+            .domain(domain)
+            .ok_or_else(|| LowerError::contract("comprehension domain does not resolve", span))?
+            .structured()
+            .index_tuple_at(scalar / body_count)
+            .map_err(|_| LowerError::contract("comprehension domain is not valid", span))?
+            .ok_or_else(|| LowerError::contract("scalar selects no comprehension point", span))?;
+        let mut nested = self.clone();
+        nested.domain_points.push((domain, values));
+        Ok((nested, scalar % body_count))
     }
 
     pub(in crate::lower) fn select_array_element(

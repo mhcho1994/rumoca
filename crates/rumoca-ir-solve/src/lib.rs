@@ -22,6 +22,7 @@ mod linear_op;
 mod model;
 mod parameter_reads;
 mod refresh;
+mod root_search;
 mod scalar_program_outputs;
 #[cfg(test)]
 mod scalar_program_tests;
@@ -56,7 +57,7 @@ pub use layout::{
 };
 pub use linear_op::{
     AssignmentProgram, CappedValue, SHARED_VALUE_REGISTER_CAP, SharedValueError,
-    SharedValueSegment, SharedValueSegments, share_program_values,
+    SharedValueSegment, SharedValueSegments, share_program_values, shared_value_proof_failures,
 };
 pub use linear_op::{
     BinaryOp, BlockResidualSplit, BlockResidualSplitError, CompareOp, FoldInitialSource,
@@ -70,6 +71,7 @@ pub use linear_op::{
 pub use model::*;
 pub use parameter_reads::read_parameter_slots;
 pub use refresh::*;
+pub use root_search::{RootSearchPlan, RootSearchRole, TimeRootSign, root_neighborhoods};
 pub use shape_error::{AffineTensorNodeKind, SolveProblemShapeContractError};
 pub use tangent_lanes::{
     ColoredLaneCall, ColoredTangentPlan, TangentLaneError, TangentLaneProgram, TangentRowSource,
@@ -83,7 +85,7 @@ pub use visitor::{
 
 pub use initialization::{InitializationSolveSystem, InitializationSystemInput};
 
-pub const SOLVE_SCHEMA_VERSION: u16 = 70;
+pub const SOLVE_SCHEMA_VERSION: u16 = 71;
 
 pub fn source_span_from_offsets(source: u64, start: usize, end: usize) -> Span {
     Span::from_offsets(SourceId(source), start, end)
@@ -2786,6 +2788,7 @@ fn validate_initial_projection_plan(
     let mut unknowns_seen = BTreeSet::new();
     for block in &plan.blocks {
         validate_projection_block_shape(context, block.rows.len(), block.unknowns.len())?;
+        validate_initial_projection_scales(block)?;
         validate_indices(context, &block.rows, row_upper_bound)?;
         validate_initial_projection_unknowns(
             context,
@@ -2812,6 +2815,35 @@ fn validate_initial_projection_plan(
                 unknown: format!("{unknown:?}"),
                 span: None,
             });
+        }
+    }
+    Ok(())
+}
+
+/// Each unknown carries one scale of its own storage kind: a solver coordinate
+/// its solver scale, a parameter a finite positive `nominal` or its guess.
+fn validate_initial_projection_scales(
+    block: &InitializationProjectionBlock,
+) -> Result<(), SolveProblemShapeContractError> {
+    let invalid = |detail| SolveProblemShapeContractError::InitializationOwnership { detail };
+    if block.scales.len() != block.unknowns.len() {
+        return Err(invalid(
+            "initialization projection scales are not aligned with the block unknowns",
+        ));
+    }
+    for (unknown, scale) in block.unknowns.iter().zip(&block.scales) {
+        let consistent = match (unknown, scale) {
+            (ScalarSlot::Y { .. }, InitializationUnknownScale::Solver) => true,
+            (ScalarSlot::P { .. }, InitializationUnknownScale::GuessMagnitude) => true,
+            (ScalarSlot::P { .. }, InitializationUnknownScale::Nominal(nominal)) => {
+                nominal.is_finite() && *nominal > 0.0
+            }
+            _ => false,
+        };
+        if !consistent {
+            return Err(invalid(
+                "an initialization unknown's scale does not match its storage kind",
+            ));
         }
     }
     Ok(())

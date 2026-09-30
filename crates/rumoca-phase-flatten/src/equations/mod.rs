@@ -19,8 +19,8 @@ use rumoca_ir_flat as flat;
 use tracing::{debug, warn};
 
 use crate::boolean_eval::{
-    is_structural_expression, reads_tunable_parameter, try_eval_boolean_with_ctx_inner,
-    try_eval_structural_boolean, try_resolve_enum_value,
+    is_structural_expression, non_evaluable_parameter_read, reads_tunable_parameter,
+    try_eval_boolean_with_ctx_inner, try_eval_structural_boolean, try_resolve_enum_value,
 };
 use crate::errors::FlattenError;
 use crate::static_subscripts::try_constant_integer;
@@ -31,10 +31,11 @@ pub(crate) mod array_family;
 mod assert_equations;
 mod conditional_and_eval;
 mod der_divergent_branches;
+mod if_equation_alignment;
 mod parameter_selections;
 use der_divergent_branches::{branches_differ_in_der_targets, try_select_parameter_branch};
-use parameter_selections::branches_structurally_equal;
 pub(crate) use parameter_selections::parameter_branch_selection;
+use parameter_selections::{branches_structurally_equal, refuse_non_evaluable_range};
 mod connections_graph;
 mod flattened_equations;
 mod structured_domain;
@@ -514,7 +515,12 @@ pub(crate) fn flatten_equation_with_def_map(
         ast::Equation::For { indices, equations } => {
             // Expand for-equations by iterating over indices (MLS §8.3.3)
             // This now also handles when-equations inside for-loops (MLS §8.3.5)
-            expand_for_equation(ctx, indices, equations, prefix, span, &origin, def_map)
+            refuse_non_evaluable_range(ctx, indices, prefix, span)?;
+            let flattened =
+                expand_for_equation(ctx, indices, equations, prefix, span, &origin, def_map)?;
+            Ok(record_structural_range(
+                ctx, indices, prefix, span, flattened,
+            ))
         }
 
         ast::Equation::When(_blocks) => {
@@ -1032,6 +1038,31 @@ fn find_array_refs_recursive(
 /// Expand a for-equation by iterating over all index combinations.
 ///
 /// MLS §8.3.3: "The for-equation construct allows iteration over a set of equations."
+/// MLS §8.3.3 evaluates a for-equation range at translation: a parameter it
+/// reads is structural, fixed like a SPEC_0040 DAE-C22 selection guard.
+fn record_structural_range(
+    ctx: &Context,
+    indices: &[ast::ForIndex],
+    prefix: &ast::QualifiedName,
+    span: rumoca_core::Span,
+    mut flattened: FlattenedEquations,
+) -> FlattenedEquations {
+    if indices
+        .iter()
+        .any(|index| crate::boolean_eval::reads_parameter(ctx, &index.range, prefix))
+    {
+        flattened
+            .parameter_branch_selections
+            .push(parameter_branch_selection(
+                flat::StructuralParameterUse::ForRange,
+                indices.iter().map(|index| &index.range),
+                prefix,
+                span,
+            ));
+    }
+    flattened
+}
+
 fn expand_for_equation(
     ctx: &Context,
     indices: &[ast::ForIndex],
@@ -1471,6 +1502,7 @@ fn expand_if_equation(
         flattened
             .parameter_branch_selections
             .push(parameter_branch_selection(
+                flat::StructuralParameterUse::BranchSelection,
                 evaluated_conditions(ctx, cond_blocks, prefix),
                 prefix,
                 span,
@@ -1491,6 +1523,7 @@ fn expand_if_equation(
         flattened
             .parameter_branch_selections
             .push(parameter_branch_selection(
+                flat::StructuralParameterUse::BranchSelection,
                 evaluated_conditions(ctx, cond_blocks, prefix),
                 prefix,
                 span,
@@ -1507,7 +1540,7 @@ fn expand_if_equation(
         expanded_branches.push((block.cond.clone(), simple_eqs));
     }
 
-    let else_simple_eqs = if let Some(else_eqs) = else_block {
+    let mut else_simple_eqs = if let Some(else_eqs) = else_block {
         expand_to_simple_equations(ctx, else_eqs, prefix, span)?
     } else {
         vec![]
@@ -1524,7 +1557,10 @@ fn expand_if_equation(
         };
 
     if all_same_count {
-        // Fast path: position-based matching (original behavior)
+        if_equation_alignment::align_branches_by_assigned_target(
+            &mut expanded_branches,
+            &mut else_simple_eqs,
+        );
         let mut result = FlattenedEquations::default();
         let eq_context = ConditionalEquationContext {
             ctx,
@@ -1628,6 +1664,21 @@ fn try_select_branch_for_mismatched_if(
     origin: &rumoca_ir_flat::EquationOrigin,
     def_map: Option<&crate::ResolveDefMap>,
 ) -> Result<FlattenedEquations, FlattenError> {
+    // MLS 3.7 section 8.3.4: branches with different equation counts are legal
+    // only under evaluable conditions.
+    if let Some(parameter) = cond_blocks
+        .iter()
+        .find_map(|block| non_evaluable_parameter_read(ctx, &block.cond, prefix))
+    {
+        return Err(FlattenError::unsupported_equation(
+            format!(
+                "if-equation branches have different equation counts, but the condition reads \
+                 non-evaluable parameter `{parameter}` (fixed = false or Evaluate = false); MLS \
+                 3.7 section 8.3.4 requires evaluable conditions for such an if-equation"
+            ),
+            span,
+        ));
+    }
     let mut selected = None;
     for block in cond_blocks {
         match try_eval_boolean_with_ctx_inner(&block.cond, Some(ctx), prefix) {
@@ -1649,6 +1700,7 @@ fn try_select_branch_for_mismatched_if(
     flattened
         .parameter_branch_selections
         .push(parameter_branch_selection(
+            flat::StructuralParameterUse::BranchSelection,
             evaluated_conditions(ctx, cond_blocks, prefix),
             prefix,
             span,

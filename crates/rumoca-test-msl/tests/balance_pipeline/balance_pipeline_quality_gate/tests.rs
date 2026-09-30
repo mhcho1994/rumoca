@@ -137,6 +137,9 @@ fn baseline_quality_template() -> MslQualityBaseline {
         runtime_ratio_stats: None,
         runtime_ratio_cohort_models: None,
         certified_strict_high_models: IndexSet::new(),
+        unexcepted_non_high_models: IndexSet::new(),
+        trace_exceptions_sha256: None,
+        evidence_provenance: None,
         trace_accuracy_stats: None,
         tensor_preservation: MslTensorPreservationBaseline {
             models_reported: 0,
@@ -1530,38 +1533,61 @@ fn trace_fixed_denominator_gate_accepts_current_ci_delta() {
 
 #[test]
 fn simulation_soundness_rejects_unclassified_non_high_results() {
-    let parity = MslParityGateInput {
-        total_models: Some(10),
-        omc_version: Some("OpenModelica 1.26.1".to_string()),
-        runtime_context: None,
-        runtime_ratio_stats: None,
-        runtime_model_ratios: IndexMap::new(),
-        trace_accuracy_stats: Some(trace_accuracy_baseline()),
-        omc_assertion_failure_models: 0,
-        omc_assertion_failure_examples: Vec::new(),
-    };
     let mut reasons = Vec::new();
 
     push_trace_soundness_reasons(
         &mut reasons,
         gate_input_with_sim_rate(10, 10),
-        Some(&parity),
+        &baseline_quality_template(),
+        Some(&soundness_parity(trace_accuracy_baseline())),
     );
 
     assert_eq!(reasons.len(), 1);
     assert!(
-        reasons[0].contains(
-            "sim_ok=10 strict_high=8 reviewed_exceptions=0 unclassified=2 overclassified=0"
-        )
+        reasons[0]
+            .contains("sim_ok=10 strict_high=8 typed_exceptions=0 unclassified=2 overclassified=0"),
+        "{reasons:?}"
     );
 }
 
+/// A pointwise non-identifiable completion without a typed exception row is
+/// unclassified; only typed rows and the baseline roster account for a
+/// completion that is not strict-high.
 #[test]
-fn simulation_soundness_accepts_strict_high_and_reviewed_oracle_boundaries() {
+fn simulation_soundness_accepts_typed_exceptions_and_the_baseline_roster_only() {
     let mut trace = trace_accuracy_baseline();
     trace.policy_excluded_models = 1;
     trace.trace_nonidentifiable_models = 1;
-    let parity = MslParityGateInput {
+    let parity = soundness_parity(trace);
+    let mut reasons = Vec::new();
+    push_trace_soundness_reasons(
+        &mut reasons,
+        gate_input_with_sim_rate(10, 10),
+        &baseline_quality_template(),
+        Some(&parity),
+    );
+    assert_eq!(
+        reasons.len(),
+        1,
+        "an untyped non-identifiable completion is unclassified"
+    );
+
+    let baseline = MslQualityBaseline {
+        unexcepted_non_high_models: IndexSet::from_iter(["Nonidentifiable0".to_string()]),
+        ..baseline_quality_template()
+    };
+    let mut reasons = Vec::new();
+    push_trace_soundness_reasons(
+        &mut reasons,
+        gate_input_with_sim_rate(10, 10),
+        &baseline,
+        Some(&parity),
+    );
+    assert!(reasons.is_empty(), "{reasons:?}");
+}
+
+fn soundness_parity(trace: MslTraceAccuracyStatsBaseline) -> MslParityGateInput {
+    MslParityGateInput {
         total_models: Some(10),
         omc_version: Some("OpenModelica 1.26.1".to_string()),
         runtime_context: None,
@@ -1570,16 +1596,7 @@ fn simulation_soundness_accepts_strict_high_and_reviewed_oracle_boundaries() {
         trace_accuracy_stats: Some(trace),
         omc_assertion_failure_models: 0,
         omc_assertion_failure_examples: Vec::new(),
-    };
-    let mut reasons = Vec::new();
-
-    push_trace_soundness_reasons(
-        &mut reasons,
-        gate_input_with_sim_rate(10, 10),
-        Some(&parity),
-    );
-
-    assert!(reasons.is_empty());
+    }
 }
 
 mod parity_cache;
@@ -1651,15 +1668,29 @@ fn oracle_boundary_migration_rejects_unreviewed_counts_digest_or_missing_evidenc
 
 #[test]
 fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi() {
-    let baseline =
-        load_msl_quality_baseline(&msl_quality_baseline_path()).expect("load checked baseline");
+    let baseline = load_msl_quality_baseline(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join(MSL_QUALITY_BASELINE_FILE_REL),
+    )
+    .expect("load checked baseline");
     assert_eq!(baseline.quality_gate_version, MSL_QUALITY_GATE_VERSION);
     assert_eq!(baseline.sim_timeout_seconds, SIM_TIMEOUT_SECS);
-    assert_eq!(baseline.flatten_models, 487);
+    assert_eq!(baseline.flatten_models, 494);
     assert_eq!(baseline.partial_models, 13);
     assert_eq!(baseline.partial_model_names, reviewed_partial_model_names());
     assert_eq!(baseline.tensor_preservation.report_errors, 0);
-    assert_eq!(baseline.certified_strict_high_models.len(), 129);
+    assert_eq!(baseline.certified_strict_high_models.len(), 194);
+    assert_eq!(baseline.unexcepted_non_high_models.len(), 3);
+    assert_eq!(
+        baseline.trace_exceptions_sha256.as_deref(),
+        Some(
+            reviewed_reference_boundary_migration()
+                .metric
+                .exclusions_sha256
+                .as_str()
+        ),
+        "the checked baseline names the reviewed exception file"
+    );
+    assert!(baseline.evidence_provenance.is_some());
     assert!(baseline.certified_strict_high_models.contains(
         "Modelica.Electrical.PowerConverters.Examples.ACDC.RectifierCenterTap2mPulse.\
          DiodeCenterTap2mPulse"
@@ -1690,14 +1721,16 @@ fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi
 
     let reference = baseline
         .reference_boundary_migration
-        .expect("reviewed v4-to-v5-to-v6-to-v7 boundaries");
+        .expect("reviewed v4-to-v8 boundary chain");
     assert_eq!(reference, reviewed_reference_boundary_migration());
     assert_eq!(
         reference.metric.strict_high_before,
         reference.metric.strict_high_after
     );
+    // The typed-exception boundary types every reviewed row and removes none;
+    // it adds the ten reviewed Clocked, Electrical, and Magnetic rows.
     assert_eq!(
-        reference.policy_excluded_before + 2,
+        reference.policy_excluded_before + 10,
         reference.metric.policy_excluded_after
     );
     assert_eq!(reference.metric.excluded_strict_high_before, 0);
@@ -1851,4 +1884,35 @@ fn quality_context_rejects_baseline_partial_roster_drift() {
         msl_quality_context_mismatch_reason(gate_input_with_sim_rate(8, 10), &baseline, None)
             .expect("baseline count/roster drift must fail closed");
     assert!(reason.contains("count/roster mismatch"), "{reason}");
+}
+
+/// A roster addition must name its defect and be in the roster it adds to;
+/// the checked baseline's LogicalSample addition is reviewed (SPEC_0050).
+#[test]
+fn roster_additions_name_their_defect_and_join_the_roster() {
+    let baseline =
+        load_msl_quality_baseline(&msl_quality_baseline_path()).expect("load checked baseline");
+    assert!(validate_unexcepted_non_high_roster(&baseline).is_ok());
+    assert_eq!(
+        baseline
+            .reference_boundary_migration
+            .as_ref()
+            .map(|migration| migration.roster_additions.clone()),
+        Some(vec![schema_migrations::logical_sample_roster_addition()])
+    );
+
+    let mut unnamed = baseline.clone();
+    unnamed
+        .reference_boundary_migration
+        .as_mut()
+        .unwrap()
+        .roster_additions[0]
+        .cause = " ".to_string();
+    assert!(validate_unexcepted_non_high_roster(&unnamed).is_err());
+
+    let mut outside = baseline;
+    outside
+        .unexcepted_non_high_models
+        .shift_remove("Modelica.Clocked.Examples.Elementary.ClockSignals.LogicalSample");
+    assert!(validate_unexcepted_non_high_roster(&outside).is_err());
 }
