@@ -629,6 +629,7 @@ fn process_replaceable_element(
                     // replaceable components (e.g., constrainedby C(n=n)) so they apply
                     // after redeclaration as defaults for the replacement type.
                     merge_constraining_clause_modifications(value, constrainedby_mods)?;
+                    apply_constraining_clause_to_declaration(value, constrainedby_mods)?;
                 }
             }
         }
@@ -690,6 +691,54 @@ fn merge_constraining_clause_modifications(
         }
     }
 
+    Ok(())
+}
+
+/// MLS §7.3.2: "The modifiers following the constraining type name are
+/// applied both for the purpose of defining the actual constraining type and
+/// they are automatically applied in the declaration and in any subsequent
+/// redeclaration. The precedence order is that declaration modifiers override
+/// constraining type modifiers."
+///
+/// The constraining modifiers a declaration does not override itself are
+/// therefore added to the declaration exactly like its own modifiers
+/// (`replaceable MixingVolume volDyn constrainedby MixingVolume(redeclare
+/// package Medium = Medium, V = 1)` instantiates `volDyn` with that `Medium`
+/// and `V`). The prefixed copies kept by
+/// [`merge_constraining_clause_modifications`] still serve redeclarations.
+fn apply_constraining_clause_to_declaration(
+    value: &mut rumoca_ir_ast::Component,
+    constrainedby_mods: Option<&modelica_grammar_trait::ConstrainingClauseOpt>,
+) -> anyhow::Result<()> {
+    let Some(list) = constrainedby_mods
+        .and_then(|opt| opt.class_modification.class_modification_opt.as_ref())
+        .map(|opt| &opt.argument_list)
+    else {
+        return Ok(());
+    };
+    let flag = |flags: &[bool], index: usize| flags.get(index).copied().unwrap_or(false);
+    for (index, arg) in list.args.iter().enumerate() {
+        let Some(target_name) = constraining_arg_target_name(arg) else {
+            continue;
+        };
+        let declared = value.source_modifications.iter().any(|existing| {
+            constraining_arg_target_name(existing).as_deref() == Some(&target_name)
+        });
+        if declared {
+            continue;
+        }
+        let (each, is_final) = (
+            flag(&list.each_flags, index),
+            flag(&list.final_flags, index),
+        );
+        value.source_modifications.push(arg.clone());
+        value.source_modification_each_flags.push(each);
+        value.source_modification_final_flags.push(is_final);
+        value
+            .source_modification_redeclare_flags
+            .push(flag(&list.redeclare_flags, index) || flag(&list.replaceable_flags, index));
+        process_mod_arg(value, arg, each, is_final)?;
+    }
     Ok(())
 }
 

@@ -1211,6 +1211,51 @@ fn inst_043_state_select_modifier_may_name_members_of_the_modified_instance() {
     );
 }
 
+#[test]
+fn inst_043_constraining_clause_modifiers_apply_to_the_declaration() {
+    // MLS §7.3.2: constraining-clause modifiers are applied in the
+    // declaration itself, below the declaration's own modifiers
+    // (IBPSA `replaceable MixingVolume volDyn constrainedby
+    // MixingVolume(redeclare package Medium = Medium, V = 1)`).
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        package C
+            partial package PM
+                replaceable partial model BaseProperties
+                    Real p;
+                end BaseProperties;
+            end PM;
+            package Air
+                extends PM;
+                redeclare model extends BaseProperties
+                equation
+                    p = 1;
+                end BaseProperties;
+            end Air;
+            model Vol
+                replaceable package Medium = PM;
+                parameter Real V = 3;
+                Medium.BaseProperties medium;
+                Real y = V;
+            end Vol;
+            model Top
+                package Medium = Air;
+                replaceable Vol vol constrainedby Vol(redeclare package Medium = Medium, V = 2);
+                replaceable Vol vol2(V = 5) constrainedby Vol(redeclare package Medium = Medium, V = 2);
+                Real t(start = 0, fixed = true);
+            equation
+                der(t) = 1;
+            end Top;
+        end C;
+    "#,
+        "C.Top",
+        0.1,
+    );
+    assert_eq!(trace.final_value("vol.medium.p"), 1.0);
+    assert_eq!(trace.final_value("vol.y"), 2.0);
+    assert_eq!(trace.final_value("vol2.y"), 5.0);
+}
+
 // =============================================================================
 // INST-034: Encapsulated lookup stop
 // "Lookup stops if enclosing class is encapsulated"
