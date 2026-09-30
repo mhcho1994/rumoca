@@ -1355,14 +1355,14 @@ outcome = 'Accept'
 [[cases]]
 contract_id = 'INST-043'
 case_id = 'inst_043_original_type_is_used_as_implicit_constraint'
-test_file = 'tests/inst_contracts.rs'
+test_file = 'tests/inst_redeclare_contracts.rs'
 kind = 'Compile'
 outcome = 'Accept'
 
 [[cases]]
 contract_id = 'INST-043'
 case_id = 'inst_043_redeclare_must_still_be_subtype_without_explicit_constrainedby'
-test_file = 'tests/inst_contracts.rs'
+test_file = 'tests/inst_redeclare_contracts.rs'
 kind = 'Compile'
 outcome = 'Reject'
 
