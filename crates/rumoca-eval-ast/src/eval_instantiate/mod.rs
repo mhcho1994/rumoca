@@ -21,7 +21,9 @@ mod class_lookup;
 mod component_params;
 mod enum_literal;
 mod function_eval;
+mod real_builtins;
 mod scoped_condition;
+mod size_eval;
 
 pub use array_indices::{ArrayIndexTuples, array_index_tuples, generate_array_indices};
 use class_lookup::{resolve_class_constant_binding, resolve_component_ref_from_record_defaults};
@@ -645,11 +647,11 @@ fn resolve_class_redeclare_field_expr(
     let forwarding_self_redeclare = target_cref.parts.len() == 1
         && target_cref.parts[0].subs.is_none()
         && target_cref.parts[0].ident.text.as_ref() == root_name;
-    if forwarding_self_redeclare {
-        return None;
-    }
-
-    let target_class = resolve_class_from_cref(tree, target_cref)?;
+    let target_class = if forwarding_self_redeclare {
+        forwarded_class(tree, target_cref)?
+    } else {
+        resolve_class_from_cref(tree, target_cref)?
+    };
     let effective_components = resolve_class_components(tree, target_class);
     let field_component = effective_components.get(field_name)?;
     component_expr_for_structural_eval(field_component).cloned()
@@ -845,6 +847,16 @@ impl AstScalarContext for InstantiateScalarAdapter<'_> {
         {
             return Some(value);
         }
+        // A Real modifier already decided in the scope that wrote it (MLS §7.2.4).
+        if reference.parts.iter().all(|part| part.subs.is_none())
+            && let Some(value) = self
+                .env
+                .mod_env
+                .get(&build_qualified_path(reference))
+                .and_then(|modification| modification.structural_real)
+        {
+            return Some(value);
+        }
         // Integer-valued parameter declarations and pure function calls are
         // promoted when they occur in a Real expression (MLS §10.6.2).  Ask
         // the Integer evaluator first: it only returns a value when the full
@@ -928,8 +940,10 @@ impl AstScalarContext for InstantiateScalarAdapter<'_> {
         // MLS §10.6.2.  The Integer evaluator remains the certificate here: it
         // rejects functions whose result cannot be established exactly, so
         // this promotion cannot turn an undecidable Real call into a value.
-        eval_integer_function_call(function, args, self.env, depth, self.local_ints)
-            .map(|value| value as f64)
+        real_builtins::eval_real_builtin_call(self, function, args, depth).or_else(|| {
+            eval_integer_function_call(function, args, self.env, depth, self.local_ints)
+                .map(|value| value as f64)
+        })
     }
 
     fn enum_equal(
@@ -1209,7 +1223,15 @@ fn eval_integer_class_constant_ref(
         .map(|part| part.ident.text.as_ref())
         .collect::<Vec<_>>()
         .join(".");
-    let class = env.tree.get_class_by_qualified_name(&class_path)?;
+    // MLS §5.3: the class prefix is looked up lexically, which resolve has
+    // already recorded on the segment (`PM.k` written inside `P.Ex` names
+    // `P.PM`); the dotted spelling is only a fully qualified fallback.
+    let prefix = &comp_ref.parts[..comp_ref.parts.len() - 1];
+    let class = if prefix.iter().any(|part| part.def_id.is_some()) {
+        static_class_prefix(comp_ref, env)?
+    } else {
+        env.tree.get_class_by_qualified_name(&class_path)?
+    };
     let effective_components = (env.resolve_class_components)(env.tree, class);
     let field_component = effective_components.get(field_name)?;
     if !matches!(
@@ -1265,11 +1287,11 @@ fn eval_integer_class_redeclare_field_ref(
     let forwarding_self_redeclare = target_cref.parts.len() == 1
         && target_cref.parts[0].subs.is_none()
         && target_cref.parts[0].ident.text.as_ref() == root_name;
-    if forwarding_self_redeclare {
-        return None;
-    }
-
-    let target_class = resolve_class_from_cref(env.tree, target_cref)?;
+    let target_class = if forwarding_self_redeclare {
+        forwarded_class(env.tree, target_cref)?
+    } else {
+        resolve_class_from_cref(env.tree, target_cref)?
+    };
     let effective_components = (env.resolve_class_components)(env.tree, target_class);
     let field_component = effective_components.get(field_name)?;
     let value_expr = component_expr_for_structural_eval(field_component)?;
@@ -1283,6 +1305,48 @@ fn eval_integer_class_redeclare_field_ref(
         depth + 1,
         local_ints,
     )
+}
+
+/// The class a forwarding redeclaration `redeclare package Medium = Medium`
+/// denotes, when that is already final.
+///
+/// The right-hand `Medium` is looked up where the modifier is written
+/// (MLS §7.2.4, §5.3), which resolve recorded on the reference. When that
+/// declaration is itself replaceable, an enclosing instance may still
+/// redeclare it, so the class is not yet known and nothing is answered.
+fn forwarded_class<'a>(
+    tree: &'a ast::ClassTree,
+    target_cref: &ast::ComponentReference,
+) -> Option<&'a ast::ClassDef> {
+    let class = tree.get_class_by_def_id(target_cref.root_def_id()?)?;
+    (!class.is_replaceable).then_some(class)
+}
+
+/// The class named by the prefix of a qualified constant reference such as
+/// `PM.k` or `Medium.nX`.
+///
+/// The prefix is looked up lexically (MLS §5.3), which resolve recorded on the
+/// segment. A replaceable prefix denotes its declared default unless this
+/// instance redeclares it (MLS §7.3); a redeclaration is an active entry of the
+/// modification environment, and such a prefix is not answered here.
+pub(super) fn static_class_prefix<'a>(
+    comp_ref: &ast::ComponentReference,
+    env: IntegerEvalEnv<'a>,
+) -> Option<&'a ast::ClassDef> {
+    let (_, prefix) = comp_ref.parts.split_last()?;
+    let root = prefix.first()?;
+    if env
+        .mod_env
+        .get(&ast::QualifiedName::from_ident(root.ident.text.as_ref()))
+        .is_some()
+    {
+        return None;
+    }
+    let mut class = None;
+    for part in prefix {
+        class = Some(env.tree.get_class_by_def_id(part.def_id?)?);
+    }
+    class
 }
 
 fn resolve_class_from_cref<'a>(
@@ -1682,11 +1746,29 @@ fn eval_integer_function_call(
             let y = recurse(args.get(1)?)?;
             return Some(x.max(y));
         }
+        "size" if is_predefined_call(comp, env.tree) => {
+            return size_eval::eval_integer_size_call(args, env, depth, local_ints);
+        }
         _ => {}
     }
 
     let function_def = lookup_function_definition(&func_name, qualified_name.as_deref(), env.tree)?;
     eval_user_defined_integer_function(function_def, args, env, depth, local_ints)
+}
+
+/// Whether a one-segment call names the predefined operation of that spelling
+/// rather than a user function that shadows it.
+fn is_predefined_call(comp: &ast::ComponentReference, tree: &ast::ClassTree) -> bool {
+    let [part] = comp.parts.as_slice() else {
+        return false;
+    };
+    part.def_id.is_none_or(|selected| {
+        tree.scope_tree
+            .predefined_member(&rumoca_core::ComponentPath::from_flat_path(
+                part.ident.text.as_ref(),
+            ))
+            == Some(selected)
+    })
 }
 
 fn lookup_function_definition<'a>(
