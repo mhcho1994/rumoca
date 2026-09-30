@@ -223,3 +223,39 @@ fn function_shape_over_a_record_constant_field_reads_the_constant() {
         "sum over 3 coefficients gives s(1) = 6, got {s}"
     );
 }
+
+// TOOLBUG-104: a constant whose value is a call (MSL `PartialMedium`
+// `T_default = Modelica.Units.Conversions.from_degC(20)`) substituted into a
+// binding introduced the call after the call graph was collected, so the
+// callee was missing and the DAE reported `ED008 unresolved Flat reference`.
+const CALL_INTRODUCED_BY_CONSTANT: &str = r#"
+package CallByConstant
+  package Conv
+    function from_degC
+      input Real c;
+      output Real k;
+    algorithm
+      k := c + 273.15;
+    end from_degC;
+  end Conv;
+  package Medium
+    constant Real T_default = CallByConstant.Conv.from_degC(20);
+  end Medium;
+  model M
+    parameter Real T_start = Medium.T_default;
+    Real s(start = 0, fixed = true);
+  equation
+    der(s) = T_start;
+  end M;
+end CallByConstant;
+"#;
+
+#[test]
+fn call_introduced_by_constant_substitution_is_collected() {
+    let compiled = compile(CALL_INTRODUCED_BY_CONSTANT, "CallByConstant.M");
+    let s = final_value(&compiled, "s");
+    assert!(
+        (s - 293.15).abs() < 1e-6,
+        "T_start = 293.15 K gives s(1) = 293.15, got {s}"
+    );
+}
