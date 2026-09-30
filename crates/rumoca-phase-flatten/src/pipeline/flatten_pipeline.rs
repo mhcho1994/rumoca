@@ -190,6 +190,7 @@ pub(crate) fn variable_import_context_for_instance<'tree>(
             semantic_function_scope_for_instance_scope(scope, class_index, scope_index)
         }),
         attribute_function_scopes,
+        root_instance_name: None,
     })
 }
 
@@ -838,6 +839,7 @@ pub(crate) fn process_component_instances_for_flatten(
     tree: &ast::ClassTree,
     class_index: &ast::ClassDefIndex<'_>,
     component_members: &component_member_scope::ComponentMemberScopes,
+    root_instance_name: Option<&str>,
 ) -> Result<(), FlattenError> {
     let mut import_cache = ImportCaches::default();
     let scope_index = OverlayScopeIndex::new(overlay);
@@ -862,6 +864,7 @@ pub(crate) fn process_component_instances_for_flatten(
             scope_index: &scope_index,
             component_members,
             function_types: functions::FunctionTypeCatalog::new(overlay),
+            root_instance_name,
         })?;
         track_top_level_component_markers(flat, instance_data);
     }

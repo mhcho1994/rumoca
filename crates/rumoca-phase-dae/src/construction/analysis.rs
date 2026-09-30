@@ -658,24 +658,25 @@ fn analyze_expression_support(
     constants: &EvalContext,
 ) -> Result<ExpressionSupportPlans, ToDaeError> {
     Ok(ExpressionSupportPlans {
-        // MLS §8.3.7: an assertion's condition, message and level are model
-        // expressions too, and a comprehension there (`andTrue({... for i in
-        // 1:n})`) is lowered through the same model-wide plan.
+        // Assertion conditions are lowered through the same comprehension
+        // plans (CDL `ExtractSignal`: `assert(andTrue({... for i in 1:n}))`).
         comprehensions: analyze_comprehensions(
-            all_model_expressions(flat).chain(
-                flat.assert_equations
-                    .iter()
-                    .chain(&flat.initial_assert_equations)
-                    .flat_map(|assertion| {
-                        [&assertion.condition, &assertion.message]
-                            .into_iter()
-                            .chain(assertion.level.as_ref())
-                    }),
-            ),
+            all_model_expressions(flat).chain(assertion_expressions(flat)),
             constants,
         )?,
         delays: analyze_delays(flat, constants)?,
     })
+}
+
+fn assertion_expressions(flat: &flat::Model) -> impl Iterator<Item = &Expression> {
+    flat.assert_equations
+        .iter()
+        .chain(&flat.initial_assert_equations)
+        .flat_map(|assertion| {
+            [&assertion.condition, &assertion.message]
+                .into_iter()
+                .chain(assertion.level.as_ref())
+        })
 }
 
 struct RecordEquationSets {
@@ -1284,10 +1285,14 @@ fn constant_context(flat: &flat::Model) -> Result<EvalContext, ToDaeError> {
             {
                 continue;
             }
-            let Some(binding) = &variable.binding else {
-                continue;
+            let evaluated = match &variable.binding {
+                Some(binding) => eval_expr(binding, &context),
+                None => match unbound_parameter_value(flat, variable, &context) {
+                    Some(value) => Ok(value),
+                    None => continue,
+                },
             };
-            match eval_expr(binding, &context) {
+            match evaluated {
                 Ok(value) => {
                     context.add_instance_parameter(variable.instance_id, name.to_string(), value);
                     progress = true;
@@ -1308,6 +1313,32 @@ fn constant_context(flat: &flat::Model) -> Result<EvalContext, ToDaeError> {
     }
     register_deferred_parameters(flat, &mut context);
     Ok(context)
+}
+
+/// The value of a constant or fixed parameter that has no binding equation.
+///
+/// MLS §8.6: such a parameter takes its `start` value, and a type's default
+/// `start` (`0`, `0.0`, `false`) when none is written; tools accept it with a
+/// warning. `Modelica.Blocks.Interfaces.DiscreteBlock.samplePeriod` (declared
+/// with `start = 0.1` only) and OpenIPSL `DEGOV.TD` (no value at all) rely on
+/// it. A `start` that does not evaluate leaves the parameter without a value.
+fn unbound_parameter_value(
+    flat: &flat::Model,
+    variable: &flat::Variable,
+    context: &EvalContext,
+) -> Option<EvalValue> {
+    if let Some(start) = &variable.start {
+        return eval_expr(start, context).ok();
+    }
+    if !variable.dims.is_empty() {
+        return None;
+    }
+    match effective_variable_scalar_type(flat, variable)? {
+        dae::ScalarType::Real => Some(EvalValue::Real(0.0)),
+        dae::ScalarType::Integer => Some(EvalValue::Integer(0)),
+        dae::ScalarType::Boolean => Some(EvalValue::Bool(false)),
+        _ => None,
+    }
 }
 
 /// Name every `fixed = false` parameter the initialization system settles, and

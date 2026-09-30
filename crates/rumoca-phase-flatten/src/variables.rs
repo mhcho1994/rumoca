@@ -26,11 +26,26 @@ pub(crate) struct VariableImportContext {
     pub(crate) declaration_function_scope: Option<String>,
     pub(crate) binding_function_scope: Option<String>,
     pub(crate) attribute_function_scopes: FxHashMap<String, String>,
+    /// Name of the simulated root model (its last path segment), which
+    /// `getInstanceName()` prefixes to the instance path of the enclosing
+    /// class instance.
+    pub(crate) root_instance_name: Option<String>,
 }
 
 impl VariableImportContext {
     fn binding_imports(&self) -> &ImportMap {
         self.binding.as_ref()
+    }
+
+    /// The `getInstanceName()` value of the class instance at `prefix`.
+    fn instance_name_for_prefix(&self, prefix: &ast::QualifiedName) -> Option<String> {
+        let root = self.root_instance_name.as_ref()?;
+        let suffix = prefix.to_flat_string();
+        Some(if suffix.is_empty() {
+            root.clone()
+        } else {
+            format!("{root}.{suffix}")
+        })
     }
 
     fn attribute_imports(&self, attr_name: &str) -> &ImportMap {
@@ -425,11 +440,12 @@ fn qualify_variable_attribute(
         .get(attr_name)
         .map(String::as_str)
         .or(ctx.imports.declaration_function_scope.as_deref());
+    let instance_name = ctx.imports.instance_name_for_prefix(ctx.prefix);
     Ok(Some(canonicalize_function_calls(
         ast_lower::expression_from_ast_with_context(
             &qualified,
             ast_lower::LoweringContext {
-                instance_name: None,
+                instance_name: instance_name.as_deref(),
                 predefined_string_declaration: ctx
                     .tree
                     .scope_tree
@@ -523,11 +539,12 @@ fn qualify_modification_binding(
         expr,
     );
     let qualified = qualify_expression_with_imports(expr, &mod_prefix, ctx.opts, &imports);
+    let instance_name = ctx.imports.instance_name_for_prefix(&mod_prefix);
     Ok(canonicalize_function_calls(
         ast_lower::expression_from_ast_with_context(
             &qualified,
             ast_lower::LoweringContext {
-                instance_name: None,
+                instance_name: instance_name.as_deref(),
                 predefined_string_declaration: ctx
                     .tree
                     .scope_tree
@@ -557,11 +574,12 @@ fn qualify_declaration_binding(
         .binding_function_scope
         .as_deref()
         .or(ctx.imports.declaration_function_scope.as_deref());
+    let instance_name = ctx.imports.instance_name_for_prefix(ctx.prefix);
     Ok(canonicalize_function_calls(
         ast_lower::expression_from_ast_with_context(
             &qualified,
             ast_lower::LoweringContext {
-                instance_name: None,
+                instance_name: instance_name.as_deref(),
                 predefined_string_declaration: ctx
                     .tree
                     .scope_tree

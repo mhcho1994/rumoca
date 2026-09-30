@@ -7,6 +7,11 @@ use super::*;
 pub(in crate::construction) enum DelayPlan {
     Fixed(PositiveParameterPlan),
     Bounded(PositiveParameterPlan),
+    /// `delayTime` evaluates to exactly zero. MLS §3.7.4.1 defines
+    /// `delay(expr, delayTime)` as `expr(time - delayTime)` for
+    /// `0 <= delayTime`, so a zero delay is `expr` itself (the
+    /// `Modelica.Blocks.Nonlinear.FixedDelay(delayTime = 0)` idiom).
+    Identity,
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +87,15 @@ fn delay_plan(
     constants: &EvalContext,
     span: Span,
 ) -> Result<DelayPlan, ToDaeError> {
+    if let [_, delay_time, ..] = arguments
+        && arguments.len() <= 3
+        && eval_expr(delay_time, constants)
+            .ok()
+            .and_then(|value| value.to_real())
+            == Some(0.0)
+    {
+        return Ok(DelayPlan::Identity);
+    }
     match arguments {
         [_, delay_time] => {
             let timing = positive_parameter(delay_time, constants, "delayTime", span)?;

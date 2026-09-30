@@ -14,8 +14,10 @@ mod function_external;
 mod function_record_assembly;
 mod function_seeds;
 mod function_shapes;
+mod initial_algorithm_equations;
 mod initial_discrete_values;
 mod model_algorithm;
+mod model_algorithm_split;
 mod model_events;
 mod multi_output_equations;
 mod record_equation;
@@ -229,7 +231,19 @@ struct ReservedVariable<'flat, 'dae> {
     definition: dae::VariableReservation<'dae>,
 }
 
+/// Source-preserving rewrites of algorithm sections into forms with existing
+/// owners; each returns the model unchanged when it does not apply.
+fn normalize_flat(flat: &flat::Model) -> std::borrow::Cow<'_, flat::Model> {
+    let normalized = initial_algorithm_equations::normalize_initial_algorithms(flat);
+    let split = model_algorithm_split::split_continuous_prefixes(&normalized);
+    if let std::borrow::Cow::Owned(model) = split {
+        return std::borrow::Cow::Owned(model);
+    }
+    normalized
+}
+
 pub(crate) fn construct(flat: &flat::Model, source_map: SourceMap) -> Result<dae::Dae, ToDaeError> {
+    let flat = &*normalize_flat(flat);
     let analysis = analyze(flat)?.with_semi_linear_rules(flat);
     if !flat.is_partial && !analysis.balance.is_balanced() {
         return Err(ToDaeError::unbalanced_from_detail(analysis.balance));
@@ -243,6 +257,7 @@ pub(crate) fn construct(flat: &flat::Model, source_map: SourceMap) -> Result<dae
 }
 
 pub(crate) fn balance_detail(flat: &flat::Model) -> Result<BalanceDetail, ToDaeError> {
+    let flat = &*normalize_flat(flat);
     analyze(flat).map(|analysis| analysis.balance)
 }
 

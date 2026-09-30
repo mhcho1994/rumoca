@@ -187,8 +187,12 @@ pub(super) fn lower_delay<'dae>(
         .copied()
         .ok_or(dae::DaeConstructionError::InvalidPositiveParameter { span })?;
     let source = lower_expression_scoped(construction, symbols, binders, &arguments[0], None)?;
+    if matches!(plan, DelayPlan::Identity) {
+        return Ok(source);
+    }
     let delay_time = lower_expression_scoped(construction, symbols, binders, &arguments[1], None)?;
     match plan {
+        DelayPlan::Identity => unreachable!("a zero delay returned its source above"),
         DelayPlan::Fixed(timing) => {
             let timing_provenance = expression_provenance(timing.provenance(), None)?;
             let positive = construction.temporal(|temporal| {

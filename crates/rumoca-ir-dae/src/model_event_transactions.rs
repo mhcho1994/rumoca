@@ -82,6 +82,10 @@ impl<'dae> ModelEventDefinition<'dae> {
             provenance,
         }
     }
+
+    pub const fn target(&self) -> ModelEventTarget<'dae> {
+        self.target
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +112,22 @@ impl<'dae> ModelEventStep<'dae> {
             definitions: definitions.into_iter().collect(),
             provenance,
         }
+    }
+
+    pub const fn trigger(&self) -> ConditionId<'dae> {
+        self.trigger
+    }
+
+    pub const fn guard(&self) -> ConditionId<'dae> {
+        self.guard
+    }
+
+    pub const fn clock(&self) -> Option<ClockId<'dae>> {
+        self.clock
+    }
+
+    pub fn definitions(&self) -> &[ModelEventDefinition<'dae>] {
+        &self.definitions
     }
 }
 
