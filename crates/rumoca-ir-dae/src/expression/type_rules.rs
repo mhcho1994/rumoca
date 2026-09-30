@@ -375,18 +375,8 @@ pub(super) fn builtin_result<'dae>(
     if builtin.has_shaped_result() {
         return shaped_builtin_result(storage, builtin, arguments, &first, at);
     }
-    if builtin == PureBuiltin::NoEvent {
-        expect_arity(arguments, 1, at)?;
-        return Ok(first);
-    }
-    if builtin == PureBuiltin::Homotopy {
-        return homotopy_result(storage, arguments, first, at);
-    }
-    if builtin == PureBuiltin::Size {
-        return size_result(storage, arguments, first, at);
-    }
-    if builtin == PureBuiltin::Integer {
-        return integer_result(arguments, &first, at);
+    if let Some(result) = special_builtin_result(storage, builtin, arguments, &first, at) {
+        return result;
     }
     expect_numeric(first.scalar_type(), at)?;
     match builtin {
@@ -467,25 +457,74 @@ pub(super) fn builtin_result<'dae>(
 }
 
 /// MLS §4.9.5.2: `Integer(e)` is the Integer ordinal of an enumeration value,
-/// and `integer(x)` is the Integer conversion of a numeric value. Both are
-/// scalar and both produce Integer, so the enumeration operand is admitted here
-/// instead of at the shared numeric gate, which every other builtin still uses.
+/// and `integer(x)` is the Integer conversion of a numeric value. Both produce
+/// Integer, so the enumeration operand is admitted here instead of at the
+/// shared numeric gate, which every other builtin still uses. The numeric
+/// conversion is vectorizable (MLS §3.7.1, §12.4.6) and keeps its operand's
+/// shape; the enumeration ordinal stays scalar.
 fn integer_result(
     arguments: &[ExprId<'_>],
     actual: &ValueType,
     at: DaeProvenance,
 ) -> Result<ValueType, DaeConstructionError> {
     expect_arity(arguments, 1, at)?;
-    if !actual.is_scalar() {
-        return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
+    if actual.scalar_type().is_numeric() {
+        return Ok(ValueType::array(ScalarType::Integer, actual.dimensions()));
     }
-    if !actual.scalar_type().is_numeric() && actual.scalar_type() != ScalarType::Enumeration {
+    if actual.scalar_type() != ScalarType::Enumeration {
         return Err(DaeConstructionError::ExpectedNumeric {
             found: actual.scalar_type(),
             span: at.span(),
         });
     }
+    if !actual.is_scalar() {
+        return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
+    }
     Ok(ValueType::scalar(ScalarType::Integer))
+}
+
+/// The builtins whose operand rules differ from the shared numeric gate.
+fn special_builtin_result(
+    storage: &Storage,
+    builtin: PureBuiltin,
+    arguments: &[ExprId<'_>],
+    first: &ValueType,
+    at: DaeProvenance,
+) -> Option<Result<ValueType, DaeConstructionError>> {
+    Some(match builtin {
+        PureBuiltin::NoEvent => expect_arity(arguments, 1, at).map(|()| first.clone()),
+        PureBuiltin::Homotopy => homotopy_result(storage, arguments, first.clone(), at),
+        PureBuiltin::Size => size_result(storage, arguments, first.clone(), at),
+        PureBuiltin::Integer => integer_result(arguments, first, at),
+        PureBuiltin::Min | PureBuiltin::Max if first.scalar_type() == ScalarType::Boolean => {
+            boolean_extremum_result(storage, arguments, first.clone(), at)
+        }
+        _ => return None,
+    })
+}
+
+/// MLS §3.7.1.1 and §10.3.4 order Boolean values `false < true`, so `min`
+/// and `max` are defined on them: `min(b)` is "all true" and `max(b)` is
+/// "any true", which is how `Modelica.Math.BooleanVectors` implements them.
+fn boolean_extremum_result(
+    storage: &Storage,
+    arguments: &[ExprId<'_>],
+    first: ValueType,
+    at: DaeProvenance,
+) -> Result<ValueType, DaeConstructionError> {
+    if arguments.len() == 1 {
+        return Ok(ValueType::scalar(ScalarType::Boolean));
+    }
+    arguments[1..].iter().try_fold(first, |common, argument| {
+        let next = storage.expr_type(*argument, at)?;
+        if next.scalar_type() != ScalarType::Boolean {
+            return Err(DaeConstructionError::ExpectedNumeric {
+                found: ScalarType::Boolean,
+                span: at.span(),
+            });
+        }
+        common_value_type(&common, next, at)
+    })
 }
 
 fn homotopy_result(
@@ -496,10 +535,16 @@ fn homotopy_result(
 ) -> Result<ValueType, DaeConstructionError> {
     expect_arity(arguments, 2, at)?;
     let simplified = storage.expr_type(arguments[1], at)?;
-    if !actual.is_scalar() || actual.scalar_type() != ScalarType::Real || simplified != &actual {
+    // MLS §3.7.4.4: both arguments are Real expressions; an Integer operand
+    // such as the common `simplified = 0` is promoted (MLS §10.6.13).
+    if !actual.is_scalar() || !simplified.is_scalar() {
         return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
     }
-    Ok(actual)
+    let common = common_value_type(&actual, simplified, at)?;
+    if common.scalar_type() != ScalarType::Real {
+        return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
+    }
+    Ok(common)
 }
 
 fn size_result(
