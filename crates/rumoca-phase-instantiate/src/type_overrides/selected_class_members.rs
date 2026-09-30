@@ -88,7 +88,7 @@ fn resolve_component_member_step(
     })?;
     let next_owner_def_id = has_tail
         .then(|| {
-            component.type_def_id.ok_or_else(|| {
+            member_owner_type_def_id(tree, owner_class, component).ok_or_else(|| {
                 Box::new(InstantiateError::redeclare_error(
                     member_name,
                     "intermediate redeclare member has no resolved class identity",
@@ -98,6 +98,31 @@ fn resolve_component_member_step(
         })
         .transpose()?;
     Ok(Some((component_def_id, next_owner_def_id)))
+}
+
+/// Class that owns the members of `component` inside the selected class.
+///
+/// A component declared with a simple type name that names a nested class of
+/// the selected class's hierarchy (`constant FluidConstants[nS]
+/// fluidConstants` in `PartialMedium`) takes that class as seen from the
+/// selected class, including a redeclaration made in an extends modification
+/// (`PartialTwoPhaseMedium` extends `PartialPureSubstance(redeclare record
+/// FluidConstants = TwoPhase.FluidConstants)`). The lexically resolved type id
+/// names the base declaration, whose members lack `criticalPressure`
+/// (MLS §7.3: member lookup happens in the instance of the selected class).
+fn member_owner_type_def_id(
+    tree: &ast::ClassTree,
+    owner_class: &ast::ClassDef,
+    component: &ast::Component,
+) -> Option<DefId> {
+    if let [type_name] = component.type_name.name.as_slice()
+        && let Some(class) =
+            crate::type_lookup::find_member_type_in_class(tree, owner_class, &type_name.text)
+        && class.def_id.is_some()
+    {
+        return class.def_id;
+    }
+    component.type_def_id
 }
 
 pub(crate) fn resolve_class_override_modifier_targets(

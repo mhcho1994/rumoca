@@ -1095,6 +1095,57 @@ fn inst_043_outer_extends_redeclare_replaces_transitively_inherited_component() 
     assert_eq!(trace.final_value("w.r.x"), 20.0);
 }
 
+#[test]
+fn inst_043_member_type_is_looked_up_in_the_selected_package() {
+    // `Medium.fluidConstants[1].criticalPressure` (ThermoPower, TRANSFORM,
+    // AixLib valves): `fluidConstants` is declared in the base package with
+    // the replaceable record `FluidConstants`, which the two-phase package
+    // redeclares in an extends modification. The member must be found in the
+    // record as seen from the selected medium.
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        package H
+            package Types
+                record Basic
+                    Real molarMass;
+                end Basic;
+                record TwoPhase
+                    extends Basic;
+                    Real criticalPressure;
+                end TwoPhase;
+            end Types;
+            partial package PartialMedium
+                replaceable record FluidConstants = Types.Basic;
+                constant FluidConstants[1] fluidConstants;
+            end PartialMedium;
+            partial package PartialTwoPhaseMedium
+                extends PartialMedium(
+                    redeclare replaceable record FluidConstants = Types.TwoPhase);
+            end PartialTwoPhaseMedium;
+            constant Types.TwoPhase waterConstants(molarMass = 0.018, criticalPressure = 22.064e6);
+            package Water
+                extends PartialTwoPhaseMedium(fluidConstants = {waterConstants});
+            end Water;
+            model Valve
+                replaceable package Medium = PartialTwoPhaseMedium;
+                Real x;
+            equation
+                x = Medium.fluidConstants[1].criticalPressure;
+            end Valve;
+            model Top
+                Valve v(redeclare package Medium = Water);
+                Real t(start = 0, fixed = true);
+            equation
+                der(t) = 1;
+            end Top;
+        end H;
+    "#,
+        "H.Top",
+        0.1,
+    );
+    assert_eq!(trace.final_value("v.x"), 22.064e6);
+}
+
 // =============================================================================
 // INST-034: Encapsulated lookup stop
 // "Lookup stops if enclosing class is encapsulated"
