@@ -153,11 +153,18 @@ impl ShapeEnvironment {
         self.shapes.get(name)
     }
 
+    /// A user enumeration literal resolves to its type's declaration. A
+    /// predefined one (`AssertionLevel.error`, MLS §4.9.5) resolves to its own
+    /// predefined literal identity, so its enumeration type is the declaration
+    /// the two-part reference is rooted at.
     pub(super) fn is_enumeration_literal(&self, reference: &rumoca_core::Reference) -> bool {
+        let declares =
+            |declaration: DefId| self.enumeration_type_declarations.contains(&declaration);
+        let predefined_root = reference.component_ref().is_some_and(|component| {
+            component.parts().len() == 2 && declares(component.root_def_id())
+        });
         self.enumeration_literals.contains(reference.var_name())
-            && reference.target_def_id().is_some_and(|declaration| {
-                self.enumeration_type_declarations.contains(&declaration)
-            })
+            && (reference.target_def_id().is_some_and(declares) || predefined_root)
     }
 
     pub(super) fn is_enumeration_literal_name(&self, name: &VarName) -> bool {
@@ -605,6 +612,7 @@ impl FunctionShapeAnalysis {
         let mut resolve = |name: &rumoca_core::Reference,
                            arguments: &[Expression],
                            is_constructor: bool,
+                           values: &ShapeEnvironment,
                            span: Span| {
             if is_constructor {
                 return self.constructor_expression_shape(name, span);
@@ -739,10 +747,46 @@ impl ShapeAnalyzer<'_> {
             // top-level horizontal-row rejection to those operands.
             return self.discover_promoted_matrix_calls(elements, values);
         }
+        if let Expression::ArrayComprehension {
+            expr,
+            indices,
+            filter,
+            ..
+        } = expression
+        {
+            return self.discover_comprehension_calls(expr, indices, filter.as_deref(), values);
+        }
         for child in expression_children(expression) {
             self.discover_calls(child, values)?;
         }
         Ok(())
+    }
+
+    /// MLS §10.4.2: an array-constructor iterator is in scope in the body and
+    /// the filter, never in the ranges. A call whose argument reads the
+    /// iterator is therefore discovered in the scope that binds it, with the
+    /// range bounds this scope proves.
+    fn discover_comprehension_calls(
+        &mut self,
+        body: &Expression,
+        indices: &[rumoca_core::ComprehensionIndex],
+        filter: Option<&Expression>,
+        values: &ShapeEnvironment,
+    ) -> Result<(), ToDaeError> {
+        let mut scoped = values.clone();
+        for index in indices {
+            self.discover_calls(&index.range, values)?;
+            match scoped.proven_range_bounds(&index.range) {
+                Some((lower, upper)) => {
+                    scoped.bind_integer_bounds(VarName::new(&index.name), lower, upper);
+                }
+                None => scoped.insert(VarName::new(&index.name), Vec::new()),
+            }
+        }
+        if let Some(filter) = filter {
+            self.discover_calls(filter, &scoped)?;
+        }
+        self.discover_calls(body, &scoped)
     }
 
     fn discover_promoted_matrix_calls(
@@ -791,6 +835,7 @@ impl ShapeAnalyzer<'_> {
         let mut resolve = |name: &rumoca_core::Reference,
                            arguments: &[Expression],
                            is_constructor: bool,
+                           values: &ShapeEnvironment,
                            span: Span| {
             if is_constructor {
                 return self.discover_constructor(name, arguments, span, values);

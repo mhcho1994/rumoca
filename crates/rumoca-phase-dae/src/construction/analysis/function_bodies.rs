@@ -759,7 +759,7 @@ fn plan_proven_function_assertion(
     ) {
         return Ok(FunctionStatementPlan::ProvenAssertion);
     }
-    if assertion.level.is_some() {
+    if !has_default_assertion_level(assertion.level, context.shapes) {
         return Err(ToDaeError::unsupported_flat(
             "function assertion",
             format!(
@@ -780,6 +780,14 @@ fn plan_proven_function_assertion(
         ));
     }
     Ok(FunctionStatementPlan::RuntimeAssertion)
+}
+
+/// MLS §8.3.7: `level` defaults to `AssertionLevel.error`, so an explicit
+/// `AssertionLevel.error` (ordinal 2 of `enumeration(warning, error)`) is the
+/// default severity the function-body assertion lowers to. Any other level,
+/// or one this specialization cannot settle, has no checked owner here.
+fn has_default_assertion_level(level: Option<&Expression>, shapes: &ShapeEnvironment) -> bool {
+    level.is_none_or(|level| matches!(shapes.proven_value(level), Some(ProvenValue::Integer(2))))
 }
 
 fn validate_function_assignment_target(

@@ -38,7 +38,16 @@ pub(in crate::construction) fn call_free_target_shape(
     apply_subscripts(declared, &target.subs, values).ok()
 }
 
-pub(super) type FunctionResultShape<'scope> = dyn FnMut(&rumoca_core::Reference, &[Expression], bool, Span) -> Result<ValueShape, ToDaeError>
+/// Shape of one call's first result. The environment is the scope the call is
+/// written in, so a comprehension binder (MLS §10.4.2) or loop index read by an
+/// argument is visible to the argument's own shape proof.
+pub(super) type FunctionResultShape<'scope> = dyn FnMut(
+        &rumoca_core::Reference,
+        &[Expression],
+        bool,
+        &ShapeEnvironment,
+        Span,
+    ) -> Result<ValueShape, ToDaeError>
     + 'scope;
 
 fn reference_shape(
@@ -110,7 +119,7 @@ pub(super) fn expression_shape(
             args,
             is_constructor,
             ..
-        } => function_result(name, args, *is_constructor, span),
+        } => function_result(name, args, *is_constructor, values, span),
         Expression::If {
             branches,
             else_branch,
@@ -556,6 +565,7 @@ pub(super) fn reject_shape_call(
     name: &rumoca_core::Reference,
     _arguments: &[Expression],
     _is_constructor: bool,
+    _values: &ShapeEnvironment,
     span: Span,
 ) -> Result<ValueShape, ToDaeError> {
     Err(ToDaeError::unsupported_flat(
