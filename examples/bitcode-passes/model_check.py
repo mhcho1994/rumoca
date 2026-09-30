@@ -96,6 +96,15 @@ def check_unused_parameters(model: Model, report: Report) -> None:
     read: set[int] = set()
     for equation in model.equations + model.initial_equations:
         read.update(variable.id for variable in equation.reads)
+    # Sampled and held discrete-Real equations are a separate partition from
+    # the continuous ones, and read parameters just the same.
+    for equation in model.discrete_real_equations:
+        read.update(variable.id for variable in equation.reads)
+    for initial in model.initial_discrete_values:
+        read.update(ref.id for ref in initial.value.variables())
+    for event in model.events:
+        if event.value is not None:
+            read.update(ref.id for ref in event.value.variables())
     # A parameter may also be consumed by another variable's start/binding.
     for variable in model.variables:
         for attribute in (variable.start, variable.binding, variable.minimum, variable.maximum):
