@@ -20,6 +20,8 @@ pub(crate) struct ComponentInstanceProcess<'a, 'tree> {
     pub(crate) scope_index: &'a OverlayScopeIndex<'a>,
     pub(crate) component_members: &'a component_member_scope::ComponentMemberScopes,
     pub(crate) function_types: functions::FunctionTypeCatalog<'a>,
+    /// Simulated root model name for `getInstanceName()` in bindings.
+    pub(crate) root_instance_name: Option<&'a str>,
 }
 
 /// Class-body occurrence that scopes the references in a modifier binding
@@ -108,7 +110,7 @@ pub(crate) fn process_component_instance(
         return retain_record_instance(request, var_name);
     }
 
-    let import_context = variable_import_context_for_instance(
+    let mut import_context = variable_import_context_for_instance(
         request.instance_data,
         request.tree,
         request.class_index,
@@ -116,6 +118,7 @@ pub(crate) fn process_component_instance(
         request.scope_index,
         request.component_override_map,
     )?;
+    import_context.root_instance_name = request.root_instance_name.map(str::to_owned);
     let mut flat_var = variables::create_flat_variable(
         request.instance_data,
         request.effective_type_id,

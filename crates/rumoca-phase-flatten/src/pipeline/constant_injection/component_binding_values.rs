@@ -20,21 +20,23 @@ pub(crate) fn collect_component_binding_values(
             continue;
         }
 
-        if let Some(binding) = &instance_data.binding {
-            let flat_binding = qualify_expression(binding, &QualifiedName::new())?;
-            if let Ok(value) = rumoca_eval_flat::constant::eval_expr(&flat_binding, eval_ctx) {
-                eval_ctx.add_parameter(qualified_name.clone(), value);
-                continue;
-            }
+        // A binding that cannot be lowered without its instance scope (for
+        // example `getInstanceName()`) is simply not a structural value here;
+        // the variable's own flattening lowers it with that scope.
+        if let Some(binding) = &instance_data.binding
+            && let Ok(flat_binding) = qualify_expression(binding, &QualifiedName::new())
+            && let Ok(value) = rumoca_eval_flat::constant::eval_expr(&flat_binding, eval_ctx)
+        {
+            eval_ctx.add_parameter(qualified_name.clone(), value);
+            continue;
         }
 
         if component_start_is_structural(instance_data)
             && let Some(start) = &instance_data.start
+            && let Ok(flat_start) = qualify_expression(start, &QualifiedName::new())
+            && let Ok(value) = rumoca_eval_flat::constant::eval_expr(&flat_start, eval_ctx)
         {
-            let flat_start = qualify_expression(start, &QualifiedName::new())?;
-            if let Ok(value) = rumoca_eval_flat::constant::eval_expr(&flat_start, eval_ctx) {
-                eval_ctx.add_parameter(qualified_name, value);
-            }
+            eval_ctx.add_parameter(qualified_name, value);
         }
     }
     Ok(())

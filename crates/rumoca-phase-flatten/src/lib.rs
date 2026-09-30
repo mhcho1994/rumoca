@@ -380,6 +380,7 @@ pub fn flatten_ref_with_options(
         tree,
         &class_index,
         &ctx.component_members,
+        ctx.simulated_root_name.as_deref(),
     )?;
     let flatten_graph = prepare_context_for_equation_flattening(
         &mut ctx,
