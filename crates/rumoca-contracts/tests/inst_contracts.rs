@@ -1146,6 +1146,71 @@ fn inst_043_member_type_is_looked_up_in_the_selected_package() {
     assert_eq!(trace.final_value("v.x"), 22.064e6);
 }
 
+#[test]
+fn inst_043_forwarded_package_redeclare_in_derived_model_uses_inherited_package() {
+    // `package Medium = Air` declared in a base model and forwarded by
+    // `sou(redeclare package Medium = Medium)`: instantiating a *derived*
+    // model must forward the inherited package, not leave the partial
+    // default (Buildings/IBPSA/AixLib `MixingVolumes.Validation`).
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        package R
+            partial package PM
+                replaceable partial model BaseProperties
+                    Real p;
+                end BaseProperties;
+            end PM;
+            package Air
+                extends PM;
+                redeclare model extends BaseProperties
+                equation
+                    p = 1;
+                end BaseProperties;
+            end Air;
+            model Source
+                replaceable package Medium = PM;
+                Medium.BaseProperties medium;
+            end Source;
+            partial model Base
+                package Medium = Air;
+                Source sou(redeclare package Medium = Medium);
+                Real t(start = 0, fixed = true);
+            equation
+                der(t) = 1;
+            end Base;
+            model Derived
+                extends Base;
+            end Derived;
+        end R;
+    "#,
+        "R.Derived",
+        0.1,
+    );
+    assert_eq!(trace.final_value("sou.medium.p"), 1.0);
+}
+
+#[test]
+fn inst_043_state_select_modifier_may_name_members_of_the_modified_instance() {
+    // `medium(Xi(each stateSelect = if medium.preferredMediumStates then
+    // ...))` (IBPSA ConservationEquation): the modifier is evaluated in the
+    // scope where it is written, where `medium.flag` names the member `flag`
+    // of the instance being built.
+    expect_success(
+        r#"
+        model Mixer
+            model B
+                parameter Boolean flag = false;
+                Real p;
+            end B;
+            B medium(p(stateSelect = if medium.flag then StateSelect.prefer else StateSelect.default));
+        equation
+            medium.p = time;
+        end Mixer;
+    "#,
+        "Mixer",
+    );
+}
+
 // =============================================================================
 // INST-034: Encapsulated lookup stop
 // "Lookup stops if enclosing class is encapsulated"
