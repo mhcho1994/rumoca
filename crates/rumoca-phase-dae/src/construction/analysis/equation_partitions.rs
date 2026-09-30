@@ -27,6 +27,26 @@ pub(in crate::construction) struct DiscreteValueAssignmentPlan<'flat> {
 pub(in crate::construction) struct AggregateDiscreteConnections {
     owners: HashMap<usize, AggregateDiscreteConnection>,
     members: HashSet<usize>,
+    /// Rows `a = b` between two discrete-valued coordinates that own `b`
+    /// rather than `a`; see [`reversed_discrete_equalities`].
+    reversed: HashSet<usize>,
+    /// Materialized families whose rows each define whole coordinates, and
+    /// those rows; see [`whole_coordinate_element_families`].
+    row_owned_families: HashSet<usize>,
+    row_owned_rows: HashSet<usize>,
+}
+
+impl AggregateDiscreteConnections {
+    /// Structured families whose rows are lowered one by one as whole
+    /// discrete-coordinate definitions instead of as a family.
+    pub(in crate::construction) fn row_owned_families(&self) -> &HashSet<usize> {
+        &self.row_owned_families
+    }
+
+    /// The Flat rows of [`Self::row_owned_families`].
+    pub(in crate::construction) fn row_owned_rows(&self) -> &HashSet<usize> {
+        &self.row_owned_rows
+    }
 }
 
 struct AggregateDiscreteConnection {
@@ -63,6 +83,22 @@ pub(in crate::construction) fn equation_partition<'flat>(
     }
     if let Some(plan) = discrete_connection_assignment(flat, equation, roles, connection_ranks)? {
         return Ok(EquationPartition::DiscreteValue(plan));
+    }
+    if let Some(plan) = whole_aggregate_element_assignment(flat, equation, roles)? {
+        return Ok(EquationPartition::DiscreteValue(plan));
+    }
+    if aggregate_connections.reversed.contains(&row)
+        && let Some((lhs, target)) = discrete_value_equality(&equation.residual, roles)
+    {
+        return Ok(EquationPartition::DiscreteValue(
+            DiscreteValueAssignmentPlan {
+                target,
+                value: Cow::Borrowed(lhs),
+                generated: true,
+                scalar_count: None,
+                ordered_scalar_self_dependencies: false,
+            },
+        ));
     }
     if let Some(plan) = discrete_value_assignment(&equation.residual, roles, equation.span)? {
         return Ok(EquationPartition::DiscreteValue(plan));
@@ -272,14 +308,158 @@ pub(super) fn aggregate_discrete_connections(
             equation,
         )?;
     }
-    let mut result = AggregateDiscreteConnections::default();
+    let mut result = AggregateDiscreteConnections {
+        reversed: reversed_discrete_equalities(flat, roles),
+        ..AggregateDiscreteConnections::default()
+    };
     for target in flat.variables.keys() {
         if let Some(group) = groups.remove(target) {
             group.finish(target.clone(), &mut result)?;
         }
     }
     debug_assert!(groups.is_empty(), "every group names a Flat variable");
+    result.row_owned_families = whole_coordinate_element_families(flat, roles, &result);
+    result.row_owned_rows = result
+        .row_owned_families
+        .iter()
+        .flat_map(|family| materialized_family_rows(&flat.structured_equations[*family]))
+        .collect();
     Ok(result)
+}
+
+/// Materialized families whose every row is owned as a whole discrete-valued
+/// coordinate definition: an aggregate formed from exact element coverage, or
+/// an element assignment whose selection denotes the whole coordinate.
+///
+/// `for i in 1:n loop y[i] = u[extract[i]]; end for;` materializes one row per
+/// element and aggregate coverage packs them into the single definition of
+/// `y`. That definition is not a per-point family body, so the family view of
+/// the same rows must stand aside and let the rows be lowered as rows.
+fn whole_coordinate_element_families(
+    flat: &flat::Model,
+    roles: &HashMap<VarName, PlannedRole>,
+    aggregates: &AggregateDiscreteConnections,
+) -> HashSet<usize> {
+    flat.structured_equations
+        .iter()
+        .enumerate()
+        .filter(|(_, family)| family.interiors_materialized)
+        .filter(|(_, family)| {
+            let rows = materialized_family_rows(family);
+            !rows.is_empty()
+                && rows
+                    .into_iter()
+                    .all(|row| row_defines_whole_coordinate(flat, row, roles, aggregates))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn row_defines_whole_coordinate(
+    flat: &flat::Model,
+    row: usize,
+    roles: &HashMap<VarName, PlannedRole>,
+    aggregates: &AggregateDiscreteConnections,
+) -> bool {
+    if aggregates.owners.contains_key(&row) || aggregates.members.contains(&row) {
+        return true;
+    }
+    let Some(equation) = flat.equations.get(row) else {
+        return false;
+    };
+    discrete_element_assignment(equation, roles).is_some_and(|(target, subscripts, _)| {
+        selection_denotes_whole_aggregate(&flat.variables[target], subscripts)
+    })
+}
+
+/// The Flat rows a materialized family represents.
+fn materialized_family_rows(family: &flat::StructuredEquationFamily) -> Vec<usize> {
+    let count = family
+        .domain
+        .scalar_count()
+        .ok()
+        .and_then(|points| points.checked_mul(family.equations_per_point))
+        .unwrap_or(0);
+    (family.first_equation_index..family.first_equation_index + count).collect()
+}
+
+/// `(lhs, rhs name)` of a residual `a - b` whose sides are both whole,
+/// unsubscripted discrete-valued coordinates.
+fn discrete_value_equality<'flat>(
+    residual: &'flat Expression,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> Option<(&'flat Expression, &'flat VarName)> {
+    let Expression::Binary {
+        op: OpBinary::Sub,
+        lhs,
+        rhs,
+        ..
+    } = residual
+    else {
+        return None;
+    };
+    let (_, lhs_subscripts) = discrete_value_base_reference(lhs, roles)?;
+    let (rhs_name, rhs_subscripts) = discrete_value_base_reference(rhs, roles)?;
+    (lhs_subscripts.is_empty() && rhs_subscripts.is_empty()).then_some((lhs.as_ref(), rhs_name))
+}
+
+/// Orient equalities `a = b` between two discrete-valued coordinates whose
+/// left side is already defined by another equation.
+///
+/// Appendix B.1c owns a discrete-valued equation by its left-hand coordinate.
+/// An equality between two coordinates is symmetric, though, and MSL relies on
+/// that: `Modelica.StateGraph.Interfaces.CompositeStepState` declares
+/// `output Boolean suspend = false` *and* writes `suspend =
+/// subgraphStatePort.suspend`, so the second row is what defines
+/// `subgraphStatePort.suspend`. When `a` is the left side of some other row
+/// (or has a declaration binding) and `b` is the left side of none, the
+/// equality owns `b` with value `a`.
+/// Every other row keeps its written orientation.
+fn reversed_discrete_equalities(
+    flat: &flat::Model,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> HashSet<usize> {
+    let mut left_counts = HashMap::<&VarName, usize>::new();
+    // A declaration binding (`Boolean suspend = false`) is a definition too.
+    for (name, variable) in &flat.variables {
+        if variable.binding.is_some() && matches!(roles.get(name), Some(PlannedRole::DiscreteValue))
+        {
+            *left_counts.entry(name).or_default() += 1;
+        }
+    }
+    for equation in &flat.equations {
+        if matches!(equation.origin, flat::EquationOrigin::Connection { .. }) {
+            continue;
+        }
+        if let Expression::Binary {
+            op: OpBinary::Sub,
+            lhs,
+            ..
+        } = &equation.residual
+            && let Some((name, subscripts)) = discrete_value_base_reference(lhs, roles)
+            && subscripts.is_empty()
+        {
+            *left_counts.entry(name).or_default() += 1;
+        }
+    }
+    flat.equations
+        .iter()
+        .enumerate()
+        .filter(|(_, equation)| {
+            !matches!(
+                equation.origin,
+                flat::EquationOrigin::Connection { .. } | flat::EquationOrigin::Binding { .. }
+            )
+        })
+        .filter_map(|(row, equation)| {
+            let (lhs, rhs_name) = discrete_value_equality(&equation.residual, roles)?;
+            let (lhs_name, _) = discrete_value_base_reference(lhs, roles)?;
+            let defined_elsewhere = left_counts.get(lhs_name).copied().unwrap_or(0) > 1;
+            let rhs_free = !left_counts.contains_key(rhs_name)
+                && !matches!(flat.variables[rhs_name].causality, Causality::Input(_));
+            (defined_elsewhere && rhs_free).then_some(row)
+        })
+        .collect()
 }
 
 struct SelectedPrefix {
@@ -595,6 +775,32 @@ fn full_aggregate_connection_value<'flat>(
         };
     }
     Ok(Cow::Owned(aggregate))
+}
+
+/// An element equation `y[1] = e` whose selection denotes all of `y` (every
+/// selected axis is a singleton, e.g. `Boolean y[1]`) defines the whole
+/// coordinate. Aggregate coverage skips it for that reason, so it is owned
+/// here as the whole-coordinate definition `y = {e}`.
+fn whole_aggregate_element_assignment<'flat>(
+    flat: &'flat flat::Model,
+    equation: &'flat flat::Equation,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> Result<Option<DiscreteValueAssignmentPlan<'flat>>, ToDaeError> {
+    let Some((target, subscripts, value)) = discrete_element_assignment(equation, roles) else {
+        return Ok(None);
+    };
+    let variable = &flat.variables[target];
+    if !selection_denotes_whole_aggregate(variable, subscripts) {
+        return Ok(None);
+    }
+    let value = full_aggregate_connection_value(variable, subscripts, value, equation.span)?;
+    Ok(Some(DiscreteValueAssignmentPlan {
+        target,
+        generated: true,
+        value,
+        scalar_count: None,
+        ordered_scalar_self_dependencies: false,
+    }))
 }
 
 fn selection_denotes_whole_aggregate(target: &flat::Variable, subscripts: &[Subscript]) -> bool {

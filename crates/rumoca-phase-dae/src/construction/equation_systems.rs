@@ -10,11 +10,15 @@ pub(super) fn lower_equation_systems<'dae>(
     clocks: &LoweredClocks<'dae>,
 ) -> Result<(), dae::DaeConstructionError> {
     let mut excluded_equation_rows = analysis.continuous_family_rows.clone();
+    let row_owned = &analysis.aggregate_discrete_connections;
+    excluded_equation_rows.retain(|row| !row_owned.row_owned_rows().contains(row));
     excluded_equation_rows.extend(&analysis.clock_equation_rows);
     excluded_equation_rows.extend(&analysis.derived_parameter_rows);
     let no_clocked_owners = HashMap::new();
     let no_semi_linear_rules = SemiLinearRules::default();
     let no_aggregate_connections = AggregateDiscreteConnections::default();
+    let mut excluded_families = analysis.derived_parameter_families.clone();
+    excluded_families.extend(row_owned.row_owned_families());
     let mut excluded_initial_rows = analysis.initialization_family_rows.clone();
     excluded_initial_rows.extend(&analysis.initial_discrete_equation_rows);
     lower_equations(
@@ -46,7 +50,7 @@ pub(super) fn lower_equation_systems<'dae>(
         StructuredEquationRows {
             equations: &flat.equations,
             families: &flat.structured_equations,
-            excluded_families: &analysis.derived_parameter_families,
+            excluded_families: &excluded_families,
             environment: Some(StructuredEquationEnvironment {
                 flat,
                 roles: &analysis.roles,
