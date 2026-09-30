@@ -1371,9 +1371,42 @@ fn infer_dims_from_func_with_scope(
                 Some(vec![args.len()])
             }
         }
-        // Fallback: infer dimensions from user-defined function output type (MLS §12.4)
-        _ => ctx.infer_user_function_dimensions(func_name, args, scope),
+        _ => infer_builtin_elementwise_dims(func_name, args, ctx, scope)
+            // Fallback: infer dimensions from user-defined function output type (MLS §12.4)
+            .or_else(|| ctx.infer_user_function_dimensions(func_name, args, scope)),
     }
+}
+
+/// Result shape of the scalar builtins that apply element-wise to array
+/// arguments (MLS §3.7.1-§3.7.3, §12.4.6): the shape of the widest argument.
+/// Reductions (`sum`, `product`, one-argument `min`/`max`) yield a scalar.
+fn infer_builtin_elementwise_dims(
+    func_name: &str,
+    args: &[Expression],
+    ctx: &(impl DimensionInferenceContext + ?Sized),
+    scope: &str,
+) -> Option<Vec<usize>> {
+    let operands: &[Expression] = match (func_name, args.len()) {
+        (
+            "abs" | "sign" | "sqrt" | "floor" | "ceil" | "integer" | "sin" | "cos" | "tan" | "asin"
+            | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "exp" | "log" | "log10" | "noEvent"
+            | "pre" | "der" | "Integer",
+            1,
+        )
+        | ("div" | "mod" | "rem" | "atan2", 2) => args,
+        ("smooth", 2) => &args[1..],
+        ("homotopy", 2) | ("delay", 2 | 3) => &args[..1],
+        ("sum" | "product" | "min" | "max", 1) | ("ndims", 1) => return Some(Vec::new()),
+        _ => return None,
+    };
+    let mut best: Option<Vec<usize>> = None;
+    for arg in operands {
+        let dims = infer_dimensions_from_binding_with_scope(arg, ctx, scope)?;
+        if best.as_ref().is_none_or(|b| dims.len() > b.len()) {
+            best = Some(dims);
+        }
+    }
+    best
 }
 
 /// Infer output array dimensions from a user-defined function call (MLS §12.4).

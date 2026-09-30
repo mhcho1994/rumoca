@@ -1,4 +1,5 @@
 use super::*;
+use rumoca_ir_ast::TerminalType;
 
 /// Try to infer array dimensions from a binding expression.
 pub fn infer_dimensions_from_binding(
@@ -58,9 +59,7 @@ pub fn infer_dimensions_from_binding_with_scope(
                     .scalar_value_known(&unindexed_path, scope)
                     .then(Vec::new);
             };
-            Some(apply_component_subscripts_to_dims(
-                base_dims, cr, ctx, scope,
-            ))
+            apply_component_subscripts_to_dims(base_dims, cr, ctx, scope)
         }
 
         Expression::Parenthesized { inner, .. } => {
@@ -109,35 +108,94 @@ fn apply_component_subscripts_to_dims(
     cr: &rumoca_ir_ast::ComponentReference,
     ctx: &(impl DimensionInferenceContext + ?Sized),
     scope: &str,
-) -> Vec<usize> {
+) -> Option<Vec<usize>> {
     // `pos` tracks the dimension the next subscript applies to. Scalar
     // indexing removes that dimension (so the cursor stays put, now pointing
     // at the following dimension); slice/colon indexing keeps it and advances
     // the cursor. This positional walk is what lets `a[:, i]` on `[3, 4]`
     // drop dimension 1 and yield `[3]` rather than removing dimension 0.
     let mut pos = 0usize;
+    let mut unknown = false;
     for part in &cr.parts {
         let Some(subs) = &part.subs else { continue };
         for sub in subs {
             if pos >= dims.len() {
-                return dims;
+                return Some(dims);
             }
-            apply_subscript_to_dims(sub, &mut dims, &mut pos, ctx, scope);
+            apply_subscript_to_dims(sub, &mut dims, &mut pos, &mut unknown, ctx, scope);
+            if unknown {
+                return None;
+            }
         }
     }
-    dims
+    Some(dims)
+}
+
+/// Replace every `end` in a slice expression with the indexed extent.
+fn substitute_end(expr: &Expression, extent: usize) -> Expression {
+    match expr {
+        Expression::Terminal {
+            terminal_type: TerminalType::End,
+            token,
+            span,
+        } => Expression::Terminal {
+            terminal_type: TerminalType::UnsignedInteger,
+            token: rumoca_core::Token {
+                text: Arc::from(extent.to_string()),
+                ..token.clone()
+            },
+            span: *span,
+        },
+        Expression::Range {
+            start,
+            step,
+            end,
+            span,
+        } => Expression::Range {
+            start: Arc::new(substitute_end(start, extent)),
+            step: step.as_ref().map(|s| Arc::new(substitute_end(s, extent))),
+            end: Arc::new(substitute_end(end, extent)),
+            span: *span,
+        },
+        Expression::Binary { op, lhs, rhs, span } => Expression::Binary {
+            op: op.clone(),
+            lhs: Arc::new(substitute_end(lhs, extent)),
+            rhs: Arc::new(substitute_end(rhs, extent)),
+            span: *span,
+        },
+        Expression::Unary { op, rhs, span } => Expression::Unary {
+            op: op.clone(),
+            rhs: Arc::new(substitute_end(rhs, extent)),
+            span: *span,
+        },
+        Expression::Parenthesized { inner, span } => Expression::Parenthesized {
+            inner: Arc::new(substitute_end(inner, extent)),
+            span: *span,
+        },
+        other => other.clone(),
+    }
 }
 
 fn apply_subscript_to_dims(
     sub: &Subscript,
     dims: &mut Vec<usize>,
     pos: &mut usize,
+    unknown: &mut bool,
     ctx: &(impl DimensionInferenceContext + ?Sized),
     scope: &str,
 ) {
     match sub {
+        // MLS §10.5: `end` inside a slice denotes the extent of the dimension
+        // being indexed, so `a[2:end]` on `[n]` has `n - 1` elements. An
+        // unevaluable slice leaves the dimension unknown instead of silently
+        // keeping the full extent.
         Subscript::Expression(expr) if matches!(expr, Expression::Range { .. }) => {
-            dims[*pos] = infer_range_length(expr, ctx, scope).unwrap_or(dims[*pos]);
+            let bound = substitute_end(expr, dims[*pos]);
+            let Some(len) = infer_range_length(&bound, ctx, scope) else {
+                *unknown = true;
+                return;
+            };
+            dims[*pos] = len;
             *pos += 1;
         }
         // Scalar indexing consumes the dimension at the cursor.
