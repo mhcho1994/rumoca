@@ -1,6 +1,6 @@
 # TOOLBUG-033 — a UTF-8 BOM makes a Modelica file unparseable, and takes its whole library with it
 
-**Status:** open. Found while compiling eleven third-party Modelica libraries.
+**Status:** fixed (2026-09-30). `parse_to_syntax` turns a leading U+FEFF into three spaces, keeping every byte offset; test `a_leading_byte_order_mark_is_not_source_text`.
 **Severity:** high — one byte in one file zeroes a library's coverage.
 
 ## What

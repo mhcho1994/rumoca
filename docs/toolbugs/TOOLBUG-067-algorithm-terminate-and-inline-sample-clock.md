@@ -1,6 +1,6 @@
 # TOOLBUG-067 — `terminate` in an algorithm `when`, and `sample(u, Clock(...))`, are refused
 
-**Status:** open.
+**Status:** algorithm `terminate`/`reinit`: fixed (2026-09-30) -- hoisted to the equivalent when-equation chain (`rumoca-phase-flatten/src/algorithm_events.rs`). Inline `sample(u, Clock(...))`: open; no uses in the eleven evaluation libraries.
 **Severity:** low — each has an equivalent spelling that compiles; found while
 writing `packages/modelsan/tests/test_sdk_typed_tables.py`.
 

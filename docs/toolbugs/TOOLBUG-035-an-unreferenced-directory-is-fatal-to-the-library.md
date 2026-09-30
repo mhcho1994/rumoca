@@ -1,6 +1,6 @@
 # TOOLBUG-035 — a directory no package references makes the whole library unusable
 
-**Status:** open. Found compiling `Modelica_DeviceDrivers`.
+**Status:** fixed (2026-09-30). A directory without `package.mo` that no `package.order` names is ignored with a PKG-006 warning; before, the no-`package.order` case still failed the library. Contract `pkg_006_an_unnamed_directory_without_package_mo_is_not_a_package`.
 **Severity:** high — fatal, whole-library, for a defect in dead weight.
 
 ## What

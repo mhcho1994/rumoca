@@ -1,7 +1,6 @@
 # TOOLBUG-034 — a source-root parse error names the root, not the file
 
-**Status:** open. Found while diagnosing
-[TOOLBUG-033](TOOLBUG-033-a-utf8-bom-makes-a-file-unparseable.md).
+**Status:** fixed. An unreadable or unparseable file under a source root is named in its own warning and skipped (`source_root_cache.rs`), so the error no longer names only the root.
 **Severity:** medium — correct verdict, unusable message.
 
 ## What

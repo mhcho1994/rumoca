@@ -1,6 +1,6 @@
 # TOOLBUG-028: constant folding discards the unit
 
-**Status:** open
+**Status:** frontend part fixed (2026-09-30): the frontend no longer folds package constants; `postprocess/package_constants.rs` keeps each Real scalar package constant declared, with its unit, under its qualified name. The default `inline-constants` bitcode pass still replaces references with literals, so a unit analysis must read `rumoca compile --pass none` output (or the artifact before that pass).
 **Found:** 2026-09-24, verifying `QuantitySan`'s first full-corpus sweep. Three
 of ten high-severity findings were this defect and not defects in MSL.
 

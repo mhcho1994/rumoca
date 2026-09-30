@@ -1,6 +1,6 @@
 # TOOLBUG-032 — `cargo xtask verify lint` has never passed on this branch
 
-**Status:** open, unowned. Not introduced by the Execution IR v2 milestone.
+**Status:** fixed by TOOLBUG-068 (2026-09-30): `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 
 ## What
 

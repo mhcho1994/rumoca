@@ -1,6 +1,6 @@
 # TOOLBUG-036 — one bad declaration anywhere in a source root zeroes every model
 
-**Status:** open. The amplifier behind three separate whole-library failures.
+**Status:** fixed for all three triggers (2026-09-30). BOM: TOOLBUG-033. Unreferenced directory: TOOLBUG-035. `outer` with a modification: no longer a parse error -- WR007 reports it and resolution drops it (MLS §5.4), as OpenModelica does. Unparseable files elsewhere in a root are skipped with a warning.
 **Severity:** high — turns a local defect into a total one.
 
 ## What
