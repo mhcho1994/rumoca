@@ -211,8 +211,8 @@ fn oriented_discrete_connection<'flat>(
     else {
         return None;
     };
-    let (lhs_name, lhs_subscripts) = discrete_value_base_reference(lhs, roles)?;
-    let (rhs_name, rhs_subscripts) = discrete_value_base_reference(rhs, roles)?;
+    let (lhs_name, lhs_subscripts) = discrete_connection_endpoint(lhs, roles)?;
+    let (rhs_name, rhs_subscripts) = discrete_connection_endpoint(rhs, roles)?;
     let lhs_variable = flat.variables.get(lhs_name)?;
     let rhs_variable = flat.variables.get(rhs_name)?;
     let lhs_rank = connection_ranks.get(lhs_name).copied();
@@ -232,7 +232,13 @@ fn oriented_discrete_connection<'flat>(
             _ => return None,
         },
     };
-    Some((target, target_subscripts, value))
+    // An external input is supplied by the environment; it is always the
+    // value of the connection and never the coordinate it defines.
+    matches!(roles.get(target), Some(PlannedRole::DiscreteValue)).then_some((
+        target,
+        target_subscripts,
+        value,
+    ))
 }
 
 pub(super) fn aggregate_discrete_connections(
@@ -541,12 +547,20 @@ pub(super) fn discrete_connection_ranks(
         else {
             continue;
         };
-        let Some((lhs, _)) = discrete_value_base_reference(lhs, roles) else {
+        let Some((lhs, _)) = discrete_connection_endpoint(lhs, roles) else {
             continue;
         };
-        let Some((rhs, _)) = discrete_value_base_reference(rhs, roles) else {
+        let Some((rhs, _)) = discrete_connection_endpoint(rhs, roles) else {
             continue;
         };
+        // A discrete external input connected to a nested discrete input
+        // produces its value: it ranks with the producers, so orientation
+        // makes the nested side the defined coordinate.
+        for endpoint in [lhs, rhs] {
+            if matches!(roles.get(endpoint), Some(PlannedRole::Input)) {
+                producers.insert(endpoint.clone());
+            }
+        }
         neighbors.entry(lhs.clone()).or_default().push(rhs.clone());
         neighbors.entry(rhs.clone()).or_default().push(lhs.clone());
     }
@@ -605,6 +619,30 @@ fn selection_denotes_whole_aggregate(target: &flat::Variable, subscripts: &[Subs
             .all(|(subscript, extent)| {
                 *extent == 1 && matches!(subscript, Subscript::Index { value: 1, .. })
             })
+}
+
+/// A discrete-connection endpoint: a discrete-value coordinate, or an
+/// external input (the environment's value) connected to one.
+///
+/// A connection equation between two external inputs defines nothing, so an
+/// input endpoint is only accepted when the other side is a discrete value;
+/// `oriented_discrete_connection` enforces that by refusing an input target.
+fn discrete_connection_endpoint<'flat>(
+    expression: &'flat Expression,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> Option<(&'flat VarName, &'flat [Subscript])> {
+    let Expression::VarRef {
+        name, subscripts, ..
+    } = expression
+    else {
+        return None;
+    };
+    let name = name.var_name();
+    matches!(
+        roles.get(name),
+        Some(PlannedRole::DiscreteValue | PlannedRole::Input)
+    )
+    .then_some((name, subscripts.as_slice()))
 }
 
 fn discrete_value_base_reference<'flat>(
