@@ -115,8 +115,18 @@ pub(super) fn lower_algorithms<'dae>(
             functions: request.environment.functions,
         };
         match plan {
-            ModelAlgorithmPlan::Declarative { target } => {
-                lower_declarative_model_algorithm(&mut lowering, algorithm, target)?;
+            ModelAlgorithmPlan::Declarative {
+                targets,
+                loop_ranges,
+            } => {
+                lower_declarative_model_algorithm(&mut lowering, algorithm, targets, loop_ranges)?;
+                lower_assertions(
+                    lowering.construction,
+                    lowering.coordinates,
+                    lowering.functions,
+                    request.environment.sample_lattices,
+                    &declarative_assertions(algorithm),
+                )?;
             }
             ModelAlgorithmPlan::TotalArrayDefinition {
                 target,
@@ -183,20 +193,114 @@ pub(super) fn lower_algorithms<'dae>(
                     debug_assert!(transaction_steps.borrow().is_empty());
                     continue;
                 }
+                let steps = transaction_steps.into_inner();
+                if event_projections_are_exact(&steps, &algorithm.statements) {
+                    continue;
+                }
                 let transaction_targets = targets
                     .into_iter()
                     .map(|target| model_event_target(request.environment.coordinates[&target]));
                 lowering.construction.model_events(|events| {
-                    events.transaction(
-                        transaction_targets,
-                        transaction_steps.into_inner(),
-                        owner_provenance,
-                    )
+                    events.transaction(transaction_targets, steps, owner_provenance)
                 })?;
             }
         }
     }
     Ok(())
+}
+
+/// The top-level `assert` statements of a declarative algorithm. Analysis
+/// proves they read no algorithm target, so they check the same values as an
+/// equation-section `assert` would.
+fn declarative_assertions(algorithm: &flat::Algorithm) -> Vec<flat::AssertEquation> {
+    algorithm
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            rumoca_core::Statement::Assert {
+                condition,
+                message,
+                level,
+                span,
+            } => Some(flat::AssertEquation::new(
+                condition.clone(),
+                message.as_ref().clone(),
+                level.as_deref().cloned(),
+                *span,
+                flat::EquationOrigin::Algorithm {
+                    component: algorithm.origin.clone(),
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether the per-statement discrete definitions an event algorithm already
+/// issued are, on their own, the exact meaning of the algorithm, so that no
+/// model-event transaction is needed to order them.
+///
+/// Every assignment is issued as an equation-shaped definition under its own
+/// activation (`lower_when_assignment`), exactly as the same statement written
+/// as a when-equation would be. Those definitions only lose the algorithm's
+/// sequential meaning (MLS §11.1) when one target is written more than once, when an
+/// `elsewhen` branch must be suppressed by an earlier branch of its chain
+/// (MLS §8.3.5), or when discrete-valued targets sharing one B.1c owner are
+/// written under different activations (the owner selects one activation and
+/// retains `pre()` for the rest). A sampled (periodic-clock) step keeps its
+/// transaction: that is the checked clock-partition producer.
+///
+/// With none of these, each target has one definition under one activation,
+/// and the algorithm means precisely those when-equations. This is the shape
+/// of the common single `when` on a relation that updates a discrete `Real`.
+fn event_projections_are_exact(
+    steps: &[dae::ModelEventStep<'_>],
+    statements: &[rumoca_core::Statement],
+) -> bool {
+    if statements_contain_elsewhen(statements) || steps.iter().any(|step| step.clock().is_some()) {
+        return false;
+    }
+    let definitions = steps.iter().flat_map(|step| {
+        step.definitions()
+            .iter()
+            .map(move |definition| (definition.target(), (step.trigger(), step.guard())))
+    });
+    let mut defined = HashSet::new();
+    let mut value_activations = HashSet::new();
+    for (target, activation) in definitions {
+        if !defined.insert(target.variable()) {
+            return false;
+        }
+        if matches!(target, dae::ModelEventTarget::DiscreteValue(_)) {
+            value_activations.insert(activation);
+        }
+    }
+    value_activations.len() <= 1
+}
+
+fn statements_contain_elsewhen(statements: &[rumoca_core::Statement]) -> bool {
+    statements.iter().any(|statement| match statement {
+        rumoca_core::Statement::When { blocks, .. } => {
+            blocks.len() > 1
+                || blocks
+                    .iter()
+                    .any(|block| statements_contain_elsewhen(&block.stmts))
+        }
+        rumoca_core::Statement::If {
+            cond_blocks,
+            else_block,
+            ..
+        } => {
+            cond_blocks
+                .iter()
+                .any(|block| statements_contain_elsewhen(&block.stmts))
+                || else_block
+                    .as_deref()
+                    .is_some_and(statements_contain_elsewhen)
+        }
+        rumoca_core::Statement::For { equations, .. } => statements_contain_elsewhen(equations),
+        _ => false,
+    })
 }
 
 fn seed_event_algorithm_values<'dae>(

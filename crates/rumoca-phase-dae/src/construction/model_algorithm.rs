@@ -12,13 +12,14 @@ pub(super) struct ModelAlgorithmLowering<'lower, 'shape, 'dae> {
 struct DeclarativeSymbols<'scope, 'shape, 'dae> {
     coordinates: &'scope HashMap<VarName, Coordinate<'dae>>,
     functions: &'scope FunctionRegistry<'shape, 'dae>,
-    target: &'scope VarName,
+    loop_ranges: &'scope HashMap<Span, Vec<i64>>,
 }
 
 pub(super) fn lower_declarative_model_algorithm<'dae>(
     lowering: &mut ModelAlgorithmLowering<'_, '_, 'dae>,
     algorithm: &flat::Algorithm,
-    target: &VarName,
+    targets: &[VarName],
+    loop_ranges: &HashMap<Span, Vec<i64>>,
 ) -> Result<(), dae::DaeConstructionError> {
     let mut values = HashMap::new();
     lower_declarative_statements(
@@ -26,13 +27,16 @@ pub(super) fn lower_declarative_model_algorithm<'dae>(
         DeclarativeSymbols {
             coordinates: lowering.coordinates,
             functions: lowering.functions,
-            target,
+            loop_ranges,
         },
         &algorithm.statements,
         &mut values,
     )?;
-    let value = values[target];
-    finish_model_algorithm_value(lowering, algorithm, target, value)
+    for target in targets {
+        let value = values[target];
+        finish_model_algorithm_value(lowering, algorithm, target, value)?;
+    }
+    Ok(())
 }
 
 pub(super) fn lower_total_array_model_algorithm<'dae>(
@@ -258,7 +262,7 @@ fn lower_declarative_statements<'dae>(
 ) -> Result<(), dae::DaeConstructionError> {
     for statement in statements {
         match statement {
-            rumoca_core::Statement::Assignment { value, .. } => {
+            rumoca_core::Statement::Assignment { comp, value, .. } => {
                 let value = lower_model_algorithm_expression(
                     construction,
                     symbols.coordinates,
@@ -266,7 +270,10 @@ fn lower_declarative_statements<'dae>(
                     values,
                     value,
                 )?;
-                values.insert(symbols.target.clone(), value);
+                let target = rumoca_core::component_ref_to_base_reference(comp)
+                    .var_name()
+                    .clone();
+                values.insert(target, value);
             }
             rumoca_core::Statement::If {
                 cond_blocks,
@@ -280,8 +287,48 @@ fn lower_declarative_statements<'dae>(
                 *span,
                 values,
             )?,
+            rumoca_core::Statement::For {
+                indices,
+                equations,
+                span,
+            } => lower_declarative_loop(construction, symbols, indices, equations, *span, values)?,
+            // Lowered with the section's other assertions; analysis proves it
+            // reads no target, so its position does not matter.
+            rumoca_core::Statement::Assert { .. } => {}
             _ => unreachable!("analysis restricts declarative model algorithm statements"),
         }
+    }
+    Ok(())
+}
+
+/// Unroll one `for` statement over the iteration values analysis settled,
+/// binding the index to each value in turn (MLS §11.2.2.1).
+fn lower_declarative_loop<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    symbols: DeclarativeSymbols<'_, '_, 'dae>,
+    indices: &[rumoca_core::ForIndex],
+    body: &[rumoca_core::Statement],
+    span: Span,
+    values: &mut HashMap<VarName, dae::ExprId<'dae>>,
+) -> Result<(), dae::DaeConstructionError> {
+    let [index] = indices else {
+        unreachable!("analysis proves a single-index declarative loop")
+    };
+    let index_name = VarName::new(&index.ident);
+    let shadowed = values.remove(&index_name);
+    let provenance = dae::DaeProvenance::generated(dae::DaeGeneration::AlgorithmEquation, span)?;
+    for value in &symbols.loop_ranges[&span] {
+        let literal = construction.expressions(|expressions| {
+            expressions
+                .at(provenance)
+                .literal(dae::DaeLiteral::Integer(*value))
+        })?;
+        values.insert(index_name.clone(), literal);
+        lower_declarative_statements(construction, symbols, body, values)?;
+    }
+    values.remove(&index_name);
+    if let Some(shadowed) = shadowed {
+        values.insert(index_name, shadowed);
     }
     Ok(())
 }
@@ -295,27 +342,54 @@ fn lower_declarative_conditional<'dae>(
     values: &mut HashMap<VarName, dae::ExprId<'dae>>,
 ) -> Result<(), dae::DaeConstructionError> {
     let entry = values.clone();
-    let mut branches = Vec::with_capacity(blocks.len());
+    let mut conditions = Vec::with_capacity(blocks.len());
+    let mut branch_values = Vec::with_capacity(blocks.len());
     for block in blocks {
-        let condition = lower_model_algorithm_expression(
+        conditions.push(lower_model_algorithm_expression(
             construction,
             symbols.coordinates,
             symbols.functions,
             &entry,
             &block.cond,
-        )?;
-        let mut branch_values = entry.clone();
-        lower_declarative_statements(construction, symbols, &block.stmts, &mut branch_values)?;
-        branches.push((condition, branch_values[symbols.target]));
+        )?);
+        let mut branch = entry.clone();
+        lower_declarative_statements(construction, symbols, &block.stmts, &mut branch)?;
+        branch_values.push(branch);
     }
-    let mut fallback_values = entry;
+    let mut fallback_values = entry.clone();
     if let Some(statements) = fallback {
         lower_declarative_statements(construction, symbols, statements, &mut fallback_values)?;
     }
-    let fallback = fallback_values[symbols.target];
+    // Merge every coordinate defined on all paths out of the chain; one that
+    // some path leaves undefined stays undefined, which analysis proves no
+    // later statement reads.
+    let mut merged = fallback_values
+        .keys()
+        .filter(|target| {
+            branch_values
+                .iter()
+                .all(|branch| branch.contains_key(*target))
+        })
+        .filter(|target| {
+            entry.get(*target) != fallback_values.get(*target)
+                || branch_values
+                    .iter()
+                    .any(|branch| entry.get(*target) != branch.get(*target))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    merged.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     let provenance = dae::DaeProvenance::generated(dae::DaeGeneration::AlgorithmEquation, span)?;
-    let value = construction
-        .expressions(|expressions| expressions.at(provenance).conditional(branches, fallback))?;
-    values.insert(symbols.target.clone(), value);
+    for target in merged {
+        let arms = conditions
+            .iter()
+            .copied()
+            .zip(branch_values.iter().map(|branch| branch[&target]))
+            .collect::<Vec<_>>();
+        let fallback = fallback_values[&target];
+        let value = construction
+            .expressions(|expressions| expressions.at(provenance).conditional(arms, fallback))?;
+        values.insert(target, value);
+    }
     Ok(())
 }

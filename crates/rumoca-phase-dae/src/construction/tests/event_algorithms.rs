@@ -167,21 +167,11 @@ fn model_event_algorithm_sequential_read_after_write_uses_new_value() {
     let dae = construct(&model, source.map)
         .expect("the event transition carries the first assignment into the second RHS");
     dae.inspect(|view| {
-        assert_eq!(view.model_event_transaction_count(), 1);
-        let transaction = view
-            .model_event_transaction(view.model_event_transaction_id(0).unwrap())
-            .unwrap();
-        assert_eq!(transaction.targets().len(), 2);
-        assert_eq!(transaction.steps().len(), 2);
-        let second_step = transaction.steps().nth(1).unwrap();
-        let second_definition = second_step.definitions().next().unwrap();
-        assert_eq!(second_definition.provenance().span(), second_span);
-        assert!(matches!(
-            view.expression(second_definition.value())
-                .unwrap()
-                .operation(),
-            dae::ExpressionOperation::Literal(dae::DaeLiteral::Boolean(true))
-        ));
+        // One activation, one definition per target: the per-statement B.1c
+        // definitions are the algorithm's exact meaning, so no model-event
+        // transaction is issued (TOOLBUG-110). The SSA value of `x` still
+        // reaches the definition of `y`.
+        assert_eq!(view.model_event_transaction_count(), 0);
         assert_eq!(view.discrete_value_owner_count(), 1);
         let owner = view
             .discrete_value_owner(view.discrete_value_owner_id(0).unwrap())

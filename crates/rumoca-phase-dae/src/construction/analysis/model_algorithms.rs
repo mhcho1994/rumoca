@@ -1,8 +1,13 @@
 use super::*;
 
 pub(in crate::construction) enum ModelAlgorithmPlan {
+    /// Straight-line scalar assignments and conditionals. Each target's value
+    /// when the section finishes is its declarative definition (MLS §11.1.2).
     Declarative {
-        target: VarName,
+        targets: Vec<VarName>,
+        /// Settled iteration values of each `for` statement, by its span; the
+        /// loop is unrolled with its index bound to each value in turn.
+        loop_ranges: HashMap<Span, Vec<i64>>,
     },
     TotalArrayDefinition {
         target: VarName,
@@ -69,6 +74,9 @@ pub(super) fn analyze_model_algorithm(
     {
         return Ok(plan);
     }
+    if targets.len() > 1 {
+        return analyze_multi_output_declarative(flat, algorithm, targets, roles, model_values);
+    }
     let [target] = targets.as_slice() else {
         return Err(ToDaeError::unsupported_algorithm(
             "model",
@@ -90,7 +98,14 @@ pub(super) fn analyze_model_algorithm(
             algorithm.span,
         ));
     }
-    let assigned = validate_declarative_sequence(&algorithm.statements, target, false)?;
+    let assigned = match validate_declarative_sequence(&algorithm.statements, target, false) {
+        Ok(assigned) => assigned,
+        // Loops and assertions are admitted by the general sequence proof.
+        Err(error) => {
+            return analyze_multi_output_declarative(flat, algorithm, targets, roles, model_values)
+                .map_err(|_| error);
+        }
+    };
     if !assigned {
         return Err(ToDaeError::unsupported_algorithm(
             "model",
@@ -99,8 +114,251 @@ pub(super) fn analyze_model_algorithm(
         ));
     }
     Ok(ModelAlgorithmPlan::Declarative {
-        target: target.clone(),
+        targets: vec![target.clone()],
+        loop_ranges: HashMap::new(),
     })
+}
+
+/// Plan a continuous algorithm that assigns several scalar coordinates.
+///
+/// MLS §11.1.2 gives such a section the meaning of the values its targets hold
+/// when it finishes. With only scalar assignments, `if` statements, `for`
+/// statements over settled integer ranges (unrolled), and top-level `assert`s
+/// that read no target, and no target read before it is assigned on every path
+/// that reaches the read, each final value is a closed expression over the
+/// section's inputs, so every target has exactly one declarative definition.
+/// Anything else keeps the atomic-owner refusal.
+fn analyze_multi_output_declarative(
+    flat: &flat::Model,
+    algorithm: &flat::Algorithm,
+    targets: Vec<VarName>,
+    roles: &HashMap<VarName, PlannedRole>,
+    model_values: &ShapeEnvironment,
+) -> Result<ModelAlgorithmPlan, ToDaeError> {
+    if targets.iter().any(|target| {
+        !flat.variables[target].dims.is_empty() || !is_declarative_role(roles[target])
+    }) {
+        return Err(ToDaeError::unsupported_algorithm(
+            "model",
+            "a multi-output algorithm requires one checked atomic vector-equation owner",
+            algorithm.span,
+        ));
+    }
+    let mut proof = DeclarativeSequenceProof {
+        targets: targets.iter().cloned().collect(),
+        model_values,
+        loop_ranges: HashMap::new(),
+    };
+    let assigned = proof.sequence(&algorithm.statements, HashSet::new(), true)?;
+    if let Some(missing) = targets.iter().find(|target| !assigned.contains(*target)) {
+        return Err(ToDaeError::unsupported_algorithm(
+            "model",
+            format!("algorithm does not define `{missing}` on every control-flow path"),
+            algorithm.span,
+        ));
+    }
+    Ok(ModelAlgorithmPlan::Declarative {
+        targets,
+        loop_ranges: proof.loop_ranges,
+    })
+}
+
+/// Largest unrolled iteration count a declarative `for` statement may have.
+const MAX_DECLARATIVE_LOOP_ITERATIONS: usize = 4096;
+
+struct DeclarativeSequenceProof<'scope> {
+    targets: HashSet<VarName>,
+    model_values: &'scope ShapeEnvironment,
+    loop_ranges: HashMap<Span, Vec<i64>>,
+}
+
+impl DeclarativeSequenceProof<'_> {
+    /// The targets definitely assigned after `statements`, rejecting any
+    /// statement outside the declarative grammar and any read of a target that
+    /// is not yet definitely assigned.
+    fn sequence(
+        &mut self,
+        statements: &[rumoca_core::Statement],
+        mut assigned: HashSet<VarName>,
+        top_level: bool,
+    ) -> Result<HashSet<VarName>, ToDaeError> {
+        for statement in statements {
+            assigned = match statement {
+                rumoca_core::Statement::Assignment { comp, value, span } => {
+                    self.assignment(comp, value, *span, &mut assigned)?;
+                    assigned
+                }
+                rumoca_core::Statement::If {
+                    cond_blocks,
+                    else_block,
+                    ..
+                } => self.conditional(cond_blocks, else_block.as_deref(), assigned)?,
+                rumoca_core::Statement::For {
+                    indices,
+                    equations,
+                    span,
+                } => self.unrolled_loop(indices, equations, *span, assigned)?,
+                rumoca_core::Statement::Assert {
+                    condition,
+                    message,
+                    level,
+                    ..
+                } if top_level => {
+                    self.assertion([condition, message].into_iter().chain(level.as_deref()))?;
+                    assigned
+                }
+                _ => {
+                    let span = required_statement_span(
+                        statement,
+                        "unsupported declarative model algorithm statement",
+                    )?;
+                    return Err(unsupported_declarative_statement(span));
+                }
+            };
+        }
+        Ok(assigned)
+    }
+
+    fn assignment(
+        &self,
+        component: &rumoca_core::ComponentReference,
+        value: &Expression,
+        span: Span,
+        assigned: &mut HashSet<VarName>,
+    ) -> Result<(), ToDaeError> {
+        if component.parts().iter().any(|part| !part.subs.is_empty()) {
+            return Err(unsupported_declarative_statement(span));
+        }
+        reject_unassigned_reads(value, &self.targets, assigned)?;
+        assigned.insert(assignment_target(component));
+        Ok(())
+    }
+
+    /// A top-level `assert` is lowered as an ordinary assertion owner, so it
+    /// may read no target at all.
+    fn assertion<'expression>(
+        &self,
+        expressions: impl IntoIterator<Item = &'expression Expression>,
+    ) -> Result<(), ToDaeError> {
+        let no_targets = HashSet::new();
+        for expression in expressions {
+            reject_unassigned_reads(expression, &self.targets, &no_targets)?;
+        }
+        Ok(())
+    }
+
+    fn conditional(
+        &mut self,
+        blocks: &[rumoca_core::StatementBlock],
+        fallback: Option<&[rumoca_core::Statement]>,
+        assigned: HashSet<VarName>,
+    ) -> Result<HashSet<VarName>, ToDaeError> {
+        let mut exits = Vec::with_capacity(blocks.len() + 1);
+        for block in blocks {
+            reject_unassigned_reads(&block.cond, &self.targets, &assigned)?;
+            exits.push(self.sequence(&block.stmts, assigned.clone(), false)?);
+        }
+        exits.push(match fallback {
+            Some(fallback) => self.sequence(fallback, assigned.clone(), false)?,
+            None => assigned,
+        });
+        Ok(exits
+            .into_iter()
+            .reduce(|lhs, rhs| lhs.intersection(&rhs).cloned().collect())
+            .unwrap_or_default())
+    }
+
+    fn unrolled_loop(
+        &mut self,
+        indices: &[rumoca_core::ForIndex],
+        body: &[rumoca_core::Statement],
+        span: Span,
+        assigned: HashSet<VarName>,
+    ) -> Result<HashSet<VarName>, ToDaeError> {
+        let [index] = indices else {
+            return Err(unsupported_declarative_statement(span));
+        };
+        if self.targets.contains(&VarName::new(&index.ident)) {
+            return Err(unsupported_declarative_statement(span));
+        }
+        let values = settled_range_values(&index.range, self.model_values)
+            .filter(|values| values.len() <= MAX_DECLARATIVE_LOOP_ITERATIONS)
+            .ok_or_else(|| {
+                ToDaeError::unsupported_algorithm(
+                    "model",
+                    format!(
+                        "loop index `{}` needs a settled integer range to unroll",
+                        index.ident
+                    ),
+                    span,
+                )
+            })?;
+        let empty = values.is_empty();
+        self.loop_ranges.insert(span, values);
+        // Every iteration runs the same body, so the first one decides which
+        // reads are defined; a nonempty range also runs its assignments.
+        let after = self.sequence(body, assigned.clone(), false)?;
+        Ok(if empty { assigned } else { after })
+    }
+}
+
+fn unsupported_declarative_statement(span: Span) -> ToDaeError {
+    ToDaeError::unsupported_algorithm(
+        "model",
+        "declarative algorithm requires scalar assignments and conditionals",
+        span,
+    )
+}
+
+/// The values of `start:step:end` when all three settle to integers.
+fn settled_range_values(range: &Expression, model_values: &ShapeEnvironment) -> Option<Vec<i64>> {
+    let Expression::Range {
+        start, step, end, ..
+    } = range
+    else {
+        return None;
+    };
+    let start = settled_integer_value(start, model_values)?;
+    let step = match step.as_deref() {
+        Some(step) => settled_integer_value(step, model_values)?,
+        None => 1,
+    };
+    let end = settled_integer_value(end, model_values)?;
+    if step == 0 {
+        return None;
+    }
+    let mut values = Vec::new();
+    let mut value = start;
+    while (step > 0 && value <= end) || (step < 0 && value >= end) {
+        if values.len() > MAX_DECLARATIVE_LOOP_ITERATIONS {
+            return None;
+        }
+        values.push(value);
+        value = value.checked_add(step)?;
+    }
+    Some(values)
+}
+
+fn reject_unassigned_reads(
+    expression: &Expression,
+    targets: &HashSet<VarName>,
+    assigned: &HashSet<VarName>,
+) -> Result<(), ToDaeError> {
+    let mut references = Vec::new();
+    expression.collect_var_refs(&mut references);
+    if let Some(target) = references
+        .iter()
+        .find(|reference| targets.contains(*reference) && !assigned.contains(*reference))
+    {
+        return Err(ToDaeError::unsupported_algorithm(
+            "model",
+            format!(
+                "`{target}` is read before definition; checked start/pre initialization is required"
+            ),
+            expression_span(expression)?,
+        ));
+    }
+    Ok(())
 }
 
 fn analyze_event_tensor_loops(
