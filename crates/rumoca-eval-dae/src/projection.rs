@@ -146,6 +146,8 @@ pub fn for_each_scalar_coordinate_cached<'dae>(
         function_frames: Vec::new(),
         function_call_active: HashSet::new(),
         function_fold_active: HashSet::new(),
+        function_fold_done: HashSet::new(),
+        next_capture_serial: 0,
         function_summary_captures: Vec::new(),
         cache,
         visit: &mut visit,
@@ -160,6 +162,8 @@ struct Projection<'visit, 'dae, F> {
     function_frames: Vec<FunctionFrame<'dae>>,
     function_call_active: HashSet<FunctionResultDependency>,
     function_fold_active: HashSet<FunctionFoldDependency>,
+    function_fold_done: HashSet<FunctionFoldDone>,
+    next_capture_serial: u64,
     function_summary_captures: Vec<FunctionSummaryCapture>,
     cache: &'visit mut ScalarCoordinateProjectionCache<'dae>,
     visit: &'visit mut F,
@@ -172,6 +176,16 @@ struct FunctionFoldDependency {
     carried: u32,
     field: Option<usize>,
     scalar: usize,
+}
+
+/// A loop-carried dependency already projected, with everything its
+/// projection depends on (`Projection::fold_done_key`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FunctionFoldDone {
+    dependency: FunctionFoldDependency,
+    frame: (u32, Option<Vec<u32>>),
+    capture: Option<u64>,
+    points: Vec<(u32, Vec<i64>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -210,6 +224,9 @@ struct FunctionSummaryCapture {
     dependencies: Vec<FunctionParameterDependency>,
     cacheable: bool,
     visited: HashSet<FunctionExpressionDependency>,
+    /// Distinguishes this capture from any other of the same function, so a
+    /// memo entry never carries from one summary into another.
+    serial: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -362,14 +379,37 @@ where
             field,
             scalar,
         };
-        if !self.function_fold_active.insert(dependency.clone()) {
-            return Ok(());
-        }
         let fold_view = self
             .view
             .function_fold(fold)
             .expect("checked function fold identity resolves");
-        let carried = carried as usize;
+        // Every iteration's update reads the carried value of the one before,
+        // so projecting a carried value re-enters the same loop from inside
+        // one of its own iterations. The loop's complete projection does not
+        // depend on which of its iterations asked: drop the enclosing points
+        // of its own domain while it is projected, so they neither pile up
+        // nor make each re-entry look new to the memo below.
+        let shadowed = self.take_domain_points(fold_view.domain());
+        let projected = self.function_fold_projection(fold_view, dependency, field, scalar);
+        self.restore_domain_points(shadowed);
+        projected
+    }
+
+    fn function_fold_projection(
+        &mut self,
+        fold_view: dae::FunctionFoldView<'dae>,
+        dependency: FunctionFoldDependency,
+        field: Option<usize>,
+        scalar: usize,
+    ) -> Result<(), ProjectionError> {
+        let done_key = self.fold_done_key(&dependency);
+        if self.function_fold_done.contains(&done_key) {
+            return Ok(());
+        }
+        if !self.function_fold_active.insert(dependency.clone()) {
+            return Ok(());
+        }
+        let carried = dependency.carried as usize;
         let initial = fold_view
             .initial_values()
             .rhs(carried)
@@ -390,13 +430,74 @@ where
                 .expect("checked fold domain remains representable");
             for point in points {
                 self.domain_points.push((fold_view.domain(), point));
-                self.projected_value(update, field, scalar)?;
+                let visited = self.projected_value(update, field, scalar);
                 self.domain_points.pop();
+                visited?;
             }
             Ok(())
         })();
         self.function_fold_active.remove(&dependency);
+        if projected.is_ok() {
+            self.function_fold_done.insert(done_key);
+        }
         projected
+    }
+
+    /// Remove the enclosing points bound to `domain`, remembering where each
+    /// was, so `restore_domain_points` can put them back exactly.
+    fn take_domain_points(
+        &mut self,
+        domain: dae::DomainId<'dae>,
+    ) -> Vec<(usize, (dae::DomainId<'dae>, Vec<i64>))> {
+        let mut taken = Vec::new();
+        let mut index = 0;
+        while index < self.domain_points.len() {
+            if self.domain_points[index].0 == domain {
+                taken.push((index + taken.len(), self.domain_points.remove(index)));
+            } else {
+                index += 1;
+            }
+        }
+        taken
+    }
+
+    fn restore_domain_points(&mut self, taken: Vec<(usize, (dae::DomainId<'dae>, Vec<i64>))>) {
+        for (position, entry) in taken {
+            self.domain_points.insert(position, entry);
+        }
+    }
+
+    /// The memo key for a loop-carried dependency: the dependency itself, the
+    /// call it is projected in (a summary, or concrete arguments), and the
+    /// enclosing loop points. Everything the projection of that carried value
+    /// can visit is a function of these, so a second projection under the
+    /// same key visits nothing new.
+    fn fold_done_key(&self, dependency: &FunctionFoldDependency) -> FunctionFoldDone {
+        let frame = match self.function_frames.last() {
+            Some(FunctionFrame::Actual {
+                function,
+                arguments,
+            }) => (
+                function.index(),
+                Some(arguments.iter().map(|argument| argument.index()).collect()),
+            ),
+            Some(FunctionFrame::Summary(function)) => (function.index(), None),
+            None => (u32::MAX, None),
+        };
+        let points = self
+            .domain_points
+            .iter()
+            .map(|(domain, point)| (domain.index(), point.clone()))
+            .collect();
+        FunctionFoldDone {
+            dependency: dependency.clone(),
+            frame,
+            capture: self
+                .function_summary_captures
+                .last()
+                .map(|capture| capture.serial),
+            points,
+        }
     }
 
     /// Project either one scalar of a value or one scalar of a record field.
@@ -588,7 +689,9 @@ where
             dependencies: Vec::new(),
             cacheable: true,
             visited: HashSet::new(),
+            serial: self.next_capture_serial,
         });
+        self.next_capture_serial += 1;
         self.function_frames.push(FunctionFrame::Summary(function));
         let result = self.function_result(function, dependency.output, span)?;
         let projected = match dependency.field {

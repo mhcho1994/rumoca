@@ -9,6 +9,7 @@
 //! own scalar coordinate projection, so a consumer never has to re-derive them
 //! by walking expressions.
 
+mod call_graph;
 mod clocks;
 mod paths;
 mod profile;
@@ -1095,40 +1096,8 @@ fn export_initial_discrete_values(
 /// call could not be expressed at all, so every call in the model exported as
 /// `Unsupported` and every expression under it became unreachable: 3621 calls
 /// across 156 of 491 MSL models, whose arguments no consumer could see.
-/// Callee edges for every function, indexed by function ordinal.
-///
-/// Built in one pass: every expression knows the function scope it belongs to
-/// (`function_scope`), so the calls inside a body are recoverable here even
-/// though the body itself is never exported. This is the same traversal
-/// `rumoca-phase-structural` uses to order functions by dependency.
-fn call_graph(view: dae::DaeView<'_>) -> Vec<Vec<FunctionId>> {
-    let mut edges: Vec<Vec<FunctionId>> = vec![Vec::new(); view.function_count()];
-    for index in 0..view.expression_count() {
-        let Some(id) = view.expression_id(index) else {
-            continue;
-        };
-        let Some(expression) = view.expression(id) else {
-            continue;
-        };
-        let Some(owner) = expression.function_scope() else {
-            continue;
-        };
-        let dae::ExpressionOperation::Call { function, .. } = expression.operation() else {
-            continue;
-        };
-        if let Some(slot) = edges.get_mut(owner.index() as usize) {
-            slot.push(FunctionId(function.index()));
-        }
-    }
-    for callees in &mut edges {
-        callees.sort_unstable_by_key(|id| id.0);
-        callees.dedup();
-    }
-    edges
-}
-
 fn export_functions(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcFunction> {
-    let edges = call_graph(view);
+    let edges = call_graph::call_graph(view);
     let recursive = function_body::recursive_functions(&edges);
     (0..view.function_count())
         .filter_map(|index| {
