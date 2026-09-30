@@ -910,8 +910,11 @@ fn arr_013_size_of_undeclared_expandable_member_rejected() {
         end M;
     "#,
         "M",
-        FailedPhase::Instantiate,
-        "EI007",
+        // No connection creates `b.sig` (MLS §9.1.3), so the reference names
+        // nothing; Instantiate leaves undeclared expandable members
+        // unresolved (TOOLBUG-078) and Typecheck reports the unknown member.
+        FailedPhase::Typecheck,
+        "ET001",
     );
 }
 

@@ -1181,3 +1181,39 @@ fn test_resolved_type_identity_rejects_unrelated_same_named_override() {
         "resolve's exact type identity must survive unrelated same-named outer types"
     );
 }
+
+#[test]
+fn selected_expandable_connector_member_is_not_required_to_be_declared() {
+    // MLS §9.1.3: `bus.TOut` names a member the connection creates; the
+    // expandable connector declares nothing, so re-proving the reference in
+    // the selected class stops at the connector instead of failing (TOOLBUG-078).
+    let source = r"
+expandable connector Bus
+end Bus;
+model Env
+  Bus bus;
+end Env;
+";
+    let tree = resolved_tree(source);
+    let env = tree
+        .get_class_by_qualified_name("Env")
+        .and_then(|class| class.def_id)
+        .expect("Env identity");
+    let reference = ast::ComponentReference {
+        local: false,
+        parts: ["env", "bus", "TOut"]
+            .iter()
+            .map(|part| ast::ComponentRefPart {
+                ident: make_token(part),
+                subs: None,
+                def_id: None,
+            })
+            .collect(),
+        span: rumoca_core::Span::DUMMY,
+        qualified_display_name: None,
+    };
+    let identities =
+        super::selected_class_members::resolve_member_reference_in_class(&tree, env, &reference, 1)
+            .expect("undeclared expandable member is accepted");
+    assert_eq!(identities.len(), 1, "only `bus` has a declaration");
+}

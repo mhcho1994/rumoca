@@ -47,6 +47,15 @@ pub(super) fn resolve_member_reference_in_class(
             }
             continue;
         }
+        if owner_class.expandable
+            && find_nested_class_in_hierarchy(tree, owner_class, part.ident.text.as_ref()).is_none()
+        {
+            // MLS §9.1.3: an undeclared member of an expandable connector is
+            // created by the connections that name it; it has no declaration
+            // to prove, so the remaining segments stay unresolved exactly as
+            // for a statically typed expandable connector.
+            break;
+        }
         let nested = find_nested_class_in_hierarchy(tree, owner_class, part.ident.text.as_ref())
             .ok_or_else(|| {
                 Box::new(InstantiateError::redeclare_error(
