@@ -1051,6 +1051,50 @@ fn inst_043_explicit_constrainedby_overrides_declared_type_as_constraint() {
     );
 }
 
+#[test]
+fn inst_043_outer_extends_redeclare_replaces_transitively_inherited_component() {
+    // `ThreeWayLinear extends PartialThreeWayValve(redeclare TwoWayLinear res1)`
+    // where `res1` is declared two levels up and redeclared (to a partial
+    // class) in between: the outermost redeclaration wins (MLS §7.2/§7.3), and
+    // the constraining-clause modifier of the intermediate redeclaration
+    // (`constrainedby PV(k = 2)`) carries over to the final element
+    // (MLS §7.3.2).
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        model M
+            partial model PI
+                Real x;
+            end PI;
+            partial model PV
+                extends PI;
+                parameter Real k = 1;
+            end PV;
+            model Lin
+                extends PV;
+            equation
+                x = 10 * k;
+            end Lin;
+            partial model Res
+                replaceable PI r constrainedby PI;
+            end Res;
+            partial model Valve
+                extends Res(redeclare replaceable PV r constrainedby PV(k = 2));
+            end Valve;
+            model V3
+                extends Valve(redeclare Lin r);
+            end V3;
+            V3 w;
+            Real t(start = 0, fixed = true);
+        equation
+            der(t) = 1;
+        end M;
+    "#,
+        "M",
+        0.1,
+    );
+    assert_eq!(trace.final_value("w.r.x"), 20.0);
+}
+
 // =============================================================================
 // INST-034: Encapsulated lookup stop
 // "Lookup stops if enclosing class is encapsulated"

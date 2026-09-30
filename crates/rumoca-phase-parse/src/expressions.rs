@@ -784,8 +784,108 @@ fn convert_element_replaceable_redecl(
             convert_short_class_specifier(&short_def.short_class_definition.short_class_specifier)
         }
         modelica_grammar_trait::ElementReplaceableGroup::ComponentClause1(comp_clause) => {
-            convert_replaceable_component_clause_inner(&comp_clause.component_clause1)
+            let expr = convert_replaceable_component_clause_inner(&comp_clause.component_clause1)?;
+            Ok(merge_redeclare_constraining_modifications(
+                expr,
+                repl.element_replaceable_opt.as_ref(),
+            ))
         }
+    }
+}
+
+/// MLS §7.3.2: the modifiers of a constraining clause apply to the declared
+/// element as well as to the constraining type. For an element-redeclaration
+/// written inside a modification (`extends Base(redeclare replaceable C c
+/// constrainedby C(k = 2))`) the declaration and its constraining clause are
+/// folded into one `Modification { c, C(...) }`, so the constraining
+/// modifiers are appended to the declaration's own. A modifier the
+/// declaration states itself takes precedence, as for replaceable
+/// declarations in a class body (`merge_constraining_clause_modifications`).
+fn merge_redeclare_constraining_modifications(
+    expr: rumoca_ir_ast::Expression,
+    constraining: Option<&modelica_grammar_trait::ElementReplaceableOpt>,
+) -> rumoca_ir_ast::Expression {
+    let Some(class_mod) = constraining
+        .and_then(|opt| opt.constraining_clause.constraining_clause_opt.as_ref())
+        .map(|opt| &opt.class_modification)
+    else {
+        return expr;
+    };
+    let rumoca_ir_ast::Expression::Modification {
+        span,
+        target,
+        value,
+    } = expr
+    else {
+        return expr;
+    };
+    // `redeclare C c = expr` has no class modification to extend.
+    let rumoca_ir_ast::Expression::ClassModification {
+        span: class_span,
+        target: class_target,
+        mut modifications,
+        mut each_flags,
+        mut final_flags,
+        mut redeclare_flags,
+    } = Arc::unwrap_or_clone(value.clone())
+    else {
+        return rumoca_ir_ast::Expression::Modification {
+            span,
+            target,
+            value,
+        };
+    };
+    let arg_list = extract_class_mod_arg_list(class_mod);
+    for (index, arg) in arg_list.args.into_iter().enumerate() {
+        let name = modification_arg_target(&arg);
+        if name.is_none()
+            || modifications
+                .iter()
+                .any(|m| modification_arg_target(m) == name)
+        {
+            continue;
+        }
+        let flag = |flags: &[bool]| flags.get(index).copied().unwrap_or(false);
+        pad_flags(&mut each_flags, modifications.len());
+        pad_flags(&mut final_flags, modifications.len());
+        pad_flags(&mut redeclare_flags, modifications.len());
+        each_flags.push(flag(&arg_list.each_flags));
+        final_flags.push(flag(&arg_list.final_flags));
+        redeclare_flags.push(flag(&arg_list.redeclare_flags));
+        modifications.push(arg);
+    }
+    rumoca_ir_ast::Expression::Modification {
+        span,
+        target,
+        value: Arc::new(rumoca_ir_ast::Expression::ClassModification {
+            span: class_span,
+            target: class_target,
+            modifications,
+            each_flags,
+            final_flags,
+            redeclare_flags,
+        }),
+    }
+}
+
+fn pad_flags(flags: &mut Vec<bool>, len: usize) {
+    if flags.len() < len {
+        flags.resize(len, false);
+    }
+}
+
+/// The element a modification argument targets (`k` in `k = 1`, `p(start = 1)`).
+fn modification_arg_target(arg: &rumoca_ir_ast::Expression) -> Option<String> {
+    match arg {
+        rumoca_ir_ast::Expression::Modification { target, .. }
+        | rumoca_ir_ast::Expression::ClassModification { target, .. } => Some(target.to_string()),
+        rumoca_ir_ast::Expression::NamedArgument { name, .. } => Some(name.text.to_string()),
+        rumoca_ir_ast::Expression::Binary {
+            op: rumoca_core::OpBinary::Assign,
+            lhs,
+            ..
+        } => modification_arg_target(lhs),
+        _ => None,
     }
 }
 

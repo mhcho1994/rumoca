@@ -174,3 +174,64 @@ pub(super) fn extract_redeclare_type(expr: &ast::Expression) -> Option<String> {
         _ => None,
     }
 }
+
+/// Redeclarations of an `extends` clause that target components the base
+/// class inherited rather than declared (MLS §7.3).
+///
+/// `merge_class_content` only sees the base class's own declarations, so in
+/// `model V3 extends Valve(redeclare Lin r)` where `Valve extends
+/// Res(redeclare replaceable PV r)` and `Res` declares `r`, the outer
+/// redeclaration would otherwise be lost and the intermediate (possibly
+/// partial) `PV` instantiated. The innermost-first merge order of
+/// `process_extends_with_cache` makes applying these after the recursive merge
+/// the outermost-wins rule of MLS §7.2.
+pub(super) fn collect_inherited_redeclarations(
+    tree: &ast::ClassTree,
+    base_class: &ast::ClassDef,
+    inherited: &IndexMap<String, ast::Component>,
+    extend: &ast::Extend,
+    extend_span: Span,
+) -> InstantiateResult<CollectedRedeclarations> {
+    let mut collected = CollectedRedeclarations {
+        types: IndexMap::default(),
+        dims: IndexMap::default(),
+        components: IndexSet::new(),
+    };
+    let mut validation_error: Option<Box<InstantiateError>> = None;
+    walk_extend_modifications(extend, |modification| {
+        if validation_error.is_some() {
+            return;
+        }
+        let Some((target_name, _)) = redeclare_target_value(modification) else {
+            return;
+        };
+        if base_class.components.contains_key(target_name) {
+            return;
+        }
+        let Some(component) = inherited.get(target_name) else {
+            return;
+        };
+        let new_type = extract_redeclare_type_qualified(&modification.expr, tree);
+        let validated = redeclare_target_span(tree, target_name, modification, extend_span)
+            .and_then(|span| {
+                validate_redeclaration(tree, component, target_name, new_type.as_deref(), span)
+            });
+        if let Err(err) = validated {
+            validation_error = Some(err);
+            return;
+        }
+        collected.components.insert(target_name.to_string());
+        if let Some(dims) = redeclared_dimensions(modification) {
+            collected.dims.insert(target_name.to_string(), dims);
+        }
+        if let Some(new_type_name) = new_type {
+            collected
+                .types
+                .insert(target_name.to_string(), new_type_name);
+        }
+    });
+    match validation_error {
+        Some(err) => Err(err),
+        None => Ok(collected),
+    }
+}
