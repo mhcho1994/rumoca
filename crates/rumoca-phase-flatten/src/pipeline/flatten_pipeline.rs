@@ -1082,7 +1082,7 @@ pub(crate) fn finalize_flat_model(
     // Inject and substitute only after both producers have run so final
     // executable call slots cannot reintroduce an unresolved constant.
     inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
-    substitute_known_constants_in_flat(flat, ctx)?;
+    substitute_constants_collecting_calls(flat, ctx, overlay, tree, class_index, model_name)?;
     resolve_nested_constructor_field_access_bindings(flat);
     // Reachability is decided from the call graph as written, before any call
     // is folded to its result. Folding first makes a pure call with settled
@@ -1108,6 +1108,39 @@ pub(crate) fn finalize_flat_model(
     })?;
 
     Ok(())
+}
+
+/// Substitute known constants, then collect any callee the substitution made
+/// reachable.
+///
+/// A constant's value can be a call: `parameter Real T_start =
+/// Medium.T_default` with `constant Real T_default = from_degC(20)` (MSL
+/// `PartialMedium`). Substitution writes that call into the model after the
+/// source call graph was collected, so the callee is collected and prepared
+/// here exactly like a source call; otherwise it reaches the DAE as an
+/// unresolved reference.
+fn substitute_constants_collecting_calls(
+    flat: &mut flat::Model,
+    ctx: &mut Context,
+    overlay: &ast::InstanceOverlay,
+    tree: &ast::ClassTree,
+    class_index: &ast::ClassDefIndex<'_>,
+    model_name: &str,
+) -> Result<(), FlattenError> {
+    substitute_known_constants_in_flat(flat, ctx)?;
+    let collected = flat.functions.len();
+    functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
+    if flat.functions.len() == collected {
+        return Ok(());
+    }
+    mark_record_constructor_calls(flat, tree);
+    functions::canonicalize_collected_function_calls(flat, class_index)?;
+    functions::materialize_flat_function_call_args(flat)?;
+    functions::specialize_function_inputs(flat, tree)?;
+    functions::lower_record_function_params(flat)?;
+    functions::materialize_flat_function_call_args(flat)?;
+    inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
+    substitute_known_constants_in_flat(flat, ctx)
 }
 
 fn finalize_flat_connections(

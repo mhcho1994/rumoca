@@ -273,8 +273,18 @@ impl Resolver {
         //
         // Direct self-extension (model A extends A) and indirect cycles (A→B→A) are
         // detected by the `resolving_extends` set and Phase 3 cycle detection.
-        let def_id =
-            self.resolve_qualified_name_excluding(base_name, scope, Some(current_class_def_id));
+        // MLS §5.3.3: `extends .A.B` starts lookup in the global scope, so an
+        // encapsulated enclosing class does not hide `A`.
+        let lookup_scope = if extend.global_scope {
+            self.scope_tree.global()
+        } else {
+            scope
+        };
+        let def_id = self.resolve_qualified_name_excluding(
+            base_name,
+            lookup_scope,
+            Some(current_class_def_id),
+        );
 
         match def_id {
             Some(base_def_id) => self.record_resolved_base(

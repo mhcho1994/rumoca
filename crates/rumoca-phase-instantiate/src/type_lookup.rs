@@ -305,6 +305,7 @@ mod tests {
         ast::Extend {
             base_name: ast::Name::from_string(name),
             base_def_id: Some(DefId::new(def_id)),
+            global_scope: false,
             location: Location::default(),
             modifications: Vec::new(),
             break_names: Vec::new(),

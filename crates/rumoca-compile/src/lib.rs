@@ -78,7 +78,8 @@ pub mod source_roots {
         referenced_unloaded_source_root_paths, render_source_root_indexing_failed_message,
         render_source_root_indexing_finished_message, render_source_root_indexing_started_message,
         render_source_root_status_message, source_requires_unloaded_source_roots,
-        source_root_paths_changed, source_root_source_set_key, source_root_status_display_name,
+        source_root_paths_changed, source_root_paths_referenced_by_files,
+        source_root_source_set_key, source_root_status_display_name,
         sources_require_loaded_source_roots,
     };
 }

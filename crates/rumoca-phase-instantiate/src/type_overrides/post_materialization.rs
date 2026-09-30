@@ -200,9 +200,6 @@ fn resolve_component_surfaces(
                 component.qualified_name.to_flat_string()
             )))
         })?;
-        if proof.overrides.is_empty() && proof.selected_component_types.is_empty() {
-            continue;
-        }
         let mut batch = DynamicExpressionTargetBatch::new(
             tree,
             &proof.overrides,

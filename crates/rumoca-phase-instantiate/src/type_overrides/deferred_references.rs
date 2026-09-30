@@ -133,24 +133,49 @@ impl ExpressionTransformer for DynamicExpressionTargetResolver<'_> {
         if self.error.is_some() || reference.target_def_id().is_some() {
             return reference;
         }
-        let Some(root_def_id) = reference.root_def_id() else {
+        // The deferred edge is the last resolved segment: the root for
+        // `Medium.f`, an inner replaceable class for `Pkg.Medium.f`.
+        let Some(deferred_index) = reference
+            .parts
+            .iter()
+            .position(|part| part.def_id.is_none())
+            .and_then(|first_missing| first_missing.checked_sub(1))
+        else {
+            return reference;
+        };
+        let Some(root_def_id) = reference.parts[deferred_index].def_id else {
             return reference;
         };
         // A replaceable class alias selects a class directly; a replaceable
         // component selects one through the type of its instantiated occurrence.
-        let Some(target_class_def_id) = self
+        let selected = self
             .overrides
             .target_for_alias_def_id(root_def_id)
-            .or_else(|| self.selected_component_types.get(&root_def_id).copied())
+            .or_else(|| self.selected_component_types.get(&root_def_id).copied());
+        let Some(target_class_def_id) = selected.or_else(|| self.default_selection(root_def_id))
         else {
             return reference;
         };
-        match resolve_member_reference_in_class(self.tree, target_class_def_id, &reference, 1) {
+        let first_member = deferred_index + 1;
+        match resolve_member_reference_in_class(
+            self.tree,
+            target_class_def_id,
+            &reference,
+            first_member,
+        ) {
             Ok(identities) => {
-                for (part, def_id) in reference.parts.iter_mut().skip(1).zip(identities) {
+                for (part, def_id) in reference
+                    .parts
+                    .iter_mut()
+                    .skip(first_member)
+                    .zip(identities)
+                {
                     part.def_id = Some(def_id);
                 }
             }
+            // The declared default is only a proof when it names the member;
+            // otherwise the reference keeps its deferred identity unchanged.
+            Err(_) if selected.is_none() => {}
             Err(error) => self.error = Some(error),
         }
         reference
@@ -169,6 +194,17 @@ impl DynamicExpressionTargetResolver<'_> {
             selected_component_types,
             error: None,
         }
+    }
+
+    /// MLS §7.3: a replaceable class that no enclosing modification
+    /// redeclares denotes its declared default, so a reference through it is
+    /// a member of that declaration (e.g. `Medium.nX` in a component whose
+    /// `replaceable package Medium = PartialMedium` is not redeclared).
+    fn default_selection(&self, root_def_id: DefId) -> Option<DefId> {
+        self.tree
+            .get_class_by_def_id(root_def_id)
+            .is_some_and(|class| class.is_replaceable)
+            .then_some(root_def_id)
     }
 
     fn finish<T>(self, value: T) -> InstantiateResult<T> {

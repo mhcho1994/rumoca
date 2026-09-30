@@ -106,17 +106,39 @@ impl FunctionShapeConstantMaterializer<'_> {
     fn replacement_for(
         &self,
         target: DefId,
-        rendered_name: &str,
+        reference: &Reference,
         span: Span,
     ) -> Result<Expression, FlattenError> {
         self.ctx
             .constant_values_by_def_id
             .get(&target)
+            .or_else(|| self.record_constant_field(reference))
             .cloned()
             .ok_or_else(|| FlattenError::UnresolvedFlatReference {
-                name: rendered_name.to_owned(),
+                name: reference.as_str().to_owned(),
                 span,
             })
+    }
+
+    /// The value of a field of a record constant, e.g. `proCoe.nT` for a
+    /// package `constant PropertyCoefficients proCoe(nT = {4, 4, 3})`.
+    ///
+    /// The field's own declaration is shared by every instance of the record
+    /// class, so its DefId names no value. The value belongs to the constant
+    /// the root segment resolved to: its declaration's qualified name plus the
+    /// structured field path (MLS §7.2.3 record modification).
+    fn record_constant_field(&self, reference: &Reference) -> Option<&Expression> {
+        let parts = reference.component_ref()?.parts();
+        let (root, fields) = parts.split_first()?;
+        if fields.is_empty() || parts.iter().any(|part| !part.subs.is_empty()) {
+            return None;
+        }
+        let mut qualified = self.ctx.target_def_names.get(&root.def_id)?.clone();
+        for field in fields {
+            qualified.push('.');
+            qualified.push_str(&field.ident);
+        }
+        self.ctx.constant_values.get(&qualified)
     }
 
     fn cycle_error(&self, target: DefId, rendered_name: &str, span: Span) -> FlattenError {
@@ -169,7 +191,7 @@ impl FallibleExpressionRewriter for FunctionShapeConstantMaterializer<'_> {
             return Err(self.cycle_error(target, name.as_str(), span));
         }
 
-        let replacement = self.replacement_for(target, name.as_str(), span)?;
+        let replacement = self.replacement_for(target, name, span)?;
         self.expansion_stack.push(target);
         let materialized = self.rewrite_expression(&replacement);
         let popped = self

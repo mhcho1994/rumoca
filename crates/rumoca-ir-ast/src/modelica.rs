@@ -461,7 +461,8 @@ impl Component {
 impl Extend {
     /// Convert an extends clause to Modelica syntax.
     pub fn to_modelica(&self) -> String {
-        let mut out = format!("extends {}", self.base_name);
+        let dot = if self.global_scope { "." } else { "" };
+        let mut out = format!("extends {dot}{}", self.base_name);
 
         if !self.modifications.is_empty() || !self.break_names.is_empty() {
             let mods: Vec<_> = self

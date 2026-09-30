@@ -1230,6 +1230,7 @@ fn spice3_relative_function_tree() -> (ast::ClassTree, rumoca_core::DefId) {
     pmos.extends.push(ast::Extend {
         base_name: ast::Name::from_string("Modelica.Electrical.Spice3.Internal.MOS"),
         base_def_id: Some(mos_def),
+        global_scope: false,
         location: rumoca_core::Location::default(),
         modifications: Vec::new(),
         break_names: Vec::new(),

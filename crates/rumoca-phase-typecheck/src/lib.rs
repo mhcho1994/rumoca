@@ -643,6 +643,18 @@ impl TypeChecker {
                 type_ids_by_def_id.insert(def_id, type_id);
             }
         }
+        // MLS §4.9.5: `StateSelect` and `AssertionLevel` are predefined
+        // enumeration types. Their declarations carry predefined identities, so
+        // a literal such as `AssertionLevel.error` reached through them keeps
+        // an exact nominal type instead of looking like an unknown class.
+        for &(name, _) in rumoca_core::PREDEFINED_ENUM_LITERALS {
+            let def_id = tree
+                .scope_tree
+                .predefined_member(&rumoca_core::ComponentPath::from_flat_path(name));
+            if let (Some(def_id), Some(type_id)) = (def_id, type_table.lookup(name)) {
+                type_ids_by_def_id.insert(def_id, type_id);
+            }
+        }
 
         // Register classes and enumerations first.
         for (qualified_name, &def_id) in &tree.name_map {

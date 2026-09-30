@@ -565,6 +565,11 @@ pub struct Extend {
     /// Resolved reference to the base class definition.
     /// None when first parsed, populated during name resolution.
     pub base_def_id: Option<DefId>,
+    /// True when the base name is written with a leading dot
+    /// (`extends .Modelica.Icons.Package;`): MLS §5.3.3 looks it up in the
+    /// global scope, past any encapsulated boundary.
+    #[serde(default)]
+    pub global_scope: bool,
     /// Source location of the extends clause.
     pub location: Location,
     /// Modifications applied to the extends clause (e.g., extends Foo(bar=1)).

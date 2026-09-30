@@ -23,10 +23,6 @@ impl TypeOverrideMap {
         Self::default()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.targets_by_alias_def_id.is_empty() && self.targets_by_alias_path.is_empty()
-    }
-
     pub(crate) fn insert_alias(
         &mut self,
         alias_path: ast::QualifiedName,

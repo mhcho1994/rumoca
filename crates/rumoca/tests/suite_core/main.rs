@@ -47,6 +47,7 @@ mod for_eq_array_test;
 mod for_loop_element_derivative_alias;
 mod forward_param_jacobian_test;
 mod frontend_event_lowering;
+mod frontend_functions_names;
 mod function_assertion_message_projection;
 mod function_conditional_sequence_test;
 mod function_inner_index_slice_compaction;

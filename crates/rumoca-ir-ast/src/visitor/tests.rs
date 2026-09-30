@@ -332,6 +332,7 @@ fn test_type_name_context_dispatch() {
         extends: vec![Extend {
             base_name: Name::from_string("MyBaseClass"),
             base_def_id: None,
+            global_scope: false,
             location: Location::default(),
             modifications: Vec::new(),
             break_names: Vec::new(),
@@ -490,6 +491,7 @@ fn make_expression_context_dispatch_class() -> ClassDef {
             }],
             annotation: vec![make_int(11)],
             base_def_id: None,
+            global_scope: false,
             location: Location::default(),
             break_names: Vec::new(),
             is_protected: false,

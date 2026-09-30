@@ -103,7 +103,54 @@ pub(super) fn scope_qualified_path(
             }
         }
     }
-    None
+    alias_qualified_path(class_index, component_ref, rendered)
+}
+
+/// Restate a callable whose root segment was looked up through a short class
+/// alias (MLS §4.5.1), e.g. `function hl_p = BaseIF97.Regions.hl_p` in
+/// `IF97_Utilities`, called unqualified as `hl_p(p)` from a sibling function.
+///
+/// Resolve binds the root segment to the alias's target declaration, whose
+/// enclosing scopes (`BaseIF97.Regions`) are not the scopes the rendered
+/// exposure (`IF97_Utilities.hl_p`) names. The restatement is admitted only
+/// when the rendered name is `<scope>.<root>.<tail>` where `<scope>` is a
+/// class, `<scope>.<root>` is a pure alias whose single base is exactly the
+/// root segment's resolved declaration, and the prepended segments carry
+/// `<scope>`'s own ancestry identities.
+fn alias_qualified_path(
+    class_index: &ast::ClassDefIndex<'_>,
+    component_ref: &rumoca_core::ComponentReference,
+    rendered: &rumoca_core::VarName,
+) -> Option<rumoca_core::ComponentReference> {
+    let written = component_ref.to_var_name();
+    let scope = rendered
+        .as_str()
+        .strip_suffix(written.as_str())?
+        .strip_suffix('.')?;
+    let root = component_ref.parts().first()?;
+    let scope_def_id = class_index.def_id_by_qualified_name(scope)?;
+    let alias = class_index.get_by_qualified_name(&format!("{scope}.{}", root.ident))?;
+    let [base] = alias.extends.as_slice() else {
+        return None;
+    };
+    let pure_alias =
+        alias.components.is_empty() && alias.algorithms.is_empty() && alias.external.is_none();
+    if !pure_alias || base.base_def_id != Some(root.def_id) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for def_id in class_index.def_ancestry(scope_def_id) {
+        let enclosing = class_index.get(def_id)?;
+        parts.push(rumoca_core::ComponentRefPart {
+            ident: enclosing.name.text.to_string(),
+            span: root.span,
+            subs: Vec::new(),
+            def_id,
+        });
+    }
+    parts.extend(component_ref.parts().iter().cloned());
+    let candidate = component_ref.with_replaced_parts(parts).ok()?;
+    (candidate.to_var_name() == *rendered).then_some(candidate)
 }
 
 #[cfg(test)]

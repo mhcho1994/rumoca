@@ -233,6 +233,58 @@ pub fn referenced_unloaded_source_root_paths(
     referenced_paths
 }
 
+/// Source roots named by the files of source roots that are already loaded.
+///
+/// The compile unit's own text is not the whole reference set: a library root
+/// loaded because the unit names it can itself use another root. A library's
+/// `package.mo` compiled as the main file often never spells `Modelica` (for
+/// example ThermoSysPro, which has no `uses` annotation), while its classes
+/// extend `Modelica.Icons.*` and read `Modelica.Constants.*`. Closing the
+/// selection over the loaded roots' files keeps every top-level name those
+/// classes look up (MLS §5.3.3) available. Paths keep their configured order.
+pub fn source_root_paths_referenced_by_files(
+    files: &[String],
+    source_root_paths: &[String],
+    loaded_source_root_path_keys: &HashSet<String>,
+) -> Vec<String> {
+    let mut seen_source_root_paths = HashSet::new();
+    let mut candidates = Vec::new();
+    for (order, source_root_path) in source_root_paths.iter().enumerate() {
+        let path_key = canonical_path_key(source_root_path);
+        if !seen_source_root_paths.insert(path_key.clone())
+            || loaded_source_root_path_keys.contains(&path_key)
+        {
+            continue;
+        }
+        let roots = infer_source_root_names(Path::new(source_root_path)).unwrap_or_default();
+        candidates.push((order, roots));
+    }
+    let mut referenced = Vec::new();
+    for file in files {
+        if candidates.is_empty() {
+            break;
+        }
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        candidates.retain(|(order, roots)| {
+            let named = roots.is_empty()
+                || roots
+                    .iter()
+                    .any(|root| source_contains_identifier(&text, root));
+            if named {
+                referenced.push(*order);
+            }
+            !named
+        });
+    }
+    referenced.sort_unstable();
+    referenced
+        .into_iter()
+        .map(|order| source_root_paths[order].clone())
+        .collect()
+}
+
 fn existing_source_root_claims(
     loaded_source_root_path_keys: &HashSet<String>,
 ) -> (HashSet<String>, HashMap<String, String>) {
