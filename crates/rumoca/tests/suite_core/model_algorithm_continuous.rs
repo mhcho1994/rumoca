@@ -315,15 +315,15 @@ model MixedAlgorithm
   Real x;
   discrete Real z;
 algorithm
-  x := 1;
   when time > 0.5 then
     z := 1;
   end when;
+  x := time;
 end MixedAlgorithm;
 "#,
             "mixed_algorithm.mo",
         )
-        .expect_err("mixed partitions need an explicit checked atomic owner");
+        .expect_err("a continuous target after the event part needs a checked atomic owner");
     let message = error.to_string();
     assert!(
         message.contains("mixed continuous/event algorithm")

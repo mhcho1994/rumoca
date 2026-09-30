@@ -1,0 +1,371 @@
+//! Event, discrete-time and algorithm lowering shapes from real libraries
+//! (Buildings/IBPSA/AixLib/IDEAS controllers, OpenIPSL governors, TRANSFORM
+//! and the MSL) that OpenModelica accepts and rumoca used to refuse.
+//!
+//! Each model is the minimal reduction of one root cause; the expected values
+//! are the ones the MLS gives the source (and OpenModelica produces).
+
+use rumoca_sim::{SimOptions, SimResult, SimSolverMode, simulate_dae_with_diagnostics};
+
+fn compile(name: &str, source: &str) -> rumoca::CompilationResult {
+    rumoca::Compiler::new()
+        .model(name)
+        .compile_str(source, "frontend_event_lowering.mo")
+        .unwrap_or_else(|error| panic!("`{name}` should compile: {error}"))
+}
+
+fn simulate(name: &str, source: &str, t_end: f64) -> SimResult {
+    let compiled = compile(name, source);
+    simulate_dae_with_diagnostics(
+        &compiled.dae,
+        &SimOptions {
+            t_end,
+            dt: Some(0.01),
+            solver_mode: SimSolverMode::RkLike,
+            ..SimOptions::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("`{name}` should simulate: {error}"))
+}
+
+/// The last recorded sample at or before `t` (the post-event row at an event).
+fn value_at(sim: &SimResult, name: &str, t: f64) -> f64 {
+    let index = sim
+        .names
+        .iter()
+        .position(|candidate| candidate == name)
+        .unwrap_or_else(|| panic!("trace should contain `{name}`; names={:?}", sim.names));
+    let mut result = sim.data[index][0];
+    for (sample, &time) in sim.times.iter().enumerate() {
+        if time > t + 1.0e-9 {
+            break;
+        }
+        result = sim.data[index][sample];
+    }
+    result
+}
+
+/// TOOLBUG-110: a relational `when` statement that updates a discrete `Real`
+/// once is exactly the when-equation it spells, so it needs no model-event
+/// transaction (which exists only under a periodic clock).
+const RELATIONAL_WHEN_ALGORITHM: &str = "model Alg2
+  Real x(start = 1, fixed = true);
+  discrete Real n(start = 0, fixed = true);
+  Integer k(start = 0, fixed = true);
+equation
+  der(x) = -2;
+algorithm
+  when x < 0.5 then
+    n := pre(n) + 1;
+    k := pre(k) + 2;
+  end when;
+end Alg2;";
+
+#[test]
+fn relational_when_statement_on_a_discrete_real_fires_once_at_its_crossing() {
+    let sim = simulate("Alg2", RELATIONAL_WHEN_ALGORITHM, 1.0);
+    assert_eq!(value_at(&sim, "n", 0.2), 0.0);
+    assert_eq!(value_at(&sim, "k", 0.2), 0.0);
+    assert_eq!(value_at(&sim, "n", 0.3), 1.0, "x crosses 0.5 at t = 0.25");
+    assert_eq!(value_at(&sim, "k", 0.3), 2.0);
+    assert_eq!(
+        value_at(&sim, "n", 1.0),
+        1.0,
+        "a when fires on the rising edge only"
+    );
+}
+
+/// TOOLBUG-111: `getInstanceName()` in a declaration or modifier binding.
+const INSTANCE_NAME_BINDINGS: &str = "package GIN
+  block Writer
+    parameter String fileName = getInstanceName() + \".csv\";
+    parameter String insNam = getInstanceName();
+    Real x = 1;
+  end Writer;
+  model Top
+    Writer w1;
+    Writer w2(fileName = getInstanceName() + \".txt\");
+  end Top;
+end GIN;";
+
+#[test]
+fn get_instance_name_in_bindings_names_the_enclosing_instance() {
+    let compiled = compile("GIN.Top", INSTANCE_NAME_BINDINGS);
+    let binding = |name: &str| {
+        let variable = compiled
+            .flat
+            .variables
+            .get(&rumoca_core::VarName::new(name))
+            .unwrap_or_else(|| panic!("`{name}` is a flat variable"));
+        format!("{:?}", variable.binding)
+    };
+    assert!(
+        binding("w1.insNam").contains("\"Top.w1\""),
+        "{}",
+        binding("w1.insNam")
+    );
+    assert!(binding("w1.fileName").contains("\"Top.w1\""));
+    assert!(
+        binding("w2.fileName").contains("\"Top\""),
+        "a modifier is written in, and names, the enclosing instance: {}",
+        binding("w2.fileName")
+    );
+}
+
+/// TOOLBUG-112: a fixed parameter without a binding takes its `start` value
+/// (MLS §8.6), so `Modelica.Blocks.Interfaces.DiscreteBlock.samplePeriod`
+/// (declared with `start = 0.1` only) gives `sample` a static interval.
+const UNBOUND_SAMPLE_PERIOD: &str = "model SP
+  parameter Real samplePeriod(start = 0.1);
+  discrete Real y(start = 0, fixed = true);
+equation
+  when sample(0, samplePeriod) then
+    y = pre(y) + 1;
+  end when;
+end SP;";
+
+#[test]
+fn an_unbound_sample_period_uses_its_start_value() {
+    let sim = simulate("SP", UNBOUND_SAMPLE_PERIOD, 0.35);
+    assert_eq!(value_at(&sim, "y", 0.05), 1.0);
+    assert_eq!(value_at(&sim, "y", 0.15), 2.0);
+    assert_eq!(value_at(&sim, "y", 0.35), 4.0);
+}
+
+/// TOOLBUG-113: a continuous algorithm assigning several scalars (TRANSFORM
+/// `BiotNumber`, `SimpleCylinder`) is one declarative definition per target.
+const MULTI_OUTPUT_ALGORITHM: &str = "model Multi
+  input Real a = 2;
+  Real b;
+  Real c;
+  Integer r;
+algorithm
+  b := a*3;
+  r := 1;
+  if a > 1 then
+    c := b + 1;
+  else
+    c := b - 1;
+  end if;
+  b := b + c;
+end Multi;";
+
+#[test]
+fn a_multi_output_algorithm_defines_each_target_by_its_final_value() {
+    let sim = simulate("Multi", MULTI_OUTPUT_ALGORITHM, 0.1);
+    assert_eq!(value_at(&sim, "c", 0.0), 7.0);
+    assert_eq!(
+        value_at(&sim, "b", 0.0),
+        13.0,
+        "b := 6 + c after c reads b = 6"
+    );
+    assert_eq!(value_at(&sim, "r", 0.0), 1.0);
+}
+
+const READ_BEFORE_WRITE_ALGORITHM: &str = "model ReadFirst
+  Real b;
+  Real c;
+algorithm
+  c := b + 1;
+  b := 2;
+end ReadFirst;";
+
+#[test]
+fn a_multi_output_algorithm_reading_a_target_before_writing_it_stays_refused() {
+    let error = rumoca::Compiler::new()
+        .model("ReadFirst")
+        .compile_str(READ_BEFORE_WRITE_ALGORITHM, "frontend_event_lowering.mo")
+        .expect_err("a read before definition needs start initialization");
+    assert!(
+        error.to_string().contains("read before definition"),
+        "{error}"
+    );
+}
+
+/// TOOLBUG-114: `initial algorithm p0 := PMECH0;` for a `fixed = false`
+/// parameter and a coordinate the initialization system solves (the OpenIPSL
+/// governor idiom) is the initial equation `p0 = PMECH0`.
+const INITIAL_ALGORITHM_FROM_A_COORDINATE: &str = "model Gov
+  Real pmech = 2 + time;
+  parameter Real p0(fixed = false);
+  Real x;
+initial algorithm
+  p0 := pmech;
+initial equation
+  x = p0;
+equation
+  der(x) = -x;
+end Gov;";
+
+#[test]
+fn an_initial_algorithm_parameter_read_from_a_coordinate_is_solved_at_initialization() {
+    let sim = simulate("Gov", INITIAL_ALGORITHM_FROM_A_COORDINATE, 0.1);
+    assert!((value_at(&sim, "x", 0.0) - 2.0).abs() < 1.0e-9);
+}
+
+/// TOOLBUG-115: `delay(u, 0)` (`FixedDelay(delayTime = 0)`) is `u` itself.
+const ZERO_DELAY: &str = "model ZeroDelay
+  parameter Real T = 0;
+  Real u = time;
+  Real y = delay(u, T);
+end ZeroDelay;";
+
+#[test]
+fn a_zero_delay_is_its_source() {
+    let sim = simulate("ZeroDelay", ZERO_DELAY, 0.5);
+    assert!((value_at(&sim, "y", 0.3) - 0.3).abs() < 1.0e-9);
+}
+
+/// TOOLBUG-116: element equations of a discrete array written in a `for`
+/// loop (CDL `BooleanExtractSignal`), including a one-element array whose
+/// single element is the whole coordinate.
+const EXTRACT_SIGNAL: &str = "model Extract
+  parameter Integer extract[2] = {3, 1};
+  parameter Integer one[1] = {2};
+  Boolean u[3] = {time > 0.2, time > 0.4, time > 0.6};
+  Boolean y[2];
+  Boolean z[1];
+equation
+  for i in 1:2 loop
+    y[i] = u[extract[i]];
+  end for;
+  for i in 1:1 loop
+    z[i] = u[one[i]];
+  end for;
+end Extract;";
+
+#[test]
+fn discrete_element_equations_in_a_for_loop_define_the_whole_array() {
+    let sim = simulate("Extract", EXTRACT_SIGNAL, 1.0);
+    assert_eq!(value_at(&sim, "y[1]", 0.5), 0.0);
+    assert_eq!(value_at(&sim, "y[2]", 0.5), 1.0);
+    assert_eq!(value_at(&sim, "y[1]", 0.7), 1.0);
+    assert_eq!(value_at(&sim, "z[1]", 0.3), 0.0);
+    assert_eq!(value_at(&sim, "z[1]", 0.5), 1.0);
+}
+
+/// TOOLBUG-117: `Modelica.StateGraph.Interfaces.CompositeStepState` declares
+/// `output Boolean suspend = false` and writes `suspend =
+/// subgraphStatePort.suspend`; the equality defines its other side.
+const SYMMETRIC_DISCRETE_EQUALITY: &str = "model Root
+  output Boolean suspend = false;
+  Boolean portSuspend;
+equation
+  suspend = portSuspend;
+end Root;";
+
+#[test]
+fn a_discrete_equality_defines_the_side_no_other_row_defines() {
+    let sim = simulate("Root", SYMMETRIC_DISCRETE_EQUALITY, 0.1);
+    assert_eq!(value_at(&sim, "portSuspend", 0.1), 0.0);
+}
+
+/// TOOLBUG-113: a declarative algorithm with an unrolled `for` loop and a
+/// top-level `assert` (Buildings `NumberOfRequests`, CDL `RealExtractor`).
+const DECLARATIVE_LOOP: &str = "model Loop
+  parameter Integer n = 3;
+  input Real u[n] = {1, 2, 3};
+  Integer y;
+  Real s;
+  Real t;
+algorithm
+  assert(n > 0, \"n must be positive\");
+  y := 0;
+  s := 0;
+  for i in 1:n loop
+    if u[i] > 1.5 then
+      y := y + 1;
+    end if;
+    s := s + u[i]*i;
+  end for;
+  t := s/2;
+end Loop;";
+
+#[test]
+fn a_declarative_loop_is_unrolled_over_its_settled_range() {
+    let sim = simulate("Loop", DECLARATIVE_LOOP, 0.1);
+    assert_eq!(value_at(&sim, "y", 0.0), 2.0);
+    assert_eq!(value_at(&sim, "s", 0.0), 14.0);
+    assert_eq!(value_at(&sim, "t", 0.0), 7.0);
+}
+
+/// TOOLBUG-118: the continuous prefix of an event algorithm (ThermoSysPro
+/// `ConvAD`) is its own declarative algorithm.
+const MIXED_ALGORITHM: &str = "model ConvAD
+  parameter Real maxval = 1;
+  parameter Real minval = -maxval;
+  Real u = time;
+  discrete Real y(start = 0, fixed = true);
+  Real q;
+algorithm
+  q := (maxval - minval)/4;
+  when sample(0, 0.25) then
+    y := q*floor(u/q + 0.5);
+  end when;
+end ConvAD;";
+
+#[test]
+fn the_continuous_prefix_of_an_event_algorithm_is_split_off() {
+    let sim = simulate("ConvAD", MIXED_ALGORITHM, 1.0);
+    assert_eq!(value_at(&sim, "q", 0.5), 0.5);
+    assert_eq!(value_at(&sim, "y", 0.2), 0.0);
+    assert_eq!(
+        value_at(&sim, "y", 0.3),
+        0.5,
+        "u = 0.25 rounds to 0.5 at the tick"
+    );
+    assert_eq!(value_at(&sim, "y", 0.8), 1.0);
+}
+
+/// TOOLBUG-119: `min`/`max` of a Boolean vector (MSL `BooleanVectors.andTrue`
+/// / `orTrue`, reached by the CDL `ExtractSignal` range assertion).
+const BOOLEAN_EXTREMA: &str = "model BooleanExtrema
+  function allTrue
+    input Boolean b[:];
+    output Boolean result = size(b, 1) == 0 or min(b);
+  algorithm
+  end allTrue;
+  function anyTrue
+    input Boolean b[:];
+    output Boolean result = size(b, 1) > 0 and max(b);
+  algorithm
+  end anyTrue;
+  Boolean u[3] = {time > 0.2, time > 0.4, true};
+  Boolean all = allTrue(u);
+  Boolean any = anyTrue({time > 0.6, false});
+end BooleanExtrema;";
+
+#[test]
+fn boolean_vectors_order_false_below_true() {
+    let sim = simulate("BooleanExtrema", BOOLEAN_EXTREMA, 1.0);
+    assert_eq!(value_at(&sim, "all", 0.3), 0.0);
+    assert_eq!(value_at(&sim, "all", 0.5), 1.0);
+    assert_eq!(value_at(&sim, "any", 0.5), 0.0);
+    assert_eq!(value_at(&sim, "any", 0.7), 1.0);
+}
+
+/// TOOLBUG-117: a discrete-valued target defined in nested if-equation
+/// branches (VehicleInterfaces `ShiftOutput`), which Flat renders as
+/// `(if ... ) - 0.0` inside the outer conditional residual.
+const NESTED_IF_DISCRETE: &str = "model ShiftOutput
+  Real s = time;
+  Integer gear;
+equation
+  if s <= 0.25 then
+    if s >= 0.1 then
+      gear = 1;
+    else
+      gear = 2;
+    end if;
+  else
+    gear = 3;
+  end if;
+end ShiftOutput;";
+
+#[test]
+fn a_discrete_target_in_nested_if_equations_is_one_definition() {
+    let sim = simulate("ShiftOutput", NESTED_IF_DISCRETE, 0.5);
+    assert_eq!(value_at(&sim, "gear", 0.05), 2.0);
+    assert_eq!(value_at(&sim, "gear", 0.2), 1.0);
+    assert_eq!(value_at(&sim, "gear", 0.4), 3.0);
+}

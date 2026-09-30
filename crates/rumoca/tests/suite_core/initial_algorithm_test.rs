@@ -560,11 +560,13 @@ end InitialAlgorithmDiscreteRuntimeRead;
     );
 }
 
-/// A deferred parameter is computed with the parameter set, before the
-/// trajectory exists, so reading a runtime coordinate is rejected rather than
-/// silently evaluated against a seed.
+/// A deferred parameter whose initial-algorithm value reads a coordinate the
+/// initialization system solves has no parameter-set value, but the section is
+/// the initial equation `k = x + 1.0` (MLS §8.6 solves both forms as one
+/// problem), so it is solved there instead of being rejected or evaluated
+/// against a seed (TOOLBUG-114).
 #[test]
-fn a_runtime_read_in_a_deferred_parameter_is_rejected() {
+fn a_runtime_read_in_a_deferred_parameter_is_solved_at_initialization() {
     const SOURCE: &str = r#"
 model InitialAlgorithmRuntimeRead
   parameter Real k(fixed=false);
@@ -575,10 +577,29 @@ equation
   der(x) = k;
 end InitialAlgorithmRuntimeRead;
 "#;
-    let rendered = rejection(SOURCE, "InitialAlgorithmRuntimeRead");
+    let compiled = Compiler::new()
+        .model("InitialAlgorithmRuntimeRead")
+        .compile_str(SOURCE, "initial_algorithm.mo")
+        .expect("the section is the initial equation k = x + 1");
+    let simulation = simulate_dae(
+        &compiled.dae,
+        &SimOptions {
+            t_end: 0.5,
+            ..SimOptions::default()
+        },
+    )
+    .expect("k is solved at initialization");
+    let x = simulation
+        .names
+        .iter()
+        .position(|name| name == "x")
+        .expect("state x is visible");
+    let last = *simulation.data[x]
+        .last()
+        .expect("the trajectory has samples");
     assert!(
-        rendered.contains("ED013") && rendered.contains("not settled"),
-        "a runtime read must name the coordinate that is not settled, got: {rendered}"
+        (last - 2.0).abs() < 1.0e-6,
+        "x(0.5) = 1 + k*0.5 with k = x(0) + 1 = 2, got {last}"
     );
 }
 
