@@ -312,7 +312,7 @@ fn lower_declarative_loop<'dae>(
     values: &mut HashMap<VarName, dae::ExprId<'dae>>,
 ) -> Result<(), dae::DaeConstructionError> {
     let [index] = indices else {
-        unreachable!("analysis proves a single-index declarative loop")
+        return Err(dae::DaeConstructionError::InvalidExpressionForm { span });
     };
     let index_name = VarName::new(&index.ident);
     let shadowed = values.remove(&index_name);

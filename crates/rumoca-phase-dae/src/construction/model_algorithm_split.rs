@@ -60,26 +60,24 @@ fn continuous_prefix_len(flat: &flat::Model, algorithm: &flat::Algorithm) -> usi
     else {
         return 0;
     };
-    let mut prefix = 0;
-    while prefix < first_when {
-        let rumoca_core::Statement::Assignment { comp, .. } = &statements[prefix] else {
+    let mut assignments = Vec::new();
+    for statement in &statements[..first_when] {
+        let rumoca_core::Statement::Assignment { comp, value, .. } = statement else {
             break;
         };
         if comp.parts().is_empty() || comp.parts().iter().any(|part| !part.subs.is_empty()) {
             break;
         }
-        prefix += 1;
+        assignments.push((comp, value));
     }
+    let prefix = assignments.len();
     if prefix == 0 || prefix == statements.len() {
         return 0;
     }
     let mut rest_targets = HashSet::new();
     collect_written(&statements[prefix..], &mut rest_targets);
     let mut prefix_targets = HashSet::new();
-    for statement in &statements[..prefix] {
-        let rumoca_core::Statement::Assignment { comp, value, .. } = statement else {
-            unreachable!("the prefix holds only assignments");
-        };
+    for (comp, value) in assignments {
         let target = rumoca_core::component_ref_to_base_reference(comp)
             .var_name()
             .clone();
