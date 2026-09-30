@@ -119,3 +119,107 @@ fn call_reading_a_comprehension_iterator_is_shaped_in_the_iterator_scope() {
         "s = g(3) + g(4) = 14, got x(1) = {last}"
     );
 }
+
+// TOOLBUG-102: a replaceable package that no modification redeclares denotes
+// its declared default (MLS §7.3), so `Medium.nX` in a dimension names the
+// default's constant. Post-materialization skipped every scope without
+// redeclarations and left the member without identity (EF024).
+const DEFAULT_REPLACEABLE_PACKAGE_DIMENSION: &str = r#"
+package DefaultReplaceable
+  partial package PartialMedium
+    constant Integer nX = 2;
+  end PartialMedium;
+  package Air
+    extends PartialMedium(nX = 3);
+  end Air;
+  model Decl
+    replaceable package Medium = PartialMedium;
+    parameter Real X_start[Medium.nX] = fill(0.5, Medium.nX);
+    Real s(start = 0, fixed = true);
+  equation
+    der(s) = sum(X_start);
+  end Decl;
+  model Redeclared
+    Decl d(redeclare package Medium = Air);
+  end Redeclared;
+end DefaultReplaceable;
+"#;
+
+fn final_value(compiled: &rumoca::CompilationResult, name: &str) -> f64 {
+    let result = simulate_dae_with_diagnostics(
+        &compiled.dae,
+        &SimOptions {
+            t_end: 1.0,
+            ..SimOptions::default()
+        },
+    )
+    .expect("the model simulates");
+    let column = result
+        .names
+        .iter()
+        .position(|candidate| candidate == name)
+        .unwrap_or_else(|| panic!("no result column {name}"));
+    *result.data[column].last().unwrap()
+}
+
+#[test]
+fn unredeclared_replaceable_package_dimension_uses_the_default() {
+    let default = compile(
+        DEFAULT_REPLACEABLE_PACKAGE_DIMENSION,
+        "DefaultReplaceable.Decl",
+    );
+    let s = final_value(&default, "s");
+    assert!(
+        (s - 1.0).abs() < 1e-6,
+        "default nX = 2 gives s(1) = 1, got {s}"
+    );
+    let redeclared = compile(
+        DEFAULT_REPLACEABLE_PACKAGE_DIMENSION,
+        "DefaultReplaceable.Redeclared",
+    );
+    let s = final_value(&redeclared, "d.s");
+    assert!(
+        (s - 1.5).abs() < 1e-6,
+        "redeclared nX = 3 gives s(1) = 1.5, got {s}"
+    );
+}
+
+// TOOLBUG-103: a function input dimension written over a field of a package
+// record constant (`input Real a[sum(proCoe.nT)]`, IDEAS/AixLib antifreeze
+// media) names the field's shared record declaration, which has no value of
+// its own; the value belongs to the record constant (EF023).
+const RECORD_CONSTANT_FIELD_IN_FUNCTION_SHAPE: &str = r#"
+package RecordConstantShape
+  record Coef
+    parameter Integer n;
+    Integer nT[n];
+  end Coef;
+  package Med
+    constant Coef proCoe(n = 2, nT = {2, 1});
+    function total
+      input Real a[sum(proCoe.nT)];
+      output Real f;
+    algorithm
+      f := sum(a);
+    end total;
+  end Med;
+  model M
+    Real s(start = 0, fixed = true);
+  equation
+    der(s) = Med.total({1, 2, 3});
+  end M;
+end RecordConstantShape;
+"#;
+
+#[test]
+fn function_shape_over_a_record_constant_field_reads_the_constant() {
+    let compiled = compile(
+        RECORD_CONSTANT_FIELD_IN_FUNCTION_SHAPE,
+        "RecordConstantShape.M",
+    );
+    let s = final_value(&compiled, "s");
+    assert!(
+        (s - 6.0).abs() < 1e-6,
+        "sum over 3 coefficients gives s(1) = 6, got {s}"
+    );
+}
