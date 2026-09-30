@@ -259,3 +259,40 @@ fn call_introduced_by_constant_substitution_is_collected() {
         "T_start = 293.15 K gives s(1) = 293.15, got {s}"
     );
 }
+
+// TOOLBUG-106: `function hl_p = Base.hl_p` (MSL `IF97_Utilities`) called
+// unqualified from a sibling function rendered the alias exposure but kept the
+// target's structured path, and flatten refused it with EF019.
+const SHORT_FUNCTION_ALIAS_CALLED_BY_SIBLING: &str = r#"
+package ShortAlias
+  package Util
+    package Base
+      function hl_p
+        input Real p;
+        output Real h;
+      algorithm
+        h := 2*p;
+      end hl_p;
+    end Base;
+    function hl_p = Base.hl_p;
+    function twice
+      input Real p;
+      output Real h;
+    algorithm
+      h := hl_p(p);
+    end twice;
+  end Util;
+  model M
+    Real s(start = 0, fixed = true);
+  equation
+    der(s) = Util.twice(1.5) + Util.hl_p(0.5);
+  end M;
+end ShortAlias;
+"#;
+
+#[test]
+fn short_function_alias_called_by_a_sibling_keeps_one_exposure() {
+    let compiled = compile(SHORT_FUNCTION_ALIAS_CALLED_BY_SIBLING, "ShortAlias.M");
+    let s = final_value(&compiled, "s");
+    assert!((s - 4.0).abs() < 1e-6, "3 + 1 gives s(1) = 4, got {s}");
+}
