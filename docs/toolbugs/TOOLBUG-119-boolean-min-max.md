@@ -26,3 +26,13 @@ The DAE type rule required numeric elements.
 ## Test
 
 `frontend_event_lowering.rs::boolean_vectors_order_false_below_true`.
+
+## Also: comprehension inside an assertion
+
+The same CDL range check `assert(andTrue({(extract[i] > 0 and extract[i] <=
+nin) for i in 1:nout}))` then panicked (`analysis proves the exact
+comprehension occurrence`): comprehension plans were collected from variable
+attributes and equations only, not from assertion owners.
+`analysis.rs::analyze_expression_support` now also feeds every assertion's
+condition, message and level. Test:
+`frontend_event_lowering.rs::a_comprehension_in_an_assertion_condition_lowers`.

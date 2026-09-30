@@ -369,3 +369,25 @@ fn a_discrete_target_in_nested_if_equations_is_one_definition() {
     assert_eq!(value_at(&sim, "gear", 0.2), 1.0);
     assert_eq!(value_at(&sim, "gear", 0.4), 3.0);
 }
+
+/// TOOLBUG-119: an array comprehension inside an `assert` condition (the CDL
+/// `ExtractSignal` range check) has a comprehension plan.
+const ASSERTED_COMPREHENSION: &str = "model Cmp
+  function andTrue
+    input Boolean b[:];
+    output Boolean result = size(b, 1) == 0 or min(b);
+  algorithm
+  end andTrue;
+  parameter Integer nin = 3;
+  parameter Integer nout = 2;
+  parameter Integer extract[nout] = {3, 1};
+  Real x = time;
+initial equation
+  assert(andTrue({(extract[i] > 0 and extract[i] <= nin) for i in 1:nout}), \"bad\");
+end Cmp;";
+
+#[test]
+fn a_comprehension_in_an_assertion_condition_lowers() {
+    let sim = simulate("Cmp", ASSERTED_COMPREHENSION, 0.1);
+    assert!((value_at(&sim, "x", 0.1) - 0.1).abs() < 1.0e-9);
+}

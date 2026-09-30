@@ -657,9 +657,25 @@ fn analyze_expression_support(
     constants: &EvalContext,
 ) -> Result<ExpressionSupportPlans, ToDaeError> {
     Ok(ExpressionSupportPlans {
-        comprehensions: analyze_comprehensions(all_model_expressions(flat), constants)?,
+        // Assertion conditions are lowered through the same comprehension
+        // plans (CDL `ExtractSignal`: `assert(andTrue({... for i in 1:n}))`).
+        comprehensions: analyze_comprehensions(
+            all_model_expressions(flat).chain(assertion_expressions(flat)),
+            constants,
+        )?,
         delays: analyze_delays(flat, constants)?,
     })
+}
+
+fn assertion_expressions(flat: &flat::Model) -> impl Iterator<Item = &Expression> {
+    flat.assert_equations
+        .iter()
+        .chain(&flat.initial_assert_equations)
+        .flat_map(|assertion| {
+            [&assertion.condition, &assertion.message]
+                .into_iter()
+                .chain(assertion.level.as_ref())
+        })
 }
 
 struct RecordEquationSets {
