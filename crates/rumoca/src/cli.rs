@@ -315,12 +315,16 @@ pub struct ModelOptions {
     #[arg(long)]
     pub freeze_parameters: bool,
 
-    /// Run a bitcode pass over the compiled model before it is simulated or
-    /// generated: `DAE -> RBC -> [passes] -> DAE`. Repeatable; runs in the
-    /// order given. Without it the `default` group runs (every pass this build
-    /// knows); `none` compiles the model exactly as the frontend lowered it;
-    /// `round-trip` exports and rebuilds with no rewrite.
-    #[arg(long = "pass", value_name = "NAME", action = ArgAction::Append)]
+    /// Run a bitcode pass pipeline over the compiled model before it is
+    /// simulated or generated: `DAE -> RBC -> [passes] -> DAE`. Repeatable
+    /// and comma-separated; runs in the order given. Without it the `default`
+    /// group runs (every pass this build knows; `O1` is the same); `none` or
+    /// `O0` compiles the model exactly as the frontend lowered it;
+    /// `round-trip` exports and rebuilds with no rewrite. `exec:COMMAND` runs
+    /// an external pass as `COMMAND IN.rbc -o OUT.rbc`; `fixpoint(a,b)`
+    /// repeats `a,b` until nothing changes. A built-in pass is skipped when
+    /// the model has not changed since it last ran and changed nothing.
+    #[arg(long = "pass", value_name = "PIPELINE", action = ArgAction::Append)]
     pub passes: Vec<String>,
 }
 

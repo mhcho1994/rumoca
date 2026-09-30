@@ -25,8 +25,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use rumoca_bitcode::schema::{
-    ExprId, RbcAction, RbcBinaryOp, RbcClockTransferKind, RbcCoordinate, RbcExprNode, RbcLiteral,
-    RbcModel, RbcStringConversionFormat, RbcUnaryOp, VariableId,
+    ExprId, FunctionId, RbcAction, RbcBinaryOp, RbcBranch, RbcClockTransferKind, RbcCoordinate,
+    RbcExprNode, RbcLiteral, RbcModel, RbcStringConversionFormat, RbcUnaryOp, VariableId,
 };
 
 /// What to include beyond the default variable and equation listing.
@@ -92,63 +92,24 @@ impl<'a> Listing<'a> {
                 self.expression(*rhs)
             ),
             RbcExprNode::Conditional { branches, fallback } => {
-                let mut out = String::new();
-                for (index, branch) in branches.iter().enumerate() {
-                    let _ = write!(
-                        out,
-                        "{} {} then {} ",
-                        if index == 0 { "if" } else { "elseif" },
-                        self.expression(branch.condition),
-                        self.expression(branch.value)
-                    );
-                }
-                let _ = write!(out, "else {}", self.expression(*fallback));
-                format!("({})", out.trim())
+                self.conditional(branches, *fallback)
             }
             RbcExprNode::Builtin { name, arguments } => {
-                let rendered: Vec<String> =
-                    arguments.iter().map(|arg| self.expression(*arg)).collect();
-                format!("{name}({})", rendered.join(", "))
+                format!("{name}({})", self.expression_list(arguments))
             }
             RbcExprNode::StringConversion { value, format } => {
-                let mut arguments = vec![self.expression(*value)];
-                let options = match format {
-                    RbcStringConversionFormat::Options {
-                        minimum_length,
-                        left_justified,
-                        significant_digits,
-                    } => vec![
-                        ("minimumLength", *minimum_length),
-                        ("leftJustified", *left_justified),
-                        ("significantDigits", *significant_digits),
-                    ],
-                    RbcStringConversionFormat::Format { value } => vec![("format", Some(*value))],
-                };
-                arguments.extend(options.into_iter().filter_map(|(name, value)| {
-                    value.map(|id| format!("{name}={}", self.expression(id)))
-                }));
-                format!("String({})", arguments.join(", "))
+                self.string_conversion(*value, format)
             }
             RbcExprNode::Array { elements, .. } => {
-                let rendered: Vec<String> = elements.iter().map(|e| self.expression(*e)).collect();
-                format!("{{{}}}", rendered.join(", "))
+                format!("{{{}}}", self.expression_list(elements))
             }
             RbcExprNode::Record { fields, .. } => {
-                let rendered: Vec<String> = fields.iter().map(|f| self.expression(*f)).collect();
-                format!("record({})", rendered.join(", "))
+                format!("record({})", self.expression_list(fields))
             }
             RbcExprNode::Field { base, field } => {
                 format!("{}.[{field}]", self.expression(*base))
             }
-            RbcExprNode::Range { start, step, stop } => match step {
-                Some(step) => format!(
-                    "{}:{}:{}",
-                    self.expression(*start),
-                    self.expression(*step),
-                    self.expression(*stop)
-                ),
-                None => format!("{}:{}", self.expression(*start), self.expression(*stop)),
-            },
+            RbcExprNode::Range { start, step, stop } => self.range(*start, *step, *stop),
             RbcExprNode::Comprehension { domain, body } => format!(
                 "{{{} for {}}}",
                 self.expression(*body),
@@ -176,29 +137,7 @@ impl<'a> Listing<'a> {
                 output,
                 arguments,
                 ..
-            } => {
-                let rendered: Vec<String> =
-                    arguments.iter().map(|arg| self.expression(*arg)).collect();
-                let name = self
-                    .model
-                    .functions
-                    .get(function.0 as usize)
-                    .map(|f| f.name.as_str())
-                    .unwrap_or("<function>");
-                // The output ordinal is shown only when the callee has more
-                // than one, so the common case reads like the source.
-                let results = self
-                    .model
-                    .functions
-                    .get(function.0 as usize)
-                    .map_or(1, |f| f.results.len());
-                let projection = if results > 1 {
-                    format!(".[{output}]")
-                } else {
-                    String::new()
-                };
-                format!("{name}({}){projection}", rendered.join(", "))
-            }
+            } => self.call(*function, *output, arguments),
             // Printed rather than skipped: a gap in the artifact is exactly the
             // thing a reader is looking for, and silently rendering around it
             // would make a partial export look complete.
@@ -208,54 +147,103 @@ impl<'a> Listing<'a> {
             // the body here and the listing shows it under its function.
             RbcExprNode::FunctionValue {
                 function, value, ..
-            } => {
-                format!("fnvalue ${}#{}", function.0, value)
-            }
+            } => format!("fnvalue ${}#{}", function.0, value),
             RbcExprNode::FunctionFoldParameter {
                 function,
                 fold,
                 carried,
                 ..
-            } => {
-                format!("foldparam ${}#{}[{}]", function.0, fold, carried)
-            }
+            } => format!("foldparam ${}#{}[{}]", function.0, fold, carried),
             RbcExprNode::FunctionFoldOutput {
                 function,
                 fold,
                 carried,
                 ..
-            } => {
-                format!("foldout ${}#{}[{}]", function.0, fold, carried)
-            }
+            } => format!("foldout ${}#{}[{}]", function.0, fold, carried),
             RbcExprNode::ClockTransfer {
                 transfer: kind,
                 source,
                 source_clock,
                 target_clock,
-            } => {
-                let name = match kind {
-                    RbcClockTransferKind::SubSample { factor } => format!("subSample({factor})"),
-                    RbcClockTransferKind::SuperSample { factor } => {
-                        format!("superSample({factor})")
-                    }
-                    RbcClockTransferKind::ShiftSample {
-                        counter,
-                        resolution,
-                    } => format!("shiftSample({counter}/{resolution})"),
-                    RbcClockTransferKind::BackSample {
-                        counter,
-                        resolution,
-                    } => format!("backSample({counter}/{resolution})"),
-                };
-                format!(
-                    "{name}[clock {} -> {}]({})",
-                    source_clock.0,
-                    target_clock.0,
-                    self.expression(*source)
-                )
-            }
+            } => format!(
+                "{}[clock {} -> {}]({})",
+                clock_transfer_name(kind),
+                source_clock.0,
+                target_clock.0,
+                self.expression(*source)
+            ),
             RbcExprNode::Unsupported { detail } => format!("<unsupported: {detail}>"),
         }
+    }
+
+    /// Operands rendered and comma-separated, as they appear in an argument
+    /// or element list.
+    fn expression_list(&self, ids: &[ExprId]) -> String {
+        let rendered: Vec<String> = ids.iter().map(|id| self.expression(*id)).collect();
+        rendered.join(", ")
+    }
+
+    fn range(&self, start: ExprId, step: Option<ExprId>, stop: ExprId) -> String {
+        match step {
+            Some(step) => format!(
+                "{}:{}:{}",
+                self.expression(start),
+                self.expression(step),
+                self.expression(stop)
+            ),
+            None => format!("{}:{}", self.expression(start), self.expression(stop)),
+        }
+    }
+
+    fn conditional(&self, branches: &[RbcBranch], fallback: ExprId) -> String {
+        let mut out = String::new();
+        for (index, branch) in branches.iter().enumerate() {
+            let keyword = if index == 0 { "if" } else { "elseif" };
+            let _ = write!(
+                out,
+                "{keyword} {} then {} ",
+                self.expression(branch.condition),
+                self.expression(branch.value)
+            );
+        }
+        let _ = write!(out, "else {}", self.expression(fallback));
+        format!("({})", out.trim())
+    }
+
+    fn string_conversion(&self, value: ExprId, format: &RbcStringConversionFormat) -> String {
+        let mut arguments = vec![self.expression(value)];
+        let options = match format {
+            RbcStringConversionFormat::Options {
+                minimum_length,
+                left_justified,
+                significant_digits,
+            } => vec![
+                ("minimumLength", *minimum_length),
+                ("leftJustified", *left_justified),
+                ("significantDigits", *significant_digits),
+            ],
+            RbcStringConversionFormat::Format { value } => vec![("format", Some(*value))],
+        };
+        arguments.extend(
+            options.into_iter().filter_map(|(name, value)| {
+                value.map(|id| format!("{name}={}", self.expression(id)))
+            }),
+        );
+        format!("String({})", arguments.join(", "))
+    }
+
+    fn call(&self, function: FunctionId, output: u32, arguments: &[ExprId]) -> String {
+        let callee = self.model.functions.get(function.0 as usize);
+        let name = callee.map(|f| f.name.as_str()).unwrap_or("<function>");
+        // The output ordinal is shown only when the callee has more
+        // than one, so the common case reads like the source.
+        let results = callee.map_or(1, |f| f.results.len());
+        let projection = if results > 1 {
+            format!(".[{output}]")
+        } else {
+            String::new()
+        };
+        format!("{name}({}){projection}", self.expression_list(arguments))
     }
 
     fn subscripts(&self, subscripts: &[rumoca_bitcode::schema::RbcSubscript]) -> String {
@@ -327,21 +315,51 @@ impl<'a> Listing<'a> {
 
     fn span(&self, provenance: &rumoca_bitcode::schema::RbcProvenance) -> String {
         let span = &provenance.span;
-        {
-            {
-                let file = self
-                    .sources
-                    .get(&span.source.0)
-                    .map(|name| {
-                        Path::new(name)
-                            .file_name()
-                            .map(|base| base.to_string_lossy().to_string())
-                            .unwrap_or_else(|| (*name).to_string())
-                    })
-                    .unwrap_or_else(|| "?".to_string());
-                format!("{file}:{}", span.line)
-            }
+        let file = self
+            .sources
+            .get(&span.source.0)
+            .map_or_else(|| "?".to_string(), |name| file_base_name(name));
+        format!("{file}:{}", span.line)
+    }
+
+    /// The ` ; file:line` suffix for a listed row, or nothing when
+    /// provenance was not requested.
+    fn provenance_suffix(
+        &self,
+        provenance: &rumoca_bitcode::schema::RbcProvenance,
+        options: DisasmOptions,
+    ) -> String {
+        if !options.provenance {
+            return String::new();
         }
+        let span = self.span(provenance);
+        if span.is_empty() {
+            return String::new();
+        }
+        format!("   ; {span}")
+    }
+}
+
+/// The final path component of a source name, falling back to the whole name.
+fn file_base_name(name: &str) -> String {
+    Path::new(name)
+        .file_name()
+        .map(|base| base.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn clock_transfer_name(kind: &RbcClockTransferKind) -> String {
+    match kind {
+        RbcClockTransferKind::SubSample { factor } => format!("subSample({factor})"),
+        RbcClockTransferKind::SuperSample { factor } => format!("superSample({factor})"),
+        RbcClockTransferKind::ShiftSample {
+            counter,
+            resolution,
+        } => format!("shiftSample({counter}/{resolution})"),
+        RbcClockTransferKind::BackSample {
+            counter,
+            resolution,
+        } => format!("backSample({counter}/{resolution})"),
     }
 }
 
@@ -393,6 +411,25 @@ pub fn run_disasm(path: &Path, options: DisasmOptions) -> Result<()> {
     println!("; model {}", model.name);
     println!();
 
+    print_variables(&listing);
+    print_equations(&listing, options);
+    print_equation_families(&listing, options);
+    print_events(&listing);
+    print_connections(model);
+    print_connection_sets(model);
+    if options.expressions {
+        print_expression_table(&listing);
+    }
+
+    if let Some(artifact) = &file.execution {
+        execution::print(artifact);
+    }
+
+    Ok(())
+}
+
+fn print_variables(listing: &Listing<'_>) {
+    let model = listing.model;
     println!("variables ({})", model.variables.len());
     for variable in &model.variables {
         let mut annotations: Vec<String> = Vec::new();
@@ -423,7 +460,10 @@ pub fn run_disasm(path: &Path, options: DisasmOptions) -> Result<()> {
             annotations.join(" ")
         );
     }
+}
 
+fn print_equations(listing: &Listing<'_>, options: DisasmOptions) {
+    let model = listing.model;
     for (label, equations) in [
         ("equations", &model.equations),
         ("initial equations", &model.initial_equations),
@@ -440,22 +480,16 @@ pub fn run_disasm(path: &Path, options: DisasmOptions) -> Result<()> {
             } else {
                 String::new()
             };
-            let where_from = if options.provenance {
-                let span = listing.span(&equation.provenance);
-                if span.is_empty() {
-                    String::new()
-                } else {
-                    format!("   ; {span}")
-                }
-            } else {
-                String::new()
-            };
+            let where_from = listing.provenance_suffix(&equation.provenance, options);
             println!("  [{:>3}]  0 = {rendered}{where_from}{id}", equation.id.0);
         }
     }
+}
 
-    // An array equation is one family, not N scalar rows: printing the `for`
-    // header keeps the listing the same shape as the source it came from.
+// An array equation is one family, not N scalar rows: printing the `for`
+// header keeps the listing the same shape as the source it came from.
+fn print_equation_families(listing: &Listing<'_>, options: DisasmOptions) {
+    let model = listing.model;
     for (label, families) in [
         ("equation families", &model.equation_families),
         (
@@ -469,16 +503,7 @@ pub fn run_disasm(path: &Path, options: DisasmOptions) -> Result<()> {
         println!();
         println!("{label} ({})", families.len());
         for family in families {
-            let where_from = if options.provenance {
-                let span = listing.span(&family.provenance);
-                if span.is_empty() {
-                    String::new()
-                } else {
-                    format!("   ; {span}")
-                }
-            } else {
-                String::new()
-            };
+            let where_from = listing.provenance_suffix(&family.provenance, options);
             println!(
                 "  [{:>3}]  for {} loop   ; {} scalar row{}{where_from}",
                 family.id.0,
@@ -492,98 +517,106 @@ pub fn run_disasm(path: &Path, options: DisasmOptions) -> Result<()> {
             println!("         end for;");
         }
     }
+}
 
-    if !model.events.is_empty() {
-        println!();
-        println!("events ({})", model.events.len());
-        for event in &model.events {
-            // The action is what a reader is looking for; the trigger and guard
-            // are condition ids that mean nothing without the condition table.
-            let action = match &event.action {
-                RbcAction::Reinitialize { state, value } => format!(
-                    "reinit({}, {})",
-                    listing.variable(*state),
-                    listing.expression(*value)
-                ),
-                RbcAction::Assert { message, level } => format!(
-                    "assert(.., {}{})",
-                    listing.expression(*message),
-                    level
-                        .map(|l| format!(", {}", listing.expression(l)))
-                        .unwrap_or_default()
-                ),
-                RbcAction::Terminate { message } => {
-                    format!("terminate({})", listing.expression(*message))
-                }
-            };
-            println!("  [{:>3}] {action}", event.id.0);
-        }
+fn print_events(listing: &Listing<'_>) {
+    let model = listing.model;
+    if model.events.is_empty() {
+        return;
     }
-
-    if !model.connections.is_empty() {
-        println!();
-        println!("connections ({})", model.connections.len());
-        for connection in &model.connections {
-            println!(
-                "  [{:>3}] {} <-> {}  ({:?})",
-                connection.id.0,
-                connection.left_connector,
-                connection.right_connector,
-                connection.quantity
-            );
-        }
-    }
-
-    if !model.connection_sets.is_empty() {
-        println!();
-        println!("connection sets ({})", model.connection_sets.len());
-        for set in &model.connection_sets {
-            let kind = if set.unconnected {
-                "unconnected"
-            } else if set.balances.is_empty() {
-                "signal"
-            } else {
-                "acausal"
-            };
-            println!(
-                "  [{:>3}] {:<11} {}",
-                set.id.0,
-                kind,
-                set.connectors.join(" -- ")
-            );
-            for balance in &set.balances {
-                let terms: Vec<String> = balance
-                    .terms
-                    .iter()
-                    .map(|term| {
-                        let name = model
-                            .variables
-                            .get(term.variable.0 as usize)
-                            .map(|variable| variable.name.as_str())
-                            .unwrap_or("?");
-                        format!("{}{}", if term.negated { "-" } else { "+" }, name)
-                    })
-                    .collect();
-                println!("        conserves  {} = 0", terms.join(" "));
+    println!();
+    println!("events ({})", model.events.len());
+    for event in &model.events {
+        // The action is what a reader is looking for; the trigger and guard
+        // are condition ids that mean nothing without the condition table.
+        let action = match &event.action {
+            RbcAction::Reinitialize { state, value } => format!(
+                "reinit({}, {})",
+                listing.variable(*state),
+                listing.expression(*value)
+            ),
+            RbcAction::Assert { message, level } => format!(
+                "assert(.., {}{})",
+                listing.expression(*message),
+                level
+                    .map(|l| format!(", {}", listing.expression(l)))
+                    .unwrap_or_default()
+            ),
+            RbcAction::Terminate { message } => {
+                format!("terminate({})", listing.expression(*message))
             }
+        };
+        println!("  [{:>3}] {action}", event.id.0);
+    }
+}
+
+fn print_connections(model: &RbcModel) {
+    if model.connections.is_empty() {
+        return;
+    }
+    println!();
+    println!("connections ({})", model.connections.len());
+    for connection in &model.connections {
+        println!(
+            "  [{:>3}] {} <-> {}  ({:?})",
+            connection.id.0,
+            connection.left_connector,
+            connection.right_connector,
+            connection.quantity
+        );
+    }
+}
+
+fn print_connection_sets(model: &RbcModel) {
+    if model.connection_sets.is_empty() {
+        return;
+    }
+    println!();
+    println!("connection sets ({})", model.connection_sets.len());
+    for set in &model.connection_sets {
+        let kind = if set.unconnected {
+            "unconnected"
+        } else if set.balances.is_empty() {
+            "signal"
+        } else {
+            "acausal"
+        };
+        println!(
+            "  [{:>3}] {:<11} {}",
+            set.id.0,
+            kind,
+            set.connectors.join(" -- ")
+        );
+        for balance in &set.balances {
+            let terms: Vec<String> = balance
+                .terms
+                .iter()
+                .map(|term| balance_term(model, term.variable, term.negated))
+                .collect();
+            println!("        conserves  {} = 0", terms.join(" "));
         }
     }
+}
 
-    if options.expressions {
-        println!();
-        println!("expression table ({})", model.expressions.len());
-        for expression in &model.expressions {
-            println!(
-                "  [{:>4}] {}",
-                expression.id.0,
-                listing.expression(expression.id)
-            );
-        }
+/// One signed term of a flow balance, e.g. `+R.p.i`.
+fn balance_term(model: &RbcModel, variable: VariableId, negated: bool) -> String {
+    let name = model
+        .variables
+        .get(variable.0 as usize)
+        .map(|variable| variable.name.as_str())
+        .unwrap_or("?");
+    format!("{}{}", if negated { "-" } else { "+" }, name)
+}
+
+fn print_expression_table(listing: &Listing<'_>) {
+    let model = listing.model;
+    println!();
+    println!("expression table ({})", model.expressions.len());
+    for expression in &model.expressions {
+        println!(
+            "  [{:>4}] {}",
+            expression.id.0,
+            listing.expression(expression.id)
+        );
     }
-
-    if let Some(artifact) = &file.execution {
-        execution::print(artifact);
-    }
-
-    Ok(())
 }

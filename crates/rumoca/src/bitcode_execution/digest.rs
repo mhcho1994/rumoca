@@ -128,7 +128,7 @@ pub fn dependency_digest(
     encode(&mut bytes, b"rumoca.execution.dependency.v2");
     encode(
         &mut bytes,
-        &u32::from(rumoca_bitcode::schema::RBC_VERSION).to_le_bytes(),
+        &rumoca_bitcode::schema::RBC_VERSION.to_le_bytes(),
     );
     encode(
         &mut bytes,

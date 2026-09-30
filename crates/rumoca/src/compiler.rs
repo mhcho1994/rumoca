@@ -79,6 +79,13 @@ pub struct CompilationResult {
     /// Cached solve-template renderer for targets that never read the `dae`
     /// template entry.
     solve_template_renderer_without_dae: std::sync::OnceLock<SolveTemplateRenderer>,
+    /// The artifact the bitcode pass stage produced, whose rebuild is `dae`.
+    /// Its derived fields (`reads`, effective values) describe the model
+    /// before the passes, so `--emit-bitcode` still exports `dae`, and takes
+    /// from here only what a DAE has no place for: trace points and an
+    /// execution section an external pass added. `None` when the stage was
+    /// skipped or its artifact holds neither.
+    pub bitcode: Option<rumoca_bitcode::RbcFile>,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +168,7 @@ impl CompilationResult {
             resolved,
             solve_template_renderer: std::sync::OnceLock::new(),
             solve_template_renderer_without_dae: std::sync::OnceLock::new(),
+            bitcode: None,
         }
     }
 
@@ -342,7 +350,8 @@ impl Compiler {
     }
 
     /// The passes to run: the `default` group unless others are named, and
-    /// none at all for `none` alone.
+    /// none at all -- the stage skipped -- when only `none`/`O0` is named.
+    /// (`round-trip` also names no pass, but still runs the stage.)
     ///
     /// The frontend only lowers; the optimizations it used to apply --
     /// inlining package constants, dropping proven-true assertions, folding
@@ -351,7 +360,14 @@ impl Compiler {
     fn requested_passes(&self) -> Vec<String> {
         match self.passes.as_slice() {
             [] => vec!["default".to_string()],
-            [only] if only == "none" => Vec::new(),
+            requested
+                if requested
+                    .iter()
+                    .flat_map(|value| value.split(','))
+                    .all(|element| matches!(element.trim(), "none" | "O0")) =>
+            {
+                Vec::new()
+            }
             requested => requested.to_vec(),
         }
     }
@@ -609,14 +625,18 @@ impl Compiler {
         let (mut result, resolved) = compilation.into_parts();
         report_compile_warnings(&mut session, model_name);
         let passes = self.requested_passes();
+        let mut bitcode = None;
         if !passes.is_empty() {
-            result.dae = crate::pass_stage::apply(
+            let (dae, file) = crate::pass_stage::apply(
                 &result.dae,
                 &result.flat,
                 model_name,
                 &passes,
                 self.verbose,
             )?;
+            result.dae = dae;
+            bitcode = Some(file)
+                .filter(|file| !file.model.trace_points.is_empty() || file.execution.is_some());
         }
 
         if self.verbose {
@@ -632,12 +652,10 @@ impl Compiler {
             eprintln!("[rumoca]   Balance: {}", result.balance_detail.balance());
         }
 
-        Ok(CompilationResult::new(
-            result.dae,
-            result.balance_detail,
-            result.flat,
-            resolved,
-        ))
+        let mut compiled =
+            CompilationResult::new(result.dae, result.balance_detail, result.flat, resolved);
+        compiled.bitcode = bitcode;
+        Ok(compiled)
     }
 
     /// Compile Modelica source code through the resolved AST stage only.
@@ -743,7 +761,8 @@ impl Compiler {
                 model_name,
                 &passes,
                 self.verbose,
-            )?;
+            )?
+            .0;
         }
 
         if self.verbose {

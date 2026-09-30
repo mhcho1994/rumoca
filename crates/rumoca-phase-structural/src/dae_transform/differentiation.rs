@@ -194,7 +194,10 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
                 builtin: dae::PureBuiltin::Smooth | dae::PureBuiltin::NoEvent,
                 arguments,
             } => {
-                let value = arguments.iter().last().expect("checked annotation builtin value");
+                let value = arguments
+                    .iter()
+                    .last()
+                    .expect("checked annotation builtin value");
                 self.differentiate_order(value, order, provenance)
             }
             dae::ExpressionOperation::Conditional(operands) => {
@@ -709,14 +712,15 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
                 self.target
                     .at(provenance)
                     .binary(dae::BinaryOperator::Subtract, exponent, one)?;
-            let power = self
-                .target
-                .at(provenance)
-                .binary(dae::BinaryOperator::Power, base, lowered)?;
-            let factor =
+            let power =
                 self.target
                     .at(provenance)
-                    .binary(dae::BinaryOperator::Multiply, exponent, power)?;
+                    .binary(dae::BinaryOperator::Power, base, lowered)?;
+            let factor = self.target.at(provenance).binary(
+                dae::BinaryOperator::Multiply,
+                exponent,
+                power,
+            )?;
             return self.multiply(lhs_derivative, factor, provenance);
         };
         let log_base = self
@@ -728,16 +732,21 @@ impl<'source, 'borrow, 'storage, 'target> ExpressionRebuilder<'source, 'borrow, 
             exponent_derivative,
             log_base,
         )?);
-        let ratio = self
-            .target
-            .at(provenance)
-            .binary(dae::BinaryOperator::Divide, exponent, base)?;
+        let ratio =
+            self.target
+                .at(provenance)
+                .binary(dae::BinaryOperator::Divide, exponent, base)?;
         let from_base = self.multiply(lhs_derivative, ratio, provenance)?;
-        let sum = self.combine_sum(dae::BinaryOperator::Add, from_exponent, from_base, provenance)?;
-        let power = self
-            .target
-            .at(provenance)
-            .binary(dae::BinaryOperator::Power, base, exponent)?;
+        let sum = self.combine_sum(
+            dae::BinaryOperator::Add,
+            from_exponent,
+            from_base,
+            provenance,
+        )?;
+        let power =
+            self.target
+                .at(provenance)
+                .binary(dae::BinaryOperator::Power, base, exponent)?;
         self.multiply(sum, power, provenance)
     }
 

@@ -67,7 +67,7 @@ pub enum CompilerError {
     #[error("bitcode pass stage failed: {0}")]
     #[diagnostic(
         code(rumoca::compiler::E014),
-        help("run without --pass to compile the model the frontend produced")
+        help("run with --pass none to compile the model the frontend produced")
     )]
     BitcodePassError(String),
 

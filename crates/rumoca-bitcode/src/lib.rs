@@ -29,6 +29,7 @@ mod connector_validation;
 pub mod export;
 pub mod import;
 pub mod link;
+pub mod observations;
 pub mod passes;
 pub mod schema;
 pub mod text;

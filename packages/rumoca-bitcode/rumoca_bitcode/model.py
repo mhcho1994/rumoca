@@ -1177,6 +1177,29 @@ class Event:
         index = action.get("value") if action["kind"] == "reinitialize" else None
         return None if index is None else self._model.expressions[index]
 
+    @property
+    def trigger(self):
+        """The condition whose rising edge fires this action."""
+        return self._model.conditions[self._raw["trigger"]]
+
+    @property
+    def guard(self):
+        """The condition that must also hold when the trigger fires."""
+        return self._model.conditions[self._raw["guard"]]
+
+    @property
+    def message(self) -> Expression | None:
+        """For an ``assert`` or ``terminate`` action, its message expression."""
+        index = self._raw["action"].get("message")
+        return None if index is None else self._model.expressions[index]
+
+    @property
+    def level(self) -> Expression | None:
+        """For an ``assert`` action, its ``AssertionLevel`` expression; ``None``
+        when the assert gives none, which means ``AssertionLevel.error``."""
+        index = self._raw["action"].get("level")
+        return None if index is None else self._model.expressions[index]
+
     def __repr__(self) -> str:
         return f"<Event {self.id} {self.kind} at {self.source.span}>"
 

@@ -96,6 +96,30 @@ model.components     # component instances
 model.trace_points   # observation requests
 ```
 
+Every other table the compiler exports has a typed view too
+(`rumoca_bitcode.dynamics`), each list indexed by the id the artifact uses:
+
+```python
+model.relations             # Relation: .expression, watched for sign changes
+model.conditions            # Condition: .kind, .relation, .expression, .operands, .clock
+model.roots                 # Root: .relation, .activation (a Condition)
+model.clocks                # Clock: .kind, .period / .phase (exact Fraction), .anchor, .condition
+model.clock_ownerships      # ClockOwnership: .variable, .clock, .sampled
+model.time_events           # TimeEvent: .time (Fraction) or .deadline (Expression)
+model.discrete_definitions  # DiscreteDefinition: .targets, .branches (.trigger, .guard, .values)
+model.event_transactions    # EventTransaction: .targets, .steps (.trigger, .guard, .clock, .definitions)
+model.previous_values       # PreviousValue: .variable, .clock
+model.delays                # Delay: .kind, .expression, .delay_time, .delay_time_value, .maximum
+model.terminals             # Terminal
+model.structured_roots      # StructuredRoot: .domain, .expression
+model.connector_types       # ConnectorType: .name, .members, .flow_convention
+```
+
+An event also names what fires it and what it reports: `event.trigger` and
+`event.guard` (Conditions), and for `assert`/`terminate` `event.message`
+and `event.level` (Expressions; no level means `AssertionLevel.error`).
+`view.raw` is the entry as stored, for a field a view does not name yet.
+
 A variable:
 
 ```python
@@ -457,6 +481,45 @@ python3 examples/bitcode-passes/connector_graph.py motor.rbc --dot | dot -Tsvg -
 python3 examples/bitcode-passes/connector_logger.py motor.rbc -o motor-traced.rbc
 ```
 
+## Running your pass inside the compiler
+
+A pass that takes `INPUT.rbc -o OUTPUT.rbc`, like every example here, can run
+as a step of `rumoca compile` itself:
+
+```bash
+rumoca compile motor.mo --model Motor \
+    --pass "default,exec:python3 examples/bitcode-passes/trace_all.py" \
+    --pass "fixpoint(fold-constants,fold-pure-calls)" \
+    --emit-bitcode motor-traced.rbc
+```
+
+The compiler writes the model to a temporary CBOR file, runs
+`COMMAND IN.rbc -o OUT.rbc` (the command split on whitespace), and reads the
+output back. Your program's stdout and stderr both go to the compiler's
+stderr. The output then gets exactly what a built-in pass's result gets:
+dead expressions are dropped, the summary is recomputed, the model is
+validated (a failure names your pass), and it is rebuilt into the DAE that
+simulation and code generation consume. Trace points and the execution
+section a pass adds are kept in the artifact `--emit-bitcode` writes.
+
+`exec:` runs to the end of its `--pass` value, so a command may contain
+commas; put anything after it in another `--pass`.
+
+The pipeline grammar and scheduling:
+
+| Element | Meaning |
+|---|---|
+| `NAME` | a built-in pass (`rumoca compile --pass nope` lists them) |
+| `default`, `O1` | every built-in pass, in catalog order (what a plain compile runs) |
+| `none`, `O0` | nothing; alone, the model is exactly what the frontend lowered |
+| `round-trip` | nothing, but still export and rebuild |
+| `exec:COMMAND` | an external pass |
+| `fixpoint(PIPELINE)` | repeat until a round changes nothing (at most 16 rounds) |
+
+Steps run in the order written. A built-in pass is skipped when the model has
+not changed since it last ran and changed nothing, so `default,default` or a
+converged `fixpoint` round costs nothing. External passes always run.
+
 ## Writing a pass in another language
 
 The SDK is one reader, not the interface. To write a pass in any language:
@@ -464,7 +527,7 @@ The SDK is one reader, not the interface. To write a pass in any language:
 1. Read the file. If the first non-whitespace byte is `{` it is JSON;
    otherwise it is CBOR. `rumoca bitcode convert --format json` gets you JSON if
    your language has no CBOR library.
-2. Check `magic == "RUMOCA-RBC"` and `bitcode_version == 1`. Refuse otherwise.
+2. Check `magic == "RUMOCA-RBC"` and `bitcode_version == 2`. Refuse otherwise.
 3. Read `model`. Every enum is tagged by an explicit `kind` string.
 4. To write: preserve fields you do not understand, recompute `summary`, and
    keep expression operands referencing strictly lower ids.

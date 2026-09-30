@@ -2034,7 +2034,7 @@ fn reject_zero_coefficient<'dae>(
     span: Span,
 ) -> Result<(), LowerError> {
     match selector.constant_real(expression, scalar) {
-        Ok(value) if value == 0.0 => Err(LowerError::non_computable(
+        Ok(0.0) => Err(LowerError::non_computable(
             "matched derivative has a zero affine coefficient",
             span,
         )),

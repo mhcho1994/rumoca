@@ -17,12 +17,13 @@
 mod asserts;
 mod constants;
 mod evaluate;
+pub mod external;
 mod functions;
 mod inline_constants;
+pub mod pipeline;
 mod pure_calls;
 
 use crate::schema::*;
-use crate::validate::{ValidateOptions, recompute_summary, validate};
 
 /// A rewrite over the equation IR.
 pub trait Pass: Sync {
@@ -47,12 +48,20 @@ impl From<crate::link::LinkError> for PassError {
 /// What one pass did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PassReport {
-    pub pass: &'static str,
-    /// Rewrites the pass made.
+    pub pass: String,
+    /// Rewrites the pass made (for an external pass, 1 if it changed the
+    /// artifact at all).
     pub rewrites: usize,
     /// Expressions the pipeline dropped after it because nothing referenced
     /// them any more.
     pub removed_expressions: usize,
+}
+
+impl PassReport {
+    /// Whether the model is different after this step.
+    pub fn changed(&self) -> bool {
+        self.rewrites > 0 || self.removed_expressions > 0
+    }
 }
 
 static DEAD_EXPRESSIONS: DeadExpressions = DeadExpressions;
@@ -87,61 +96,13 @@ pub fn find(name: &str) -> Option<&'static dyn Pass> {
     catalog().into_iter().find(|pass| pass.name() == name)
 }
 
-/// Run named passes in order over an artifact.
-///
-/// `default` expands to the whole catalog. Each pass is followed by dead
-/// expression removal and validation, so a pass that breaks the model is
-/// named as the one that did.
+/// Run a pass pipeline over an artifact ([`pipeline`] has the grammar and
+/// the scheduling rules).
 pub fn run(file: &mut RbcFile, names: &[String]) -> Result<Vec<PassReport>, PassError> {
-    let mut passes = Vec::new();
-    for name in names {
-        if name == "default" {
-            passes.extend(catalog());
-            continue;
-        }
-        // Round trip only: export and rebuild with nothing in between, which
-        // is how the stage's own fidelity is measured. (`none` alone never
-        // reaches here: the compiler skips the stage for it.)
-        if name == "round-trip" || name == "none" {
-            continue;
-        }
-        passes.push(find(name).ok_or_else(|| {
-            let known: Vec<_> = catalog().iter().map(|pass| pass.name()).collect();
-            PassError(format!(
-                "unknown pass `{name}`; known passes: default, none, round-trip, {}",
-                known.join(", ")
-            ))
-        })?);
-    }
-    let mut reports = Vec::with_capacity(passes.len());
-    for pass in passes {
-        let rewrites = pass.run(&mut file.model)?;
-        let removed_expressions = remove_dead_expressions(&mut file.model)?;
-        recompute_summary(&mut file.model);
-        validate(
-            &file.model,
-            &ValidateOptions {
-                reject_unsupported: true,
-            },
-        )
-        .map_err(|errors| {
-            PassError(format!(
-                "`{}` produced an invalid model: {}",
-                pass.name(),
-                errors
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ))
-        })?;
-        reports.push(PassReport {
-            pass: pass.name(),
-            rewrites,
-            removed_expressions,
-        });
-    }
-    Ok(reports)
+    let steps = pipeline::parse(names)?;
+    let mut scheduler = pipeline::Scheduler::default();
+    scheduler.run(file, &steps)?;
+    Ok(scheduler.reports)
 }
 
 /// Which expressions are reachable from outside the arena, operands closed.

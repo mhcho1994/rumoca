@@ -369,31 +369,51 @@ fn rebuild_discrete_definitions<'dae>(
                 .map(discrete_value)
                 .collect::<Result<Vec<_>, _>>()?;
             topology.owner(at, targets, |owner| {
-                for branch in &definition.branches {
-                    let branch_at = ctx.provenance(branch.provenance)?;
-                    let values = branch
-                        .values
-                        .iter()
-                        .map(|value| {
-                            resolve(expressions, value.0, "expression", ctx)
-                                .map(|expression| (expression, branch_at))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    match branch.activation {
-                        RbcDiscreteActivation::Always => owner.always(branch_at, values)?,
-                        RbcDiscreteActivation::When { trigger, guard } => owner.when(
-                            resolve(conditions, trigger.0, "condition", ctx)?,
-                            resolve(conditions, guard.0, "condition", ctx)?,
-                            branch_at,
-                            values,
-                        )?,
-                    }
-                }
-                Ok(())
+                rebuild_discrete_branches(owner, ctx, expressions, conditions, &definition.branches)
             })?;
         }
         Ok(())
     })
+}
+
+fn rebuild_discrete_branches<'dae>(
+    owner: &mut dae::DiscreteValueOwner<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    expressions: &[dae::ExprId<'dae>],
+    conditions: &[dae::ConditionId<'dae>],
+    branches: &[RbcDiscreteBranch],
+) -> Result<(), dae::DaeConstructionError> {
+    for branch in branches {
+        rebuild_discrete_branch(owner, ctx, expressions, conditions, branch)?;
+    }
+    Ok(())
+}
+
+fn rebuild_discrete_branch<'dae>(
+    owner: &mut dae::DiscreteValueOwner<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    expressions: &[dae::ExprId<'dae>],
+    conditions: &[dae::ConditionId<'dae>],
+    branch: &RbcDiscreteBranch,
+) -> Result<(), dae::DaeConstructionError> {
+    let branch_at = ctx.provenance(branch.provenance)?;
+    let values = branch
+        .values
+        .iter()
+        .map(|value| {
+            resolve(expressions, value.0, "expression", ctx)
+                .map(|expression| (expression, branch_at))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match branch.activation {
+        RbcDiscreteActivation::Always => owner.always(branch_at, values),
+        RbcDiscreteActivation::When { trigger, guard } => owner.when(
+            resolve(conditions, trigger.0, "condition", ctx)?,
+            resolve(conditions, guard.0, "condition", ctx)?,
+            branch_at,
+            values,
+        ),
+    }
 }
 
 fn rebuild_types<'dae>(
@@ -425,15 +445,8 @@ fn rebuild_types<'dae>(
             // `ValueTypeId`s the owner has to re-check, not data it can take
             // on trust from an artifact.
             if let Some(record) = &ty.record {
-                let mut fields = Vec::with_capacity(record.fields.len());
-                for field in &record.fields {
-                    fields.push((
-                        rumoca_core::VarName::intern(&field.name),
-                        resolve(&types, field.value_type.0, "type", ctx)?,
-                    ));
-                }
-                let name = rumoca_core::VarName::intern(&record.name);
-                types.push(owner.record_array(name, fields, ty.dimensions.clone(), anchor)?);
+                let record = rebuild_record(owner, ctx, &types, record, ty, anchor)?;
+                types.push(record);
                 continue;
             }
             let scalar = scalar_of(ty.scalar);
@@ -449,6 +462,25 @@ fn rebuild_types<'dae>(
     Ok(types)
 }
 
+fn rebuild_record<'dae>(
+    owner: &mut dae::ValueTypes<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    types: &[dae::ValueTypeId<'dae>],
+    record: &RbcRecord,
+    ty: &RbcType,
+    anchor: dae::DaeProvenance,
+) -> Result<dae::ValueTypeId<'dae>, dae::DaeConstructionError> {
+    let mut fields = Vec::with_capacity(record.fields.len());
+    for field in &record.fields {
+        fields.push((
+            rumoca_core::VarName::intern(&field.name),
+            resolve(types, field.value_type.0, "type", ctx)?,
+        ));
+    }
+    let name = rumoca_core::VarName::intern(&record.name);
+    owner.record_array(name, fields, ty.dimensions.clone(), anchor)
+}
+
 type Reservations<'dae> = Vec<dae::VariableReservation<'dae>>;
 
 fn reserve_variables<'dae>(
@@ -460,54 +492,63 @@ fn reserve_variables<'dae>(
     let mut reservations = Vec::with_capacity(ctx.model.variables.len());
     construction.variables(|owner| {
         for variable in &ctx.model.variables {
-            let name = rumoca_core::VarName::intern(&variable.name);
-            let ty = resolve(types, variable.value_type.0, "type", ctx)?;
-            let at = ctx.provenance(variable.declaration)?;
-            let (slot, reservation) = match variable.role {
-                RbcRole::Parameter => {
-                    let (id, r) = owner.reserve_parameter(name, ty, at)?;
-                    (VariableSlot::Parameter(id), r)
-                }
-                RbcRole::Constant => {
-                    let (id, r) = owner.reserve_constant(name, ty, at)?;
-                    (VariableSlot::Parameter(id), r)
-                }
-                RbcRole::Input => {
-                    let variability = if variable.discrete_input {
-                        dae::InputVariability::Discrete
-                    } else {
-                        dae::InputVariability::Continuous
-                    };
-                    let (id, r) = owner.reserve_input(name, ty, variability, at)?;
-                    (VariableSlot::Input(id), r)
-                }
-                RbcRole::State => {
-                    let (id, r) = owner.reserve_state(name, ty, at)?;
-                    (VariableSlot::State(id), r)
-                }
-                RbcRole::Algebraic => {
-                    let (id, r) = owner.reserve_algebraic(name, ty, at)?;
-                    (VariableSlot::Algebraic(id), r)
-                }
-                RbcRole::Output => {
-                    let (id, r) = owner.reserve_output(name, ty, at)?;
-                    (VariableSlot::Algebraic(id), r)
-                }
-                RbcRole::DiscreteReal => {
-                    let (id, r) = owner.reserve_discrete_real(name, ty, at)?;
-                    (VariableSlot::DiscreteReal(id), r)
-                }
-                RbcRole::DiscreteValue => {
-                    let (id, r) = owner.reserve_discrete_value(name, ty, at)?;
-                    (VariableSlot::DiscreteValue(id), r)
-                }
-            };
+            let (slot, reservation) = reserve_variable(owner, ctx, types, variable)?;
             slots.push(slot);
             reservations.push(reservation);
         }
         Ok(())
     })?;
     Ok((slots, reservations))
+}
+
+fn reserve_variable<'dae>(
+    owner: &mut dae::Variables<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    types: &[dae::ValueTypeId<'dae>],
+    variable: &RbcVariable,
+) -> Result<(VariableSlot<'dae>, dae::VariableReservation<'dae>), dae::DaeConstructionError> {
+    let name = rumoca_core::VarName::intern(&variable.name);
+    let ty = resolve(types, variable.value_type.0, "type", ctx)?;
+    let at = ctx.provenance(variable.declaration)?;
+    Ok(match variable.role {
+        RbcRole::Parameter => {
+            let (id, r) = owner.reserve_parameter(name, ty, at)?;
+            (VariableSlot::Parameter(id), r)
+        }
+        RbcRole::Constant => {
+            let (id, r) = owner.reserve_constant(name, ty, at)?;
+            (VariableSlot::Parameter(id), r)
+        }
+        RbcRole::Input => {
+            let variability = if variable.discrete_input {
+                dae::InputVariability::Discrete
+            } else {
+                dae::InputVariability::Continuous
+            };
+            let (id, r) = owner.reserve_input(name, ty, variability, at)?;
+            (VariableSlot::Input(id), r)
+        }
+        RbcRole::State => {
+            let (id, r) = owner.reserve_state(name, ty, at)?;
+            (VariableSlot::State(id), r)
+        }
+        RbcRole::Algebraic => {
+            let (id, r) = owner.reserve_algebraic(name, ty, at)?;
+            (VariableSlot::Algebraic(id), r)
+        }
+        RbcRole::Output => {
+            let (id, r) = owner.reserve_output(name, ty, at)?;
+            (VariableSlot::Algebraic(id), r)
+        }
+        RbcRole::DiscreteReal => {
+            let (id, r) = owner.reserve_discrete_real(name, ty, at)?;
+            (VariableSlot::DiscreteReal(id), r)
+        }
+        RbcRole::DiscreteValue => {
+            let (id, r) = owner.reserve_discrete_value(name, ty, at)?;
+            (VariableSlot::DiscreteValue(id), r)
+        }
+    })
 }
 
 /// Everything an expression node may name that was rebuilt before it.
@@ -577,63 +618,8 @@ fn build_expression<'dae>(
             value: RbcLiteral::Enumeration { ordinal },
         } => owner.at(at).enumeration_literal(*ordinal)?,
         RbcExprNode::Literal { value } => owner.at(at).literal(literal_of(value))?,
-        // A binder is not a `CoordinateInput`: it is owner-local to a domain
-        // and has its own constructor, which re-checks the binder against the
-        // domain it claims to come from.
-        RbcExprNode::Coordinate {
-            coordinate: RbcCoordinate::Binder { domain, ordinal },
-        } => {
-            let binder = *tables
-                .binders
-                .get(&(*domain, *ordinal))
-                .ok_or_else(|| ctx.unsupported("binder names an unknown domain"))?;
-            owner.at(at).binder(binder)?
-        }
-        RbcExprNode::Coordinate {
-            coordinate: RbcCoordinate::ClockInterval { clock },
-        } => {
-            let clock = tables
-                .periodic
-                .get(clock.0 as usize)
-                .copied()
-                .flatten()
-                .ok_or_else(|| ctx.unsupported("interval() names a clock that is not periodic"))?;
-            owner
-                .at(at)
-                .coordinate(dae::CoordinateInput::ClockInterval(clock))?
-        }
-        RbcExprNode::Coordinate {
-            coordinate: RbcCoordinate::Previous { previous },
-        } => owner
-            .at(at)
-            .coordinate(dae::CoordinateInput::Previous(resolve(
-                tables.previous,
-                previous.0,
-                "previous value",
-                ctx,
-            )?))?,
-        RbcExprNode::Coordinate {
-            coordinate: RbcCoordinate::Terminal { terminal },
-        } => owner
-            .at(at)
-            .coordinate(dae::CoordinateInput::Terminal(resolve(
-                tables.terminals,
-                terminal.0,
-                "terminal",
-                ctx,
-            )?))?,
-        RbcExprNode::Coordinate {
-            coordinate: RbcCoordinate::Condition { condition },
-        } => {
-            let condition = resolve(tables.conditions, condition.0, "condition", ctx)?;
-            owner
-                .at(at)
-                .coordinate(dae::CoordinateInput::Condition(condition))?
-        }
         RbcExprNode::Coordinate { coordinate } => {
-            let input = coordinate_of(*coordinate, tables.variables)
-                .ok_or_else(|| ctx.unsupported("coordinate names an unknown variable"))?;
-            owner.at(at).coordinate(input)?
+            build_coordinate(owner, ctx, coordinate, tables, at)?
         }
         RbcExprNode::Unary { op, operand } => {
             let operand = resolve(built, operand.0, "expression", ctx)?;
@@ -645,69 +631,34 @@ fn build_expression<'dae>(
             owner.at(at).binary(binary_of(*op), lhs, rhs)?
         }
         RbcExprNode::Conditional { branches, fallback } => {
-            let mut arms = Vec::with_capacity(branches.len());
-            for branch in branches {
-                let condition = resolve(built, branch.condition.0, "expression", ctx)?;
-                let value = resolve(built, branch.value.0, "expression", ctx)?;
-                arms.push((condition, value));
-            }
-            let fallback = resolve(built, fallback.0, "expression", ctx)?;
-            owner.at(at).conditional(arms, fallback)?
+            build_conditional(owner, ctx, branches, *fallback, built, at)?
         }
         RbcExprNode::Builtin { name, arguments } => {
             let builtin = builtin_of(name)
                 .ok_or_else(|| ctx.unsupported(format!("unknown built-in `{name}`")))?;
-            let mut operands = Vec::with_capacity(arguments.len());
-            for argument in arguments {
-                operands.push(resolve(built, argument.0, "expression", ctx)?);
-            }
-            owner.at(at).builtin(builtin, operands)?
+            owner
+                .at(at)
+                .builtin(builtin, resolve_operands(built, arguments, ctx)?)?
         }
         RbcExprNode::Array {
             elements,
             empty_type,
-        } => {
-            if let Some(ty) = empty_type {
-                // An empty literal carries no element from which to re-derive
-                // its type, so the constructor takes the type directly.
-                owner
-                    .at(at)
-                    .empty_array(resolve(tables.types, ty.0, "type", ctx)?)?
-            } else {
-                let mut operands = Vec::with_capacity(elements.len());
-                for element in elements {
-                    operands.push(resolve(built, element.0, "expression", ctx)?);
-                }
-                owner.at(at).array(operands)?
-            }
-        }
+        } => build_array(owner, ctx, elements, *empty_type, built, tables, at)?,
         RbcExprNode::Record { ty, fields } => {
             let ty = resolve(tables.types, ty.0, "type", ctx)?;
-            let mut operands = Vec::with_capacity(fields.len());
-            for field in fields {
-                operands.push(resolve(built, field.0, "expression", ctx)?);
-            }
-            owner.at(at).record(ty, operands)?
+            owner
+                .at(at)
+                .record(ty, resolve_operands(built, fields, ctx)?)?
         }
         RbcExprNode::Field { base, field } => {
             let base = resolve(built, base.0, "expression", ctx)?;
             owner.at(at).field(base, *field as usize)?
         }
         RbcExprNode::Range { start, step, stop } => {
-            let start = resolve(built, start.0, "expression", ctx)?;
-            let step = step
-                .map(|step| resolve(built, step.0, "expression", ctx))
-                .transpose()?;
-            let stop = resolve(built, stop.0, "expression", ctx)?;
-            owner.at(at).range(start, step, stop)?
+            build_range(owner, ctx, *start, *step, *stop, built, at)?
         }
         RbcExprNode::Comprehension { domain, body } => {
-            let domain = *tables
-                .domains
-                .get(domain.0 as usize)
-                .ok_or_else(|| ctx.unsupported("comprehension names an unknown domain"))?;
-            let body = resolve(built, body.0, "expression", ctx)?;
-            owner.at(at).comprehension(domain, body)?
+            build_comprehension(owner, ctx, *domain, *body, built, tables, at)?
         }
         RbcExprNode::Index { base, subscripts } => {
             let base = resolve(built, base.0, "expression", ctx)?;
@@ -731,6 +682,153 @@ fn build_expression<'dae>(
             )));
         }
     })
+}
+
+fn build_coordinate<'dae>(
+    owner: &mut dae::Expressions<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    coordinate: &RbcCoordinate,
+    tables: &Tables<'_, 'dae>,
+    at: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    Ok(match coordinate {
+        // A binder is not a `CoordinateInput`: it is owner-local to a domain
+        // and has its own constructor, which re-checks the binder against the
+        // domain it claims to come from.
+        RbcCoordinate::Binder { domain, ordinal } => {
+            let binder = *tables
+                .binders
+                .get(&(*domain, *ordinal))
+                .ok_or_else(|| ctx.unsupported("binder names an unknown domain"))?;
+            owner.at(at).binder(binder)?
+        }
+        RbcCoordinate::ClockInterval { clock } => {
+            let clock = tables
+                .periodic
+                .get(clock.0 as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| ctx.unsupported("interval() names a clock that is not periodic"))?;
+            owner
+                .at(at)
+                .coordinate(dae::CoordinateInput::ClockInterval(clock))?
+        }
+        RbcCoordinate::Previous { previous } => {
+            owner
+                .at(at)
+                .coordinate(dae::CoordinateInput::Previous(resolve(
+                    tables.previous,
+                    previous.0,
+                    "previous value",
+                    ctx,
+                )?))?
+        }
+        RbcCoordinate::Terminal { terminal } => {
+            owner
+                .at(at)
+                .coordinate(dae::CoordinateInput::Terminal(resolve(
+                    tables.terminals,
+                    terminal.0,
+                    "terminal",
+                    ctx,
+                )?))?
+        }
+        RbcCoordinate::Condition { condition } => {
+            let condition = resolve(tables.conditions, condition.0, "condition", ctx)?;
+            owner
+                .at(at)
+                .coordinate(dae::CoordinateInput::Condition(condition))?
+        }
+        coordinate => {
+            let input = coordinate_of(*coordinate, tables.variables)
+                .ok_or_else(|| ctx.unsupported("coordinate names an unknown variable"))?;
+            owner.at(at).coordinate(input)?
+        }
+    })
+}
+
+/// Resolve a list of earlier expression operands, in order.
+fn resolve_operands<'dae>(
+    built: &[dae::ExprId<'dae>],
+    operands: &[ExprId],
+    ctx: &Rebuild<'_>,
+) -> Result<Vec<dae::ExprId<'dae>>, dae::DaeConstructionError> {
+    let mut resolved = Vec::with_capacity(operands.len());
+    for operand in operands {
+        resolved.push(resolve(built, operand.0, "expression", ctx)?);
+    }
+    Ok(resolved)
+}
+
+fn build_conditional<'dae>(
+    owner: &mut dae::Expressions<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    branches: &[RbcBranch],
+    fallback: ExprId,
+    built: &[dae::ExprId<'dae>],
+    at: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let mut arms = Vec::with_capacity(branches.len());
+    for branch in branches {
+        let condition = resolve(built, branch.condition.0, "expression", ctx)?;
+        let value = resolve(built, branch.value.0, "expression", ctx)?;
+        arms.push((condition, value));
+    }
+    let fallback = resolve(built, fallback.0, "expression", ctx)?;
+    owner.at(at).conditional(arms, fallback)
+}
+
+fn build_array<'dae>(
+    owner: &mut dae::Expressions<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    elements: &[ExprId],
+    empty_type: Option<TypeId>,
+    built: &[dae::ExprId<'dae>],
+    tables: &Tables<'_, 'dae>,
+    at: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    if let Some(ty) = empty_type {
+        // An empty literal carries no element from which to re-derive
+        // its type, so the constructor takes the type directly.
+        return owner
+            .at(at)
+            .empty_array(resolve(tables.types, ty.0, "type", ctx)?);
+    }
+    owner.at(at).array(resolve_operands(built, elements, ctx)?)
+}
+
+fn build_range<'dae>(
+    owner: &mut dae::Expressions<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    start: ExprId,
+    step: Option<ExprId>,
+    stop: ExprId,
+    built: &[dae::ExprId<'dae>],
+    at: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let start = resolve(built, start.0, "expression", ctx)?;
+    let step = step
+        .map(|step| resolve(built, step.0, "expression", ctx))
+        .transpose()?;
+    let stop = resolve(built, stop.0, "expression", ctx)?;
+    owner.at(at).range(start, step, stop)
+}
+
+fn build_comprehension<'dae>(
+    owner: &mut dae::Expressions<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    domain: DomainId,
+    body: ExprId,
+    built: &[dae::ExprId<'dae>],
+    tables: &Tables<'_, 'dae>,
+    at: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let domain = *tables
+        .domains
+        .get(domain.0 as usize)
+        .ok_or_else(|| ctx.unsupported("comprehension names an unknown domain"))?;
+    let body = resolve(built, body.0, "expression", ctx)?;
+    owner.at(at).comprehension(domain, body)
 }
 
 fn define_variables<'dae>(
@@ -909,20 +1007,7 @@ fn rebuild_discrete_real<'dae>(
     if !ctx.model.discrete_real_equations.is_empty() {
         construction.discrete(|owner| {
             for equation in &ctx.model.discrete_real_equations {
-                let at = ctx.provenance(equation.provenance)?;
-                let residual = resolve(expressions, equation.residual.0, "expression", ctx)?;
-                let build =
-                    |target: &mut dae::ResidualEquation<'_, 'dae>| target.residual(residual);
-                match equation.activation {
-                    RbcDiscreteRealActivation::Always => {
-                        owner.real_equation(at, build)?;
-                    }
-                    RbcDiscreteRealActivation::When { trigger, guard } => {
-                        let trigger = resolve(conditions, trigger.0, "condition", ctx)?;
-                        let guard = resolve(conditions, guard.0, "condition", ctx)?;
-                        owner.when_real_equation(trigger, guard, at, build)?;
-                    }
-                }
+                rebuild_discrete_real_equation(owner, ctx, equation, expressions, conditions)?;
             }
             Ok(())
         })?;
@@ -930,26 +1015,60 @@ fn rebuild_discrete_real<'dae>(
     if !ctx.model.initial_discrete_values.is_empty() {
         construction.initialization(|owner| {
             for entry in &ctx.model.initial_discrete_values {
-                let at = ctx.provenance(entry.provenance)?;
-                let value = resolve(expressions, entry.value.0, "expression", ctx)?;
-                match variables.get(entry.target.0 as usize) {
-                    Some(VariableSlot::DiscreteReal(target)) => {
-                        owner.discrete_real_initial_value(*target, value, at)?;
-                    }
-                    Some(VariableSlot::DiscreteValue(target)) => {
-                        owner.discrete_value_initial_value(*target, value, at)?;
-                    }
-                    _ => {
-                        return Err(ctx.unsupported(format!(
-                            "initial discrete value names variable {}, which is not \
-                             a discrete coordinate",
-                            entry.target.0
-                        )));
-                    }
-                }
+                rebuild_initial_discrete_value(owner, ctx, entry, expressions, variables)?;
             }
             Ok(())
         })?;
+    }
+    Ok(())
+}
+
+fn rebuild_discrete_real_equation<'dae>(
+    owner: &mut dae::DiscreteEquations<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    equation: &RbcDiscreteRealEquation,
+    expressions: &[dae::ExprId<'dae>],
+    conditions: &[dae::ConditionId<'dae>],
+) -> Result<(), dae::DaeConstructionError> {
+    let at = ctx.provenance(equation.provenance)?;
+    let residual = resolve(expressions, equation.residual.0, "expression", ctx)?;
+    let build = |target: &mut dae::ResidualEquation<'_, 'dae>| target.residual(residual);
+    match equation.activation {
+        RbcDiscreteRealActivation::Always => {
+            owner.real_equation(at, build)?;
+        }
+        RbcDiscreteRealActivation::When { trigger, guard } => {
+            let trigger = resolve(conditions, trigger.0, "condition", ctx)?;
+            let guard = resolve(conditions, guard.0, "condition", ctx)?;
+            owner.when_real_equation(trigger, guard, at, build)?;
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_initial_discrete_value<'dae>(
+    owner: &mut dae::InitializationEquations<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    entry: &RbcInitialDiscreteValue,
+    expressions: &[dae::ExprId<'dae>],
+    variables: &[VariableSlot<'dae>],
+) -> Result<(), dae::DaeConstructionError> {
+    let at = ctx.provenance(entry.provenance)?;
+    let value = resolve(expressions, entry.value.0, "expression", ctx)?;
+    match variables.get(entry.target.0 as usize) {
+        Some(VariableSlot::DiscreteReal(target)) => {
+            owner.discrete_real_initial_value(*target, value, at)?;
+        }
+        Some(VariableSlot::DiscreteValue(target)) => {
+            owner.discrete_value_initial_value(*target, value, at)?;
+        }
+        _ => {
+            return Err(ctx.unsupported(format!(
+                "initial discrete value names variable {}, which is not \
+                 a discrete coordinate",
+                entry.target.0
+            )));
+        }
     }
     Ok(())
 }
@@ -971,53 +1090,65 @@ fn rebuild_families<'dae>(
         (&ctx.model.initial_equation_families, true),
     ] {
         for family in families {
-            let at = ctx.provenance(family.provenance)?;
-            // Validation guarantees the reference, but a corrupt artifact must
-            // not panic here.
-            let Some(&domain) = domains.get(family.domain.0 as usize) else {
-                continue;
-            };
-            let bodies: Vec<dae::ExprId<'dae>> = family
-                .bodies
-                .iter()
-                .map(|body| resolve(expressions, body.0, "expression", ctx))
-                .collect::<Result<_, _>>()?;
-            let view = match family.scalar_view {
-                RbcScalarView::BinderSubstitution => {
-                    rumoca_core::ComprehensionScalarView::BinderSubstitution
-                }
-                RbcScalarView::RowMajorProjection => {
-                    rumoca_core::ComprehensionScalarView::RowMajorProjection
-                }
-                RbcScalarView::BinderPrefixProjection { binder_count } => {
-                    rumoca_core::ComprehensionScalarView::BinderPrefixProjection { binder_count }
-                }
-            };
-            // The two partitions are distinct owner types, so the call is
-            // written twice rather than behind one closure.
-            let outcome = if initial {
-                construction.initialization(|owner| {
-                    owner.structured_family(at, domain, view, |family| {
-                        for body in &bodies {
-                            family.body(*body)?;
-                        }
-                        Ok(())
-                    })?;
-                    Ok(())
-                })
-            } else {
-                construction.continuous(|owner| {
-                    owner.structured_family(at, domain, view, |family| {
-                        for body in &bodies {
-                            family.body(*body)?;
-                        }
-                        Ok(())
-                    })?;
-                    Ok(())
-                })
-            };
-            outcome?;
+            rebuild_family(construction, ctx, expressions, domains, family, initial)?;
         }
+    }
+    Ok(())
+}
+
+fn rebuild_family<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    ctx: &Rebuild<'_>,
+    expressions: &[dae::ExprId<'dae>],
+    domains: &[dae::DomainId<'dae>],
+    family: &RbcEquationFamily,
+    initial: bool,
+) -> Result<(), dae::DaeConstructionError> {
+    let at = ctx.provenance(family.provenance)?;
+    // Validation guarantees the reference, but a corrupt artifact must
+    // not panic here.
+    let Some(&domain) = domains.get(family.domain.0 as usize) else {
+        return Ok(());
+    };
+    let bodies: Vec<dae::ExprId<'dae>> = family
+        .bodies
+        .iter()
+        .map(|body| resolve(expressions, body.0, "expression", ctx))
+        .collect::<Result<_, _>>()?;
+    let view = match family.scalar_view {
+        RbcScalarView::BinderSubstitution => {
+            rumoca_core::ComprehensionScalarView::BinderSubstitution
+        }
+        RbcScalarView::RowMajorProjection => {
+            rumoca_core::ComprehensionScalarView::RowMajorProjection
+        }
+        RbcScalarView::BinderPrefixProjection { binder_count } => {
+            rumoca_core::ComprehensionScalarView::BinderPrefixProjection { binder_count }
+        }
+    };
+    // The two partitions are distinct owner types, so the call is
+    // written twice rather than behind one closure.
+    let outcome = if initial {
+        construction.initialization(|owner| {
+            owner.structured_family(at, domain, view, |family| family_bodies(family, &bodies))?;
+            Ok(())
+        })
+    } else {
+        construction.continuous(|owner| {
+            owner.structured_family(at, domain, view, |family| family_bodies(family, &bodies))?;
+            Ok(())
+        })
+    };
+    outcome?;
+    Ok(())
+}
+
+fn family_bodies<'dae>(
+    family: &mut dae::StructuredResiduals<'_, 'dae>,
+    bodies: &[dae::ExprId<'dae>],
+) -> Result<(), dae::DaeConstructionError> {
+    for body in bodies {
+        family.body(*body)?;
     }
     Ok(())
 }

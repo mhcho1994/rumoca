@@ -237,6 +237,54 @@ fn needs_record(function: &RbcFunction) -> bool {
         || function.parameters.iter().any(|p| p.declaration.is_some())
 }
 
+/// `%id` references, space separated.
+fn variable_refs(ids: &[VariableId]) -> String {
+    ids.iter()
+        .map(|v| format!("%{}", v.0))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `^id` references, space separated.
+fn expression_refs(ids: &[ExprId]) -> String {
+    ids.iter()
+        .map(|e| format!("^{}", e.0))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Extents as `a,b,c`, or `-` when there are none.
+fn extents(values: &[u32]) -> String {
+    if values.is_empty() {
+        "-".to_string()
+    } else {
+        values
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// Append the `reads`, `dreads` and `preads` clauses, each only when
+/// non-empty.
+fn write_reads(
+    line: &mut String,
+    reads: &[VariableId],
+    reads_derivative: &[VariableId],
+    reads_previous: &[VariableId],
+) {
+    for (key, ids) in [
+        ("reads", reads),
+        ("dreads", reads_derivative),
+        ("preads", reads_previous),
+    ] {
+        if !ids.is_empty() {
+            let _ = write!(line, " {key} {}", variable_refs(ids));
+        }
+    }
+}
+
 pub fn print_text(file: &RbcFile) -> Result<String, TextError> {
     print_text_with(file, TextOptions::default())
 }
@@ -258,418 +306,479 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
     let _ = writeln!(out, "producer {}", quote(&file.producer));
     let _ = writeln!(out, "model {}", quote(&model.name));
 
-    if !model.sources.is_empty() {
-        let _ = writeln!(out, "\n; sources");
-        for source in &model.sources {
-            match (&source.text, options.sources) {
-                (Some(text), true) => {
-                    let _ = writeln!(
-                        out,
-                        "!{} source {} text {}",
-                        source.id.0,
-                        quote(&source.name),
-                        quote(text)
-                    );
-                }
-                _ => {
-                    let _ = writeln!(out, "!{} source {}", source.id.0, quote(&source.name));
-                }
+    write_sources(&mut out, model, options);
+    write_types(&mut out, model);
+    write_functions(&mut out, model)?;
+    write_components(&mut out, model);
+    write_variables(&mut out, model);
+    write_expressions(&mut out, model)?;
+    write_equations(&mut out, model);
+    write_domains(&mut out, model);
+    write_families(&mut out, model);
+    write_discrete_real_equations(&mut out, model);
+    write_initial_discrete_values(&mut out, model);
+    write_relations(&mut out, model);
+    write_records(&mut out, model)?;
+    write_conditions(&mut out, model);
+    write_roots(&mut out, model);
+    write_events(&mut out, model);
+    write_time_events(&mut out, model);
+    write_connections(&mut out, model);
+    write_connection_sets(&mut out, model);
+    write_discrete_definitions(&mut out, model);
+    write_trace_points(&mut out, model);
+
+    Ok(out)
+}
+
+fn write_sources(out: &mut String, model: &RbcModel, options: TextOptions) {
+    if model.sources.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n; sources");
+    for source in &model.sources {
+        match (&source.text, options.sources) {
+            (Some(text), true) => {
+                let _ = writeln!(
+                    out,
+                    "!{} source {} text {}",
+                    source.id.0,
+                    quote(&source.name),
+                    quote(text)
+                );
+            }
+            _ => {
+                let _ = writeln!(out, "!{} source {}", source.id.0, quote(&source.name));
             }
         }
     }
+}
 
-    if !model.types.is_empty() {
-        let _ = writeln!(out, "\n; types");
-        for entry in &model.types {
-            let dims = if entry.dimensions.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " dims {}",
-                    entry
-                        .dimensions
-                        .iter()
-                        .map(u32::to_string)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            };
-            let record = match &entry.record {
-                Some(record) => format!(
-                    " record {} {} {}",
-                    quote(&record.name),
-                    record.fields.len(),
-                    record
-                        .fields
-                        .iter()
-                        .map(|f| format!("{} ${}", quote(&f.name), f.value_type.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                None => String::new(),
-            };
-            let _ = writeln!(
-                out,
-                "${} type {}{dims}{record}",
-                entry.id.0,
-                scalar(entry.scalar)
-            );
-        }
+fn write_types(out: &mut String, model: &RbcModel) {
+    if model.types.is_empty() {
+        return;
     }
+    let _ = writeln!(out, "\n; types");
+    for entry in &model.types {
+        let dims = if entry.dimensions.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " dims {}",
+                entry
+                    .dimensions
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        let record = match &entry.record {
+            Some(record) => format!(
+                " record {} {} {}",
+                quote(&record.name),
+                record.fields.len(),
+                record
+                    .fields
+                    .iter()
+                    .map(|f| format!("{} ${}", quote(&f.name), f.value_type.0))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            None => String::new(),
+        };
+        let _ = writeln!(
+            out,
+            "${} type {}{dims}{record}",
+            entry.id.0,
+            scalar(entry.scalar)
+        );
+    }
+}
 
-    if !model.functions.is_empty() {
-        let _ = writeln!(out, "\n; functions");
-        for function in &model.functions {
-            // A function the one-line form cannot hold -- a carried body,
-            // its value table and folds, call edges, an external ABI,
-            // parameter spans -- is written as a record, the way clocks are,
-            // rather than printed with those parts missing.
-            if needs_record(function) {
-                let _ = writeln!(out, "function_record {}", json(function)?);
-                continue;
-            }
-            let parameters = function
-                .parameters
-                .iter()
-                .map(|p| format!("{} ${}", quote(&p.name), p.value_type.0))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let results = function
-                .results
-                .iter()
-                .map(|t| format!("${}", t.0))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let body = match &function.body {
-                RbcFunctionBody::ElidedModelica => "body elided".to_string(),
-                RbcFunctionBody::External {
-                    language, symbol, ..
-                } => {
-                    format!("body external {} {}", quote(language), quote(symbol))
-                }
-                RbcFunctionBody::Modelica { .. } => {
-                    unreachable!("a carried body is written as a function record")
-                }
-            };
-            let inline = match function.inline {
-                RbcInline::Unstated => "",
-                RbcInline::Requested => " inline",
-                RbcInline::Never => " noinline",
-            };
-            let _ = writeln!(
-                out,
-                "~{} fn {} params {} {parameters} results {} {results} \
+fn write_functions(out: &mut String, model: &RbcModel) -> Result<(), TextError> {
+    if model.functions.is_empty() {
+        return Ok(());
+    }
+    let _ = writeln!(out, "\n; functions");
+    for function in &model.functions {
+        // A function the one-line form cannot hold -- a carried body,
+        // its value table and folds, call edges, an external ABI,
+        // parameter spans -- is written as a record, the way clocks are,
+        // rather than printed with those parts missing.
+        if needs_record(function) {
+            let _ = writeln!(out, "function_record {}", json(function)?);
+            continue;
+        }
+        let _ = writeln!(out, "{}", function_line(function));
+    }
+    Ok(())
+}
+
+/// The one-line `fn` form of a function `needs_record` lets through.
+fn function_line(function: &RbcFunction) -> String {
+    let parameters = function
+        .parameters
+        .iter()
+        .map(|p| format!("{} ${}", quote(&p.name), p.value_type.0))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let results = function
+        .results
+        .iter()
+        .map(|t| format!("${}", t.0))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = match &function.body {
+        RbcFunctionBody::ElidedModelica => "body elided".to_string(),
+        RbcFunctionBody::External {
+            language, symbol, ..
+        } => {
+            format!("body external {} {}", quote(language), quote(symbol))
+        }
+        RbcFunctionBody::Modelica { .. } => {
+            unreachable!("a carried body is written as a function record")
+        }
+    };
+    let inline = match function.inline {
+        RbcInline::Unstated => "",
+        RbcInline::Requested => " inline",
+        RbcInline::Never => " noinline",
+    };
+    format!(
+        "~{} fn {} params {} {parameters} results {} {results} \
 {body}{inline} {}",
-                function.id.0,
-                quote(&function.name),
-                function.parameters.len(),
-                function.results.len(),
-                provenance(&function.declaration)
-            );
+        function.id.0,
+        quote(&function.name),
+        function.parameters.len(),
+        function.results.len(),
+        provenance(&function.declaration)
+    )
+}
+
+fn write_components(out: &mut String, model: &RbcModel) {
+    if model.components.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n; components");
+    for component in &model.components {
+        let class = component
+            .class_name
+            .as_deref()
+            .map(|name| format!(" of {}", quote(name)))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "#{} comp {}{class}",
+            component.id.0,
+            quote(&component.path)
+        );
+    }
+}
+
+fn write_variables(out: &mut String, model: &RbcModel) {
+    if model.variables.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n; variables");
+    for variable in &model.variables {
+        let _ = writeln!(
+            out,
+            "{} {}",
+            variable_line(variable),
+            provenance(&variable.declaration)
+        );
+    }
+}
+
+/// A variable's line, up to but not including its provenance.
+fn variable_line(variable: &RbcVariable) -> String {
+    let mut line = format!(
+        "%{} var {} ${} {} {} scalars {}",
+        variable.id.0,
+        quote(&variable.name),
+        variable.value_type.0,
+        role(variable.role),
+        causality(variable.causality),
+        variable.scalar_count
+    );
+    if variable.discrete_input {
+        let _ = write!(line, " discrete");
+    }
+    if let Some(contract) = &variable.contract {
+        write_contract(&mut line, contract);
+    }
+    if let Some(component) = variable.component {
+        let _ = write!(line, " comp #{}", component.0);
+    }
+    for (key, slot) in [
+        ("unit", &variable.unit),
+        ("quantity", &variable.physical_quantity),
+        ("class", &variable.declaring_class),
+        ("desc", &variable.description),
+    ] {
+        if let Some(value) = slot {
+            let _ = write!(line, " {key} {}", quote(value));
         }
     }
-
-    if !model.components.is_empty() {
-        let _ = writeln!(out, "\n; components");
-        for component in &model.components {
-            let class = component
-                .class_name
-                .as_deref()
-                .map(|name| format!(" of {}", quote(name)))
-                .unwrap_or_default();
-            let _ = writeln!(
-                out,
-                "#{} comp {}{class}",
-                component.id.0,
-                quote(&component.path)
-            );
+    if let Some(fixed) = variable.fixed {
+        let _ = write!(line, " fixed {fixed}");
+    }
+    if variable.tunable {
+        let _ = write!(line, " tunable");
+    }
+    if variable.from_source {
+        let _ = write!(line, " from_source");
+    }
+    for (key, slot) in [
+        ("start", variable.start),
+        ("min", variable.min),
+        ("max", variable.max),
+        ("nominal", variable.nominal),
+        ("binding", variable.binding),
+    ] {
+        if let Some(expression) = slot {
+            let _ = write!(line, " {key} ^{}", expression.0);
         }
     }
+    if let Some(connector) = &variable.connector {
+        let connected = if connector.connected {
+            " connected"
+        } else {
+            ""
+        };
+        let _ = write!(
+            line,
+            " connector {}{connected}",
+            quantity_kind(connector.quantity)
+        );
+    }
+    line
+}
 
-    if !model.variables.is_empty() {
-        let _ = writeln!(out, "\n; variables");
-        for variable in &model.variables {
-            let mut line = format!(
-                "%{} var {} ${} {} {} scalars {}",
-                variable.id.0,
-                quote(&variable.name),
-                variable.value_type.0,
-                role(variable.role),
-                causality(variable.causality),
-                variable.scalar_count
-            );
-            if variable.discrete_input {
-                let _ = write!(line, " discrete");
-            }
-            if let Some(contract) = &variable.contract {
-                let _ = write!(
-                    line,
-                    " contract {}",
-                    match contract.variability {
-                        RbcVariability::Constant => "constant",
-                        RbcVariability::Parameter => "parameter",
-                        RbcVariability::Discrete => "discrete",
-                        RbcVariability::Continuous => "continuous",
-                    }
-                );
-                for (flag, set) in [
-                    ("final", contract.is_final),
-                    ("protected", contract.is_protected),
-                    ("evaluate", contract.evaluate),
-                    ("structural", contract.structural),
-                    ("frommod", contract.binding_from_modification),
-                ] {
-                    if set {
-                        let _ = write!(line, " {flag}");
-                    }
-                }
-                if let Some(value) = contract.effective_value {
-                    let _ = write!(line, " value {}", real(value));
-                }
-                if !contract.binding_depends_on.is_empty() {
-                    let _ = write!(
-                        line,
-                        " uses {}",
-                        contract
-                            .binding_depends_on
-                            .iter()
-                            .map(|v| format!("%{}", v.0))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    );
-                }
-                if let Some(declared) = &contract.declared_in {
-                    let _ = write!(line, " declaredin {}", quote(declared));
-                }
-            }
-            if let Some(component) = variable.component {
-                let _ = write!(line, " comp #{}", component.0);
-            }
-            for (key, slot) in [
-                ("unit", &variable.unit),
-                ("quantity", &variable.physical_quantity),
-                ("class", &variable.declaring_class),
-                ("desc", &variable.description),
-            ] {
-                if let Some(value) = slot {
-                    let _ = write!(line, " {key} {}", quote(value));
-                }
-            }
-            if let Some(fixed) = variable.fixed {
-                let _ = write!(line, " fixed {fixed}");
-            }
-            if variable.tunable {
-                let _ = write!(line, " tunable");
-            }
-            if variable.from_source {
-                let _ = write!(line, " from_source");
-            }
-            for (key, slot) in [
-                ("start", variable.start),
-                ("min", variable.min),
-                ("max", variable.max),
-                ("nominal", variable.nominal),
-                ("binding", variable.binding),
-            ] {
-                if let Some(expression) = slot {
-                    let _ = write!(line, " {key} ^{}", expression.0);
-                }
-            }
-            if let Some(connector) = &variable.connector {
-                let _ = write!(
-                    line,
-                    " connector {}{}",
-                    quantity_kind(connector.quantity),
-                    if connector.connected {
-                        " connected"
-                    } else {
-                        ""
-                    }
-                );
-            }
-            let _ = writeln!(out, "{line} {}", provenance(&variable.declaration));
+/// Append a variable's `contract` clause.
+fn write_contract(line: &mut String, contract: &RbcSymbolContract) {
+    let _ = write!(
+        line,
+        " contract {}",
+        match contract.variability {
+            RbcVariability::Constant => "constant",
+            RbcVariability::Parameter => "parameter",
+            RbcVariability::Discrete => "discrete",
+            RbcVariability::Continuous => "continuous",
+        }
+    );
+    for (flag, set) in [
+        ("final", contract.is_final),
+        ("protected", contract.is_protected),
+        ("evaluate", contract.evaluate),
+        ("structural", contract.structural),
+        ("frommod", contract.binding_from_modification),
+    ] {
+        if set {
+            let _ = write!(line, " {flag}");
         }
     }
-
-    if !model.expressions.is_empty() {
-        let _ = writeln!(out, "\n; expressions");
-        for expression in &model.expressions {
-            let body = match &expression.node {
-                RbcExprNode::Literal { value } => literal(value),
-                RbcExprNode::StringConversion { value, format } => format!(
-                    "string_conversion ^{} {}",
-                    value.0,
-                    quote(
-                        &serde_json::to_string(format)
-                            .map_err(|e| TextError::at(0, e.to_string()))?
-                    )
-                ),
-                RbcExprNode::Coordinate { coordinate: c } => format!("coord {}", coordinate(*c)),
-                RbcExprNode::Unary { op, operand } => format!("un {} ^{}", unary(*op), operand.0),
-                RbcExprNode::Binary { op, lhs, rhs } => {
-                    format!("bin {} ^{} ^{}", binary(*op), lhs.0, rhs.0)
-                }
-                RbcExprNode::Conditional { branches, fallback } => {
-                    let arms: Vec<String> = branches
-                        .iter()
-                        .map(|b| format!("^{} ^{}", b.condition.0, b.value.0))
-                        .collect();
-                    format!(
-                        "cond {} {} else ^{}",
-                        arms.len(),
-                        arms.join(" "),
-                        fallback.0
-                    )
-                }
-                RbcExprNode::Builtin { name, arguments } => format!(
-                    "call {} {} {}",
-                    quote(name),
-                    arguments.len(),
-                    arguments
-                        .iter()
-                        .map(|a| format!("^{}", a.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                RbcExprNode::Array {
-                    elements,
-                    empty_type,
-                } => format!(
-                    "array {}{} {}",
-                    elements.len(),
-                    match empty_type {
-                        Some(ty) => format!(" of ${}", ty.0),
-                        None => String::new(),
-                    },
-                    elements
-                        .iter()
-                        .map(|e| format!("^{}", e.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                RbcExprNode::Record { ty, fields } => format!(
-                    "record ${} {} {}",
-                    ty.0,
-                    fields.len(),
-                    fields
-                        .iter()
-                        .map(|f| format!("^{}", f.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                RbcExprNode::Field { base, field } => format!("field ^{} {field}", base.0),
-                RbcExprNode::Range { start, step, stop } => format!(
-                    "range ^{} {} ^{}",
-                    start.0,
-                    match step {
-                        Some(step) => format!("step ^{}", step.0),
-                        None => "nostep".to_string(),
-                    },
-                    stop.0
-                ),
-                RbcExprNode::Comprehension { domain, body } => {
-                    format!("comp &{} ^{}", domain.0, body.0)
-                }
-                RbcExprNode::Index { base, subscripts } => format!(
-                    "index ^{} {} {}",
-                    base.0,
-                    subscripts.len(),
-                    subscripts
-                        .iter()
-                        .map(subscript)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                RbcExprNode::ArrayUpdate {
-                    base,
-                    value,
-                    subscripts,
-                } => format!(
-                    "update ^{} ^{} {} {}",
-                    base.0,
-                    value.0,
-                    subscripts.len(),
-                    subscripts
-                        .iter()
-                        .map(subscript)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                RbcExprNode::Call {
-                    owner,
-                    function,
-                    output,
-                    arguments,
-                } => format!(
-                    "invoke ~{} out {output} owner ^{} {} {}",
-                    function.0,
-                    owner.0,
-                    arguments.len(),
-                    arguments
-                        .iter()
-                        .map(|a| format!("^{}", a.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                // The text profile carries no function bodies, so it cannot
-                // render a reference into one. `emit-text` refuses such an
-                // artifact outright; this keeps the listing honest if it is
-                // ever reached another way.
-                RbcExprNode::FunctionValue {
-                    function,
-                    value,
-                    definition,
-                } => format!("fnvalue ~{} {value} def {definition}", function.0),
-                RbcExprNode::FunctionFoldParameter {
-                    function,
-                    fold,
-                    carried,
-                    definition,
-                } => format!(
-                    "foldparam ~{} {fold} {carried} def {definition}",
-                    function.0
-                ),
-                RbcExprNode::FunctionFoldOutput {
-                    function,
-                    fold,
-                    carried,
-                    definition,
-                } => format!("foldout ~{} {fold} {carried} def {definition}", function.0),
-                RbcExprNode::ClockTransfer {
-                    transfer: kind,
-                    source,
-                    source_clock,
-                    target_clock,
-                } => {
-                    let kind = match kind {
-                        RbcClockTransferKind::SubSample { factor } => format!("sub {factor}"),
-                        RbcClockTransferKind::SuperSample { factor } => format!("super {factor}"),
-                        RbcClockTransferKind::ShiftSample {
-                            counter,
-                            resolution,
-                        } => format!("shift {counter} {resolution}"),
-                        RbcClockTransferKind::BackSample {
-                            counter,
-                            resolution,
-                        } => format!("back {counter} {resolution}"),
-                    };
-                    format!(
-                        "ctransfer {kind} ^{} clocks {} {}",
-                        source.0, source_clock.0, target_clock.0
-                    )
-                }
-                RbcExprNode::Unsupported { detail } => format!("unsupported {}", quote(detail)),
-            };
-            let _ = writeln!(
-                out,
-                "^{} expr ${} {body} {}",
-                expression.id.0,
-                expression.value_type.0,
-                provenance(&expression.provenance)
-            );
-        }
+    if let Some(value) = contract.effective_value {
+        let _ = write!(line, " value {}", real(value));
     }
+    if !contract.binding_depends_on.is_empty() {
+        let _ = write!(
+            line,
+            " uses {}",
+            variable_refs(&contract.binding_depends_on)
+        );
+    }
+    if let Some(declared) = &contract.declared_in {
+        let _ = write!(line, " declaredin {}", quote(declared));
+    }
+}
 
+fn write_expressions(out: &mut String, model: &RbcModel) -> Result<(), TextError> {
+    if model.expressions.is_empty() {
+        return Ok(());
+    }
+    let _ = writeln!(out, "\n; expressions");
+    for expression in &model.expressions {
+        let body = expression_body(&expression.node)?;
+        let _ = writeln!(
+            out,
+            "^{} expr ${} {body} {}",
+            expression.id.0,
+            expression.value_type.0,
+            provenance(&expression.provenance)
+        );
+    }
+    Ok(())
+}
+
+fn expression_body(node: &RbcExprNode) -> Result<String, TextError> {
+    Ok(match node {
+        RbcExprNode::Literal { value } => literal(value),
+        RbcExprNode::StringConversion { value, format } => format!(
+            "string_conversion ^{} {}",
+            value.0,
+            quote(&serde_json::to_string(format).map_err(|e| TextError::at(0, e.to_string()))?)
+        ),
+        RbcExprNode::Coordinate { coordinate: c } => format!("coord {}", coordinate(*c)),
+        RbcExprNode::Unary { op, operand } => format!("un {} ^{}", unary(*op), operand.0),
+        RbcExprNode::Binary { op, lhs, rhs } => {
+            format!("bin {} ^{} ^{}", binary(*op), lhs.0, rhs.0)
+        }
+        RbcExprNode::Conditional { branches, fallback } => conditional_body(branches, *fallback),
+        RbcExprNode::Builtin { name, arguments } => format!(
+            "call {} {} {}",
+            quote(name),
+            arguments.len(),
+            expression_refs(arguments)
+        ),
+        RbcExprNode::Array {
+            elements,
+            empty_type,
+        } => format!(
+            "array {}{} {}",
+            elements.len(),
+            match empty_type {
+                Some(ty) => format!(" of ${}", ty.0),
+                None => String::new(),
+            },
+            expression_refs(elements)
+        ),
+        RbcExprNode::Record { ty, fields } => format!(
+            "record ${} {} {}",
+            ty.0,
+            fields.len(),
+            expression_refs(fields)
+        ),
+        RbcExprNode::Field { base, field } => format!("field ^{} {field}", base.0),
+        RbcExprNode::Range { start, step, stop } => format!(
+            "range ^{} {} ^{}",
+            start.0,
+            match step {
+                Some(step) => format!("step ^{}", step.0),
+                None => "nostep".to_string(),
+            },
+            stop.0
+        ),
+        RbcExprNode::Comprehension { domain, body } => {
+            format!("comp &{} ^{}", domain.0, body.0)
+        }
+        RbcExprNode::Index { base, subscripts } => format!(
+            "index ^{} {} {}",
+            base.0,
+            subscripts.len(),
+            subscript_list(subscripts)
+        ),
+        RbcExprNode::ArrayUpdate {
+            base,
+            value,
+            subscripts,
+        } => format!(
+            "update ^{} ^{} {} {}",
+            base.0,
+            value.0,
+            subscripts.len(),
+            subscript_list(subscripts)
+        ),
+        RbcExprNode::Call {
+            owner,
+            function,
+            output,
+            arguments,
+        } => format!(
+            "invoke ~{} out {output} owner ^{} {} {}",
+            function.0,
+            owner.0,
+            arguments.len(),
+            expression_refs(arguments)
+        ),
+        // The text profile carries no function bodies, so it cannot
+        // render a reference into one. `emit-text` refuses such an
+        // artifact outright; this keeps the listing honest if it is
+        // ever reached another way.
+        inner @ (RbcExprNode::FunctionValue { .. }
+        | RbcExprNode::FunctionFoldParameter { .. }
+        | RbcExprNode::FunctionFoldOutput { .. }) => function_reference_body(inner),
+        RbcExprNode::ClockTransfer {
+            transfer: kind,
+            source,
+            source_clock,
+            target_clock,
+        } => format!(
+            "ctransfer {} ^{} clocks {} {}",
+            clock_transfer(kind),
+            source.0,
+            source_clock.0,
+            target_clock.0
+        ),
+        RbcExprNode::Unsupported { detail } => format!("unsupported {}", quote(detail)),
+    })
+}
+
+fn conditional_body(branches: &[RbcBranch], fallback: ExprId) -> String {
+    let arms: Vec<String> = branches
+        .iter()
+        .map(|b| format!("^{} ^{}", b.condition.0, b.value.0))
+        .collect();
+    format!(
+        "cond {} {} else ^{}",
+        arms.len(),
+        arms.join(" "),
+        fallback.0
+    )
+}
+
+/// A reference to a value inside a function body; see `expression_body`.
+fn function_reference_body(node: &RbcExprNode) -> String {
+    match node {
+        RbcExprNode::FunctionValue {
+            function,
+            value,
+            definition,
+        } => format!("fnvalue ~{} {value} def {definition}", function.0),
+        RbcExprNode::FunctionFoldParameter {
+            function,
+            fold,
+            carried,
+            definition,
+        } => format!(
+            "foldparam ~{} {fold} {carried} def {definition}",
+            function.0
+        ),
+        RbcExprNode::FunctionFoldOutput {
+            function,
+            fold,
+            carried,
+            definition,
+        } => format!("foldout ~{} {fold} {carried} def {definition}", function.0),
+        _ => unreachable!("only function-body references are passed here"),
+    }
+}
+
+fn subscript_list(subscripts: &[RbcSubscript]) -> String {
+    subscripts
+        .iter()
+        .map(subscript)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn clock_transfer(kind: &RbcClockTransferKind) -> String {
+    match kind {
+        RbcClockTransferKind::SubSample { factor } => format!("sub {factor}"),
+        RbcClockTransferKind::SuperSample { factor } => format!("super {factor}"),
+        RbcClockTransferKind::ShiftSample {
+            counter,
+            resolution,
+        } => format!("shift {counter} {resolution}"),
+        RbcClockTransferKind::BackSample {
+            counter,
+            resolution,
+        } => format!("back {counter} {resolution}"),
+    }
+}
+
+fn write_equations(out: &mut String, model: &RbcModel) {
     for (keyword, equations) in [("eq", &model.equations), ("ieq", &model.initial_equations)] {
         if equations.is_empty() {
             continue;
@@ -677,90 +786,56 @@ pub fn print_text_with(file: &RbcFile, options: TextOptions) -> Result<String, T
         let _ = writeln!(out, "\n; {keyword}");
         for equation in equations {
             let mut line = format!("{keyword} {} ^{}", equation.id.0, equation.residual.0);
-            if !equation.reads.is_empty() {
-                let _ = write!(
-                    line,
-                    " reads {}",
-                    equation
-                        .reads
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            if !equation.reads_derivative.is_empty() {
-                let _ = write!(
-                    line,
-                    " dreads {}",
-                    equation
-                        .reads_derivative
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            if !equation.reads_previous.is_empty() {
-                let _ = write!(
-                    line,
-                    " preads {}",
-                    equation
-                        .reads_previous
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
+            write_reads(
+                &mut line,
+                &equation.reads,
+                &equation.reads_derivative,
+                &equation.reads_previous,
+            );
             let _ = writeln!(out, "{line} {}", provenance(&equation.provenance));
         }
     }
+}
 
-    if !model.domains.is_empty() {
-        let _ = writeln!(out, "\n; domains");
-        for domain in &model.domains {
-            let binders = domain
-                .binders
-                .iter()
-                .map(|b| {
-                    format!(
-                        "{} {} {} {} {}",
-                        b.id,
-                        quote(&b.display_name),
-                        b.lower,
-                        b.upper,
-                        b.step
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let parent = domain
-                .parent
-                .map(|p| format!(" parent &{}", p.0))
-                .unwrap_or_default();
-            let extents = if domain.extents.is_empty() {
-                "-".to_string()
-            } else {
-                domain
-                    .extents
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            let _ = writeln!(
-                out,
-                "&{} domain scalars {} extents {extents}{parent} \
-binders {} {binders} {}",
-                domain.id.0,
-                domain.scalar_count,
-                domain.binders.len(),
-                provenance(&domain.provenance)
-            );
-        }
+fn write_domains(out: &mut String, model: &RbcModel) {
+    if model.domains.is_empty() {
+        return;
     }
+    let _ = writeln!(out, "\n; domains");
+    for domain in &model.domains {
+        let binders = domain
+            .binders
+            .iter()
+            .map(|b| {
+                format!(
+                    "{} {} {} {} {}",
+                    b.id,
+                    quote(&b.display_name),
+                    b.lower,
+                    b.upper,
+                    b.step
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let parent = domain
+            .parent
+            .map(|p| format!(" parent &{}", p.0))
+            .unwrap_or_default();
+        let extents = extents(&domain.extents);
+        let _ = writeln!(
+            out,
+            "&{} domain scalars {} extents {extents}{parent} \
+binders {} {binders} {}",
+            domain.id.0,
+            domain.scalar_count,
+            domain.binders.len(),
+            provenance(&domain.provenance)
+        );
+    }
+}
 
+fn write_families(out: &mut String, model: &RbcModel) {
     for (keyword, families) in [
         ("family", &model.equation_families),
         ("ifamily", &model.initial_equation_families),
@@ -770,156 +845,104 @@ binders {} {binders} {}",
         }
         let _ = writeln!(out, "\n; {keyword}");
         for family in families {
-            let view = match family.scalar_view {
-                RbcScalarView::BinderSubstitution => "binder".to_string(),
-                RbcScalarView::RowMajorProjection => "rowmajor".to_string(),
-                RbcScalarView::BinderPrefixProjection { binder_count } => {
-                    format!("prefix {binder_count}")
-                }
-            };
-            let extents = if family.extents.is_empty() {
-                "-".to_string()
-            } else {
-                family
-                    .extents
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            let bodies = family
-                .bodies
-                .iter()
-                .map(|b| format!("^{}", b.0))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut line = format!(
-                "{keyword} {} domain &{} rows {} extents {extents} \
+            let _ = writeln!(
+                out,
+                "{} {}",
+                family_line(keyword, family),
+                provenance(&family.provenance)
+            );
+        }
+    }
+}
+
+/// An equation family's line, up to but not including its provenance.
+fn family_line(keyword: &str, family: &RbcEquationFamily) -> String {
+    let view = match family.scalar_view {
+        RbcScalarView::BinderSubstitution => "binder".to_string(),
+        RbcScalarView::RowMajorProjection => "rowmajor".to_string(),
+        RbcScalarView::BinderPrefixProjection { binder_count } => {
+            format!("prefix {binder_count}")
+        }
+    };
+    let extents = extents(&family.extents);
+    let bodies = expression_refs(&family.bodies);
+    let mut line = format!(
+        "{keyword} {} domain &{} rows {} extents {extents} \
 view {view} bodies {} {bodies}",
-                family.id.0,
-                family.domain.0,
-                family.scalar_rows,
-                family.bodies.len()
-            );
-            if !family.reads.is_empty() {
-                let _ = write!(
-                    line,
-                    " reads {}",
-                    family
-                        .reads
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            if !family.reads_derivative.is_empty() {
-                let _ = write!(
-                    line,
-                    " dreads {}",
-                    family
-                        .reads_derivative
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            if !family.reads_previous.is_empty() {
-                let _ = write!(
-                    line,
-                    " preads {}",
-                    family
-                        .reads_previous
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            let _ = writeln!(out, "{line} {}", provenance(&family.provenance));
-        }
-    }
+        family.id.0,
+        family.domain.0,
+        family.scalar_rows,
+        family.bodies.len()
+    );
+    write_reads(
+        &mut line,
+        &family.reads,
+        &family.reads_derivative,
+        &family.reads_previous,
+    );
+    line
+}
 
-    if !model.discrete_real_equations.is_empty() {
-        let _ = writeln!(out, "\n; discrete real equations (MLS B.1b)");
-        for equation in &model.discrete_real_equations {
-            let activation = match equation.activation {
-                RbcDiscreteRealActivation::Always => "always".to_string(),
-                RbcDiscreteRealActivation::When { trigger, guard } => {
-                    format!("when ?{} guard ?{}", trigger.0, guard.0)
-                }
-            };
-            let mut line = format!(
-                "dreq {} ^{} {activation}",
-                equation.id.0, equation.residual.0
-            );
-            if !equation.reads.is_empty() {
-                let _ = write!(
-                    line,
-                    " reads {}",
-                    equation
-                        .reads
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            if !equation.reads_derivative.is_empty() {
-                let _ = write!(
-                    line,
-                    " dreads {}",
-                    equation
-                        .reads_derivative
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            if !equation.reads_previous.is_empty() {
-                let _ = write!(
-                    line,
-                    " preads {}",
-                    equation
-                        .reads_previous
-                        .iter()
-                        .map(|v| format!("%{}", v.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            let _ = writeln!(out, "{line} {}", provenance(&equation.provenance));
-        }
+fn write_discrete_real_equations(out: &mut String, model: &RbcModel) {
+    if model.discrete_real_equations.is_empty() {
+        return;
     }
-
-    if !model.initial_discrete_values.is_empty() {
-        let _ = writeln!(out, "\n; initial discrete values");
-        for entry in &model.initial_discrete_values {
-            let _ = writeln!(
-                out,
-                "idval %{} ^{} {}",
-                entry.target.0,
-                entry.value.0,
-                provenance(&entry.provenance)
-            );
-        }
+    let _ = writeln!(out, "\n; discrete real equations (MLS B.1b)");
+    for equation in &model.discrete_real_equations {
+        let activation = match equation.activation {
+            RbcDiscreteRealActivation::Always => "always".to_string(),
+            RbcDiscreteRealActivation::When { trigger, guard } => {
+                format!("when ?{} guard ?{}", trigger.0, guard.0)
+            }
+        };
+        let mut line = format!(
+            "dreq {} ^{} {activation}",
+            equation.id.0, equation.residual.0
+        );
+        write_reads(
+            &mut line,
+            &equation.reads,
+            &equation.reads_derivative,
+            &equation.reads_previous,
+        );
+        let _ = writeln!(out, "{line} {}", provenance(&equation.provenance));
     }
+}
 
-    if !model.relations.is_empty() {
-        let _ = writeln!(out, "\n; relations");
-        for relation in &model.relations {
-            let _ = writeln!(
-                out,
-                "rel {} ^{} {}",
-                relation.id.0,
-                relation.expression.0,
-                provenance(&relation.provenance)
-            );
-        }
+fn write_initial_discrete_values(out: &mut String, model: &RbcModel) {
+    if model.initial_discrete_values.is_empty() {
+        return;
     }
+    let _ = writeln!(out, "\n; initial discrete values");
+    for entry in &model.initial_discrete_values {
+        let _ = writeln!(
+            out,
+            "idval %{} ^{} {}",
+            entry.target.0,
+            entry.value.0,
+            provenance(&entry.provenance)
+        );
+    }
+}
 
+fn write_relations(out: &mut String, model: &RbcModel) {
+    if model.relations.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n; relations");
+    for relation in &model.relations {
+        let _ = writeln!(
+            out,
+            "rel {} ^{} {}",
+            relation.id.0,
+            relation.expression.0,
+            provenance(&relation.provenance)
+        );
+    }
+}
+
+/// The tables written as quoted JSON records rather than line forms.
+fn write_records(out: &mut String, model: &RbcModel) -> Result<(), TextError> {
     for clock in &model.clocks {
         let _ = writeln!(
             out,
@@ -949,205 +972,224 @@ view {view} bodies {} {bodies}",
     for delay in &model.delays {
         let _ = writeln!(out, "delay_record {}", json(delay)?);
     }
-    if !model.conditions.is_empty() {
-        let _ = writeln!(out, "\n; conditions");
-        for condition in &model.conditions {
-            use RbcConditionNode::*;
-            let body = match &condition.node {
-                Initial => "initial".to_string(),
-                Always => "always".to_string(),
-                ClockActivation { clock } => format!("clock_activation {}", clock.0),
-                Relation { relation } => format!("rel {}", relation.0),
-                Discrete { expression } => format!("discrete ^{}", expression.0),
-                Not { operand } => format!("not {}", operand.0),
-                And { lhs, rhs } => format!("and {} {}", lhs.0, rhs.0),
-                Or { lhs, rhs } => format!("or {} {}", lhs.0, rhs.0),
-                AnyRise { lhs, rhs } => format!("any_rise {} {}", lhs.0, rhs.0),
-                Unsupported { detail } => format!("unsupported {}", quote(detail)),
-            };
-            let _ = writeln!(
-                out,
-                "cond {} {body} {}",
-                condition.id.0,
-                provenance(&condition.provenance)
-            );
-        }
-    }
+    Ok(())
+}
 
-    if !model.roots.is_empty() {
-        let _ = writeln!(out, "\n; roots");
-        for root in &model.roots {
-            let _ = writeln!(
-                out,
-                "root {} rel {} act {} {}",
-                root.id.0,
-                root.relation.0,
-                root.activation.0,
-                provenance(&root.provenance)
-            );
-        }
+fn write_conditions(out: &mut String, model: &RbcModel) {
+    if model.conditions.is_empty() {
+        return;
     }
-
-    if !model.events.is_empty() {
-        let _ = writeln!(out, "\n; events");
-        for event in &model.events {
-            let action = match &event.action {
-                RbcAction::Reinitialize { state, value } => {
-                    format!("reinit %{} ^{}", state.0, value.0)
-                }
-                RbcAction::Assert { message, level } => match level {
-                    Some(level) => format!("assert ^{} level ^{}", message.0, level.0),
-                    None => format!("assert ^{}", message.0),
-                },
-                RbcAction::Terminate { message } => format!("terminate ^{}", message.0),
-            };
-            let _ = writeln!(
-                out,
-                "event {} trig {} guard {} {action} {}",
-                event.id.0,
-                event.trigger.0,
-                event.guard.0,
-                provenance(&event.provenance)
-            );
-        }
+    let _ = writeln!(out, "\n; conditions");
+    for condition in &model.conditions {
+        use RbcConditionNode::*;
+        let body = match &condition.node {
+            Initial => "initial".to_string(),
+            Always => "always".to_string(),
+            ClockActivation { clock } => format!("clock_activation {}", clock.0),
+            Relation { relation } => format!("rel {}", relation.0),
+            Discrete { expression } => format!("discrete ^{}", expression.0),
+            Not { operand } => format!("not {}", operand.0),
+            And { lhs, rhs } => format!("and {} {}", lhs.0, rhs.0),
+            Or { lhs, rhs } => format!("or {} {}", lhs.0, rhs.0),
+            AnyRise { lhs, rhs } => format!("any_rise {} {}", lhs.0, rhs.0),
+            Unsupported { detail } => format!("unsupported {}", quote(detail)),
+        };
+        let _ = writeln!(
+            out,
+            "cond {} {body} {}",
+            condition.id.0,
+            provenance(&condition.provenance)
+        );
     }
+}
 
-    if !model.time_events.is_empty() {
-        let _ = writeln!(out, "\n; time events");
-        for event in &model.time_events {
-            let schedule = match event.schedule {
-                RbcSchedule::Static {
-                    numerator,
-                    denominator,
-                } => format!("static {numerator} {denominator}"),
-                RbcSchedule::Dynamic { deadline } => format!("dynamic ^{}", deadline.0),
-            };
-            let _ = writeln!(
-                out,
-                "tevent {} {schedule} {}",
-                event.id.0,
-                provenance(&event.provenance)
-            );
-        }
+fn write_roots(out: &mut String, model: &RbcModel) {
+    if model.roots.is_empty() {
+        return;
     }
-
-    if !model.connections.is_empty() {
-        let _ = writeln!(out, "\n; connections");
-        for connection in &model.connections {
-            let equation = connection
-                .equation
-                .map(|e| format!(" eq {}", e.0))
-                .unwrap_or_default();
-            let _ = writeln!(
-                out,
-                "conn {} %{} %{} {} {} {}{equation} {}",
-                connection.id.0,
-                connection.left.0,
-                connection.right.0,
-                quantity_kind(connection.quantity),
-                quote(&connection.left_connector),
-                quote(&connection.right_connector),
-                provenance(&connection.provenance)
-            );
-        }
+    let _ = writeln!(out, "\n; roots");
+    for root in &model.roots {
+        let _ = writeln!(
+            out,
+            "root {} rel {} act {} {}",
+            root.id.0,
+            root.relation.0,
+            root.activation.0,
+            provenance(&root.provenance)
+        );
     }
+}
 
-    if !model.connection_sets.is_empty() {
-        let _ = writeln!(out, "\n; connection sets");
-        for set in &model.connection_sets {
-            let mut line = format!("connset {}", set.id.0);
-            for connector in &set.connectors {
-                let _ = write!(line, " at {}", quote(connector));
-            }
-            for potential in &set.potentials {
-                let _ = write!(line, " pot %{}", potential.0);
-            }
-            for balance in &set.balances {
-                let _ = write!(line, " balance");
-                if let Some(equation) = balance.equation {
-                    let _ = write!(line, " eq {}", equation.0);
-                }
-                for term in &balance.terms {
-                    let _ = write!(
-                        line,
-                        " {}%{}",
-                        if term.negated { "-" } else { "+" },
-                        term.variable.0
-                    );
-                }
-                let _ = write!(line, " end");
-            }
-            for equation in &set.potential_equations {
-                let _ = write!(line, " poteq {}", equation.0);
-            }
-            if set.unconnected {
-                let _ = write!(line, " unconnected");
-            }
-            let _ = writeln!(out, "{line} {}", provenance(&set.provenance));
-        }
+fn write_events(out: &mut String, model: &RbcModel) {
+    if model.events.is_empty() {
+        return;
     }
-
-    if !model.discrete_definitions.is_empty() {
-        let _ = writeln!(out, "\n; discrete definitions");
-        for definition in &model.discrete_definitions {
-            let targets = definition
-                .targets
-                .iter()
-                .map(|t| format!("%{}", t.0))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let _ = writeln!(out, "disc {} targets {}", definition.targets.len(), targets);
-            for branch in &definition.branches {
-                let activation = match branch.activation {
-                    RbcDiscreteActivation::Always => "always".to_string(),
-                    RbcDiscreteActivation::When { trigger, guard } => {
-                        format!("when {} {}", trigger.0, guard.0)
-                    }
-                };
-                let values = branch
-                    .values
-                    .iter()
-                    .map(|v| format!("^{}", v.0))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let _ = writeln!(
-                    out,
-                    "  branch {activation} values {} {values} {}",
-                    branch.values.len(),
-                    provenance(&branch.provenance)
-                );
+    let _ = writeln!(out, "\n; events");
+    for event in &model.events {
+        let action = match &event.action {
+            RbcAction::Reinitialize { state, value } => {
+                format!("reinit %{} ^{}", state.0, value.0)
             }
-            let _ = writeln!(out, "  end {}", provenance(&definition.provenance));
-        }
+            RbcAction::Assert { message, level } => match level {
+                Some(level) => format!("assert ^{} level ^{}", message.0, level.0),
+                None => format!("assert ^{}", message.0),
+            },
+            RbcAction::Terminate { message } => format!("terminate ^{}", message.0),
+        };
+        let _ = writeln!(
+            out,
+            "event {} trig {} guard {} {action} {}",
+            event.id.0,
+            event.trigger.0,
+            event.guard.0,
+            provenance(&event.provenance)
+        );
     }
+}
 
-    if !model.trace_points.is_empty() {
-        let _ = writeln!(out, "\n; trace points");
-        for point in &model.trace_points {
-            let mut line = format!(
-                "trace {} %{} {}",
-                point.id.0,
-                point.variable.0,
-                quote(&point.label)
-            );
-            if let Some(connection) = point.connection {
-                let _ = write!(line, " conn {}", connection.0);
-            }
-            if let Some(set) = point.connection_set {
-                let _ = write!(line, " connset {}", set.0);
-            }
-            if let Some(kind) = point.quantity {
-                let _ = write!(line, " kind {}", quantity_kind(kind));
-            }
-            if let Some(unit) = &point.unit {
-                let _ = write!(line, " unit {}", quote(unit));
-            }
-            if let Some(added_by) = &point.added_by {
-                let _ = write!(line, " added_by {}", quote(added_by));
-            }
-            let _ = writeln!(out, "{line}");
-        }
+fn write_time_events(out: &mut String, model: &RbcModel) {
+    if model.time_events.is_empty() {
+        return;
     }
+    let _ = writeln!(out, "\n; time events");
+    for event in &model.time_events {
+        let schedule = match event.schedule {
+            RbcSchedule::Static {
+                numerator,
+                denominator,
+            } => format!("static {numerator} {denominator}"),
+            RbcSchedule::Dynamic { deadline } => format!("dynamic ^{}", deadline.0),
+        };
+        let _ = writeln!(
+            out,
+            "tevent {} {schedule} {}",
+            event.id.0,
+            provenance(&event.provenance)
+        );
+    }
+}
 
-    Ok(out)
+fn write_connections(out: &mut String, model: &RbcModel) {
+    if model.connections.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n; connections");
+    for connection in &model.connections {
+        let equation = connection
+            .equation
+            .map(|e| format!(" eq {}", e.0))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "conn {} %{} %{} {} {} {}{equation} {}",
+            connection.id.0,
+            connection.left.0,
+            connection.right.0,
+            quantity_kind(connection.quantity),
+            quote(&connection.left_connector),
+            quote(&connection.right_connector),
+            provenance(&connection.provenance)
+        );
+    }
+}
+
+fn write_connection_sets(out: &mut String, model: &RbcModel) {
+    if model.connection_sets.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n; connection sets");
+    for set in &model.connection_sets {
+        let mut line = format!("connset {}", set.id.0);
+        for connector in &set.connectors {
+            let _ = write!(line, " at {}", quote(connector));
+        }
+        for potential in &set.potentials {
+            let _ = write!(line, " pot %{}", potential.0);
+        }
+        for balance in &set.balances {
+            write_balance(&mut line, balance);
+        }
+        for equation in &set.potential_equations {
+            let _ = write!(line, " poteq {}", equation.0);
+        }
+        if set.unconnected {
+            let _ = write!(line, " unconnected");
+        }
+        let _ = writeln!(out, "{line} {}", provenance(&set.provenance));
+    }
+}
+
+/// Append one flow balance of a connection set, `balance ... end`.
+fn write_balance(line: &mut String, balance: &RbcFlowBalance) {
+    let _ = write!(line, " balance");
+    if let Some(equation) = balance.equation {
+        let _ = write!(line, " eq {}", equation.0);
+    }
+    for term in &balance.terms {
+        let sign = if term.negated { "-" } else { "+" };
+        let _ = write!(line, " {sign}%{}", term.variable.0);
+    }
+    let _ = write!(line, " end");
+}
+
+fn write_discrete_definitions(out: &mut String, model: &RbcModel) {
+    if model.discrete_definitions.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n; discrete definitions");
+    for definition in &model.discrete_definitions {
+        let targets = variable_refs(&definition.targets);
+        let _ = writeln!(out, "disc {} targets {}", definition.targets.len(), targets);
+        for branch in &definition.branches {
+            write_discrete_branch(out, branch);
+        }
+        let _ = writeln!(out, "  end {}", provenance(&definition.provenance));
+    }
+}
+
+fn write_discrete_branch(out: &mut String, branch: &RbcDiscreteBranch) {
+    let activation = match branch.activation {
+        RbcDiscreteActivation::Always => "always".to_string(),
+        RbcDiscreteActivation::When { trigger, guard } => {
+            format!("when {} {}", trigger.0, guard.0)
+        }
+    };
+    let values = expression_refs(&branch.values);
+    let _ = writeln!(
+        out,
+        "  branch {activation} values {} {values} {}",
+        branch.values.len(),
+        provenance(&branch.provenance)
+    );
+}
+
+fn write_trace_points(out: &mut String, model: &RbcModel) {
+    if model.trace_points.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n; trace points");
+    for point in &model.trace_points {
+        let mut line = format!(
+            "trace {} %{} {}",
+            point.id.0,
+            point.variable.0,
+            quote(&point.label)
+        );
+        if let Some(connection) = point.connection {
+            let _ = write!(line, " conn {}", connection.0);
+        }
+        if let Some(set) = point.connection_set {
+            let _ = write!(line, " connset {}", set.0);
+        }
+        if let Some(kind) = point.quantity {
+            let _ = write!(line, " kind {}", quantity_kind(kind));
+        }
+        if let Some(unit) = &point.unit {
+            let _ = write!(line, " unit {}", quote(unit));
+        }
+        if let Some(added_by) = &point.added_by {
+            let _ = write!(line, " added_by {}", quote(added_by));
+        }
+        let _ = writeln!(out, "{line}");
+    }
 }

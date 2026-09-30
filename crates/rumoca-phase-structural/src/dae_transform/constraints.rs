@@ -1195,7 +1195,21 @@ impl<'facts, 'dae> HolonomicProofWalk<'facts, 'dae> {
             self.cache_differentiability(index, order, context, true);
             return true;
         }
-        let differentiable = match expression.operation() {
+        let differentiable =
+            self.can_differentiate_operation(expression.operation(), order, on_residual);
+        self.cache_differentiability(index, order, context, differentiable);
+        differentiable
+    }
+
+    /// Whether one expression node, not yet cached, differentiates `order`
+    /// times: the operation-by-operation rules.
+    fn can_differentiate_operation(
+        &mut self,
+        operation: dae::ExpressionOperation<'dae>,
+        order: u8,
+        on_residual: bool,
+    ) -> bool {
+        match operation {
             dae::ExpressionOperation::Literal(_) => true,
             dae::ExpressionOperation::Coordinate(dae::CoordinateView::FunctionParameter(
                 parameter,
@@ -1222,8 +1236,14 @@ impl<'facts, 'dae> HolonomicProofWalk<'facts, 'dae> {
                         operator,
                         dae::BinaryOperator::Divide | dae::BinaryOperator::Power
                     )
-                    && self.view.expression(lhs).is_some_and(|lhs| lhs.value_type().is_scalar())
-                    && self.view.expression(rhs).is_some_and(|rhs| rhs.value_type().is_scalar())))
+                    && self
+                        .view
+                        .expression(lhs)
+                        .is_some_and(|lhs| lhs.value_type().is_scalar())
+                    && self
+                        .view
+                        .expression(rhs)
+                        .is_some_and(|rhs| rhs.value_type().is_scalar())))
                     && self.can_differentiate_order(lhs, order, on_residual)
                     && self.can_differentiate_order(rhs, order, on_residual)
             }
@@ -1236,48 +1256,16 @@ impl<'facts, 'dae> HolonomicProofWalk<'facts, 'dae> {
                 .is_some_and(|value| self.can_differentiate_order(value, order, on_residual)),
             // Branch values are differentiated; conditions are only rebuilt.
             dae::ExpressionOperation::Conditional(operands) => {
-                let operands = operands.iter().collect::<Vec<_>>();
-                operands.split_last().is_some_and(|(fallback, branches)| {
-                    branches.chunks_exact(2).all(|pair| {
-                        is_rebuildable_in_context(self.view, pair[0], &self.function_context)
-                            && self.can_differentiate_order(pair[1], order, on_residual)
-                    }) && self.can_differentiate_order(*fallback, order, on_residual)
-                })
+                self.can_differentiate_conditional(operands, order, on_residual)
             }
             dae::ExpressionOperation::FunctionValue { definition, .. } => {
                 self.can_differentiate_order(definition.rhs(), order, on_residual)
             }
             dae::ExpressionOperation::Builtin { builtin, arguments } if order == 1 => {
-                matches!(
-                    builtin,
-                    dae::PureBuiltin::Zeros
-                        | dae::PureBuiltin::Ones
-                        | dae::PureBuiltin::Identity
-                        | dae::PureBuiltin::Sin
-                        | dae::PureBuiltin::Cos
-                        | dae::PureBuiltin::Tan
-                        | dae::PureBuiltin::Exp
-                        | dae::PureBuiltin::Log
-                        | dae::PureBuiltin::Sqrt
-                        | dae::PureBuiltin::Log10
-                        | dae::PureBuiltin::Sinh
-                        | dae::PureBuiltin::Cosh
-                        | dae::PureBuiltin::Tanh
-                        | dae::PureBuiltin::Asin
-                        | dae::PureBuiltin::Acos
-                        | dae::PureBuiltin::Atan
-                        | dae::PureBuiltin::Abs
-                        | dae::PureBuiltin::Sign
-                        | dae::PureBuiltin::Atan2
-                        | dae::PureBuiltin::Vector
-                        | dae::PureBuiltin::Transpose
-                        | dae::PureBuiltin::Diagonal
-                        | dae::PureBuiltin::Skew
-                        | dae::PureBuiltin::Cross
-                        | dae::PureBuiltin::OuterProduct
-                ) && arguments
-                    .iter()
-                    .all(|argument| self.can_differentiate_order(argument, order, on_residual))
+                has_first_derivative_rule(builtin)
+                    && arguments
+                        .iter()
+                        .all(|argument| self.can_differentiate_order(argument, order, on_residual))
             }
             dae::ExpressionOperation::Array(elements) => elements
                 .iter()
@@ -1293,9 +1281,24 @@ impl<'facts, 'dae> HolonomicProofWalk<'facts, 'dae> {
                     differentiable
                 }),
             _ => false,
+        }
+    }
+
+    /// Branch values are differentiated; conditions are only rebuilt.
+    fn can_differentiate_conditional(
+        &mut self,
+        operands: dae::ExpressionOperands<'dae>,
+        order: u8,
+        on_residual: bool,
+    ) -> bool {
+        let operands = operands.iter().collect::<Vec<_>>();
+        let Some((fallback, branches)) = operands.split_last() else {
+            return false;
         };
-        self.cache_differentiability(index, order, context, differentiable);
-        differentiable
+        branches.chunks_exact(2).all(|pair| {
+            is_rebuildable_in_context(self.view, pair[0], &self.function_context)
+                && self.can_differentiate_order(pair[1], order, on_residual)
+        }) && self.can_differentiate_order(*fallback, order, on_residual)
     }
 
     fn cache_differentiability(
@@ -1411,6 +1414,38 @@ fn is_differentiable<'dae>(
     )
 }
 
+/// Builtins with a first-derivative rule in index reduction.
+fn has_first_derivative_rule(builtin: dae::PureBuiltin) -> bool {
+    matches!(
+        builtin,
+        dae::PureBuiltin::Zeros
+            | dae::PureBuiltin::Ones
+            | dae::PureBuiltin::Identity
+            | dae::PureBuiltin::Sin
+            | dae::PureBuiltin::Cos
+            | dae::PureBuiltin::Tan
+            | dae::PureBuiltin::Exp
+            | dae::PureBuiltin::Log
+            | dae::PureBuiltin::Sqrt
+            | dae::PureBuiltin::Log10
+            | dae::PureBuiltin::Sinh
+            | dae::PureBuiltin::Cosh
+            | dae::PureBuiltin::Tanh
+            | dae::PureBuiltin::Asin
+            | dae::PureBuiltin::Acos
+            | dae::PureBuiltin::Atan
+            | dae::PureBuiltin::Abs
+            | dae::PureBuiltin::Sign
+            | dae::PureBuiltin::Atan2
+            | dae::PureBuiltin::Vector
+            | dae::PureBuiltin::Transpose
+            | dae::PureBuiltin::Diagonal
+            | dae::PureBuiltin::Skew
+            | dae::PureBuiltin::Cross
+            | dae::PureBuiltin::OuterProduct
+    )
+}
+
 fn is_differentiable_in_context<'dae>(
     view: dae::DaeView<'dae>,
     facts: &DifferentiationFacts,
@@ -1432,13 +1467,7 @@ fn is_differentiable_in_context<'dae>(
     if let Some((result, nested)) = context.call_result(view, expression) {
         let differentiable =
             is_differentiable_in_context(view, facts, result, demoted, visited, &nested);
-        if context.is_empty() {
-            visited[index] = if differentiable {
-                Visit::Differentiable
-            } else {
-                Visit::Pending
-            };
-        }
+        record_visit(visited, index, context, differentiable);
         return differentiable;
     }
     if facts.expression_is_zero(view, expression, context) {
@@ -1470,23 +1499,18 @@ fn is_differentiable_in_context<'dae>(
             operator: dae::UnaryOperator::Plus | dae::UnaryOperator::Negate,
             operand,
         } => is_differentiable_in_context(view, facts, operand, demoted, visited, context),
-        dae::ExpressionOperation::Binary {
-            operator:
+        dae::ExpressionOperation::Binary { operator, lhs, rhs }
+            if matches!(
+                operator,
                 dae::BinaryOperator::Add
-                | dae::BinaryOperator::Subtract
-                | dae::BinaryOperator::Multiply
-                | dae::BinaryOperator::Divide,
-            lhs,
-            rhs,
-        } => {
-            is_differentiable_in_context(view, facts, lhs, demoted, visited, context)
-                && is_differentiable_in_context(view, facts, rhs, demoted, visited, context)
-        }
-        dae::ExpressionOperation::Binary {
-            operator: dae::BinaryOperator::Power,
-            lhs,
-            rhs,
-        } if view.expression(lhs).is_some_and(|lhs| lhs.value_type().is_scalar()) => {
+                    | dae::BinaryOperator::Subtract
+                    | dae::BinaryOperator::Multiply
+                    | dae::BinaryOperator::Divide
+            ) || (matches!(operator, dae::BinaryOperator::Power)
+                && view
+                    .expression(lhs)
+                    .is_some_and(|lhs| lhs.value_type().is_scalar())) =>
+        {
             is_differentiable_in_context(view, facts, lhs, demoted, visited, context)
                 && is_differentiable_in_context(view, facts, rhs, demoted, visited, context)
         }
@@ -1500,13 +1524,7 @@ fn is_differentiable_in_context<'dae>(
             builtin_is_differentiable(view, facts, builtin, arguments, demoted, visited, context)
         }
         dae::ExpressionOperation::Conditional(operands) => {
-            let operands = operands.iter().collect::<Vec<_>>();
-            operands.split_last().is_some_and(|(fallback, branches)| {
-                branches.chunks_exact(2).all(|pair| {
-                    is_rebuildable_in_context(view, pair[0], context)
-                        && is_differentiable_in_context(view, facts, pair[1], demoted, visited, context)
-                }) && is_differentiable_in_context(view, facts, *fallback, demoted, visited, context)
-            })
+            conditional_is_differentiable(view, facts, operands, demoted, visited, context)
         }
         dae::ExpressionOperation::FunctionValue { definition, .. } => {
             is_differentiable_in_context(view, facts, definition.rhs(), demoted, visited, context)
@@ -1534,6 +1552,16 @@ fn is_differentiable_in_context<'dae>(
         }
         _ => false,
     };
+    record_visit(visited, index, context, differentiable);
+    differentiable
+}
+
+fn record_visit(
+    visited: &mut [Visit],
+    index: usize,
+    context: &FunctionCallContext<'_>,
+    differentiable: bool,
+) {
     if context.is_empty() {
         visited[index] = if differentiable {
             Visit::Differentiable
@@ -1541,7 +1569,25 @@ fn is_differentiable_in_context<'dae>(
             Visit::Pending
         };
     }
-    differentiable
+}
+
+/// Branch values are differentiated; conditions are only rebuilt.
+fn conditional_is_differentiable<'dae>(
+    view: dae::DaeView<'dae>,
+    facts: &DifferentiationFacts,
+    operands: dae::ExpressionOperands<'dae>,
+    demoted: dae::StateId<'dae>,
+    visited: &mut [Visit],
+    context: &FunctionCallContext<'dae>,
+) -> bool {
+    let operands = operands.iter().collect::<Vec<_>>();
+    let Some((fallback, branches)) = operands.split_last() else {
+        return false;
+    };
+    branches.chunks_exact(2).all(|pair| {
+        is_rebuildable_in_context(view, pair[0], context)
+            && is_differentiable_in_context(view, facts, pair[1], demoted, visited, context)
+    }) && is_differentiable_in_context(view, facts, *fallback, demoted, visited, context)
 }
 
 /// Whether `rebuild_instantiated` can materialize `expression` in the model:

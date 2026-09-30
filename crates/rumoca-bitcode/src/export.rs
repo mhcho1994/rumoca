@@ -11,10 +11,12 @@
 
 mod call_graph;
 mod clocks;
+mod connection_sets;
 mod paths;
 mod profile;
 mod strings;
 
+use connection_sets::export_connection_sets;
 use paths::{component_classes, connector_path};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -218,19 +220,7 @@ fn build(
     // Last, after every table that can register a source through a span.
     // Collected earlier, a span first seen in a function body or a discrete
     // equation named a source the artifact did not contain.
-    let sources = ctx
-        .names
-        .iter()
-        .enumerate()
-        .map(|(index, name)| RbcSource {
-            id: SourceId(index as u32),
-            name: name.clone(),
-            text: options
-                .embed_sources
-                .then(|| ctx.texts[index].clone())
-                .filter(|text| !text.is_empty()),
-        })
-        .collect();
+    let sources = export_sources(&ctx, options);
 
     let mut summary = summarize(
         &variables,
@@ -289,6 +279,22 @@ fn build(
         trace_points: Vec::new(),
         summary,
     })
+}
+
+/// Every source a span has registered with `ctx`, text embedded on request.
+fn export_sources(ctx: &Ctx<'_>, options: &ExportOptions) -> Vec<RbcSource> {
+    ctx.names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| RbcSource {
+            id: SourceId(index as u32),
+            name: name.clone(),
+            text: options
+                .embed_sources
+                .then(|| ctx.texts[index].clone())
+                .filter(|text| !text.is_empty()),
+        })
+        .collect()
 }
 
 fn export_types(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcType> {
@@ -597,18 +603,7 @@ fn expression_node(
         dae::ExpressionOperation::Literal(literal) => RbcExprNode::Literal {
             value: literal_of(literal),
         },
-        dae::ExpressionOperation::Coordinate(coordinate) => match coordinate_of(coordinate) {
-            Some(coordinate) => RbcExprNode::Coordinate { coordinate },
-            // Naming the kind is the difference between a report a maintainer
-            // can act on and one that only says something is missing.
-            None => unsupported(
-                &format!(
-                    "coordinate kind {} not in bitcode v2",
-                    coordinate_kind_name(coordinate)
-                ),
-                options,
-            )?,
-        },
+        dae::ExpressionOperation::Coordinate(coordinate) => coordinate_node(coordinate, options)?,
         dae::ExpressionOperation::Unary { operator, operand } => match unary_of(operator) {
             Some(op) => RbcExprNode::Unary {
                 op,
@@ -625,90 +620,22 @@ fn expression_node(
             None => unsupported("binary operator not in bitcode v2", options)?,
         },
         dae::ExpressionOperation::Conditional(operands) => {
-            // Packed as [cond, value, cond, value, ..., fallback]: an even
-            // number of branch operands followed by the required fallback.
-            let count = operands.len();
-            if count == 0 || count % 2 == 0 {
-                unsupported("malformed conditional operand packing", options)?
-            } else {
-                let mut branches = Vec::with_capacity(count / 2);
-                for pair in 0..count / 2 {
-                    let condition = operands
-                        .get(pair * 2)
-                        .ok_or_else(|| ExportError::Projection("conditional operand".into()))?;
-                    let value = operands
-                        .get(pair * 2 + 1)
-                        .ok_or_else(|| ExportError::Projection("conditional operand".into()))?;
-                    branches.push(RbcBranch {
-                        condition: check(condition)?,
-                        value: check(value)?,
-                    });
-                }
-                let fallback = operands
-                    .get(count - 1)
-                    .ok_or_else(|| ExportError::Projection("conditional fallback".into()))?;
-                RbcExprNode::Conditional {
-                    branches,
-                    fallback: check(fallback)?,
-                }
-            }
+            conditional_node(operands, options, &check)?
         }
-        dae::ExpressionOperation::Builtin { builtin, arguments } => {
-            let mut operands = Vec::with_capacity(arguments.len());
-            for position in 0..arguments.len() {
-                let argument = arguments
-                    .get(position)
-                    .ok_or_else(|| ExportError::Projection("builtin argument".into()))?;
-                operands.push(check(argument)?);
-            }
-            RbcExprNode::Builtin {
-                name: builtin_name(builtin).to_string(),
-                arguments: operands,
-            }
-        }
-        dae::ExpressionOperation::Array(operands) => {
-            let mut elements = Vec::with_capacity(operands.len());
-            for position in 0..operands.len() {
-                let element = operands
-                    .get(position)
-                    .ok_or_else(|| ExportError::Projection("array element".into()))?;
-                elements.push(check(element)?);
-            }
-            // A zero-element array has no operand from which the importer
-            // could re-derive its element type, so the type travels with it.
-            let empty_type = elements
-                .is_empty()
-                .then(|| TypeId(expression.value_type_id().index()));
-            RbcExprNode::Array {
-                elements,
-                empty_type,
-            }
-        }
-        dae::ExpressionOperation::Record(operands) => {
-            let mut fields = Vec::with_capacity(operands.len());
-            for position in 0..operands.len() {
-                let field = operands
-                    .get(position)
-                    .ok_or_else(|| ExportError::Projection("record field".into()))?;
-                fields.push(check(field)?);
-            }
-            RbcExprNode::Record {
-                ty: TypeId(expression.value_type_id().index()),
-                fields,
-            }
-        }
+        dae::ExpressionOperation::Builtin { builtin, arguments } => RbcExprNode::Builtin {
+            name: builtin_name(builtin).to_string(),
+            arguments: operands_of(arguments, "builtin argument", &check)?,
+        },
+        dae::ExpressionOperation::Array(operands) => array_node(expression, operands, &check)?,
+        dae::ExpressionOperation::Record(operands) => RbcExprNode::Record {
+            ty: TypeId(expression.value_type_id().index()),
+            fields: operands_of(operands, "record field", &check)?,
+        },
         dae::ExpressionOperation::Field { base, field } => RbcExprNode::Field {
             base: check(base)?,
             field,
         },
-        dae::ExpressionOperation::Range(range) => RbcExprNode::Range {
-            start: check(range.start().expression())?,
-            step: range
-                .explicit_step()
-                .map(|step| check(step.expression()))
-                .transpose()?,
-            stop: check(range.stop().expression())?,
-        },
+        dae::ExpressionOperation::Range(range) => range_node(range, &check)?,
         dae::ExpressionOperation::Comprehension { domain, body } => RbcExprNode::Comprehension {
             domain: DomainId(domain.index()),
             body: check(body)?,
@@ -722,23 +649,14 @@ fn expression_node(
             function,
             output,
             arguments,
-        } => {
-            let mut operands = Vec::with_capacity(arguments.len());
-            for position in 0..arguments.len() {
-                let argument = arguments
-                    .get(position)
-                    .ok_or_else(|| ExportError::Projection("call argument".into()))?;
-                operands.push(check(argument)?);
-            }
-            RbcExprNode::Call {
-                // A projection may be its own owner, so this is `<=`, not the
-                // strict earlier-operand check the others use.
-                owner: ExprId(owner.index()),
-                function: FunctionId(function.index()),
-                output,
-                arguments: operands,
-            }
-        }
+        } => RbcExprNode::Call {
+            // A projection may be its own owner, so this is `<=`, not the
+            // strict earlier-operand check the others use.
+            owner: ExprId(owner.index()),
+            function: FunctionId(function.index()),
+            output,
+            arguments: operands_of(arguments, "call argument", &check)?,
+        },
         dae::ExpressionOperation::ArrayUpdate {
             base,
             value,
@@ -767,6 +685,104 @@ fn expression_node(
         }
     };
     Ok(node)
+}
+
+fn coordinate_node(
+    coordinate: dae::CoordinateView<'_>,
+    options: &ExportOptions,
+) -> Result<RbcExprNode, ExportError> {
+    match coordinate_of(coordinate) {
+        Some(coordinate) => Ok(RbcExprNode::Coordinate { coordinate }),
+        // Naming the kind is the difference between a report a maintainer
+        // can act on and one that only says something is missing.
+        None => unsupported(
+            &format!(
+                "coordinate kind {} not in bitcode v2",
+                coordinate_kind_name(coordinate)
+            ),
+            options,
+        ),
+    }
+}
+
+fn conditional_node(
+    operands: dae::ExpressionOperands<'_>,
+    options: &ExportOptions,
+    check: &impl Fn(dae::ExprId<'_>) -> Result<ExprId, ExportError>,
+) -> Result<RbcExprNode, ExportError> {
+    // Packed as [cond, value, cond, value, ..., fallback]: an even
+    // number of branch operands followed by the required fallback.
+    let count = operands.len();
+    if count == 0 || count.is_multiple_of(2) {
+        return unsupported("malformed conditional operand packing", options);
+    }
+    let mut branches = Vec::with_capacity(count / 2);
+    for pair in 0..count / 2 {
+        let condition = operands
+            .get(pair * 2)
+            .ok_or_else(|| ExportError::Projection("conditional operand".into()))?;
+        let value = operands
+            .get(pair * 2 + 1)
+            .ok_or_else(|| ExportError::Projection("conditional operand".into()))?;
+        branches.push(RbcBranch {
+            condition: check(condition)?,
+            value: check(value)?,
+        });
+    }
+    let fallback = operands
+        .get(count - 1)
+        .ok_or_else(|| ExportError::Projection("conditional fallback".into()))?;
+    Ok(RbcExprNode::Conditional {
+        branches,
+        fallback: check(fallback)?,
+    })
+}
+
+fn array_node(
+    expression: dae::ExpressionView<'_>,
+    operands: dae::ExpressionOperands<'_>,
+    check: &impl Fn(dae::ExprId<'_>) -> Result<ExprId, ExportError>,
+) -> Result<RbcExprNode, ExportError> {
+    let elements = operands_of(operands, "array element", check)?;
+    // A zero-element array has no operand from which the importer
+    // could re-derive its element type, so the type travels with it.
+    let empty_type = elements
+        .is_empty()
+        .then(|| TypeId(expression.value_type_id().index()));
+    Ok(RbcExprNode::Array {
+        elements,
+        empty_type,
+    })
+}
+
+fn range_node(
+    range: dae::RangeView<'_>,
+    check: &impl Fn(dae::ExprId<'_>) -> Result<ExprId, ExportError>,
+) -> Result<RbcExprNode, ExportError> {
+    Ok(RbcExprNode::Range {
+        start: check(range.start().expression())?,
+        step: range
+            .explicit_step()
+            .map(|step| check(step.expression()))
+            .transpose()?,
+        stop: check(range.stop().expression())?,
+    })
+}
+
+/// Every operand in order, each checked; `what` names a missing one.
+fn operands_of(
+    operands: dae::ExpressionOperands<'_>,
+    what: &str,
+    check: &impl Fn(dae::ExprId<'_>) -> Result<ExprId, ExportError>,
+) -> Result<Vec<ExprId>, ExportError> {
+    let mut checked = Vec::with_capacity(operands.len());
+    for position in 0..operands.len() {
+        let operand = operands
+            .get(position)
+            .ok_or_else(|| ExportError::Projection(what.into()))?;
+        checked.push(check(operand)?);
+    }
+    Ok(checked)
 }
 
 fn subscripts_of(
@@ -1632,273 +1648,6 @@ fn export_connections(
             ..connection
         })
         .collect()
-}
-
-/// `"battery.pin.v"` → `"battery.pin"`. A serialization-boundary operation.
-/// The connection graph's nodes, from Flat's flow sums and connect equalities.
-///
-/// A `connect` is written pairwise and the object it creates is n-ary: three
-/// pins on one node share one potential and one conservation law. The
-/// potential side arrives as pairs and is closed transitively into sets here;
-/// the flow side arrives already n-ary, as `EquationOrigin::FlowSum`.
-///
-/// Both halves are needed and only the first was ever exported, so every
-/// consumer saw a graph with equalities and no conservation --- which is the
-/// half that makes an acausal model worth analysing as a network.
-fn export_connection_sets(
-    flat: Option<&flat::Model>,
-    variables: &[RbcVariable],
-    equations: &[RbcEquation],
-    ctx: &mut Ctx<'_>,
-) -> Vec<RbcConnectionSet> {
-    let Some(flat) = flat else {
-        return Vec::new();
-    };
-    let by_name: BTreeMap<&str, VariableId> = variables
-        .iter()
-        .map(|variable| (variable.name.as_str(), variable.id))
-        .collect();
-
-    // Flow sums and potential equalities are paired with their DAE equations
-    // the same way `export_connections` pairs its own: by position among the
-    // generated connection equations, and only when the counts agree.
-    let generated: Vec<EquationId> = equations
-        .iter()
-        .filter(|equation| {
-            matches!(
-                equation.provenance.origin,
-                RbcOrigin::Generated {
-                    generation: RbcGeneration::ConnectionEquation
-                }
-            )
-        })
-        .map(|equation| equation.id)
-        .collect();
-    let mut flat_generated = 0usize;
-    let mut equation_at: BTreeMap<usize, EquationId> = BTreeMap::new();
-    for equation in flat.equations.iter() {
-        if matches!(
-            equation.origin,
-            flat::EquationOrigin::Connection { .. }
-                | flat::EquationOrigin::FlowSum { .. }
-                | flat::EquationOrigin::UnconnectedFlow { .. }
-        ) {
-            if let Some(id) = generated.get(flat_generated) {
-                equation_at.insert(flat_generated, *id);
-            }
-            flat_generated += 1;
-        }
-    }
-    let pairable = flat_generated == generated.len();
-
-    // Union-find over connector instances, so `a.p -- b.n` and `b.n -- c.p`
-    // become one node rather than two edges.
-    let mut parent: BTreeMap<String, String> = BTreeMap::new();
-    fn root(parent: &mut BTreeMap<String, String>, of: &str) -> String {
-        let mut cursor = of.to_string();
-        while let Some(next) = parent.get(&cursor) {
-            if next == &cursor {
-                break;
-            }
-            cursor = next.clone();
-        }
-        cursor
-    }
-    let join = |parent: &mut BTreeMap<String, String>, left: &str, right: &str| {
-        parent
-            .entry(left.to_string())
-            .or_insert_with(|| left.to_string());
-        parent
-            .entry(right.to_string())
-            .or_insert_with(|| right.to_string());
-        let (a, b) = (root(parent, left), root(parent, right));
-        if a != b {
-            parent.insert(a, b);
-        }
-    };
-
-    struct Pending {
-        potentials: Vec<VariableId>,
-        potential_equations: Vec<EquationId>,
-        connectors: BTreeSet<String>,
-        span: rumoca_core::Span,
-    }
-    let mut pending: BTreeMap<String, Pending> = BTreeMap::new();
-    let mut index = 0usize;
-    for equation in flat.equations.iter() {
-        match &equation.origin {
-            flat::EquationOrigin::Connection { lhs, rhs } => {
-                join(&mut parent, connector_path(lhs), connector_path(rhs));
-                index += 1;
-            }
-            flat::EquationOrigin::FlowSum { .. } | flat::EquationOrigin::UnconnectedFlow { .. } => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
-    let _ = index;
-
-    // Second pass, now that the sets are known: attach each equality to the
-    // node its endpoints landed in.
-    let mut position = 0usize;
-    for equation in flat.equations.iter() {
-        let flat::EquationOrigin::Connection { lhs, rhs } = &equation.origin else {
-            if matches!(
-                equation.origin,
-                flat::EquationOrigin::FlowSum { .. } | flat::EquationOrigin::UnconnectedFlow { .. }
-            ) {
-                position += 1;
-            }
-            continue;
-        };
-        let node = root(&mut parent, connector_path(lhs));
-        let entry = pending.entry(node).or_insert_with(|| Pending {
-            potentials: Vec::new(),
-            potential_equations: Vec::new(),
-            connectors: BTreeSet::new(),
-            span: equation.span,
-        });
-        for endpoint in [lhs.as_str(), rhs.as_str()] {
-            entry
-                .connectors
-                .insert(connector_path(endpoint).to_string());
-            if let Some(id) = by_name.get(endpoint) {
-                if !entry.potentials.contains(id) {
-                    entry.potentials.push(*id);
-                }
-            }
-        }
-        if pairable {
-            if let Some(id) = equation_at.get(&position) {
-                entry.potential_equations.push(*id);
-            }
-        }
-        position += 1;
-    }
-
-    // The flow side, accumulated **per node**. A connector may declare more
-    // than one flow member --- a MultiBody frame conserves a force and a
-    // torque --- and each balance is its own equation but the same node.
-    struct Node {
-        connectors: BTreeSet<String>,
-        balances: Vec<RbcFlowBalance>,
-        unconnected: bool,
-        span: rumoca_core::Span,
-    }
-    let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
-    let mut order: Vec<String> = Vec::new();
-    let mut position = 0usize;
-    for equation in flat.equations.iter() {
-        let (members, unconnected) = match &equation.origin {
-            flat::EquationOrigin::Connection { .. } => {
-                position += 1;
-                continue;
-            }
-            flat::EquationOrigin::FlowSum { members, .. } => (members.clone(), false),
-            flat::EquationOrigin::UnconnectedFlow { variable } => (
-                vec![flat::FlowMember {
-                    variable: variable.clone(),
-                    negated: false,
-                }],
-                true,
-            ),
-            _ => continue,
-        };
-        let Some(first) = members.first() else {
-            position += 1;
-            continue;
-        };
-        let key = root(&mut parent, connector_path(&first.variable));
-        let node = nodes.entry(key.clone()).or_insert_with(|| {
-            order.push(key.clone());
-            Node {
-                connectors: BTreeSet::new(),
-                balances: Vec::new(),
-                unconnected,
-                span: equation.span,
-            }
-        });
-        // One unconnected member does not make a joined node unconnected.
-        node.unconnected = node.unconnected && unconnected;
-        let mut terms = Vec::new();
-        for member in members.iter() {
-            node.connectors
-                .insert(connector_path(&member.variable).to_string());
-            if let Some(id) = by_name.get(member.variable.as_str()) {
-                terms.push(RbcFlowTerm {
-                    variable: *id,
-                    negated: member.negated,
-                });
-            }
-        }
-        if !terms.is_empty() {
-            node.balances.push(RbcFlowBalance {
-                equation: pairable
-                    .then(|| equation_at.get(&position).copied())
-                    .flatten(),
-                terms,
-            });
-        }
-        position += 1;
-    }
-
-    let mut sets: Vec<RbcConnectionSet> = Vec::new();
-    let mut claimed: BTreeSet<String> = BTreeSet::new();
-    for key in order {
-        let Some(node) = nodes.remove(&key) else {
-            continue;
-        };
-        let mut connectors = node.connectors;
-        let mut potentials = Vec::new();
-        let mut potential_equations = Vec::new();
-        if let Some(entry) = pending.get(&key) {
-            potentials = entry.potentials.clone();
-            potential_equations = entry.potential_equations.clone();
-            connectors.extend(entry.connectors.iter().cloned());
-            claimed.insert(key.clone());
-        }
-        let span = ctx.span(node.span);
-        sets.push(RbcConnectionSet {
-            id: ConnectionSetId(sets.len() as u32),
-            connectors: connectors.into_iter().collect(),
-            potentials,
-            balances: node.balances,
-            potential_equations,
-            unconnected: node.unconnected,
-            provenance: RbcProvenance {
-                origin: RbcOrigin::Generated {
-                    generation: RbcGeneration::ConnectionEquation,
-                },
-                span,
-            },
-        });
-    }
-
-    // A node whose potentials were equated but whose flow sum did not survive
-    // lowering still exists, and dropping it would understate the graph.
-    let leftover: Vec<(String, Pending)> = pending
-        .into_iter()
-        .filter(|(node, _)| !claimed.contains(node))
-        .collect();
-    for (_, entry) in leftover {
-        let span = ctx.span(entry.span);
-        sets.push(RbcConnectionSet {
-            id: ConnectionSetId(sets.len() as u32),
-            connectors: entry.connectors.into_iter().collect(),
-            potentials: entry.potentials,
-            balances: Vec::new(),
-            potential_equations: entry.potential_equations,
-            unconnected: false,
-            provenance: RbcProvenance {
-                origin: RbcOrigin::Generated {
-                    generation: RbcGeneration::ConnectionEquation,
-                },
-                span,
-            },
-        });
-    }
-    sets
 }
 
 // Passing the assembled `RbcModel` instead would invert the order: the summary

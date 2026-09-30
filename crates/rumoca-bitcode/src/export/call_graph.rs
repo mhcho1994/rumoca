@@ -32,7 +32,7 @@ pub(super) fn call_graph(view: dae::DaeView<'_>) -> Vec<Vec<FunctionId>> {
     // misses it; it is still reached only through the body. Walk each body
     // from its definitions and loop values as well.
     let mut traversal = dae::ExpressionTraversal::new();
-    for index in 0..view.function_count() {
+    for (index, slot) in edges.iter_mut().enumerate() {
         let Some(function) = view.function_id(index).and_then(|id| view.function(id)) else {
             continue;
         };
@@ -50,7 +50,6 @@ pub(super) fn call_graph(view: dae::DaeView<'_>) -> Vec<Vec<FunctionId>> {
                     .collect::<Vec<_>>()
             });
         let roots = definitions.chain(folds).collect::<Vec<_>>();
-        let slot = &mut edges[index];
         traversal.visit_pruned(view, roots, |_, expression| {
             if let dae::ExpressionOperation::Call { function, .. } = expression.operation() {
                 slot.push(FunctionId(function.index()));

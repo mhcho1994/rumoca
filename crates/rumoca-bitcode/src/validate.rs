@@ -468,250 +468,209 @@ fn check_expressions(
 ) {
     for expression in &model.expressions {
         let index = expression.id.0;
-        reference(
-            errors,
-            format!("expression {index}"),
-            "type",
-            expression.value_type.0,
-            counts.types,
-        );
-        // Operands must be strictly earlier. This is what makes the arena a DAG
-        // and lets a consumer evaluate it in one forward pass; it also makes a
-        // cycle unrepresentable rather than something to detect.
-        let mut operand = |operand: ExprId| {
-            if operand.0 >= index {
-                errors.push(ValidationError::NonTopologicalOperand {
+        expression_reference(errors, index, "type", expression.value_type.0, counts.types);
+        check_expression_node(errors, index, &expression.node, counts, options);
+    }
+}
+
+/// Report a dangling reference from expression `index` into another table.
+fn expression_reference(
+    errors: &mut Vec<ValidationError>,
+    index: u32,
+    target: &'static str,
+    id: u32,
+    count: u32,
+) {
+    reference(errors, format!("expression {index}"), target, id, count);
+}
+
+/// Operands must be strictly earlier. This is what makes the arena a DAG
+/// and lets a consumer evaluate it in one forward pass; it also makes a
+/// cycle unrepresentable rather than something to detect.
+fn check_operand(errors: &mut Vec<ValidationError>, index: u32, operand: ExprId) {
+    if operand.0 >= index {
+        errors.push(ValidationError::NonTopologicalOperand {
+            expression: index,
+            operand: operand.0,
+        });
+    }
+}
+
+fn check_operands(
+    errors: &mut Vec<ValidationError>,
+    index: u32,
+    operands: impl IntoIterator<Item = ExprId>,
+) {
+    for operand in operands {
+        check_operand(errors, index, operand);
+    }
+}
+
+fn check_expression_node(
+    errors: &mut Vec<ValidationError>,
+    index: u32,
+    node: &RbcExprNode,
+    counts: &Counts,
+    options: &ValidateOptions,
+) {
+    let mut operand = |operand: ExprId| check_operand(errors, index, operand);
+    match node {
+        RbcExprNode::StringConversion { value, format } => {
+            operand(*value);
+            check_operands(errors, index, format.operands());
+        }
+        RbcExprNode::Literal { .. } => {}
+        RbcExprNode::ClockTransfer {
+            source,
+            source_clock,
+            target_clock,
+            ..
+        } => {
+            operand(*source);
+            for clock in [source_clock, target_clock] {
+                expression_reference(errors, index, "clock", clock.0, counts.clocks);
+            }
+        }
+        RbcExprNode::Coordinate { coordinate } => {
+            check_coordinate(errors, index, *coordinate, counts)
+        }
+        RbcExprNode::Unary { operand: inner, .. } => operand(*inner),
+        RbcExprNode::Binary { lhs, rhs, .. } => {
+            operand(*lhs);
+            operand(*rhs);
+        }
+        RbcExprNode::Builtin { arguments, .. } => {
+            check_operands(errors, index, arguments.iter().copied())
+        }
+        RbcExprNode::Conditional { branches, fallback } => {
+            for branch in branches {
+                operand(branch.condition);
+                operand(branch.value);
+            }
+            operand(*fallback);
+        }
+        RbcExprNode::Array {
+            elements,
+            empty_type,
+        } => {
+            check_operands(errors, index, elements.iter().copied());
+            if let Some(ty) = empty_type {
+                expression_reference(errors, index, "type", ty.0, counts.types);
+            }
+        }
+        RbcExprNode::Record { ty, fields } => {
+            check_operands(errors, index, fields.iter().copied());
+            expression_reference(errors, index, "type", ty.0, counts.types);
+        }
+        RbcExprNode::Field { base, .. } => operand(*base),
+        RbcExprNode::Range { start, step, stop } => {
+            operand(*start);
+            if let Some(step) = step {
+                operand(*step);
+            }
+            operand(*stop);
+        }
+        RbcExprNode::Comprehension { domain, body } => {
+            operand(*body);
+            expression_reference(errors, index, "domain", domain.0, counts.domains);
+        }
+        RbcExprNode::Index { base, subscripts } => {
+            operand(*base);
+            let subscripts = subscripts.iter().filter_map(|s| s.expression());
+            check_operands(errors, index, subscripts);
+        }
+        RbcExprNode::ArrayUpdate {
+            base,
+            value,
+            subscripts,
+        } => {
+            operand(*base);
+            operand(*value);
+            let subscripts = subscripts.iter().filter_map(|s| s.expression());
+            check_operands(errors, index, subscripts);
+        }
+        RbcExprNode::Call {
+            owner,
+            function,
+            arguments,
+            ..
+        } => check_call(errors, index, *owner, *function, arguments, counts),
+        RbcExprNode::FunctionValue { function, .. }
+        | RbcExprNode::FunctionFoldParameter { function, .. }
+        | RbcExprNode::FunctionFoldOutput { function, .. } => {
+            // Only the function id is artifact-wide. The other fields
+            // are owner-local ordinals, checked against that function's
+            // own body and fold tables by `check_function_bodies`,
+            // which is where the tables to check against are in scope.
+            expression_reference(errors, index, "function", function.0, counts.functions);
+        }
+        RbcExprNode::Unsupported { detail } => {
+            if options.reject_unsupported {
+                errors.push(ValidationError::UnsupportedNode {
                     expression: index,
-                    operand: operand.0,
+                    detail: detail.clone(),
                 });
-            }
-        };
-        match &expression.node {
-            RbcExprNode::StringConversion { value, format } => {
-                operand(*value);
-                for value in format.operands() {
-                    operand(value);
-                }
-            }
-            RbcExprNode::Literal { .. } => {}
-            RbcExprNode::ClockTransfer {
-                source,
-                source_clock,
-                target_clock,
-                ..
-            } => {
-                operand(*source);
-                for clock in [source_clock, target_clock] {
-                    reference(
-                        errors,
-                        format!("expression {index}"),
-                        "clock",
-                        clock.0,
-                        counts.clocks,
-                    );
-                }
-            }
-            RbcExprNode::Coordinate { coordinate } => {
-                match coordinate {
-                    RbcCoordinate::Binder { domain, .. } => reference(
-                        errors,
-                        format!("expression {index}"),
-                        "domain",
-                        domain.0,
-                        counts.domains,
-                    ),
-                    RbcCoordinate::Condition { condition } => reference(
-                        errors,
-                        format!("expression {index}"),
-                        "condition",
-                        condition.0,
-                        counts.conditions,
-                    ),
-                    RbcCoordinate::FunctionParameter { function, .. } => reference(
-                        errors,
-                        format!("expression {index}"),
-                        "function",
-                        function.0,
-                        counts.functions,
-                    ),
-                    RbcCoordinate::ClockInterval { clock } => reference(
-                        errors,
-                        format!("expression {index}"),
-                        "clock",
-                        clock.0,
-                        counts.clocks,
-                    ),
-                    RbcCoordinate::Delay { delay } => reference(
-                        errors,
-                        format!("expression {index}"),
-                        "delay",
-                        delay.0,
-                        counts.delays,
-                    ),
-                    RbcCoordinate::Previous { previous } => reference(
-                        errors,
-                        format!("expression {index}"),
-                        "previous value",
-                        previous.0,
-                        counts.previous_values,
-                    ),
-                    RbcCoordinate::Terminal { terminal } => reference(
-                        errors,
-                        format!("expression {index}"),
-                        "terminal",
-                        terminal.0,
-                        counts.terminals,
-                    ),
-                    _ => {}
-                }
-                if let Some(variable) = coordinate.variable() {
-                    reference(
-                        errors,
-                        format!("expression {index}"),
-                        "variable",
-                        variable.0,
-                        counts.variables,
-                    );
-                }
-            }
-            RbcExprNode::Unary { operand: inner, .. } => operand(*inner),
-            RbcExprNode::Binary { lhs, rhs, .. } => {
-                operand(*lhs);
-                operand(*rhs);
-            }
-            RbcExprNode::Builtin { arguments, .. } => {
-                for argument in arguments {
-                    operand(*argument);
-                }
-            }
-            RbcExprNode::Conditional { branches, fallback } => {
-                for branch in branches {
-                    operand(branch.condition);
-                    operand(branch.value);
-                }
-                operand(*fallback);
-            }
-            RbcExprNode::Array {
-                elements,
-                empty_type,
-            } => {
-                for element in elements {
-                    operand(*element);
-                }
-                if let Some(ty) = empty_type {
-                    reference(
-                        errors,
-                        format!("expression {index}"),
-                        "type",
-                        ty.0,
-                        counts.types,
-                    );
-                }
-            }
-            RbcExprNode::Record { ty, fields } => {
-                for field in fields {
-                    operand(*field);
-                }
-                reference(
-                    errors,
-                    format!("expression {index}"),
-                    "type",
-                    ty.0,
-                    counts.types,
-                );
-            }
-            RbcExprNode::Field { base, .. } => operand(*base),
-            RbcExprNode::Range { start, step, stop } => {
-                operand(*start);
-                if let Some(step) = step {
-                    operand(*step);
-                }
-                operand(*stop);
-            }
-            RbcExprNode::Comprehension { domain, body } => {
-                operand(*body);
-                reference(
-                    errors,
-                    format!("expression {index}"),
-                    "domain",
-                    domain.0,
-                    counts.domains,
-                );
-            }
-            RbcExprNode::Index { base, subscripts } => {
-                operand(*base);
-                for subscript in subscripts {
-                    if let Some(expression) = subscript.expression() {
-                        operand(expression);
-                    }
-                }
-            }
-            RbcExprNode::ArrayUpdate {
-                base,
-                value,
-                subscripts,
-            } => {
-                operand(*base);
-                operand(*value);
-                for subscript in subscripts {
-                    if let Some(expression) = subscript.expression() {
-                        operand(expression);
-                    }
-                }
-            }
-            RbcExprNode::Call {
-                owner,
-                function,
-                arguments,
-                ..
-            } => {
-                // `owner` may be this node itself — a single-output call is
-                // its own owner — so it is checked as a backward-or-self
-                // reference rather than with the strict operand rule.
-                let forward_owner = owner.0 > index;
-                for argument in arguments {
-                    operand(*argument);
-                }
-                drop(operand);
-                if forward_owner {
-                    errors.push(ValidationError::NonTopologicalOperand {
-                        expression: index,
-                        operand: owner.0,
-                    });
-                }
-                reference(
-                    errors,
-                    format!("expression {index}"),
-                    "function",
-                    function.0,
-                    counts.functions,
-                );
-            }
-            RbcExprNode::FunctionValue { function, .. }
-            | RbcExprNode::FunctionFoldParameter { function, .. }
-            | RbcExprNode::FunctionFoldOutput { function, .. } => {
-                // Only the function id is artifact-wide. The other fields
-                // are owner-local ordinals, checked against that function's
-                // own body and fold tables by `check_function_bodies`,
-                // which is where the tables to check against are in scope.
-                reference(
-                    errors,
-                    format!("expression {index}"),
-                    "function",
-                    function.0,
-                    counts.functions,
-                );
-            }
-            RbcExprNode::Unsupported { detail } => {
-                if options.reject_unsupported {
-                    errors.push(ValidationError::UnsupportedNode {
-                        expression: index,
-                        detail: detail.clone(),
-                    });
-                }
             }
         }
     }
+}
+
+fn check_coordinate(
+    errors: &mut Vec<ValidationError>,
+    index: u32,
+    coordinate: RbcCoordinate,
+    counts: &Counts,
+) {
+    match coordinate {
+        RbcCoordinate::Binder { domain, .. } => {
+            expression_reference(errors, index, "domain", domain.0, counts.domains);
+        }
+        RbcCoordinate::Condition { condition } => {
+            expression_reference(errors, index, "condition", condition.0, counts.conditions);
+        }
+        RbcCoordinate::FunctionParameter { function, .. } => {
+            expression_reference(errors, index, "function", function.0, counts.functions);
+        }
+        RbcCoordinate::ClockInterval { clock } => {
+            expression_reference(errors, index, "clock", clock.0, counts.clocks);
+        }
+        RbcCoordinate::Delay { delay } => {
+            expression_reference(errors, index, "delay", delay.0, counts.delays);
+        }
+        RbcCoordinate::Previous { previous } => {
+            let count = counts.previous_values;
+            expression_reference(errors, index, "previous value", previous.0, count);
+        }
+        RbcCoordinate::Terminal { terminal } => {
+            expression_reference(errors, index, "terminal", terminal.0, counts.terminals);
+        }
+        _ => {}
+    }
+    if let Some(variable) = coordinate.variable() {
+        expression_reference(errors, index, "variable", variable.0, counts.variables);
+    }
+}
+
+fn check_call(
+    errors: &mut Vec<ValidationError>,
+    index: u32,
+    owner: ExprId,
+    function: FunctionId,
+    arguments: &[ExprId],
+    counts: &Counts,
+) {
+    // `owner` may be this node itself — a single-output call is
+    // its own owner — so it is checked as a backward-or-self
+    // reference rather than with the strict operand rule.
+    let forward_owner = owner.0 > index;
+    check_operands(errors, index, arguments.iter().copied());
+    if forward_owner {
+        errors.push(ValidationError::NonTopologicalOperand {
+            expression: index,
+            operand: owner.0,
+        });
+    }
+    expression_reference(errors, index, "function", function.0, counts.functions);
 }
 
 fn check_equations(errors: &mut Vec<ValidationError>, model: &RbcModel, counts: &Counts) {
@@ -1078,34 +1037,8 @@ fn check_discrete_definitions(
             defined.insert(target.0);
         }
         for (branch_index, branch) in definition.branches.iter().enumerate() {
-            if branch.values.len() != definition.targets.len() {
-                errors.push(ValidationError::DiscreteBranchArity {
-                    definition: index,
-                    branch: branch_index as u32,
-                    values: branch.values.len() as u32,
-                    targets: definition.targets.len() as u32,
-                });
-            }
-            for value in &branch.values {
-                reference(
-                    errors,
-                    format!("discrete definition {index} branch {branch_index}"),
-                    "expression",
-                    value.0,
-                    counts.expressions,
-                );
-            }
-            if let RbcDiscreteActivation::When { trigger, guard } = branch.activation {
-                for (label, condition) in [("trigger", trigger), ("guard", guard)] {
-                    reference(
-                        errors,
-                        format!("discrete definition {index} branch {branch_index} {label}"),
-                        "condition",
-                        condition.0,
-                        counts.conditions,
-                    );
-                }
-            }
+            let targets = definition.targets.len();
+            check_discrete_branch(errors, index, branch_index, branch, targets, counts);
         }
     }
     check_temporal_owners(errors, model, counts);
@@ -1117,6 +1050,44 @@ fn check_discrete_definitions(
                 id: variable.id.0,
                 name: variable.name.clone(),
             });
+        }
+    }
+}
+
+fn check_discrete_branch(
+    errors: &mut Vec<ValidationError>,
+    index: u32,
+    branch_index: usize,
+    branch: &RbcDiscreteBranch,
+    targets: usize,
+    counts: &Counts,
+) {
+    if branch.values.len() != targets {
+        errors.push(ValidationError::DiscreteBranchArity {
+            definition: index,
+            branch: branch_index as u32,
+            values: branch.values.len() as u32,
+            targets: targets as u32,
+        });
+    }
+    for value in &branch.values {
+        reference(
+            errors,
+            format!("discrete definition {index} branch {branch_index}"),
+            "expression",
+            value.0,
+            counts.expressions,
+        );
+    }
+    if let RbcDiscreteActivation::When { trigger, guard } = branch.activation {
+        for (label, condition) in [("trigger", trigger), ("guard", guard)] {
+            reference(
+                errors,
+                format!("discrete definition {index} branch {branch_index} {label}"),
+                "condition",
+                condition.0,
+                counts.conditions,
+            );
         }
     }
 }
@@ -1198,43 +1169,53 @@ fn check_model_event_transactions(
             owned.push(target.0);
         }
         for step in &transaction.steps {
-            for condition in [step.trigger, step.guard] {
-                reference(
-                    errors,
-                    referrer.clone(),
-                    "condition",
-                    condition.0,
-                    counts.conditions,
-                );
-            }
-            if let Some(clock) = step.clock {
-                reference(errors, referrer.clone(), "clock", clock.0, counts.clocks);
-            }
-            for definition in &step.definitions {
-                reference(
-                    errors,
-                    referrer.clone(),
-                    "variable",
-                    definition.target.0,
-                    counts.variables,
-                );
-                reference(
-                    errors,
-                    referrer.clone(),
-                    "expression",
-                    definition.value.0,
-                    counts.expressions,
-                );
-                if !transaction.targets.contains(&definition.target) {
-                    errors.push(ValidationError::Connector(format!(
-                        "{referrer}: a step defines variable {}, which the transaction does not own",
-                        definition.target.0
-                    )));
-                }
-            }
+            check_transaction_step(errors, &referrer, &transaction.targets, step, counts);
         }
     }
     owned
+}
+
+fn check_transaction_step(
+    errors: &mut Vec<ValidationError>,
+    referrer: &str,
+    targets: &[VariableId],
+    step: &RbcModelEventStep,
+    counts: &Counts,
+) {
+    for condition in [step.trigger, step.guard] {
+        reference(
+            errors,
+            referrer,
+            "condition",
+            condition.0,
+            counts.conditions,
+        );
+    }
+    if let Some(clock) = step.clock {
+        reference(errors, referrer, "clock", clock.0, counts.clocks);
+    }
+    for definition in &step.definitions {
+        reference(
+            errors,
+            referrer,
+            "variable",
+            definition.target.0,
+            counts.variables,
+        );
+        reference(
+            errors,
+            referrer,
+            "expression",
+            definition.value.0,
+            counts.expressions,
+        );
+        if !targets.contains(&definition.target) {
+            errors.push(ValidationError::Connector(format!(
+                "{referrer}: a step defines variable {}, which the transaction does not own",
+                definition.target.0
+            )));
+        }
+    }
 }
 
 fn check_summary(errors: &mut Vec<ValidationError>, model: &RbcModel) {

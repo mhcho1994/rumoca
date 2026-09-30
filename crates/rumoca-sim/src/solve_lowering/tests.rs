@@ -382,7 +382,10 @@ fn index_reduction_differentiates_elementary_and_piecewise_definitions() {
         ("time/(1 + time)", 0.5),
         // Continuous piecewise definitions differentiate branch by branch.
         ("if time > 0.5 then time^2 + 0.25 else time", 1.25),
-        ("smooth(1, if time > 0.5 then time^2 + 0.25 else time)", 1.25),
+        (
+            "smooth(1, if time > 0.5 then time^2 + 0.25 else time)",
+            1.25,
+        ),
         ("noEvent(exp(time))", std::f64::consts::E - 1.0),
         ("abs(time + 1)", 1.0),
         ("sign(time + 1)*time", 1.0),
@@ -407,7 +410,11 @@ fn index_reduction_differentiates_elementary_and_piecewise_definitions() {
         };
         let result = simulate_dae(&dae, &options)
             .unwrap_or_else(|error| panic!("x = {definition}: {error}"));
-        let z = result.names.iter().position(|name| name == "z").expect("z column");
+        let z = result
+            .names
+            .iter()
+            .position(|name| name == "z")
+            .expect("z column");
         let last = *result.data[z].last().expect("trajectory sample");
         assert!(
             (last - expected).abs() < 1.0e-4,
@@ -452,7 +459,11 @@ fn index_reduction_differentiates_through_a_function_body_with_an_if_statement()
         ..SimOptions::default()
     };
     let result = simulate_dae(&dae, &options).expect("the call differentiates through its body");
-    let z = result.names.iter().position(|name| name == "z").expect("z column");
+    let z = result
+        .names
+        .iter()
+        .position(|name| name == "z")
+        .expect("z column");
     let last = *result.data[z].last().expect("trajectory sample");
     // ease(0) = -1 and ease(1) = 4 + 1 = 5.
     assert!((last - 6.0).abs() < 1.0e-4, "z(1) = {last}, expected 6");
@@ -478,7 +489,11 @@ fn parameter_sized_linspace_evaluates_in_a_start_value() {
         ..SimOptions::default()
     };
     let result = simulate_dae(&dae, &options).expect("a parameter-sized linspace evaluates");
-    let x = result.names.iter().position(|name| name == "x").expect("x column");
+    let x = result
+        .names
+        .iter()
+        .position(|name| name == "x")
+        .expect("x column");
     assert_eq!(result.data[x].first().copied(), Some(0.5));
 }
 
@@ -504,9 +519,17 @@ fn inclusive_relation_holds_at_its_boundary_without_event_chattering() {
     };
     let result = simulate_dae(&dae, &options)
         .expect("a relation exactly at its boundary must settle its event iteration");
-    let z = result.names.iter().position(|name| name == "z").expect("z column");
+    let z = result
+        .names
+        .iter()
+        .position(|name| name == "z")
+        .expect("z column");
     assert_eq!(result.data[z].first().copied(), Some(1.0), "0 >= 0 holds");
-    assert_eq!(result.data[z].last().copied(), Some(-1.0), "0 >= 1 does not");
+    assert_eq!(
+        result.data[z].last().copied(),
+        Some(-1.0),
+        "0 >= 1 does not"
+    );
 }
 
 #[test]
@@ -526,7 +549,11 @@ fn warning_level_assertion_reports_and_continues_while_error_level_stops() {
     let warning = compile(&source("warning"), "LeveledAssertion");
     let result = simulate_dae(&warning, &options)
         .expect("a warning-level assertion must not stop the simulation");
-    let x = result.names.iter().position(|name| name == "x").expect("x column");
+    let x = result
+        .names
+        .iter()
+        .position(|name| name == "x")
+        .expect("x column");
     let last = *result.data[x].last().expect("trajectory sample");
     assert!((last - 1.0).abs() < 1.0e-8, "x(1) = {last}");
 
@@ -969,10 +996,17 @@ fn implicit_algebraic_over_fixed_false_parameters_initializes() {
         ..SimOptions::default()
     };
     let result = simulate_dae(&dae, &options).expect("the parameters and x initialize together");
-    let x = result.names.iter().position(|name| name == "x").expect("x column");
+    let x = result
+        .names
+        .iter()
+        .position(|name| name == "x")
+        .expect("x column");
     for (time, &value) in result.times.iter().zip(&result.data[x]) {
         let residual = 4.0 * (time - 0.5) - (2.0 * value + value.powi(3));
-        assert!(residual.abs() < 1.0e-6, "t={time}: x={value}, residual {residual}");
+        assert!(
+            residual.abs() < 1.0e-6,
+            "t={time}: x={value}, residual {residual}"
+        );
     }
 }
 
@@ -1013,7 +1047,10 @@ fn algebraic_non_finite_at_parameter_seed_does_not_abort_initialization() {
         &result.data[index.expect("result column")]
     };
     for (&y, &z) in column("y").iter().zip(column("z")) {
-        assert!((y - z).abs() < 1.0e-6, "z tracks y below the switch: y={y}, z={z}");
+        assert!(
+            (y - z).abs() < 1.0e-6,
+            "z tracks y below the switch: y={y}, z={z}"
+        );
     }
 }
 

@@ -173,10 +173,20 @@ pub struct CompileBitcodeArgs {
     #[arg(long)]
     pub simulate: bool,
     /// Simulation start time, e.g. a model's `experiment(StartTime=...)`.
-    #[arg(long, default_value_t = 0.0, requires = "simulate", allow_hyphen_values = true)]
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        requires = "simulate",
+        allow_hyphen_values = true
+    )]
     pub t_start: f64,
     /// Simulation end time.
-    #[arg(long, default_value_t = 1.0, requires = "simulate", allow_hyphen_values = true)]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        requires = "simulate",
+        allow_hyphen_values = true
+    )]
     pub t_end: f64,
     /// Fixed output interval. Omitted lets the runtime choose.
     #[arg(long, requires = "simulate")]
@@ -275,8 +285,15 @@ pub fn emit_bitcode(
 ) -> Result<()> {
     let mut options = ExportOptions::default();
     options.embed_sources = embed_sources;
-    let file = rumoca_bitcode::export(&result.dae, Some(&result.flat), model_name, &options)
+    let mut file = rumoca_bitcode::export(&result.dae, Some(&result.flat), model_name, &options)
         .context("export bitcode")?;
+    // A fresh export describes the model as the passes left it, but cannot
+    // contain the trace points or execution section an external pass added;
+    // carry those over from the pass stage's artifact.
+    if let Some(passed) = &result.bitcode {
+        rumoca_bitcode::observations::carry_observations(passed, &mut file)
+            .context("carry pass-stage observations into the emitted artifact")?;
+    }
     rumoca_bitcode::write_file(path, &file, format.into())
         .with_context(|| format!("write {}", path.display()))?;
     eprintln!(
@@ -576,6 +593,40 @@ fn run_round_trip(path: &Path, output: Option<&Path>) -> Result<()> {
     )
 }
 
+/// The event-transaction, `previous`, `terminal`, structured-root and delay
+/// owner tables, compared whole.
+fn compare_owner_tables(
+    left: &RbcModel,
+    right: &RbcModel,
+    check: &mut impl FnMut(&str, String, String),
+) {
+    check(
+        "model event transactions",
+        format!("{:?}", left.model_event_transactions),
+        format!("{:?}", right.model_event_transactions),
+    );
+    check(
+        "previous values",
+        format!("{:?}", left.previous_values),
+        format!("{:?}", right.previous_values),
+    );
+    check(
+        "terminals",
+        format!("{:?}", left.terminals),
+        format!("{:?}", right.terminals),
+    );
+    check(
+        "structured roots",
+        format!("{:?}", left.structured_roots),
+        format!("{:?}", right.structured_roots),
+    );
+    check(
+        "delays",
+        format!("{:?}", left.delays),
+        format!("{:?}", right.delays),
+    );
+}
+
 fn compare(left: &RbcModel, right: &RbcModel) -> Vec<String> {
     let mut differences = Vec::new();
     let mut check = |label: &str, a: String, b: String| {
@@ -650,31 +701,7 @@ fn compare(left: &RbcModel, right: &RbcModel) -> Vec<String> {
             format!("{:?}", with_type_ids(b, &right_types)),
         );
     }
-    check(
-        "model event transactions",
-        format!("{:?}", left.model_event_transactions),
-        format!("{:?}", right.model_event_transactions),
-    );
-    check(
-        "previous values",
-        format!("{:?}", left.previous_values),
-        format!("{:?}", right.previous_values),
-    );
-    check(
-        "terminals",
-        format!("{:?}", left.terminals),
-        format!("{:?}", right.terminals),
-    );
-    check(
-        "structured roots",
-        format!("{:?}", left.structured_roots),
-        format!("{:?}", right.structured_roots),
-    );
-    check(
-        "delays",
-        format!("{:?}", left.delays),
-        format!("{:?}", right.delays),
-    );
+    compare_owner_tables(left, right, &mut check);
     for (a, b) in left.events.iter().zip(&right.events) {
         check(
             &format!("event {} action", a.id),

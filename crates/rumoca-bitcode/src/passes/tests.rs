@@ -240,3 +240,140 @@ fn an_assertion_over_a_structural_parameter_folds_without_inlining_it() {
     assert_eq!(reports[1].rewrites, 2, "both assertions are decided");
     assert!(file.model.events.is_empty());
 }
+
+#[test]
+fn a_pipeline_parses_groups_lists_and_fixpoints() {
+    let steps =
+        pipeline::parse(&["inline-constants,fixpoint(fold-constants, fold-pure-calls)".into()])
+            .expect("parses");
+    assert_eq!(
+        format!("{steps:?}"),
+        "[inline-constants, fixpoint([fold-constants, fold-pure-calls])]"
+    );
+    let default = pipeline::parse(&["O1".into()]).expect("parses");
+    assert_eq!(default.len(), catalog().len());
+    assert!(
+        pipeline::parse(&["O0,none,round-trip".into()])
+            .expect("parses")
+            .is_empty()
+    );
+    let external =
+        pipeline::parse(&["fold-constants,exec:tool --keep a,b".into()]).expect("parses");
+    assert_eq!(
+        format!("{external:?}"),
+        "[fold-constants, exec:tool --keep a,b]"
+    );
+    assert!(pipeline::parse(&["fixpoint(fold-constants".into()]).is_err());
+    assert!(pipeline::parse(&["exec:".into()]).is_err());
+}
+
+#[test]
+fn a_pass_that_changed_nothing_is_not_rerun_on_the_same_model() {
+    let mut file = file(model());
+    let steps = pipeline::parse(&["fold-constants,fold-constants,fold-constants".into()]).unwrap();
+    let mut scheduler = pipeline::Scheduler::default();
+    scheduler.run(&mut file, &steps).expect("runs");
+    // The first run folds `2 + 3`; the second finds nothing; the third is
+    // skipped because nothing changed in between.
+    assert_eq!(scheduler.reports.len(), 2);
+    assert!(scheduler.reports[0].changed());
+    assert!(!scheduler.reports[1].changed());
+    assert_eq!(scheduler.skipped, 1);
+}
+
+#[test]
+fn a_fixpoint_stops_once_a_round_changes_nothing() {
+    let mut file = file(model());
+    let steps = pipeline::parse(&["fixpoint(fold-constants,dead-expressions)".into()]).unwrap();
+    let mut scheduler = pipeline::Scheduler::default();
+    scheduler.run(&mut file, &steps).expect("converges");
+    // Round one: folding changes the model (the dead operands go with it),
+    // then `dead-expressions` finds nothing. Round two: folding reruns on the
+    // changed model and finds nothing; `dead-expressions` is skipped, since
+    // nothing changed after it last ran. There is no round three.
+    assert_eq!(scheduler.reports.len(), 3);
+    assert!(scheduler.reports[0].changed());
+    assert!(
+        scheduler.reports[1..]
+            .iter()
+            .all(|report| !report.changed())
+    );
+    assert_eq!(scheduler.skipped, 1);
+}
+
+#[cfg(unix)]
+fn script(directory: &std::path::Path, name: &str, body: &str) -> String {
+    let path = directory.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    format!("sh {}", path.display())
+}
+
+#[cfg(unix)]
+#[test]
+fn an_external_pass_runs_in_the_pipeline_and_its_output_is_validated() {
+    let directory = tempfile::tempdir().unwrap();
+    let copy = script(directory.path(), "copy.sh", r#"cp "$1" "$3""#);
+    let mut file = file(model());
+    let reports = run(&mut file, &[format!("fold-constants,exec:{copy}")]).expect("runs");
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[1].pass, format!("exec:{copy}"));
+    assert!(!reports[1].changed(), "a copy changes nothing");
+
+    let fails = script(directory.path(), "fails.sh", "echo broken >&2; exit 3");
+    let error = run(&mut file, &[format!("exec:{fails}")]).unwrap_err();
+    assert!(error.to_string().contains("exited with"), "{error}");
+
+    let silent = script(directory.path(), "silent.sh", "true");
+    let error = run(&mut file, &[format!("exec:{silent}")]).unwrap_err();
+    assert!(
+        error.to_string().contains("wrote no output artifact"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_external_pass_that_writes_another_version_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut future = file(model());
+    future.bitcode_version = RBC_VERSION + 1;
+    let path = directory.path().join("future.rbc");
+    std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+    let writes_future = script(
+        directory.path(),
+        "future.sh",
+        &format!(r#"cp "{}" "$3""#, path.display()),
+    );
+    let mut file = file(model());
+    let error = run(&mut file, &[format!("exec:{writes_future}")]).unwrap_err();
+    assert!(error.to_string().contains("version"), "{error}");
+}
+
+#[test]
+fn trace_points_carry_onto_a_fresh_export_by_variable_name() {
+    use crate::observations::carry_observations;
+    use crate::schema::{RbcTracePoint, TracePointId};
+    let mut traced = file(model());
+    let x = traced.model.variables[0].id;
+    traced.model.trace_points.push(RbcTracePoint {
+        id: TracePointId(0),
+        variable: x,
+        label: "x".into(),
+        connection: None,
+        connection_set: None,
+        quantity: None,
+        unit: None,
+        added_by: None,
+    });
+    let mut fresh = file(model());
+    carry_observations(&traced, &mut fresh).expect("carries");
+    assert_eq!(fresh.model.trace_points.len(), 1);
+    assert_eq!(fresh.model.summary.trace_points, 1);
+    assert_eq!(fresh.model.trace_points[0].variable, x);
+
+    // A variable the rebuild no longer has is named, not silently dropped.
+    let mut renamed = file(model());
+    renamed.model.variables[0].name = "y".into();
+    let error = carry_observations(&traced, &mut renamed).unwrap_err();
+    assert!(error.to_string().contains("`x`"), "{error}");
+}

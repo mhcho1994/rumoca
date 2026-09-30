@@ -1285,8 +1285,8 @@ fn assertion_kind<'dae>(
         )
     };
     match super::ScalarSelector::new(view, None).constant_real(level, 0) {
-        Ok(value) if value == 1.0 => Ok(solve::SolveEventActionKind::Warning),
-        Ok(value) if value == 2.0 => Ok(solve::SolveEventActionKind::Assert),
+        Ok(1.0) => Ok(solve::SolveEventActionKind::Warning),
+        Ok(2.0) => Ok(solve::SolveEventActionKind::Assert),
         _ => Err(unsupported()),
     }
 }

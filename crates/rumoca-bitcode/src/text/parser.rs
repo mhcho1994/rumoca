@@ -313,7 +313,7 @@ fn parse_subscripts(cursor: &mut Cursor<'_>) -> Result<Vec<RbcSubscript>, TextEr
     let mut subscripts = Vec::with_capacity(count);
     for _ in 0..count {
         let kind = cursor.word()?;
-        subscripts.push(match &*kind {
+        subscripts.push(match kind {
             "at" => RbcSubscript::Index {
                 expression: ExprId(cursor.id('^')?),
             },
@@ -482,6 +482,1106 @@ fn empty_model() -> RbcModel {
     }
 }
 
+/// The number after a declaration's sigil, e.g. the `3` of `%3`.
+fn item_id(rest: &str, line: usize, message: &'static str) -> Result<u32, TextError> {
+    rest.parse().map_err(|_| TextError::at(line, message))
+}
+
+/// `count` expression ids in a row.
+fn parse_expr_ids(cursor: &mut Cursor<'_>, count: usize) -> Result<Vec<ExprId>, TextError> {
+    let mut ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        ids.push(ExprId(cursor.id('^')?));
+    }
+    Ok(ids)
+}
+
+/// A run of variable ids, ending at the first token that is not one.
+fn parse_variable_run(cursor: &mut Cursor<'_>) -> Result<Vec<VariableId>, TextError> {
+    let mut variables = Vec::new();
+    while cursor.peek().is_some_and(|t| t.starts_with('%')) {
+        variables.push(VariableId(cursor.id('%')?));
+    }
+    Ok(variables)
+}
+
+/// An optional `keyword %a %b ...` clause; an absent clause reads as empty.
+fn parse_variable_clause(
+    cursor: &mut Cursor<'_>,
+    keyword: &str,
+) -> Result<Vec<VariableId>, TextError> {
+    if cursor.eat(keyword) {
+        parse_variable_run(cursor)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// A comma-separated extent list, or `-` for none.
+fn parse_extents(raw: &str, line: usize) -> Result<Vec<u32>, TextError> {
+    if raw == "-" {
+        return Ok(Vec::new());
+    }
+    raw.split(',')
+        .map(|p| {
+            p.parse()
+                .map_err(|_| TextError::at(line, format!("bad extent `{p}`")))
+        })
+        .collect()
+}
+
+/// A record carried whole as one quoted JSON string.
+fn parse_json<T: serde::de::DeserializeOwned>(cursor: &mut Cursor<'_>) -> Result<T, TextError> {
+    serde_json::from_str(&cursor.string()?).map_err(|e| TextError::at(cursor.line, e.to_string()))
+}
+
+fn parse_source(id: SourceId, cursor: &mut Cursor<'_>) -> Result<RbcSource, TextError> {
+    cursor.expect("source")?;
+    let name = cursor.string()?;
+    let text = if cursor.eat("text") {
+        Some(cursor.string()?)
+    } else {
+        None
+    };
+    Ok(RbcSource { id, name, text })
+}
+
+fn parse_dimensions(cursor: &mut Cursor<'_>) -> Result<Vec<u32>, TextError> {
+    let mut dimensions = Vec::new();
+    if !cursor.eat("dims") {
+        return Ok(dimensions);
+    }
+    let line = cursor.line;
+    for part in cursor.word()?.split(',') {
+        dimensions.push(
+            part.parse()
+                .map_err(|_| TextError::at(line, format!("bad dimension `{part}`")))?,
+        );
+    }
+    Ok(dimensions)
+}
+
+fn parse_record(cursor: &mut Cursor<'_>) -> Result<Option<RbcRecord>, TextError> {
+    if !cursor.eat("record") {
+        return Ok(None);
+    }
+    let name = cursor.string()?;
+    let count: usize = cursor.number()?;
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count {
+        fields.push(RbcRecordField {
+            name: cursor.string()?,
+            value_type: TypeId(cursor.id('$')?),
+        });
+    }
+    Ok(Some(RbcRecord { name, fields }))
+}
+
+fn parse_type(id: TypeId, cursor: &mut Cursor<'_>) -> Result<RbcType, TextError> {
+    cursor.expect("type")?;
+    let scalar = parse_scalar(cursor.word()?, cursor.line)?;
+    let dimensions = parse_dimensions(cursor)?;
+    let record = parse_record(cursor)?;
+    Ok(RbcType {
+        id,
+        scalar,
+        dimensions,
+        record,
+    })
+}
+
+fn parse_function_body(cursor: &mut Cursor<'_>) -> Result<RbcFunctionBody, TextError> {
+    cursor.expect("body")?;
+    Ok(match cursor.word()? {
+        "elided" => RbcFunctionBody::ElidedModelica,
+        "external" => RbcFunctionBody::External {
+            language: cursor.string()?,
+            symbol: cursor.string()?,
+            purity: RbcPurity::Impure,
+            arguments: Vec::new(),
+            result: None,
+            linkage: RbcExternalLinkage::default(),
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown function body `{other}`"),
+            ));
+        }
+    })
+}
+
+fn parse_function(id: FunctionId, cursor: &mut Cursor<'_>) -> Result<RbcFunction, TextError> {
+    cursor.expect("fn")?;
+    let name = cursor.string()?;
+    cursor.expect("params")?;
+    let count: usize = cursor.number()?;
+    let mut parameters = Vec::with_capacity(count);
+    for _ in 0..count {
+        parameters.push(RbcFunctionParameter {
+            name: cursor.string()?,
+            value_type: TypeId(cursor.id('$')?),
+            declaration: None,
+        });
+    }
+    cursor.expect("results")?;
+    let count: usize = cursor.number()?;
+    let mut results = Vec::with_capacity(count);
+    for _ in 0..count {
+        results.push(TypeId(cursor.id('$')?));
+    }
+    let body = parse_function_body(cursor)?;
+    let inline = if cursor.eat("inline") {
+        RbcInline::Requested
+    } else if cursor.eat("noinline") {
+        RbcInline::Never
+    } else {
+        RbcInline::Unstated
+    };
+    Ok(RbcFunction {
+        // The text profile does not carry bodies, so it carries no
+        // folds either; `emit-text` refuses an artifact whose body
+        // it cannot represent rather than writing an empty one.
+        folds: Vec::new(),
+        values: Vec::new(),
+        calls: Vec::new(),
+        id,
+        name,
+        parameters,
+        results,
+        inline,
+        body,
+        declaration: cursor.provenance()?,
+    })
+}
+
+fn parse_component(id: ComponentId, cursor: &mut Cursor<'_>) -> Result<RbcComponent, TextError> {
+    cursor.expect("comp")?;
+    let path = cursor.string()?;
+    let class_name = if cursor.eat("of") {
+        Some(cursor.string()?)
+    } else {
+        None
+    };
+    Ok(RbcComponent {
+        id,
+        path,
+        class_name,
+    })
+}
+
+/// Read one optional clause of a symbol contract, if the next token starts
+/// one. Returns whether a clause was read.
+fn parse_contract_clause(
+    contract: &mut RbcSymbolContract,
+    cursor: &mut Cursor<'_>,
+) -> Result<bool, TextError> {
+    match cursor.peek().map(|t| t.to_string()) {
+        Some(t) if t == "final" => {
+            cursor.word()?;
+            contract.is_final = true
+        }
+        Some(t) if t == "protected" => {
+            cursor.word()?;
+            contract.is_protected = true
+        }
+        Some(t) if t == "evaluate" => {
+            cursor.word()?;
+            contract.evaluate = true
+        }
+        Some(t) if t == "structural" => {
+            cursor.word()?;
+            contract.structural = true
+        }
+        Some(t) if t == "frommod" => {
+            cursor.word()?;
+            contract.binding_from_modification = true
+        }
+        Some(t) if t == "value" => {
+            cursor.word()?;
+            let raw = cursor.word()?;
+            contract.effective_value = Some(parse_real(raw, cursor.line)?)
+        }
+        Some(t) if t == "uses" => {
+            cursor.word()?;
+            contract
+                .binding_depends_on
+                .extend(parse_variable_run(cursor)?);
+        }
+        Some(t) if t == "declaredin" => {
+            cursor.word()?;
+            contract.declared_in = Some(cursor.string()?)
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn parse_contract(cursor: &mut Cursor<'_>) -> Result<RbcSymbolContract, TextError> {
+    let variability = match cursor.word()? {
+        "constant" => RbcVariability::Constant,
+        "parameter" => RbcVariability::Parameter,
+        "discrete" => RbcVariability::Discrete,
+        "continuous" => RbcVariability::Continuous,
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown variability `{other}`"),
+            ));
+        }
+    };
+    let mut contract = RbcSymbolContract {
+        variability,
+        is_final: false,
+        is_protected: false,
+        evaluate: false,
+        structural: false,
+        effective_value: None,
+        binding_depends_on: Vec::new(),
+        binding_from_modification: false,
+        declared_in: None,
+    };
+    while parse_contract_clause(&mut contract, cursor)? {}
+    Ok(contract)
+}
+
+fn parse_variable_attribute(
+    variable: &mut RbcVariable,
+    keyword: &str,
+    cursor: &mut Cursor<'_>,
+) -> Result<(), TextError> {
+    match keyword {
+        "comp" => variable.component = Some(ComponentId(cursor.id('#')?)),
+        "unit" => variable.unit = Some(cursor.string()?),
+        "quantity" => variable.physical_quantity = Some(cursor.string()?),
+        "class" => variable.declaring_class = Some(cursor.string()?),
+        "desc" => variable.description = Some(cursor.string()?),
+        "fixed" => variable.fixed = Some(cursor.word()? == "true"),
+        "tunable" => variable.tunable = true,
+        "discrete" => variable.discrete_input = true,
+        "contract" => variable.contract = Some(parse_contract(cursor)?),
+        "from_source" => variable.from_source = true,
+        "start" => variable.start = Some(ExprId(cursor.id('^')?)),
+        "min" => variable.min = Some(ExprId(cursor.id('^')?)),
+        "max" => variable.max = Some(ExprId(cursor.id('^')?)),
+        "nominal" => variable.nominal = Some(ExprId(cursor.id('^')?)),
+        "binding" => variable.binding = Some(ExprId(cursor.id('^')?)),
+        "connector" => {
+            let quantity = parse_quantity(cursor.word()?, cursor.line)?;
+            variable.connector = Some(RbcConnectorMember {
+                quantity,
+                connected: cursor.eat("connected"),
+            });
+        }
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown variable attribute `{other}`"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_variable(id: VariableId, cursor: &mut Cursor<'_>) -> Result<RbcVariable, TextError> {
+    cursor.expect("var")?;
+    let name = cursor.string()?;
+    let value_type = TypeId(cursor.id('$')?);
+    let role = parse_role(cursor.word()?, cursor.line)?;
+    let causality = parse_causality(cursor.word()?, cursor.line)?;
+    cursor.expect("scalars")?;
+    let scalar_count = cursor.number()?;
+    let mut variable = RbcVariable {
+        id,
+        name,
+        role,
+        causality,
+        value_type,
+        scalar_count,
+        declaration: placeholder_provenance(),
+        component: None,
+        unit: None,
+        description: None,
+        fixed: None,
+        start: None,
+        min: None,
+        max: None,
+        nominal: None,
+        binding: None,
+        connector: None,
+        tunable: false,
+        from_source: false,
+        physical_quantity: None,
+        declaring_class: None,
+        discrete_input: false,
+        contract: None,
+    };
+    while cursor
+        .peek()
+        .is_some_and(|keyword| !keyword.starts_with('@'))
+    {
+        let keyword = cursor.word()?;
+        parse_variable_attribute(&mut variable, keyword, cursor)?;
+    }
+    variable.declaration = cursor.provenance()?;
+    Ok(variable)
+}
+
+fn parse_domain(id: DomainId, cursor: &mut Cursor<'_>) -> Result<RbcDomain, TextError> {
+    cursor.expect("domain")?;
+    cursor.expect("scalars")?;
+    let scalar_count = cursor.number()?;
+    cursor.expect("extents")?;
+    let extents = parse_extents(cursor.word()?, cursor.line)?;
+    let parent = cursor
+        .eat("parent")
+        .then(|| cursor.id('&'))
+        .transpose()?
+        .map(DomainId);
+    cursor.expect("binders")?;
+    let count: usize = cursor.number()?;
+    let mut binders = Vec::with_capacity(count);
+    for _ in 0..count {
+        binders.push(RbcBinder {
+            id: cursor.number()?,
+            display_name: cursor.string()?,
+            lower: cursor.number()?,
+            upper: cursor.number()?,
+            step: cursor.number()?,
+        });
+    }
+    Ok(RbcDomain {
+        id,
+        binders,
+        parent,
+        extents,
+        scalar_count,
+        provenance: cursor.provenance()?,
+    })
+}
+
+fn parse_literal(cursor: &mut Cursor<'_>) -> Result<RbcLiteral, TextError> {
+    Ok(match cursor.word()? {
+        "real" => RbcLiteral::Real {
+            value: parse_real(cursor.word()?, cursor.line)?,
+        },
+        "integer" => RbcLiteral::Integer {
+            value: cursor.number()?,
+        },
+        "enum" => RbcLiteral::Enumeration {
+            ordinal: cursor.number()?,
+        },
+        "boolean" => RbcLiteral::Boolean {
+            value: cursor.word()? == "true",
+        },
+        "string" => RbcLiteral::String {
+            value: cursor.string()?,
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown literal kind `{other}`"),
+            ));
+        }
+    })
+}
+
+fn parse_conditional(cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextError> {
+    let count: usize = cursor.number()?;
+    let mut branches = Vec::with_capacity(count);
+    for _ in 0..count {
+        branches.push(RbcBranch {
+            condition: ExprId(cursor.id('^')?),
+            value: ExprId(cursor.id('^')?),
+        });
+    }
+    cursor.expect("else")?;
+    Ok(RbcExprNode::Conditional {
+        branches,
+        fallback: ExprId(cursor.id('^')?),
+    })
+}
+
+fn parse_array(cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextError> {
+    let count: usize = cursor.number()?;
+    let empty_type = cursor
+        .eat("of")
+        .then(|| cursor.id('$'))
+        .transpose()?
+        .map(TypeId);
+    Ok(RbcExprNode::Array {
+        elements: parse_expr_ids(cursor, count)?,
+        empty_type,
+    })
+}
+
+fn parse_range(cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextError> {
+    let start = ExprId(cursor.id('^')?);
+    let step = if cursor.eat("step") {
+        Some(ExprId(cursor.id('^')?))
+    } else {
+        cursor.expect("nostep")?;
+        None
+    };
+    Ok(RbcExprNode::Range {
+        start,
+        step,
+        stop: ExprId(cursor.id('^')?),
+    })
+}
+
+fn parse_invoke(cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextError> {
+    let function = FunctionId(cursor.id('~')?);
+    cursor.expect("out")?;
+    let output = cursor.number()?;
+    cursor.expect("owner")?;
+    let owner = ExprId(cursor.id('^')?);
+    let count: usize = cursor.number()?;
+    Ok(RbcExprNode::Call {
+        owner,
+        function,
+        output,
+        arguments: parse_expr_ids(cursor, count)?,
+    })
+}
+
+fn parse_function_value(cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextError> {
+    let function = FunctionId(cursor.id('~')?);
+    let value = cursor.number()?;
+    cursor.expect("def")?;
+    Ok(RbcExprNode::FunctionValue {
+        function,
+        value,
+        definition: cursor.number()?,
+    })
+}
+
+fn parse_fold_value(cursor: &mut Cursor<'_>, output: bool) -> Result<RbcExprNode, TextError> {
+    let function = FunctionId(cursor.id('~')?);
+    let fold = cursor.number()?;
+    let carried = cursor.number()?;
+    cursor.expect("def")?;
+    let definition = cursor.number()?;
+    Ok(if output {
+        RbcExprNode::FunctionFoldOutput {
+            function,
+            fold,
+            carried,
+            definition,
+        }
+    } else {
+        RbcExprNode::FunctionFoldParameter {
+            function,
+            fold,
+            carried,
+            definition,
+        }
+    })
+}
+
+fn parse_clock_transfer(cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextError> {
+    let kind = match cursor.word()? {
+        "sub" => RbcClockTransferKind::SubSample {
+            factor: cursor.number()?,
+        },
+        "super" => RbcClockTransferKind::SuperSample {
+            factor: cursor.number()?,
+        },
+        "shift" => RbcClockTransferKind::ShiftSample {
+            counter: cursor.number()?,
+            resolution: cursor.number()?,
+        },
+        "back" => RbcClockTransferKind::BackSample {
+            counter: cursor.number()?,
+            resolution: cursor.number()?,
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown clock transfer `{other}`"),
+            ));
+        }
+    };
+    let source = ExprId(cursor.id('^')?);
+    cursor.expect("clocks")?;
+    Ok(RbcExprNode::ClockTransfer {
+        transfer: kind,
+        source,
+        source_clock: ClockId(cursor.number()?),
+        target_clock: ClockId(cursor.number()?),
+    })
+}
+
+fn parse_expr_node(kind: &str, cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextError> {
+    Ok(match kind {
+        "lit" => RbcExprNode::Literal {
+            value: parse_literal(cursor)?,
+        },
+        "string_conversion" => RbcExprNode::StringConversion {
+            value: ExprId(cursor.id('^')?),
+            format: parse_json(cursor)?,
+        },
+        "coord" => RbcExprNode::Coordinate {
+            coordinate: parse_coordinate(cursor)?,
+        },
+        "un" => RbcExprNode::Unary {
+            op: parse_unary(cursor.word()?, cursor.line)?,
+            operand: ExprId(cursor.id('^')?),
+        },
+        "bin" => RbcExprNode::Binary {
+            op: parse_binary(cursor.word()?, cursor.line)?,
+            lhs: ExprId(cursor.id('^')?),
+            rhs: ExprId(cursor.id('^')?),
+        },
+        "cond" => parse_conditional(cursor)?,
+        "call" => {
+            let name = cursor.string()?;
+            let count: usize = cursor.number()?;
+            RbcExprNode::Builtin {
+                name,
+                arguments: parse_expr_ids(cursor, count)?,
+            }
+        }
+        "array" => parse_array(cursor)?,
+        "record" => {
+            let ty = TypeId(cursor.id('$')?);
+            let count: usize = cursor.number()?;
+            RbcExprNode::Record {
+                ty,
+                fields: parse_expr_ids(cursor, count)?,
+            }
+        }
+        "field" => RbcExprNode::Field {
+            base: ExprId(cursor.id('^')?),
+            field: cursor.number()?,
+        },
+        "range" => parse_range(cursor)?,
+        "comp" => RbcExprNode::Comprehension {
+            domain: DomainId(cursor.id('&')?),
+            body: ExprId(cursor.id('^')?),
+        },
+        "index" => {
+            let base = ExprId(cursor.id('^')?);
+            RbcExprNode::Index {
+                base,
+                subscripts: parse_subscripts(cursor)?,
+            }
+        }
+        "update" => {
+            let base = ExprId(cursor.id('^')?);
+            let value = ExprId(cursor.id('^')?);
+            RbcExprNode::ArrayUpdate {
+                base,
+                value,
+                subscripts: parse_subscripts(cursor)?,
+            }
+        }
+        "invoke" => parse_invoke(cursor)?,
+        "fnvalue" => parse_function_value(cursor)?,
+        "foldparam" | "foldout" => parse_fold_value(cursor, kind == "foldout")?,
+        "ctransfer" => parse_clock_transfer(cursor)?,
+        "unsupported" => RbcExprNode::Unsupported {
+            detail: cursor.string()?,
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown expression kind `{other}`"),
+            ));
+        }
+    })
+}
+
+fn parse_expr(id: ExprId, cursor: &mut Cursor<'_>) -> Result<RbcExpr, TextError> {
+    cursor.expect("expr")?;
+    let value_type = TypeId(cursor.id('$')?);
+    let kind = cursor.word()?;
+    let node = parse_expr_node(kind, cursor)?;
+    Ok(RbcExpr {
+        id,
+        value_type,
+        node,
+        provenance: cursor.provenance()?,
+    })
+}
+
+/// Read a sigil-led line, which declares a numbered item, into `model`.
+/// Returns `false`, having read nothing, when `head` carries no sigil.
+fn parse_numbered_item(
+    model: &mut RbcModel,
+    head: &str,
+    cursor: &mut Cursor<'_>,
+) -> Result<bool, TextError> {
+    let line = cursor.line;
+    let Some(sigil) = head.chars().next() else {
+        return Ok(false);
+    };
+    let rest = &head[sigil.len_utf8()..];
+    match sigil {
+        '!' => {
+            let id = SourceId(item_id(rest, line, "bad source id")?);
+            model.sources.push(parse_source(id, cursor)?);
+        }
+        '$' => {
+            let id = TypeId(item_id(rest, line, "bad type id")?);
+            model.types.push(parse_type(id, cursor)?);
+        }
+        '~' => {
+            let id = FunctionId(item_id(rest, line, "bad function id")?);
+            model.functions.push(parse_function(id, cursor)?);
+        }
+        '#' => {
+            let id = ComponentId(item_id(rest, line, "bad component id")?);
+            model.components.push(parse_component(id, cursor)?);
+        }
+        '%' => {
+            let id = VariableId(item_id(rest, line, "bad variable id")?);
+            model.variables.push(parse_variable(id, cursor)?);
+        }
+        '&' => {
+            let id = DomainId(item_id(rest, line, "bad domain id")?);
+            model.domains.push(parse_domain(id, cursor)?);
+        }
+        '^' => {
+            let id = ExprId(item_id(rest, line, "bad expression id")?);
+            model.expressions.push(parse_expr(id, cursor)?);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn parse_scalar_view(cursor: &mut Cursor<'_>) -> Result<RbcScalarView, TextError> {
+    cursor.expect("view")?;
+    Ok(match cursor.word()? {
+        "binder" => RbcScalarView::BinderSubstitution,
+        "rowmajor" => RbcScalarView::RowMajorProjection,
+        "prefix" => RbcScalarView::BinderPrefixProjection {
+            binder_count: cursor.number()?,
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown scalar view `{other}`"),
+            ));
+        }
+    })
+}
+
+fn parse_family(cursor: &mut Cursor<'_>) -> Result<RbcEquationFamily, TextError> {
+    let id = FamilyId(cursor.number()?);
+    cursor.expect("domain")?;
+    let domain = DomainId(cursor.id('&')?);
+    cursor.expect("rows")?;
+    let scalar_rows = cursor.number()?;
+    cursor.expect("extents")?;
+    let extents = parse_extents(cursor.word()?, cursor.line)?;
+    let scalar_view = parse_scalar_view(cursor)?;
+    cursor.expect("bodies")?;
+    let count: usize = cursor.number()?;
+    let bodies = parse_expr_ids(cursor, count)?;
+    let reads = parse_variable_clause(cursor, "reads")?;
+    let reads_derivative = parse_variable_clause(cursor, "dreads")?;
+    let reads_previous = parse_variable_clause(cursor, "preads")?;
+    Ok(RbcEquationFamily {
+        id,
+        domain,
+        bodies,
+        scalar_rows,
+        extents,
+        scalar_view,
+        reads,
+        reads_derivative,
+        reads_previous,
+        provenance: cursor.provenance()?,
+    })
+}
+
+fn parse_discrete_real_equation(
+    cursor: &mut Cursor<'_>,
+) -> Result<RbcDiscreteRealEquation, TextError> {
+    let id = EquationId(cursor.number()?);
+    let residual = ExprId(cursor.id('^')?);
+    let activation = if cursor.eat("always") {
+        RbcDiscreteRealActivation::Always
+    } else {
+        cursor.expect("when")?;
+        let trigger = ConditionId(cursor.id('?')?);
+        cursor.expect("guard")?;
+        RbcDiscreteRealActivation::When {
+            trigger,
+            guard: ConditionId(cursor.id('?')?),
+        }
+    };
+    let reads = parse_variable_clause(cursor, "reads")?;
+    let reads_derivative = parse_variable_clause(cursor, "dreads")?;
+    let reads_previous = parse_variable_clause(cursor, "preads")?;
+    Ok(RbcDiscreteRealEquation {
+        id,
+        residual,
+        activation,
+        reads,
+        reads_derivative,
+        reads_previous,
+        provenance: cursor.provenance()?,
+    })
+}
+
+fn parse_condition(cursor: &mut Cursor<'_>) -> Result<RbcCondition, TextError> {
+    let id = ConditionId(cursor.number()?);
+    let kind = cursor.word()?;
+    use RbcConditionNode::*;
+    let node = match kind {
+        "initial" => Initial,
+        "always" => Always,
+        "clock_activation" => ClockActivation {
+            clock: ClockId(cursor.number()?),
+        },
+        "rel" => Relation {
+            relation: RelationId(cursor.number()?),
+        },
+        "discrete" => Discrete {
+            expression: ExprId(cursor.id('^')?),
+        },
+        "not" => Not {
+            operand: ConditionId(cursor.number()?),
+        },
+        "and" => And {
+            lhs: ConditionId(cursor.number()?),
+            rhs: ConditionId(cursor.number()?),
+        },
+        "or" => Or {
+            lhs: ConditionId(cursor.number()?),
+            rhs: ConditionId(cursor.number()?),
+        },
+        "any_rise" => AnyRise {
+            lhs: ConditionId(cursor.number()?),
+            rhs: ConditionId(cursor.number()?),
+        },
+        "unsupported" => Unsupported {
+            detail: cursor.string()?,
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown condition `{other}`"),
+            ));
+        }
+    };
+    Ok(RbcCondition {
+        id,
+        node,
+        provenance: cursor.provenance()?,
+    })
+}
+
+fn parse_root(cursor: &mut Cursor<'_>) -> Result<RbcRoot, TextError> {
+    let id = RootId(cursor.number()?);
+    cursor.expect("rel")?;
+    let relation = RelationId(cursor.number()?);
+    cursor.expect("act")?;
+    let activation = ConditionId(cursor.number()?);
+    Ok(RbcRoot {
+        id,
+        relation,
+        activation,
+        provenance: cursor.provenance()?,
+    })
+}
+
+fn parse_action(cursor: &mut Cursor<'_>) -> Result<RbcAction, TextError> {
+    Ok(match cursor.word()? {
+        "reinit" => RbcAction::Reinitialize {
+            state: VariableId(cursor.id('%')?),
+            value: ExprId(cursor.id('^')?),
+        },
+        "assert" => {
+            let message = ExprId(cursor.id('^')?);
+            let level = if cursor.eat("level") {
+                Some(ExprId(cursor.id('^')?))
+            } else {
+                None
+            };
+            RbcAction::Assert { message, level }
+        }
+        "terminate" => RbcAction::Terminate {
+            message: ExprId(cursor.id('^')?),
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown action `{other}`"),
+            ));
+        }
+    })
+}
+
+fn parse_event(cursor: &mut Cursor<'_>) -> Result<RbcEventAction, TextError> {
+    let id = EventId(cursor.number()?);
+    cursor.expect("trig")?;
+    let trigger = ConditionId(cursor.number()?);
+    cursor.expect("guard")?;
+    let guard = ConditionId(cursor.number()?);
+    let action = parse_action(cursor)?;
+    Ok(RbcEventAction {
+        id,
+        trigger,
+        guard,
+        action,
+        provenance: cursor.provenance()?,
+    })
+}
+
+fn parse_time_event(cursor: &mut Cursor<'_>) -> Result<RbcTimeEvent, TextError> {
+    let id = EventId(cursor.number()?);
+    let schedule = match cursor.word()? {
+        "static" => RbcSchedule::Static {
+            numerator: cursor.number()?,
+            denominator: cursor.number()?,
+        },
+        "dynamic" => RbcSchedule::Dynamic {
+            deadline: ExprId(cursor.id('^')?),
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown schedule `{other}`"),
+            ));
+        }
+    };
+    Ok(RbcTimeEvent {
+        id,
+        schedule,
+        provenance: cursor.provenance()?,
+    })
+}
+
+/// An optional `eq <id>` clause naming the equation an item produced.
+fn parse_optional_equation(cursor: &mut Cursor<'_>) -> Result<Option<EquationId>, TextError> {
+    if cursor.eat("eq") {
+        Ok(Some(EquationId(cursor.number()?)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_connection(cursor: &mut Cursor<'_>) -> Result<RbcConnection, TextError> {
+    let id = ConnectionId(cursor.number()?);
+    let left = VariableId(cursor.id('%')?);
+    let right = VariableId(cursor.id('%')?);
+    let quantity = parse_quantity(cursor.word()?, cursor.line)?;
+    let left_connector = cursor.string()?;
+    let right_connector = cursor.string()?;
+    let equation = parse_optional_equation(cursor)?;
+    Ok(RbcConnection {
+        id,
+        left,
+        right,
+        quantity,
+        left_connector,
+        right_connector,
+        equation,
+        provenance: cursor.provenance()?,
+    })
+}
+
+fn parse_flow_term(token: &str, line: usize) -> Result<RbcFlowTerm, TextError> {
+    let negated = token.starts_with('-');
+    let digits = token.trim_start_matches(['+', '-']).trim_start_matches('%');
+    Ok(RbcFlowTerm {
+        variable: VariableId(
+            digits
+                .parse()
+                .map_err(|_| TextError::at(line, "bad flow member"))?,
+        ),
+        negated,
+    })
+}
+
+fn parse_flow_balance(cursor: &mut Cursor<'_>) -> Result<RbcFlowBalance, TextError> {
+    let equation = parse_optional_equation(cursor)?;
+    let mut terms = Vec::new();
+    while !cursor.eat("end") {
+        let token = cursor.word()?;
+        terms.push(parse_flow_term(token, cursor.line)?);
+    }
+    Ok(RbcFlowBalance { equation, terms })
+}
+
+fn parse_connection_set(cursor: &mut Cursor<'_>) -> Result<RbcConnectionSet, TextError> {
+    let id = ConnectionSetId(cursor.number()?);
+    let mut connectors = Vec::new();
+    let mut potentials = Vec::new();
+    let mut balances: Vec<RbcFlowBalance> = Vec::new();
+    let mut potential_equations = Vec::new();
+    let mut unconnected = false;
+    // Clauses first, provenance last: it is the one token that
+    // starts with `@`, so the loop stops there rather than
+    // needing to put anything back.
+    while !cursor.peek().is_some_and(|word| word.starts_with('@')) {
+        match cursor.word()? {
+            "at" => connectors.push(cursor.string()?),
+            "pot" => potentials.push(VariableId(cursor.id('%')?)),
+            "balance" => balances.push(parse_flow_balance(cursor)?),
+            "poteq" => potential_equations.push(EquationId(cursor.number()?)),
+            "unconnected" => unconnected = true,
+            other => {
+                return Err(TextError::at(
+                    cursor.line,
+                    format!("unknown connset clause `{other}`"),
+                ));
+            }
+        }
+    }
+    Ok(RbcConnectionSet {
+        id,
+        connectors,
+        potentials,
+        balances,
+        potential_equations,
+        unconnected,
+        provenance: cursor.provenance()?,
+    })
+}
+
+/// The `disc` line that opens a discrete definition; its branches and its
+/// provenance arrive on later lines.
+fn parse_discrete_header(cursor: &mut Cursor<'_>) -> Result<RbcDiscreteDefinition, TextError> {
+    let count: usize = cursor.number()?;
+    cursor.expect("targets")?;
+    let mut targets = Vec::with_capacity(count);
+    for _ in 0..count {
+        targets.push(VariableId(cursor.id('%')?));
+    }
+    Ok(RbcDiscreteDefinition {
+        targets,
+        branches: Vec::new(),
+        provenance: placeholder_provenance(),
+    })
+}
+
+fn parse_discrete_branch(cursor: &mut Cursor<'_>) -> Result<RbcDiscreteBranch, TextError> {
+    let activation = match cursor.word()? {
+        "always" => RbcDiscreteActivation::Always,
+        "when" => RbcDiscreteActivation::When {
+            trigger: ConditionId(cursor.number()?),
+            guard: ConditionId(cursor.number()?),
+        },
+        other => {
+            return Err(TextError::at(
+                cursor.line,
+                format!("unknown activation `{other}`"),
+            ));
+        }
+    };
+    cursor.expect("values")?;
+    let count: usize = cursor.number()?;
+    Ok(RbcDiscreteBranch {
+        activation,
+        values: parse_expr_ids(cursor, count)?,
+        provenance: cursor.provenance()?,
+    })
+}
+
+fn parse_trace_point(cursor: &mut Cursor<'_>) -> Result<RbcTracePoint, TextError> {
+    let id = TracePointId(cursor.number()?);
+    let variable = VariableId(cursor.id('%')?);
+    let label = cursor.string()?;
+    let mut point = RbcTracePoint {
+        id,
+        variable,
+        label,
+        connection: None,
+        connection_set: None,
+        quantity: None,
+        unit: None,
+        added_by: None,
+    };
+    while !cursor.done() {
+        match cursor.word()? {
+            "conn" => point.connection = Some(ConnectionId(cursor.number()?)),
+            "connset" => point.connection_set = Some(ConnectionSetId(cursor.number()?)),
+            "kind" => point.quantity = Some(parse_quantity(cursor.word()?, cursor.line)?),
+            "unit" => point.unit = Some(cursor.string()?),
+            "added_by" => point.added_by = Some(cursor.string()?),
+            other => {
+                return Err(TextError::at(
+                    cursor.line,
+                    format!("unknown trace attribute `{other}`"),
+                ));
+            }
+        }
+    }
+    Ok(point)
+}
+
+/// Read a keyword-led line into `file`. `open_discrete` carries a discrete
+/// definition between its `disc`, `branch` and `end` lines.
+fn parse_statement(
+    file: &mut RbcFile,
+    open_discrete: &mut Option<RbcDiscreteDefinition>,
+    head: &str,
+    cursor: &mut Cursor<'_>,
+) -> Result<(), TextError> {
+    let line = cursor.line;
+    let model = &mut file.model;
+    match head {
+        "rbc" => file.bitcode_version = cursor.number()?,
+        "producer" => file.producer = cursor.string()?,
+        "model" => model.name = cursor.string()?,
+        "eq" => model.equations.push(parse_equation(cursor)?),
+        "ieq" => model.initial_equations.push(parse_equation(cursor)?),
+        "family" => model.equation_families.push(parse_family(cursor)?),
+        "ifamily" => model.initial_equation_families.push(parse_family(cursor)?),
+        "dreq" => model
+            .discrete_real_equations
+            .push(parse_discrete_real_equation(cursor)?),
+        "idval" => model.initial_discrete_values.push(RbcInitialDiscreteValue {
+            target: VariableId(cursor.id('%')?),
+            value: ExprId(cursor.id('^')?),
+            provenance: cursor.provenance()?,
+        }),
+        "function_record" => model.functions.push(parse_json(cursor)?),
+        "model_event_transaction" => model.model_event_transactions.push(parse_json(cursor)?),
+        "previous_value" => model.previous_values.push(parse_json(cursor)?),
+        "terminal_record" => model.terminals.push(parse_json(cursor)?),
+        "structured_root" => model.structured_roots.push(parse_json(cursor)?),
+        "delay_record" => model.delays.push(parse_json(cursor)?),
+        "clock_record" => model.clocks.push(parse_json(cursor)?),
+        "clock_ownership" => model.clock_ownerships.push(parse_json(cursor)?),
+        "rel" => model.relations.push(RbcRelation {
+            id: RelationId(cursor.number()?),
+            expression: ExprId(cursor.id('^')?),
+            provenance: cursor.provenance()?,
+        }),
+        "cond" => model.conditions.push(parse_condition(cursor)?),
+        "root" => model.roots.push(parse_root(cursor)?),
+        "event" => model.events.push(parse_event(cursor)?),
+        "tevent" => model.time_events.push(parse_time_event(cursor)?),
+        "conn" => model.connections.push(parse_connection(cursor)?),
+        "connset" => model.connection_sets.push(parse_connection_set(cursor)?),
+        "disc" => *open_discrete = Some(parse_discrete_header(cursor)?),
+        "branch" => {
+            let definition = open_discrete
+                .as_mut()
+                .ok_or_else(|| TextError::at(line, "`branch` outside a `disc` block"))?;
+            definition.branches.push(parse_discrete_branch(cursor)?);
+        }
+        "end" => {
+            let mut definition = open_discrete
+                .take()
+                .ok_or_else(|| TextError::at(line, "`end` outside a `disc` block"))?;
+            definition.provenance = cursor.provenance()?;
+            model.discrete_definitions.push(definition);
+        }
+        "trace" => model.trace_points.push(parse_trace_point(cursor)?),
+        other => {
+            return Err(TextError::at(line, format!("unknown statement `{other}`")));
+        }
+    }
+    Ok(())
+}
+
 /// Read the textual IR back into an artifact.
 pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
     let mut file = RbcFile {
@@ -491,7 +1591,6 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
         producer: String::new(),
         model: empty_model(),
     };
-    let model = &mut file.model;
     // A discrete definition spans several lines, so it is assembled across
     // iterations and closed by its `end` line.
     let mut open_discrete: Option<RbcDiscreteDefinition> = None;
@@ -503,1020 +1602,11 @@ pub fn parse_text(text: &str) -> Result<RbcFile, TextError> {
             continue;
         }
         let mut cursor = Cursor::new(&tokens, number);
-        let head = cursor.next_raw()?.to_string();
+        let head = cursor.next_raw()?;
 
         // Sigil-led lines declare a numbered item; keyword-led lines do not.
-        if let Some(rest) = head.strip_prefix('!') {
-            let id = SourceId(
-                rest.parse()
-                    .map_err(|_| TextError::at(number, "bad source id"))?,
-            );
-            cursor.expect("source")?;
-            let name = cursor.string()?;
-            let text = if cursor.eat("text") {
-                Some(cursor.string()?)
-            } else {
-                None
-            };
-            model.sources.push(RbcSource { id, name, text });
-        } else if let Some(rest) = head.strip_prefix('$') {
-            let id = TypeId(
-                rest.parse()
-                    .map_err(|_| TextError::at(number, "bad type id"))?,
-            );
-            cursor.expect("type")?;
-            let scalar = parse_scalar(cursor.word()?, number)?;
-            let mut dimensions = Vec::new();
-            if cursor.eat("dims") {
-                for part in cursor.word()?.split(',') {
-                    dimensions.push(
-                        part.parse().map_err(|_| {
-                            TextError::at(number, format!("bad dimension `{part}`"))
-                        })?,
-                    );
-                }
-            }
-            let record = if cursor.eat("record") {
-                let name = cursor.string()?;
-                let count: usize = cursor.number()?;
-                let mut fields = Vec::with_capacity(count);
-                for _ in 0..count {
-                    fields.push(RbcRecordField {
-                        name: cursor.string()?,
-                        value_type: TypeId(cursor.id('$')?),
-                    });
-                }
-                Some(RbcRecord { name, fields })
-            } else {
-                None
-            };
-            model.types.push(RbcType {
-                id,
-                scalar,
-                dimensions,
-                record,
-            });
-        } else if let Some(rest) = head.strip_prefix('~') {
-            let id = FunctionId(
-                rest.parse()
-                    .map_err(|_| TextError::at(number, "bad function id"))?,
-            );
-            cursor.expect("fn")?;
-            let name = cursor.string()?;
-            cursor.expect("params")?;
-            let count: usize = cursor.number()?;
-            let mut parameters = Vec::with_capacity(count);
-            for _ in 0..count {
-                parameters.push(RbcFunctionParameter {
-                    name: cursor.string()?,
-                    value_type: TypeId(cursor.id('$')?),
-                    declaration: None,
-                });
-            }
-            cursor.expect("results")?;
-            let count: usize = cursor.number()?;
-            let mut results = Vec::with_capacity(count);
-            for _ in 0..count {
-                results.push(TypeId(cursor.id('$')?));
-            }
-            cursor.expect("body")?;
-            let body = match &*cursor.word()? {
-                "elided" => RbcFunctionBody::ElidedModelica,
-                "external" => RbcFunctionBody::External {
-                    language: cursor.string()?,
-                    symbol: cursor.string()?,
-                    purity: RbcPurity::Impure,
-                    arguments: Vec::new(),
-                    result: None,
-                    linkage: RbcExternalLinkage::default(),
-                },
-                other => {
-                    return Err(TextError::at(
-                        number,
-                        format!("unknown function body `{other}`"),
-                    ));
-                }
-            };
-            let inline = if cursor.eat("inline") {
-                RbcInline::Requested
-            } else if cursor.eat("noinline") {
-                RbcInline::Never
-            } else {
-                RbcInline::Unstated
-            };
-            model.functions.push(RbcFunction {
-                // The text profile does not carry bodies, so it carries no
-                // folds either; `emit-text` refuses an artifact whose body
-                // it cannot represent rather than writing an empty one.
-                folds: Vec::new(),
-                values: Vec::new(),
-                calls: Vec::new(),
-                id,
-                name,
-                parameters,
-                results,
-                inline,
-                body,
-                declaration: cursor.provenance()?,
-            });
-        } else if let Some(rest) = head.strip_prefix('#') {
-            let id = ComponentId(
-                rest.parse()
-                    .map_err(|_| TextError::at(number, "bad component id"))?,
-            );
-            cursor.expect("comp")?;
-            let path = cursor.string()?;
-            let class_name = if cursor.eat("of") {
-                Some(cursor.string()?)
-            } else {
-                None
-            };
-            model.components.push(RbcComponent {
-                id,
-                path,
-                class_name,
-            });
-        } else if let Some(rest) = head.strip_prefix('%') {
-            let id = VariableId(
-                rest.parse()
-                    .map_err(|_| TextError::at(number, "bad variable id"))?,
-            );
-            cursor.expect("var")?;
-            let name = cursor.string()?;
-            let value_type = TypeId(cursor.id('$')?);
-            let role = parse_role(cursor.word()?, number)?;
-            let causality = parse_causality(cursor.word()?, number)?;
-            cursor.expect("scalars")?;
-            let scalar_count = cursor.number()?;
-            let mut variable = RbcVariable {
-                id,
-                name,
-                role,
-                causality,
-                value_type,
-                scalar_count,
-                declaration: placeholder_provenance(),
-                component: None,
-                unit: None,
-                description: None,
-                fixed: None,
-                start: None,
-                min: None,
-                max: None,
-                nominal: None,
-                binding: None,
-                connector: None,
-                tunable: false,
-                from_source: false,
-                physical_quantity: None,
-                declaring_class: None,
-                discrete_input: false,
-                contract: None,
-            };
-            loop {
-                let Some(keyword) = cursor.peek() else { break };
-                if keyword.starts_with('@') {
-                    break;
-                }
-                let keyword = cursor.word()?;
-                match keyword {
-                    "comp" => variable.component = Some(ComponentId(cursor.id('#')?)),
-                    "unit" => variable.unit = Some(cursor.string()?),
-                    "quantity" => variable.physical_quantity = Some(cursor.string()?),
-                    "class" => variable.declaring_class = Some(cursor.string()?),
-                    "desc" => variable.description = Some(cursor.string()?),
-                    "fixed" => variable.fixed = Some(cursor.word()? == "true"),
-                    "tunable" => variable.tunable = true,
-                    "discrete" => variable.discrete_input = true,
-                    "contract" => {
-                        let variability = match &*cursor.word()? {
-                            "constant" => RbcVariability::Constant,
-                            "parameter" => RbcVariability::Parameter,
-                            "discrete" => RbcVariability::Discrete,
-                            "continuous" => RbcVariability::Continuous,
-                            other => {
-                                return Err(TextError::at(
-                                    number,
-                                    format!("unknown variability `{other}`"),
-                                ));
-                            }
-                        };
-                        let mut contract = RbcSymbolContract {
-                            variability,
-                            is_final: false,
-                            is_protected: false,
-                            evaluate: false,
-                            structural: false,
-                            effective_value: None,
-                            binding_depends_on: Vec::new(),
-                            binding_from_modification: false,
-                            declared_in: None,
-                        };
-                        loop {
-                            match cursor.peek().map(|t| t.to_string()) {
-                                Some(t) if t == "final" => {
-                                    cursor.word()?;
-                                    contract.is_final = true
-                                }
-                                Some(t) if t == "protected" => {
-                                    cursor.word()?;
-                                    contract.is_protected = true
-                                }
-                                Some(t) if t == "evaluate" => {
-                                    cursor.word()?;
-                                    contract.evaluate = true
-                                }
-                                Some(t) if t == "structural" => {
-                                    cursor.word()?;
-                                    contract.structural = true
-                                }
-                                Some(t) if t == "frommod" => {
-                                    cursor.word()?;
-                                    contract.binding_from_modification = true
-                                }
-                                Some(t) if t == "value" => {
-                                    cursor.word()?;
-                                    let raw = cursor.word()?;
-                                    contract.effective_value = Some(parse_real(raw, number)?)
-                                }
-                                Some(t) if t == "uses" => {
-                                    cursor.word()?;
-                                    while cursor.peek().is_some_and(|t| t.starts_with('%')) {
-                                        contract
-                                            .binding_depends_on
-                                            .push(VariableId(cursor.id('%')?));
-                                    }
-                                }
-                                Some(t) if t == "declaredin" => {
-                                    cursor.word()?;
-                                    contract.declared_in = Some(cursor.string()?)
-                                }
-                                _ => break,
-                            }
-                        }
-                        variable.contract = Some(contract);
-                    }
-                    "from_source" => variable.from_source = true,
-                    "start" => variable.start = Some(ExprId(cursor.id('^')?)),
-                    "min" => variable.min = Some(ExprId(cursor.id('^')?)),
-                    "max" => variable.max = Some(ExprId(cursor.id('^')?)),
-                    "nominal" => variable.nominal = Some(ExprId(cursor.id('^')?)),
-                    "binding" => variable.binding = Some(ExprId(cursor.id('^')?)),
-                    "connector" => {
-                        let quantity = parse_quantity(cursor.word()?, number)?;
-                        variable.connector = Some(RbcConnectorMember {
-                            quantity,
-                            connected: cursor.eat("connected"),
-                        });
-                    }
-                    other => {
-                        return Err(TextError::at(
-                            number,
-                            format!("unknown variable attribute `{other}`"),
-                        ));
-                    }
-                }
-            }
-            variable.declaration = cursor.provenance()?;
-            model.variables.push(variable);
-        } else if let Some(rest) = head.strip_prefix('&') {
-            let id = DomainId(
-                rest.parse()
-                    .map_err(|_| TextError::at(number, "bad domain id"))?,
-            );
-            cursor.expect("domain")?;
-            cursor.expect("scalars")?;
-            let scalar_count = cursor.number()?;
-            cursor.expect("extents")?;
-            let raw = cursor.word()?;
-            let extents = if raw == "-" {
-                Vec::new()
-            } else {
-                raw.split(',')
-                    .map(|p| {
-                        p.parse()
-                            .map_err(|_| TextError::at(number, format!("bad extent `{p}`")))
-                    })
-                    .collect::<Result<Vec<u32>, _>>()?
-            };
-            let parent = cursor
-                .eat("parent")
-                .then(|| cursor.id('&'))
-                .transpose()?
-                .map(DomainId);
-            cursor.expect("binders")?;
-            let count: usize = cursor.number()?;
-            let mut binders = Vec::with_capacity(count);
-            for _ in 0..count {
-                binders.push(RbcBinder {
-                    id: cursor.number()?,
-                    display_name: cursor.string()?,
-                    lower: cursor.number()?,
-                    upper: cursor.number()?,
-                    step: cursor.number()?,
-                });
-            }
-            model.domains.push(RbcDomain {
-                id,
-                binders,
-                parent,
-                extents,
-                scalar_count,
-                provenance: cursor.provenance()?,
-            });
-        } else if let Some(rest) = head.strip_prefix('^') {
-            let id = ExprId(
-                rest.parse()
-                    .map_err(|_| TextError::at(number, "bad expression id"))?,
-            );
-            cursor.expect("expr")?;
-            let value_type = TypeId(cursor.id('$')?);
-            let kind = cursor.word()?;
-            let node = match kind {
-                "lit" => {
-                    let which = cursor.word()?;
-                    RbcExprNode::Literal {
-                        value: match which {
-                            "real" => RbcLiteral::Real {
-                                value: parse_real(cursor.word()?, number)?,
-                            },
-                            "integer" => RbcLiteral::Integer {
-                                value: cursor.number()?,
-                            },
-                            "enum" => RbcLiteral::Enumeration {
-                                ordinal: cursor.number()?,
-                            },
-                            "boolean" => RbcLiteral::Boolean {
-                                value: cursor.word()? == "true",
-                            },
-                            "string" => RbcLiteral::String {
-                                value: cursor.string()?,
-                            },
-                            other => {
-                                return Err(TextError::at(
-                                    number,
-                                    format!("unknown literal kind `{other}`"),
-                                ));
-                            }
-                        },
-                    }
-                }
-                "string_conversion" => RbcExprNode::StringConversion {
-                    value: ExprId(cursor.id('^')?),
-                    format: serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                },
-                "coord" => RbcExprNode::Coordinate {
-                    coordinate: parse_coordinate(&mut cursor)?,
-                },
-                "un" => RbcExprNode::Unary {
-                    op: parse_unary(cursor.word()?, number)?,
-                    operand: ExprId(cursor.id('^')?),
-                },
-                "bin" => RbcExprNode::Binary {
-                    op: parse_binary(cursor.word()?, number)?,
-                    lhs: ExprId(cursor.id('^')?),
-                    rhs: ExprId(cursor.id('^')?),
-                },
-                "cond" => {
-                    let count: usize = cursor.number()?;
-                    let mut branches = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        branches.push(RbcBranch {
-                            condition: ExprId(cursor.id('^')?),
-                            value: ExprId(cursor.id('^')?),
-                        });
-                    }
-                    cursor.expect("else")?;
-                    RbcExprNode::Conditional {
-                        branches,
-                        fallback: ExprId(cursor.id('^')?),
-                    }
-                }
-                "call" => {
-                    let name = cursor.string()?;
-                    let count: usize = cursor.number()?;
-                    let mut arguments = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        arguments.push(ExprId(cursor.id('^')?));
-                    }
-                    RbcExprNode::Builtin { name, arguments }
-                }
-                "array" => {
-                    let count: usize = cursor.number()?;
-                    let empty_type = cursor
-                        .eat("of")
-                        .then(|| cursor.id('$'))
-                        .transpose()?
-                        .map(TypeId);
-                    let mut elements = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        elements.push(ExprId(cursor.id('^')?));
-                    }
-                    RbcExprNode::Array {
-                        elements,
-                        empty_type,
-                    }
-                }
-                "record" => {
-                    let ty = TypeId(cursor.id('$')?);
-                    let count: usize = cursor.number()?;
-                    let mut fields = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        fields.push(ExprId(cursor.id('^')?));
-                    }
-                    RbcExprNode::Record { ty, fields }
-                }
-                "field" => RbcExprNode::Field {
-                    base: ExprId(cursor.id('^')?),
-                    field: cursor.number()?,
-                },
-                "range" => {
-                    let start = ExprId(cursor.id('^')?);
-                    let step = if cursor.eat("step") {
-                        Some(ExprId(cursor.id('^')?))
-                    } else {
-                        cursor.expect("nostep")?;
-                        None
-                    };
-                    RbcExprNode::Range {
-                        start,
-                        step,
-                        stop: ExprId(cursor.id('^')?),
-                    }
-                }
-                "comp" => RbcExprNode::Comprehension {
-                    domain: DomainId(cursor.id('&')?),
-                    body: ExprId(cursor.id('^')?),
-                },
-                "index" => {
-                    let base = ExprId(cursor.id('^')?);
-                    RbcExprNode::Index {
-                        base,
-                        subscripts: parse_subscripts(&mut cursor)?,
-                    }
-                }
-                "update" => {
-                    let base = ExprId(cursor.id('^')?);
-                    let value = ExprId(cursor.id('^')?);
-                    RbcExprNode::ArrayUpdate {
-                        base,
-                        value,
-                        subscripts: parse_subscripts(&mut cursor)?,
-                    }
-                }
-                "invoke" => {
-                    let function = FunctionId(cursor.id('~')?);
-                    cursor.expect("out")?;
-                    let output = cursor.number()?;
-                    cursor.expect("owner")?;
-                    let owner = ExprId(cursor.id('^')?);
-                    let count: usize = cursor.number()?;
-                    let mut arguments = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        arguments.push(ExprId(cursor.id('^')?));
-                    }
-                    RbcExprNode::Call {
-                        owner,
-                        function,
-                        output,
-                        arguments,
-                    }
-                }
-                "fnvalue" => {
-                    let function = FunctionId(cursor.id('~')?);
-                    let value = cursor.number()?;
-                    cursor.expect("def")?;
-                    RbcExprNode::FunctionValue {
-                        function,
-                        value,
-                        definition: cursor.number()?,
-                    }
-                }
-                "foldparam" | "foldout" => {
-                    let output = kind == "foldout";
-                    let function = FunctionId(cursor.id('~')?);
-                    let fold = cursor.number()?;
-                    let carried = cursor.number()?;
-                    cursor.expect("def")?;
-                    let definition = cursor.number()?;
-                    if output {
-                        RbcExprNode::FunctionFoldOutput {
-                            function,
-                            fold,
-                            carried,
-                            definition,
-                        }
-                    } else {
-                        RbcExprNode::FunctionFoldParameter {
-                            function,
-                            fold,
-                            carried,
-                            definition,
-                        }
-                    }
-                }
-                "ctransfer" => {
-                    let kind = match &*cursor.word()? {
-                        "sub" => RbcClockTransferKind::SubSample {
-                            factor: cursor.number()?,
-                        },
-                        "super" => RbcClockTransferKind::SuperSample {
-                            factor: cursor.number()?,
-                        },
-                        "shift" => RbcClockTransferKind::ShiftSample {
-                            counter: cursor.number()?,
-                            resolution: cursor.number()?,
-                        },
-                        "back" => RbcClockTransferKind::BackSample {
-                            counter: cursor.number()?,
-                            resolution: cursor.number()?,
-                        },
-                        other => {
-                            return Err(TextError::at(
-                                number,
-                                format!("unknown clock transfer `{other}`"),
-                            ));
-                        }
-                    };
-                    let source = ExprId(cursor.id('^')?);
-                    cursor.expect("clocks")?;
-                    RbcExprNode::ClockTransfer {
-                        transfer: kind,
-                        source,
-                        source_clock: ClockId(cursor.number()?),
-                        target_clock: ClockId(cursor.number()?),
-                    }
-                }
-                "unsupported" => RbcExprNode::Unsupported {
-                    detail: cursor.string()?,
-                },
-                other => {
-                    return Err(TextError::at(
-                        number,
-                        format!("unknown expression kind `{other}`"),
-                    ));
-                }
-            };
-            model.expressions.push(RbcExpr {
-                id,
-                value_type,
-                node,
-                provenance: cursor.provenance()?,
-            });
-        } else {
-            match head.as_str() {
-                "rbc" => file.bitcode_version = cursor.number()?,
-                "producer" => file.producer = cursor.string()?,
-                "model" => model.name = cursor.string()?,
-                "eq" => model.equations.push(parse_equation(&mut cursor)?),
-                "ieq" => model.initial_equations.push(parse_equation(&mut cursor)?),
-                "family" | "ifamily" => {
-                    let id = FamilyId(cursor.number()?);
-                    cursor.expect("domain")?;
-                    let domain = DomainId(cursor.id('&')?);
-                    cursor.expect("rows")?;
-                    let scalar_rows = cursor.number()?;
-                    cursor.expect("extents")?;
-                    let raw = cursor.word()?;
-                    let extents = if raw == "-" {
-                        Vec::new()
-                    } else {
-                        raw.split(',')
-                            .map(|p| {
-                                p.parse()
-                                    .map_err(|_| TextError::at(number, format!("bad extent `{p}`")))
-                            })
-                            .collect::<Result<Vec<u32>, _>>()?
-                    };
-                    cursor.expect("view")?;
-                    let scalar_view = match cursor.word()? {
-                        "binder" => RbcScalarView::BinderSubstitution,
-                        "rowmajor" => RbcScalarView::RowMajorProjection,
-                        "prefix" => RbcScalarView::BinderPrefixProjection {
-                            binder_count: cursor.number()?,
-                        },
-                        other => {
-                            return Err(TextError::at(
-                                number,
-                                format!("unknown scalar view `{other}`"),
-                            ));
-                        }
-                    };
-                    cursor.expect("bodies")?;
-                    let count: usize = cursor.number()?;
-                    let mut bodies = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        bodies.push(ExprId(cursor.id('^')?));
-                    }
-                    let mut reads = Vec::new();
-                    let mut reads_derivative = Vec::new();
-                    if cursor.eat("reads") {
-                        while cursor.peek().is_some_and(|t| t.starts_with('%')) {
-                            reads.push(VariableId(cursor.id('%')?));
-                        }
-                    }
-                    if cursor.eat("dreads") {
-                        while cursor.peek().is_some_and(|t| t.starts_with('%')) {
-                            reads_derivative.push(VariableId(cursor.id('%')?));
-                        }
-                    }
-                    let mut reads_previous = Vec::new();
-                    if cursor.eat("preads") {
-                        while cursor.peek().is_some_and(|t| t.starts_with('%')) {
-                            reads_previous.push(VariableId(cursor.id('%')?));
-                        }
-                    }
-                    let family = RbcEquationFamily {
-                        id,
-                        domain,
-                        bodies,
-                        scalar_rows,
-                        extents,
-                        scalar_view,
-                        reads,
-                        reads_derivative,
-                        reads_previous,
-                        provenance: cursor.provenance()?,
-                    };
-                    if head == "family" {
-                        model.equation_families.push(family);
-                    } else {
-                        model.initial_equation_families.push(family);
-                    }
-                }
-                "dreq" => {
-                    let id = EquationId(cursor.number()?);
-                    let residual = ExprId(cursor.id('^')?);
-                    let activation = if cursor.eat("always") {
-                        RbcDiscreteRealActivation::Always
-                    } else {
-                        cursor.expect("when")?;
-                        let trigger = ConditionId(cursor.id('?')?);
-                        cursor.expect("guard")?;
-                        RbcDiscreteRealActivation::When {
-                            trigger,
-                            guard: ConditionId(cursor.id('?')?),
-                        }
-                    };
-                    let mut reads = Vec::new();
-                    let mut reads_derivative = Vec::new();
-                    if cursor.eat("reads") {
-                        while cursor.peek().is_some_and(|t| t.starts_with('%')) {
-                            reads.push(VariableId(cursor.id('%')?));
-                        }
-                    }
-                    if cursor.eat("dreads") {
-                        while cursor.peek().is_some_and(|t| t.starts_with('%')) {
-                            reads_derivative.push(VariableId(cursor.id('%')?));
-                        }
-                    }
-                    let mut reads_previous = Vec::new();
-                    if cursor.eat("preads") {
-                        while cursor.peek().is_some_and(|t| t.starts_with('%')) {
-                            reads_previous.push(VariableId(cursor.id('%')?));
-                        }
-                    }
-                    model.discrete_real_equations.push(RbcDiscreteRealEquation {
-                        id,
-                        residual,
-                        activation,
-                        reads,
-                        reads_derivative,
-                        reads_previous,
-                        provenance: cursor.provenance()?,
-                    });
-                }
-                "idval" => model.initial_discrete_values.push(RbcInitialDiscreteValue {
-                    target: VariableId(cursor.id('%')?),
-                    value: ExprId(cursor.id('^')?),
-                    provenance: cursor.provenance()?,
-                }),
-                "function_record" => model.functions.push(
-                    serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                ),
-                "model_event_transaction" => model.model_event_transactions.push(
-                    serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                ),
-                "previous_value" => model.previous_values.push(
-                    serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                ),
-                "terminal_record" => model.terminals.push(
-                    serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                ),
-                "structured_root" => model.structured_roots.push(
-                    serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                ),
-                "delay_record" => model.delays.push(
-                    serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                ),
-                "clock_record" => model.clocks.push(
-                    serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                ),
-                "clock_ownership" => model.clock_ownerships.push(
-                    serde_json::from_str(&cursor.string()?)
-                        .map_err(|e| TextError::at(number, e.to_string()))?,
-                ),
-                "rel" => model.relations.push(RbcRelation {
-                    id: RelationId(cursor.number()?),
-                    expression: ExprId(cursor.id('^')?),
-                    provenance: cursor.provenance()?,
-                }),
-                "cond" => {
-                    let id = ConditionId(cursor.number()?);
-                    let kind = cursor.word()?;
-                    use RbcConditionNode::*;
-                    let node = match kind {
-                        "initial" => Initial,
-                        "always" => Always,
-                        "clock_activation" => ClockActivation {
-                            clock: ClockId(cursor.number()?),
-                        },
-                        "rel" => Relation {
-                            relation: RelationId(cursor.number()?),
-                        },
-                        "discrete" => Discrete {
-                            expression: ExprId(cursor.id('^')?),
-                        },
-                        "not" => Not {
-                            operand: ConditionId(cursor.number()?),
-                        },
-                        "and" => And {
-                            lhs: ConditionId(cursor.number()?),
-                            rhs: ConditionId(cursor.number()?),
-                        },
-                        "or" => Or {
-                            lhs: ConditionId(cursor.number()?),
-                            rhs: ConditionId(cursor.number()?),
-                        },
-                        "any_rise" => AnyRise {
-                            lhs: ConditionId(cursor.number()?),
-                            rhs: ConditionId(cursor.number()?),
-                        },
-                        "unsupported" => Unsupported {
-                            detail: cursor.string()?,
-                        },
-                        other => {
-                            return Err(TextError::at(
-                                number,
-                                format!("unknown condition `{other}`"),
-                            ));
-                        }
-                    };
-                    model.conditions.push(RbcCondition {
-                        id,
-                        node,
-                        provenance: cursor.provenance()?,
-                    });
-                }
-                "root" => {
-                    let id = RootId(cursor.number()?);
-                    cursor.expect("rel")?;
-                    let relation = RelationId(cursor.number()?);
-                    cursor.expect("act")?;
-                    let activation = ConditionId(cursor.number()?);
-                    model.roots.push(RbcRoot {
-                        id,
-                        relation,
-                        activation,
-                        provenance: cursor.provenance()?,
-                    });
-                }
-                "event" => {
-                    let id = EventId(cursor.number()?);
-                    cursor.expect("trig")?;
-                    let trigger = ConditionId(cursor.number()?);
-                    cursor.expect("guard")?;
-                    let guard = ConditionId(cursor.number()?);
-                    let action = match cursor.word()? {
-                        "reinit" => RbcAction::Reinitialize {
-                            state: VariableId(cursor.id('%')?),
-                            value: ExprId(cursor.id('^')?),
-                        },
-                        "assert" => {
-                            let message = ExprId(cursor.id('^')?);
-                            let level = if cursor.eat("level") {
-                                Some(ExprId(cursor.id('^')?))
-                            } else {
-                                None
-                            };
-                            RbcAction::Assert { message, level }
-                        }
-                        "terminate" => RbcAction::Terminate {
-                            message: ExprId(cursor.id('^')?),
-                        },
-                        other => {
-                            return Err(TextError::at(number, format!("unknown action `{other}`")));
-                        }
-                    };
-                    model.events.push(RbcEventAction {
-                        id,
-                        trigger,
-                        guard,
-                        action,
-                        provenance: cursor.provenance()?,
-                    });
-                }
-                "tevent" => {
-                    let id = EventId(cursor.number()?);
-                    let schedule = match cursor.word()? {
-                        "static" => RbcSchedule::Static {
-                            numerator: cursor.number()?,
-                            denominator: cursor.number()?,
-                        },
-                        "dynamic" => RbcSchedule::Dynamic {
-                            deadline: ExprId(cursor.id('^')?),
-                        },
-                        other => {
-                            return Err(TextError::at(
-                                number,
-                                format!("unknown schedule `{other}`"),
-                            ));
-                        }
-                    };
-                    model.time_events.push(RbcTimeEvent {
-                        id,
-                        schedule,
-                        provenance: cursor.provenance()?,
-                    });
-                }
-                "conn" => {
-                    let id = ConnectionId(cursor.number()?);
-                    let left = VariableId(cursor.id('%')?);
-                    let right = VariableId(cursor.id('%')?);
-                    let quantity = parse_quantity(cursor.word()?, number)?;
-                    let left_connector = cursor.string()?;
-                    let right_connector = cursor.string()?;
-                    let equation = if cursor.eat("eq") {
-                        Some(EquationId(cursor.number()?))
-                    } else {
-                        None
-                    };
-                    model.connections.push(RbcConnection {
-                        id,
-                        left,
-                        right,
-                        quantity,
-                        left_connector,
-                        right_connector,
-                        equation,
-                        provenance: cursor.provenance()?,
-                    });
-                }
-                "connset" => {
-                    let id = ConnectionSetId(cursor.number()?);
-                    let mut connectors = Vec::new();
-                    let mut potentials = Vec::new();
-                    let mut balances: Vec<RbcFlowBalance> = Vec::new();
-                    let mut potential_equations = Vec::new();
-                    let mut unconnected = false;
-                    // Clauses first, provenance last: it is the one token that
-                    // starts with `@`, so the loop stops there rather than
-                    // needing to put anything back.
-                    while !cursor.peek().is_some_and(|word| word.starts_with('@')) {
-                        match cursor.word()? {
-                            "at" => connectors.push(cursor.string()?),
-                            "pot" => potentials.push(VariableId(cursor.id('%')?)),
-                            "balance" => {
-                                let equation = if cursor.eat("eq") {
-                                    Some(EquationId(cursor.number()?))
-                                } else {
-                                    None
-                                };
-                                let mut terms = Vec::new();
-                                while !cursor.eat("end") {
-                                    let token = cursor.word()?;
-                                    let negated = token.starts_with('-');
-                                    let digits = token
-                                        .trim_start_matches(['+', '-'])
-                                        .trim_start_matches('%');
-                                    terms.push(RbcFlowTerm {
-                                        variable: VariableId(digits.parse().map_err(|_| {
-                                            TextError::at(number, "bad flow member")
-                                        })?),
-                                        negated,
-                                    });
-                                }
-                                balances.push(RbcFlowBalance { equation, terms });
-                            }
-                            "poteq" => potential_equations.push(EquationId(cursor.number()?)),
-                            "unconnected" => unconnected = true,
-                            other => {
-                                return Err(TextError::at(
-                                    number,
-                                    format!("unknown connset clause `{other}`"),
-                                ));
-                            }
-                        }
-                    }
-                    model.connection_sets.push(RbcConnectionSet {
-                        id,
-                        connectors,
-                        potentials,
-                        balances,
-                        potential_equations,
-                        unconnected,
-                        provenance: cursor.provenance()?,
-                    });
-                }
-                "disc" => {
-                    let count: usize = cursor.number()?;
-                    cursor.expect("targets")?;
-                    let mut targets = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        targets.push(VariableId(cursor.id('%')?));
-                    }
-                    open_discrete = Some(RbcDiscreteDefinition {
-                        targets,
-                        branches: Vec::new(),
-                        provenance: placeholder_provenance(),
-                    });
-                }
-                "branch" => {
-                    let definition = open_discrete
-                        .as_mut()
-                        .ok_or_else(|| TextError::at(number, "`branch` outside a `disc` block"))?;
-                    let activation = match cursor.word()? {
-                        "always" => RbcDiscreteActivation::Always,
-                        "when" => RbcDiscreteActivation::When {
-                            trigger: ConditionId(cursor.number()?),
-                            guard: ConditionId(cursor.number()?),
-                        },
-                        other => {
-                            return Err(TextError::at(
-                                number,
-                                format!("unknown activation `{other}`"),
-                            ));
-                        }
-                    };
-                    cursor.expect("values")?;
-                    let count: usize = cursor.number()?;
-                    let mut values = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        values.push(ExprId(cursor.id('^')?));
-                    }
-                    definition.branches.push(RbcDiscreteBranch {
-                        activation,
-                        values,
-                        provenance: cursor.provenance()?,
-                    });
-                }
-                "end" => {
-                    let mut definition = open_discrete
-                        .take()
-                        .ok_or_else(|| TextError::at(number, "`end` outside a `disc` block"))?;
-                    definition.provenance = cursor.provenance()?;
-                    model.discrete_definitions.push(definition);
-                }
-                "trace" => {
-                    let id = TracePointId(cursor.number()?);
-                    let variable = VariableId(cursor.id('%')?);
-                    let label = cursor.string()?;
-                    let mut point = RbcTracePoint {
-                        id,
-                        variable,
-                        label,
-                        connection: None,
-                        connection_set: None,
-                        quantity: None,
-                        unit: None,
-                        added_by: None,
-                    };
-                    while !cursor.done() {
-                        match cursor.word()? {
-                            "conn" => point.connection = Some(ConnectionId(cursor.number()?)),
-                            "connset" => {
-                                point.connection_set = Some(ConnectionSetId(cursor.number()?))
-                            }
-                            "kind" => {
-                                point.quantity = Some(parse_quantity(cursor.word()?, number)?)
-                            }
-                            "unit" => point.unit = Some(cursor.string()?),
-                            "added_by" => point.added_by = Some(cursor.string()?),
-                            other => {
-                                return Err(TextError::at(
-                                    number,
-                                    format!("unknown trace attribute `{other}`"),
-                                ));
-                            }
-                        }
-                    }
-                    model.trace_points.push(point);
-                }
-                other => {
-                    return Err(TextError::at(
-                        number,
-                        format!("unknown statement `{other}`"),
-                    ));
-                }
-            }
+        if !parse_numbered_item(&mut file.model, head, &mut cursor)? {
+            parse_statement(&mut file, &mut open_discrete, head, &mut cursor)?;
         }
     }
 

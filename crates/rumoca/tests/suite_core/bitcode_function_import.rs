@@ -508,7 +508,11 @@ fn check_reports_each_array_element_against_its_declared_bound() {
         "--emit-bitcode",
         artifact.to_str().unwrap(),
     ]);
-    assert!(artifact.exists(), "fixture must compile: {}", text(&compiled));
+    assert!(
+        artifact.exists(),
+        "fixture must compile: {}",
+        text(&compiled)
+    );
     let checked = rumoca(&[
         "compile-bitcode",
         artifact.to_str().unwrap(),
@@ -549,7 +553,11 @@ fn a_zero_size_array_with_a_scalar_attribute_simulates() {
         "--emit-bitcode",
         artifact.to_str().unwrap(),
     ]);
-    assert!(artifact.exists(), "fixture must compile: {}", text(&compiled));
+    assert!(
+        artifact.exists(),
+        "fixture must compile: {}",
+        text(&compiled)
+    );
     let run = rumoca(&[
         "compile-bitcode",
         artifact.to_str().unwrap(),
@@ -582,7 +590,11 @@ fn a_start_written_over_an_input_evaluates_from_the_inputs_value() {
         "--emit-bitcode",
         artifact.to_str().unwrap(),
     ]);
-    assert!(artifact.exists(), "fixture must compile: {}", text(&compiled));
+    assert!(
+        artifact.exists(),
+        "fixture must compile: {}",
+        text(&compiled)
+    );
     let run = rumoca(&[
         "compile-bitcode",
         artifact.to_str().unwrap(),

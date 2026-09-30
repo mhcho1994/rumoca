@@ -430,23 +430,24 @@ impl Builder {
             let Some(entry) = self.model.expressions.get(id.0 as usize) else {
                 continue;
             };
-            if let RbcExprNode::Coordinate { coordinate } = &entry.node {
-                match coordinate {
-                    RbcCoordinate::Derivative { variable } => derivatives.push(*variable),
-                    RbcCoordinate::PreState { variable }
-                    | RbcCoordinate::PreAlgebraic { variable }
-                    | RbcCoordinate::PreDiscreteReal { variable }
-                    | RbcCoordinate::PreDiscreteValue { variable } => previous.push(*variable),
-                    RbcCoordinate::Parameter { variable }
-                    | RbcCoordinate::Input { variable }
-                    | RbcCoordinate::State { variable }
-                    | RbcCoordinate::Algebraic { variable }
-                    | RbcCoordinate::DiscreteReal { variable }
-                    | RbcCoordinate::DiscreteValue { variable } => reads.push(*variable),
-                    _ => {}
-                }
-            }
             stack.extend(references(id, &entry.node));
+            let RbcExprNode::Coordinate { coordinate } = &entry.node else {
+                continue;
+            };
+            match coordinate {
+                RbcCoordinate::Derivative { variable } => derivatives.push(*variable),
+                RbcCoordinate::PreState { variable }
+                | RbcCoordinate::PreAlgebraic { variable }
+                | RbcCoordinate::PreDiscreteReal { variable }
+                | RbcCoordinate::PreDiscreteValue { variable } => previous.push(*variable),
+                RbcCoordinate::Parameter { variable }
+                | RbcCoordinate::Input { variable }
+                | RbcCoordinate::State { variable }
+                | RbcCoordinate::Algebraic { variable }
+                | RbcCoordinate::DiscreteReal { variable }
+                | RbcCoordinate::DiscreteValue { variable } => reads.push(*variable),
+                _ => {}
+            }
         }
         for list in [&mut reads, &mut derivatives, &mut previous] {
             list.sort_by_key(|variable| variable.0);

@@ -23,6 +23,23 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import _cbor
+from .dynamics import (
+    Clock,
+    ClockOwnership,
+    Condition,
+    ConnectorType,
+    Delay,
+    DiscreteBranch,
+    DiscreteDefinition,
+    EventTransaction,
+    PreviousValue,
+    Relation,
+    Root,
+    StructuredRoot,
+    Terminal,
+    TimeEvent,
+    TransactionStep,
+)
 from .model import (
     ConnectionSet,
     FlowBalance,
@@ -71,6 +88,9 @@ from .model import (
     VariableRef,
 )
 
+#: The SDK's own release version. The bitcode version it reads is ``VERSION``.
+__version__ = "0.2.0"
+
 __all__ = [
     "Model",
     "Variable",
@@ -115,6 +135,21 @@ __all__ = [
     "IndexExpr",
     "ArrayUpdate",
     "Unsupported",
+    "Relation",
+    "Condition",
+    "Root",
+    "Clock",
+    "ClockOwnership",
+    "TimeEvent",
+    "DiscreteDefinition",
+    "DiscreteBranch",
+    "EventTransaction",
+    "TransactionStep",
+    "PreviousValue",
+    "Delay",
+    "Terminal",
+    "StructuredRoot",
+    "ConnectorType",
     "BitcodeError",
     "Builder",
     "MAGIC",
@@ -217,6 +252,28 @@ class Model:
             for entry in self._raw.get("connection_sets", [])
         ]
         self.events: list[Event] = [Event(entry, self) for entry in self._raw.get("events", [])]
+        # Event, clock and owner tables. Ids are dense, so each list is
+        # indexed by the id the artifact uses.
+        def table(view, key):
+            return [view(entry, self) for entry in self._raw.get(key, [])]
+
+        self.relations: list[Relation] = table(Relation, "relations")
+        self.conditions: list[Condition] = table(Condition, "conditions")
+        self.clocks: list[Clock] = table(Clock, "clocks")
+        self.clock_ownerships: list[ClockOwnership] = table(ClockOwnership, "clock_ownerships")
+        self.roots: list[Root] = table(Root, "roots")
+        self.time_events: list[TimeEvent] = table(TimeEvent, "time_events")
+        self.discrete_definitions: list[DiscreteDefinition] = table(
+            DiscreteDefinition, "discrete_definitions"
+        )
+        self.event_transactions: list[EventTransaction] = table(
+            EventTransaction, "model_event_transactions"
+        )
+        self.previous_values: list[PreviousValue] = table(PreviousValue, "previous_values")
+        self.delays: list[Delay] = table(Delay, "delays")
+        self.terminals: list[Terminal] = table(Terminal, "terminals")
+        self.structured_roots: list[StructuredRoot] = table(StructuredRoot, "structured_roots")
+        self.connector_types: list[ConnectorType] = table(ConnectorType, "connector_types")
         self.trace_points: list[TracePoint] = [
             TracePoint(entry, self) for entry in self._raw.get("trace_points", [])
         ]

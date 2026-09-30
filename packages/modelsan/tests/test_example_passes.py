@@ -82,6 +82,42 @@ class ExamplePasses(unittest.TestCase):
         self.assertEqual(simulated.returncode, 0, simulated.stderr)
         self.assertIn("Simulation complete", simulated.stderr + simulated.stdout)
 
+    def test_an_example_pass_runs_inside_the_compiler(self):
+        source = Path(self.work.name) / "Sampled.mo"
+        # `exec:` runs to the end of its value, so what follows it is a
+        # separate `--pass`.
+        result = run(
+            str(RUMOCA), "compile", str(source), "--model", "Sampled",
+            "--pass", f"default,exec:{sys.executable} {EXAMPLES / 'trace_all.py'}",
+            "--pass", "fixpoint(fold-constants)",
+            "--emit-bitcode", str(Path(self.work.name) / "inline.rbc"),
+            "--verbose",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pass exec:", result.stderr)
+        sys.path.insert(0, str(SDK))
+        from rumoca_bitcode import Model
+
+        traced = Model.load(Path(self.work.name) / "inline.rbc")
+        self.assertTrue(traced.trace_points, "the external pass's trace points survive the rebuild")
+
+    def test_an_external_pass_that_breaks_the_model_is_named(self):
+        source = Path(self.work.name) / "Sampled.mo"
+        breaker = Path(self.work.name) / "breaker.py"
+        breaker.write_text(
+            "import sys\n"
+            "from rumoca_bitcode import Model\n"
+            "model = Model.load(sys.argv[1])\n"
+            "model.raw_model['equations'][0]['residual'] = 10**6\n"
+            "model.save(sys.argv[3])\n"
+        )
+        result = run(
+            str(RUMOCA), "compile", str(source), "--model", "Sampled",
+            "--pass", f"exec:{sys.executable} {breaker}",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("breaker.py", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

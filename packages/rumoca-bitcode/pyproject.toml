@@ -1,6 +1,6 @@
 [project]
 name = "rumoca-bitcode"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read, analyse and transform Rumoca Bitcode (.rbc) compiled Modelica models"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

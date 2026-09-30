@@ -37,7 +37,10 @@ fn first_order_filter_written_as_a_sum_isolates_its_derivative() {
         "y",
     );
     let expected = 1.0 - (-2.0f64).exp();
-    assert!((y - expected).abs() < 1.0e-4, "y(1) = {y}, expected {expected}");
+    assert!(
+        (y - expected).abs() < 1.0e-4,
+        "y(1) = {y}, expected {expected}"
+    );
 }
 
 #[test]
@@ -55,7 +58,10 @@ fn derivative_scaled_by_a_state_and_negated_in_a_difference_is_isolated() {
         "x",
     );
     let expected = 17.0f64.sqrt();
-    assert!((x - expected).abs() < 1.0e-4, "x(1) = {x}, expected {expected}");
+    assert!(
+        (x - expected).abs() < 1.0e-4,
+        "x(1) = {x}, expected {expected}"
+    );
 }
 
 #[test]

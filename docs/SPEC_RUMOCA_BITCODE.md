@@ -285,6 +285,27 @@ replaces it with `clock_activation` referencing the exact `clocks` table and
 preserves `clock_ownerships`, including sampled ownership. No superseded
 payload-free clock reader is retained.
 
+### 4.1 Who checks the version
+
+Every reader implements exactly one `RBC_VERSION` and refuses any other
+before it looks at the payload. No reader migrates or down-converts.
+
+| Reader | Where the check is | On a mismatch |
+|---|---|---|
+| The compiler (`compile-bitcode`, `bitcode *`, the linker) | `codec::decode` | refuses the file; no `RbcFile` of another version can be constructed |
+| An in-compiler external pass (`--pass exec:COMMAND`) | the pass's output goes through `codec::decode` | the compile fails naming the pass |
+| The Python SDK (`rumoca_bitcode.Model`) | `Model.__init__` | `BitcodeError`; `rumoca_bitcode.VERSION` is the version it reads |
+
+The SDK package version and the bitcode version are separate numbers. The SDK
+states the one bitcode version it reads as `rumoca_bitcode.VERSION`, and an
+SDK release that changes it is a major release of the SDK. The compiler and
+the SDK in one checkout always agree; `packages/modelsan` tests pin that.
+
+A pass inside the compiler and a pass run on a file obey the same contract:
+the compiler hands an external pass an artifact of the current version and
+accepts only the same version back, then validates it and rebuilds it through
+the checked constructors like its own passes' results.
+
 `execution.version = 1` is a separate numerical-program contract. It remains
 unchanged and event-free. Equation artifacts containing supported clocks can
 be rebuilt and simulated with `compile-bitcode --simulate`; they do not acquire

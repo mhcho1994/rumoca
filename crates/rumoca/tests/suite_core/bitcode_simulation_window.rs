@@ -75,5 +75,9 @@ fn a_model_defined_only_after_its_start_time_runs_from_that_start() {
 
     let reversed = check(artifact, &["--t-start", "1", "--t-end", "0.5"]);
     assert!(!reversed.status.success(), "{}", text(&reversed));
-    assert!(text(&reversed).contains("must be after"), "{}", text(&reversed));
+    assert!(
+        text(&reversed).contains("must be after"),
+        "{}",
+        text(&reversed)
+    );
 }
