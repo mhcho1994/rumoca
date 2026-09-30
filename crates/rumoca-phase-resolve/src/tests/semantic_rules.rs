@@ -136,25 +136,6 @@ end UsesLoopIndexJ;
         .expect("loop index `j` must resolve as a value, not as global class `j`");
 }
 
-#[test]
-fn test_evaluate_on_non_parameter_component_is_always_an_error() {
-    let source = r#"
-model EvaluateScopeWarning
-  Real x annotation(Evaluate=true);
-equation
-  x = 1;
-end EvaluateScopeWarning;
-"#;
-    let diagnostics = resolve_test_source(source)
-        .expect_err("Evaluate annotation scope is a mandatory MLS error");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diag| diag.code.as_deref() == Some("ER070")),
-        "expected ER070 for invalid Evaluate annotation, got: {diagnostics:?}"
-    );
-}
-
 /// MLS §18.6: `Evaluate` "only has effect for a component declared with the
 /// prefix parameter". A function has no parameter-variability locals, so the
 /// annotation is without effect there rather than illegal — the shape MSL
@@ -195,25 +176,37 @@ end F;
     );
 }
 
-/// The same annotation outside a function keeps the ANN-008 hard rejection:
-/// there the modeler can declare the component `parameter` or `constant`.
+/// Outside a function the annotation is equally without effect (MLS §18.3)
+/// and OpenModelica ignores it, so it is the same WR006 advisory.
 #[test]
-fn test_evaluate_on_model_local_component_is_an_error() {
+fn test_evaluate_on_model_local_component_is_an_ignored_advisory() {
     let source = r#"
 model M
   Integer m annotation(Evaluate=true);
+  Real x annotation(Evaluate=true);
 equation
   m = 1;
+  x = time;
+  annotation(Evaluate=true);
 end M;
 "#;
-    let diagnostics =
-        resolve_test_source(source).expect_err("model components are not exempt from ANN-008");
+    let success = match resolve_with_diagnostics(parsed_tree_from_source(source)) {
+        Ok(success) => success,
+        Err(failure) => panic!(
+            "a non-parameter Evaluate annotation must not block resolution: {:?}",
+            failure.diagnostics()
+        ),
+    };
+    let (_, diagnostics) = success.into_parts();
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code.as_deref() == Some("ER070")),
-        "expected ER070 for invalid model-local Evaluate annotation, got: {diagnostics:?}"
+        !diagnostics.has_errors(),
+        "non-parameter Evaluate must not be an error: {diagnostics:?}"
     );
+    let advisories = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code.as_deref() == Some("WR006"))
+        .count();
+    assert_eq!(advisories, 3, "one WR006 per annotation: {diagnostics:?}");
 }
 
 #[test]

@@ -6,6 +6,31 @@ use super::{
     ClassContext, first_expression_token, is_input, reference_text, resolve_local_class_path,
 };
 
+/// True when `class` contributes nothing but annotations to a class that
+/// extends it: no components, nested classes, equations, algorithms, or
+/// external clause, and only equally empty bases. MSL icon classes
+/// (`Modelica.Icons.Record`, `Modelica.Icons.Function`) have this shape, and
+/// libraries extend them from packages and models; OpenModelica accepts that,
+/// and since inheriting nothing cannot change the extending class, Rumoca
+/// accepts it with WR008 instead of rejecting it.
+fn class_is_contentless(class: &ClassDef, def: &StoredDefinition, depth: usize) -> bool {
+    const MAX_DEPTH: usize = 16;
+    let body_empty = class.components.is_empty()
+        && class.classes.is_empty()
+        && class.equations.is_empty()
+        && class.initial_equations.is_empty()
+        && class.algorithms.is_empty()
+        && class.initial_algorithms.is_empty()
+        && class.external.is_none();
+    body_empty
+        && depth < MAX_DEPTH
+        && class.extends.iter().all(|ext| {
+            ext.base_def_id
+                .and_then(|id| find_class_by_def_id(def, id))
+                .is_some_and(|base| class_is_contentless(base, def, depth + 1))
+        })
+}
+
 /// MLS §7.1.3 / INST-024 (conservative subset): functions may only take part
 /// in inheritance with other functions, and packages only with packages.
 pub(super) fn check_inheritance_compatibility(
@@ -49,7 +74,23 @@ pub(super) fn check_inheritance_compatibility(
         let base_is_package = base.class_type == ClassType::Package;
         let incompatible =
             (class_is_function != base_is_function) || (class_is_package != base_is_package);
-        if incompatible {
+        if incompatible && class_is_contentless(base, def, 0) {
+            diags.push(Diagnostic::warning(
+                WR008_EMPTY_INCOMPATIBLE_BASE,
+                format!(
+                    "{} '{}' extends {} '{}', which MLS §7.1.3 does not allow; the base declares no elements, so the extends clause is ignored",
+                    class.class_type.as_str(),
+                    class.name.text,
+                    base.class_type.as_str(),
+                    base.name.text
+                ),
+                label_from_token(
+                    &class.name,
+                    "restrictions/inheritance_compatibility_empty_base",
+                    "incompatible but empty base class (icon) is ignored",
+                ),
+            ));
+        } else if incompatible {
             diags.push(semantic_error(
                 ER091_INHERITANCE_COMPATIBILITY,
                 format!(
@@ -80,8 +121,13 @@ pub(super) fn check_operator_placement(
     let parent_is_operator_scope = ancestors
         .last()
         .is_some_and(|parent| parent.operator_record || parent.class_type == ClassType::Operator);
+    // The AST does not keep the `operator` prefix of `operator function`, so
+    // an operator function is recognised by its MLS §14 operator name. Any
+    // other quoted identifier (MSL's `ComplexMath.'abs'`, `'max'`) is an
+    // ordinary function whose name merely needs quoting (MLS §2.3.1).
     let is_operator_item = class.class_type == ClassType::Operator
-        || (class.class_type == ClassType::Function && class.name.text.starts_with('\''));
+        || (class.class_type == ClassType::Function
+            && is_overloadable_operator_name(class.name.text.as_ref()));
     if is_operator_item && !parent_is_operator_scope {
         diags.push(semantic_error(
             ER092_OPERATOR_PLACEMENT,
@@ -399,10 +445,17 @@ pub(super) fn check_modification_restrictions(
         // walk the alias chain before deciding the component is scalar.
         let is_array =
             !comp.shape.is_empty() || !comp.shape_expr.is_empty() || type_alias_is_array(comp, def);
+        // MLS §7.2.5 only gives `each` a meaning on array components. For a
+        // scalar component OpenModelica warns ("'each' used when modifying
+        // non-array element") and applies the modification as if `each` were
+        // absent, which is also what instantiation does for a scalar owner.
+        // AixLib, IDEAS and TRANSFORM rely on that, so this is WR009.
         if !is_array && comp.source_modification_each_flags.iter().any(|&f| f) {
-            diags.push(semantic_error(
-                ER104_EACH_ON_SCALAR,
-                format!("'each' modification on non-array component '{name}' (MLS §7.2.5)"),
+            diags.push(Diagnostic::warning(
+                WR009_EACH_ON_SCALAR,
+                format!(
+                    "'each' modification on non-array component '{name}' has no effect and is ignored (MLS §7.2.5)"
+                ),
                 label_from_token(
                     &comp.name_token,
                     "restrictions/each_on_scalar",
@@ -751,6 +804,30 @@ fn binding_targets<'a>(class: &'a ClassDef, binding: &Expression) -> Vec<&'a str
             _ => None,
         })
         .collect()
+}
+
+/// MLS §14.3: the names an operator record may overload.
+fn is_overloadable_operator_name(name: &str) -> bool {
+    matches!(
+        name,
+        "'constructor'"
+            | "'0'"
+            | "'String'"
+            | "'+'"
+            | "'-'"
+            | "'*'"
+            | "'/'"
+            | "'^'"
+            | "'=='"
+            | "'<>'"
+            | "'<'"
+            | "'<='"
+            | "'>'"
+            | "'>='"
+            | "'and'"
+            | "'or'"
+            | "'not'"
+    )
 }
 
 /// MLS §14 / OPREC-006: the first two inputs of an operator function shall
@@ -1147,6 +1224,46 @@ pub(super) fn check_equality_constraint_prototype(class: &ClassDef, diags: &mut 
 /// MLS §12.7.1 / FUNC-030, FUNC-031: a `derivative` annotation must reference
 /// a function with at least one output, and `zeroDerivative` must name an
 /// input of the annotated function.
+/// Find a component declared in `class` or inherited through its resolved
+/// `extends` clauses (MLS §7.1): functions such as TRANSFORM's
+/// `bicubic_eval` inherit their inputs from a partial base function.
+fn find_component_with_bases<'a>(
+    class: &'a ClassDef,
+    def: &'a StoredDefinition,
+    name: &str,
+    depth: usize,
+) -> Option<&'a ast::Component> {
+    const MAX_DEPTH: usize = 32;
+    if let Some(component) = class.components.get(name) {
+        return Some(component);
+    }
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    class.extends.iter().find_map(|ext| {
+        let base = find_class_by_def_id(def, ext.base_def_id?)?;
+        find_component_with_bases(base, def, name, depth + 1)
+    })
+}
+
+fn class_has_output_with_bases(class: &ClassDef, def: &StoredDefinition, depth: usize) -> bool {
+    const MAX_DEPTH: usize = 32;
+    if class
+        .components
+        .values()
+        .any(|comp| matches!(comp.causality, Causality::Output(_)))
+    {
+        return true;
+    }
+    // An unresolved base could contribute the output; stay conservative.
+    depth < MAX_DEPTH
+        && class.extends.iter().any(|ext| {
+            ext.base_def_id
+                .and_then(|id| find_class_by_def_id(def, id))
+                .is_none_or(|base| class_has_output_with_bases(base, def, depth + 1))
+        })
+}
+
 pub(super) fn check_derivative_annotations(
     class: &ClassDef,
     def: &StoredDefinition,
@@ -1188,10 +1305,7 @@ pub(super) fn check_derivative_annotations(
         if let Some(Expression::ComponentReference(cref)) = value
             && let Some(derivative_fn) = resolve_sibling_class(cref, def, ancestors)
             && derivative_fn.class_type == ClassType::Function
-            && !derivative_fn
-                .components
-                .iter()
-                .any(|(_, comp)| matches!(comp.causality, Causality::Output(_)))
+            && !class_has_output_with_bases(derivative_fn, def, 0)
             && let Some(token) = cref.parts.first().map(|part| &part.ident)
         {
             diags.push(semantic_error(
@@ -1228,9 +1342,7 @@ pub(super) fn check_derivative_annotations(
             let [part] = arg.parts.as_slice() else {
                 continue;
             };
-            let names_input = class
-                .components
-                .get(part.ident.text.as_ref())
+            let names_input = find_component_with_bases(class, def, part.ident.text.as_ref(), 0)
                 .is_some_and(is_input);
             if !names_input {
                 diags.push(semantic_error(

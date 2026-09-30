@@ -5,7 +5,6 @@
 
 use super::*;
 
-pub(super) const ER070_EVALUATE_SCOPE: &str = "ER070";
 pub(super) const WR006_EVALUATE_WITHOUT_EFFECT: &str = "WR006";
 
 pub(super) fn check_annotation_restrictions(class: &ClassDef, diags: &mut Vec<Diagnostic>) {
@@ -44,29 +43,28 @@ fn check_non_component_evaluate_annotations(
         let label = label_from_expression(
             expr,
             "check_annotation_restrictions/non_component_evaluate",
-            format!("Evaluate is not allowed on {} '{}'", owner_kind, owner_name),
+            format!("Evaluate has no effect on {} '{}'", owner_kind, owner_name),
         )
         .expect("annotation expression must carry a span");
-        diags.push(semantic_error(
-            ER070_EVALUATE_SCOPE,
-            "annotation Evaluate is only allowed on parameter or constant components (MLS §18.6)",
+        diags.push(Diagnostic::warning(
+            WR006_EVALUATE_WITHOUT_EFFECT,
+            format!(
+                "annotation Evaluate on {} '{}' has no effect: only components declared with the parameter prefix are evaluated (MLS §18.3)",
+                owner_kind, owner_name
+            ),
             label,
         ));
     }
 }
 
-/// ANN-008 (MLS §18.6): `Evaluate` is a parameter/constant annotation.
-///
-/// Inside a `function` the MLS sentence that applies is "the annotation
-/// Evaluate only has effect for a component declared with the prefix
-/// parameter": a function has no parameter-variability locals at all, so the
-/// annotation is defined to be without effect rather than illegal there. MSL
-/// 4.1.0 relies on exactly that reading in
-/// `Modelica.Electrical.Machines.SpacePhasors.Functions.ToSpacePhasor`, whose
-/// protected `Integer m = size(x, 1)` carries `annotation(Evaluate=true)`.
-/// Function-local declarations therefore warn (WR006) and drop the annotation;
-/// every other class kind keeps the hard ER070 rejection, because there the
-/// modeler can express the intent with a `parameter`/`constant` prefix.
+/// ANN-008 (MLS §18.3): `Evaluate` "only has effect for a component declared
+/// with the prefix parameter". The MLS does not make the annotation illegal
+/// elsewhere, and OpenModelica ignores it on other components (CDL's
+/// `Real Dzero annotation(Evaluate=true)`, TRANSFORM/IBPSA
+/// `y_reset_internal`, MSL's function-local `Integer m = size(x, 1)`).
+/// Every non-parameter/non-constant component therefore warns (WR006) and the
+/// annotation is dropped: instantiation only honours `Evaluate` on
+/// parameter/constant components.
 fn check_component_evaluate_annotations(
     comp: &ast::Component,
     in_function: bool,
@@ -79,37 +77,25 @@ fn check_component_evaluate_annotations(
         return;
     }
 
+    let owner = if in_function {
+        "function local"
+    } else {
+        "component"
+    };
     for expr in &comp.annotation {
         if !is_evaluate_annotation(expr) {
-            continue;
-        }
-        if in_function {
-            let label = label_from_expression(
-                expr,
-                "check_annotation_restrictions/function_local_evaluate",
-                format!("Evaluate has no effect on function local '{}'", comp.name),
-            )
-            .expect("annotation expression must carry a span");
-            diags.push(Diagnostic::warning(
-                WR006_EVALUATE_WITHOUT_EFFECT,
-                format!(
-                    "annotation Evaluate has no effect on function local '{}': only components declared with the parameter prefix are evaluated (MLS §18.6)",
-                    comp.name
-                ),
-                label,
-            ));
             continue;
         }
         let label = label_from_expression(
             expr,
             "check_annotation_restrictions/component_evaluate",
-            format!("Evaluate is not allowed on component '{}'", comp.name),
+            format!("Evaluate has no effect on {owner} '{}'", comp.name),
         )
         .expect("annotation expression must carry a span");
-        diags.push(semantic_error(
-            ER070_EVALUATE_SCOPE,
+        diags.push(Diagnostic::warning(
+            WR006_EVALUATE_WITHOUT_EFFECT,
             format!(
-                "annotation Evaluate is only allowed on parameter or constant components; '{}' is not parameter or constant (MLS §18.6)",
+                "annotation Evaluate has no effect on {owner} '{}': only components declared with the parameter prefix are evaluated (MLS §18.3)",
                 comp.name
             ),
             label,

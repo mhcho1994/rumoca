@@ -1519,20 +1519,33 @@ fn inst_024_function_extends_connector_rejected() {
 // declaration/modification
 // =============================================================================
 
+/// MLS §7.2.5 gives `each` no meaning on a scalar component. OpenModelica
+/// warns and applies the modification as written (AixLib's
+/// `simpleNLayer(each final T_start=fill(T0, n))`), so Rumoca warns (WR009)
+/// and the array value lands unchanged on the array member.
 #[test]
-fn inst_040_each_on_scalar_component_rejected() {
-    expect_resolve_failure_with_code(
-        r#"
+fn inst_040_each_on_scalar_component_ignored_with_warning() {
+    let source = r#"
         model M
             model Sub
-                parameter Real p = 1;
+                parameter Integer n = 3;
+                parameter Real T[n] = fill(1.0, n);
+                Real x[n];
+            equation
+                der(x) = T;
             end Sub;
-            Sub s(each p = 2);
+            Sub s(each T = {2.0, 3.0, 4.0}, each x(each start = 0, each fixed = true));
         end M;
-    "#,
-        "M",
-        "ER104",
-    );
+    "#;
+    rumoca_contracts::test_support::expect_compile_warning(source, "M", "WR009");
+    let trace = rumoca_contracts::test_support::simulate_model(source, "M", 1.0);
+    for (name, slope) in [("s.x[1]", 2.0), ("s.x[2]", 3.0), ("s.x[3]", 4.0)] {
+        let value = trace.final_value(name);
+        assert!(
+            (value - slope).abs() < 1e-6,
+            "{name} must integrate slope {slope}, got {value}"
+        );
+    }
 }
 
 // =============================================================================

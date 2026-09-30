@@ -579,13 +579,22 @@ fn check_cross_partition_reads(
 }
 
 /// CLK-006: clocked variables read directly from continuous equations.
+///
+/// An equation outside a clocked `when` is not continuous-time by itself:
+/// clock inference (MLS §16.7) associates it with the partition of the
+/// clocked variables it uses, so `y = 2 * xc` simply makes `y` clocked (the
+/// Modelica_DeviceDrivers `KeyboardInput` pattern, accepted by OpenModelica).
+/// Only an equation that is continuous-time on its own — one that contains
+/// `der()` (MLS §16.8.1) — can prove a direct clocked read illegal here.
 fn check_continuous_clocked_reads(
     class: &ClassDef,
     var_partition: &HashMap<String, String>,
     diags: &mut Vec<Diagnostic>,
 ) {
     let reads = class.equations.iter().flat_map(|eq| match eq {
-        Equation::Simple { lhs, rhs, .. } => {
+        Equation::Simple { lhs, rhs, .. }
+            if expression_calls_der(lhs) || expression_calls_der(rhs) =>
+        {
             let mut found = unwrapped_clocked_reads(lhs);
             found.extend(unwrapped_clocked_reads(rhs));
             found
@@ -607,6 +616,29 @@ fn check_continuous_clocked_reads(
             ));
         }
     }
+}
+
+fn expression_calls_der(expr: &Expression) -> bool {
+    struct DerFinder {
+        found: bool,
+    }
+    impl ast::Visitor for DerFinder {
+        fn visit_expr_function_call_ctx(
+            &mut self,
+            comp: &ComponentReference,
+            args: &[Expression],
+            ctx: ast::FunctionCallContext,
+        ) -> std::ops::ControlFlow<()> {
+            if builtin_name(comp) == Some("der") {
+                self.found = true;
+                return std::ops::ControlFlow::Break(());
+            }
+            ast::visitor::walk_expr_function_call_ctx_default(self, comp, args, ctx)
+        }
+    }
+    let mut finder = DerFinder { found: false };
+    let _ = finder.visit_expression(expr);
+    finder.found
 }
 
 /// Textual partition key for a clocked when-condition.

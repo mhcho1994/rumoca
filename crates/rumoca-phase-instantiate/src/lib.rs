@@ -1331,7 +1331,9 @@ fn validate_partial_component_instantiation(
     type_name: &str,
     allow_partial_instantiation: bool,
 ) -> InstantiateResult<()> {
-    if allow_partial_instantiation {
+    // A pure `outer` element is a reference to the matching `inner` element
+    // (MLS §5.4), so its declared type may legitimately be partial.
+    if allow_partial_instantiation || (comp.outer && !comp.inner) {
         return Ok(());
     }
 
@@ -1432,8 +1434,9 @@ fn instantiate_component(
         binding_source_scope.as_ref(),
     );
     let causality = resolve_component_causality(comp, class_def, ctx.inherited_causality());
-    let evaluate = has_evaluate_annotation(comp) || ctx.inherited_evaluate();
     let effective_variability = resolve_effective_variability(comp, ctx.inherited_variability());
+    let evaluate =
+        has_evaluate_annotation(comp, &effective_variability) || ctx.inherited_evaluate();
     let (class_overrides, has_forwarding_class_redeclare, nested_type_overrides) =
         resolve_component_nested_type_overrides(
             tree,
@@ -1835,9 +1838,10 @@ fn instantiate_nested_class(
 
     let eq_size = inheritance::equality_constraint_output_size(nested_class);
 
+    let evaluate = has_evaluate_annotation(comp, effective_variability) || ctx.inherited_evaluate();
     ctx.push_scope_frame(ScopeFrameInput {
         variability: effective_variability,
-        evaluate: has_evaluate_annotation(comp) || ctx.inherited_evaluate(),
+        evaluate,
         causality,
         flow,
         stream,

@@ -88,6 +88,8 @@ const ER032_DUPLICATE_COMPONENT_NAME: &str = "ER032";
 const ER033_COMPONENT_CLASS_NAME_CONFLICT: &str = "ER033";
 const ER034_CONNECTOR_PROTECTED_ELEMENT: &str = "ER034";
 const ER035_INPUT_PARAMETER_COMBINATION: &str = "ER035";
+const WR010_FUNCTION_PARAMETER_INPUT: &str = "WR010";
+const WR011_EXTERNAL_OBJECT_MEMBER: &str = "WR011";
 const ER036_COMPONENT_NAME_EQUALS_CLASS_NAME: &str = "ER036";
 const ER037_PACKAGE_NON_CONSTANT_COMPONENT: &str = "ER037";
 const ER038_FUNCTION_EQUATION_SECTION: &str = "ER038";
@@ -518,6 +520,50 @@ fn check_record_restrictions(class: &ClassDef, diags: &mut Vec<Diagnostic>) {
     }
 }
 
+/// MLS §12.9.7: an external object class is a `class` that directly extends
+/// the predefined `ExternalObject`.
+fn is_external_object_class(class: &ClassDef) -> bool {
+    class.class_type == ClassType::Class
+        && class.extends.iter().any(|ext| {
+            ext.base_name
+                .name
+                .last()
+                .is_some_and(|part| part.text.as_ref() == "ExternalObject")
+        })
+}
+
+/// MLS §4.7 / §9.1 only list record/type (and connector) component types for
+/// records and connectors, so an external object member is outside the
+/// letter of the spec. OpenModelica accepts it, and Modelica_DeviceDrivers
+/// passes its `SerialPackager` handle through a `PackageOut` connector and
+/// keeps a `Comedi` handle in a configuration record. The handle is an
+/// opaque value that is only ever bound by its constructor, so Rumoca
+/// accepts the member with WR011 instead of rejecting the class.
+fn push_external_object_member_warning(
+    class: &ClassDef,
+    name: &str,
+    comp: &ast::Component,
+    type_class: &ClassDef,
+    diags: &mut Vec<Diagnostic>,
+) {
+    diags.push(Diagnostic::warning(
+        WR011_EXTERNAL_OBJECT_MEMBER,
+        format!(
+            "{} '{}' contains external object component '{}' of type '{}'; MLS §4.7/§9.1 do not list external objects as {} members",
+            class.class_type.as_str(),
+            class.name.text,
+            name,
+            type_class.name.text,
+            class.class_type.as_str()
+        ),
+        label_from_token(
+            &comp.name_token,
+            "external_object_member",
+            format!("external object member '{name}'"),
+        ),
+    ));
+}
+
 /// DECL-006: Connectors cannot have protected sections.
 /// DECL-007: Connector elements cannot have inner/outer prefixes.
 fn check_connector_restrictions(
@@ -531,6 +577,10 @@ fn check_connector_restrictions(
 
     for (name, comp) in &class.components {
         if let Some(type_class) = find_class_by_name(def, &comp.type_name.to_string())
+            && is_external_object_class(type_class)
+        {
+            push_external_object_member_warning(class, name, comp, type_class, diags);
+        } else if let Some(type_class) = find_class_by_name(def, &comp.type_name.to_string())
             && !matches!(
                 type_class.class_type,
                 ClassType::Connector | ClassType::Record | ClassType::Type
@@ -657,6 +707,28 @@ fn check_input_parameter_combination(class: &ClassDef, diags: &mut Vec<Diagnosti
             Variability::Constant(_) => "constant",
             _ => continue,
         };
+        // A function input receives its value from the call, so a
+        // `parameter` prefix on it constrains nothing the function body can
+        // observe. OpenModelica accepts `parameter input` formal parameters
+        // (IDEAS' `OutsideAir.windPressureProfile`); treat the prefix as
+        // having no effect and warn (WR010).
+        if class.class_type == ClassType::Function
+            && matches!(comp.variability, Variability::Parameter(_))
+        {
+            diags.push(Diagnostic::warning(
+                WR010_FUNCTION_PARAMETER_INPUT,
+                format!(
+                    "'parameter' prefix on function input '{}' has no effect and is ignored (MLS §4.4.2.2)",
+                    name
+                ),
+                label_from_token(
+                    input_token,
+                    "check_input_parameter_combination/function_parameter_input",
+                    "'input' combined with 'parameter' in a function",
+                ),
+            ));
+            continue;
+        }
         diags.push(semantic_error(
             ER035_INPUT_PARAMETER_COMBINATION,
             format!(
@@ -880,6 +952,10 @@ fn check_record_component_type_restriction(
     if matches!(tc.class_type, ClassType::Record | ClassType::Type) {
         return;
     }
+    if is_external_object_class(tc) {
+        push_external_object_member_warning(class, component_name, comp, tc, diags);
+        return;
+    }
 
     diags.push(semantic_error(
         ER023_RECORD_INVALID_COMPONENT_TYPE,
@@ -916,7 +992,10 @@ fn check_partial_class_instantiation_restriction(
     // MLS §4.7 forbids instantiating partial classes in concrete model/block
     // instances. Partial classes themselves and replaceable declarations remain
     // legal because they do not commit to a concrete instantiation yet.
-    if class.partial || comp.is_replaceable {
+    // A pure `outer` declaration is a reference to the matching `inner`
+    // element (MLS §5.4), not an instantiation, so its type may be partial
+    // (e.g. `outer VehicleInterfaces.Roads.Interfaces.Base road;`).
+    if class.partial || comp.is_replaceable || (comp.outer && !comp.inner) {
         return;
     }
     let Some(tc) = type_class else {
