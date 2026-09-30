@@ -121,6 +121,14 @@ impl TypeCheckTraversalCallbacks for TypeChecker {
         self.select_parameter_if_branch(cond_blocks)
     }
 
+    fn select_if_expression_branch(
+        &mut self,
+        branches: &[(Expression, Expression)],
+        _type_table: &TypeTable,
+    ) -> Option<usize> {
+        self.select_parameter_if_expression_branch(branches)
+    }
+
     /// MLS §8.3.5: the condition of a when-equation must be a Boolean
     /// expression (ALG-011/EQN side).
     fn on_when_condition(&mut self, condition: &Expression, type_table: &TypeTable) {

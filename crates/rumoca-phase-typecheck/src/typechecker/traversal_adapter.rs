@@ -73,6 +73,17 @@ pub(crate) trait TypeCheckTraversalCallbacks {
     ) -> Option<usize> {
         None
     }
+
+    /// Branch of an if-expression selected at translation time, with the
+    /// same convention as [`Self::select_if_equation_branch`] (`branches.len()`
+    /// selects the `else` branch).
+    fn select_if_expression_branch(
+        &mut self,
+        _branches: &[(Expression, Expression)],
+        _type_table: &TypeTable,
+    ) -> Option<usize> {
+        None
+    }
 }
 
 struct TypeCheckTraversal<'a, C> {
@@ -123,6 +134,23 @@ impl<C: TypeCheckTraversalCallbacks> TypeCheckTraversal<'_, C> {
                 Some(equations) => self.visit_each(equations, Self::visit_equation),
                 None => ControlFlow::Continue(()),
             },
+        }
+    }
+
+    /// Walk the conditions up to and including the selected one, then only
+    /// the selected branch value.
+    fn visit_selected_if_expression_branch(
+        &mut self,
+        branches: &[(Expression, Expression)],
+        else_branch: &Expression,
+        selected: usize,
+    ) -> ControlFlow<()> {
+        for (cond, _) in branches.iter().take(selected.saturating_add(1)) {
+            self.visit_expression(cond)?;
+        }
+        match branches.get(selected) {
+            Some((_, value)) => self.visit_expression(value),
+            None => self.visit_expression(else_branch),
         }
     }
 
@@ -256,6 +284,19 @@ impl<C: TypeCheckTraversalCallbacks> Visitor for TypeCheckTraversal<'_, C> {
         if let Expression::FieldAccess { base, field, .. } = expression {
             self.visit_expression(base)?;
             self.callbacks.on_field_access(base, field, self.type_table);
+            self.callbacks.on_expression(expression, self.type_table);
+            return ControlFlow::Continue(());
+        }
+        if let Expression::If {
+            branches,
+            else_branch,
+            ..
+        } = expression
+            && let Some(selected) = self
+                .callbacks
+                .select_if_expression_branch(branches, self.type_table)
+        {
+            self.visit_selected_if_expression_branch(branches, else_branch, selected)?;
             self.callbacks.on_expression(expression, self.type_table);
             return ControlFlow::Continue(());
         }

@@ -28,21 +28,37 @@ impl TypeChecker {
         &self,
         cond_blocks: &[rumoca_ir_ast::EquationBlock],
     ) -> Option<usize> {
+        self.select_parameter_branch(cond_blocks.iter().map(|block| &block.cond))
+    }
+
+    /// Branch an if-expression selects at translation time (MLS §3.6.5 with
+    /// the §8.3.4 rule for parameter conditions): only the selected branch is
+    /// evaluated, so array-bound rules apply to it alone. Same return
+    /// convention as [`Self::select_parameter_if_branch`].
+    pub(crate) fn select_parameter_if_expression_branch(
+        &self,
+        branches: &[(Expression, Expression)],
+    ) -> Option<usize> {
+        self.select_parameter_branch(branches.iter().map(|(cond, _)| cond))
+    }
+
+    fn select_parameter_branch<'a>(
+        &self,
+        conditions: impl ExactSizeIterator<Item = &'a Expression>,
+    ) -> Option<usize> {
         let scope = self.current_instance_scope.as_ref()?.to_flat_string();
-        for (index, block) in cond_blocks.iter().enumerate() {
-            if !self.condition_is_translation_time(&block.cond) {
+        let count = conditions.len();
+        for (index, cond) in conditions.enumerate() {
+            if !self.condition_is_translation_time(cond) {
                 return None;
             }
-            let selected = rumoca_eval_ast::eval::eval_boolean_with_scope(
-                &block.cond,
-                &self.eval_ctx,
-                &scope,
-            )?;
+            let selected =
+                rumoca_eval_ast::eval::eval_boolean_with_scope(cond, &self.eval_ctx, &scope)?;
             if selected {
                 return Some(index);
             }
         }
-        Some(cond_blocks.len())
+        Some(count)
     }
 
     /// MLS §3.8: an if-equation is resolved at translation time only when its
@@ -93,5 +109,19 @@ impl Visitor for ConditionReferences {
     ) -> ControlFlow<()> {
         self.references.push(cr.clone());
         self.visit_component_reference(cr)
+    }
+
+    /// MLS §3.8.1/§3.8.3: `size(A, i)` and `ndims(A)` are parameter
+    /// expressions whatever the variability of `A` (dimensions are fixed at
+    /// translation time), so the array operand does not make the condition
+    /// time-varying. The dimension index argument is still collected.
+    fn visit_expression(&mut self, expr: &Expression) -> ControlFlow<()> {
+        if let Expression::FunctionCall { comp, args, .. } = expr
+            && comp.parts.len() == 1
+            && matches!(comp.parts[0].ident.text.as_ref(), "size" | "ndims")
+        {
+            return self.visit_each(args.get(1..).unwrap_or_default(), Self::visit_expression);
+        }
+        rumoca_ir_ast::visitor::walk_expression_default(self, expr)
     }
 }
