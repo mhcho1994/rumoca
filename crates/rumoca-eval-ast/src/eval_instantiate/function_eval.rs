@@ -280,6 +280,132 @@ fn component_is_predefined_real(component: &ast::Component, env: IntegerEvalEnv<
     }
 }
 
+/// Whether a single-part call names the tree's own predefined operation of
+/// that spelling, rather than a user declaration that shadows it. A call with
+/// no resolved identity is the synthetic spelling and counts as predefined.
+pub(super) fn names_predefined(comp: &ast::ComponentReference, tree: &ast::ClassTree) -> bool {
+    let [part] = comp.parts.as_slice() else {
+        return false;
+    };
+    let Some(selected) = part.def_id else {
+        return true;
+    };
+    tree.scope_tree
+        .predefined_member(&rumoca_core::ComponentPath::from_flat_path(
+            part.ident.text.as_ref(),
+        ))
+        == Some(selected)
+}
+
+/// `size(a, k)` of a component of the scope being instantiated (MLS §10.3.1),
+/// read off its declared dimensions.
+///
+/// Structural dimensions routinely derive from another array's declared size
+/// (`parameter Integer n = size(timPer, 1); Subtract sub[n];`). Without this
+/// the component-array dimension evaluated to nothing and the array was
+/// instantiated as a scalar. Only a declared extent answers: a `:` dimension
+/// sized by its binding stays unevaluated rather than guessed.
+pub(super) fn declared_component_extent(
+    array: &ast::ComponentReference,
+    dimension: i64,
+    env: IntegerEvalEnv<'_>,
+    depth: usize,
+) -> Option<i64> {
+    let [part] = array.parts.as_slice() else {
+        return None;
+    };
+    if part.subs.as_ref().is_some_and(|subs| !subs.is_empty()) {
+        return None;
+    }
+    let component = env.effective_components.get(part.ident.text.as_ref())?;
+    let index = usize::try_from(dimension).ok()?.checked_sub(1)?;
+    if component.shape_expr.is_empty() {
+        return component
+            .shape
+            .get(index)
+            .and_then(|&extent| i64::try_from(extent).ok());
+    }
+    let extent = match component.shape_expr.get(index)? {
+        ast::Subscript::Expression(extent) => extent,
+        ast::Subscript::Range { .. } | ast::Subscript::Empty if index == 0 => {
+            let mut path = ast::QualifiedName::new();
+            path.push(part.ident.text.to_string(), Vec::new());
+            let binding = match env.mod_env.get(&path) {
+                Some(modification) => &modification.value,
+                None => component.binding.as_ref()?,
+            };
+            return binding_vector_length(binding, env, depth + 1);
+        }
+        ast::Subscript::Range { .. } | ast::Subscript::Empty => return None,
+    };
+    try_eval_integer_shape_expr_with_depth(
+        extent,
+        env.mod_env,
+        env.effective_components,
+        env.tree,
+        env.resolve_class_components,
+        depth + 1,
+    )
+    .filter(|extent| *extent >= 0)
+}
+
+/// Leading extent of a `:`-sized array binding (MLS §10.1: the binding
+/// determines the size), for the two forms that state it structurally: an
+/// array constructor `{a, b, c}` and a single-iterator comprehension over an
+/// integer range, `{f(i) for i in lo:hi}`. Anything else is left unevaluated.
+fn binding_vector_length(
+    binding: &ast::Expression,
+    env: IntegerEvalEnv<'_>,
+    depth: usize,
+) -> Option<i64> {
+    match binding {
+        ast::Expression::Array {
+            elements,
+            is_matrix: false,
+            ..
+        } => i64::try_from(elements.len()).ok(),
+        ast::Expression::ArrayComprehension {
+            indices,
+            filter: None,
+            ..
+        } => {
+            let [index] = indices.as_slice() else {
+                return None;
+            };
+            let ast::Expression::Range {
+                start, step, end, ..
+            } = &index.range
+            else {
+                return None;
+            };
+            let eval = |expr: &ast::Expression| {
+                try_eval_integer_shape_expr_with_depth(
+                    expr,
+                    env.mod_env,
+                    env.effective_components,
+                    env.tree,
+                    env.resolve_class_components,
+                    depth + 1,
+                )
+            };
+            let (start, end) = (eval(start)?, eval(end)?);
+            let step = match step {
+                Some(step) => eval(step)?,
+                None => 1,
+            };
+            if step == 0 {
+                return None;
+            }
+            let span = end.checked_sub(start)?;
+            if span != 0 && span.signum() != step.signum() {
+                return Some(0);
+            }
+            Some(span / step + 1)
+        }
+        _ => None,
+    }
+}
+
 fn declared_rank(component: &ast::Component) -> usize {
     component.shape.len().max(component.shape_expr.len())
 }

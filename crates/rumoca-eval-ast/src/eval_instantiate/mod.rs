@@ -1682,6 +1682,13 @@ fn eval_integer_function_call(
             let y = recurse(args.get(1)?)?;
             return Some(x.max(y));
         }
+        "size" if function_eval::names_predefined(comp, env.tree) => {
+            let [ast::Expression::ComponentReference(array), dimension] = args else {
+                return None;
+            };
+            let dimension = recurse(dimension)?;
+            return function_eval::declared_component_extent(array, dimension, env, depth);
+        }
         _ => {}
     }
 
