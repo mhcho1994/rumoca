@@ -115,24 +115,24 @@ outcome = 'Accept'
 
 [[cases]]
 contract_id = 'ANN-008'
-case_id = 'ann_008_variable_evaluate_rejected'
+case_id = 'ann_008_variable_evaluate_ignored_with_warning'
 test_file = 'tests/ann_contracts.rs'
 kind = 'Compile'
-outcome = 'Reject'
+outcome = 'Accept'
 
 [[cases]]
 contract_id = 'ANN-008'
-case_id = 'ann_008_class_annotation_evaluate_rejected'
+case_id = 'ann_008_class_annotation_evaluate_ignored_with_warning'
 test_file = 'tests/ann_contracts.rs'
 kind = 'Compile'
-outcome = 'Reject'
+outcome = 'Accept'
 
 [[cases]]
 contract_id = 'ANN-008'
-case_id = 'ann_008_extends_annotation_evaluate_rejected'
+case_id = 'ann_008_extends_annotation_evaluate_ignored_with_warning'
 test_file = 'tests/ann_contracts.rs'
 kind = 'Compile'
-outcome = 'Reject'
+outcome = 'Accept'
 
 [[cases]]
 contract_id = 'ARR-001'
@@ -1242,17 +1242,17 @@ outcome = 'Reject'
 
 [[cases]]
 contract_id = 'INST-012'
-case_id = 'inst_012_outer_binding_is_rejected'
+case_id = 'inst_012_outer_binding_is_reported_and_ignored'
 test_file = 'tests/inst_contracts.rs'
-kind = 'Parse'
-outcome = 'Reject'
+kind = 'Compile'
+outcome = 'Accept'
 
 [[cases]]
 contract_id = 'INST-012'
-case_id = 'inst_012_outer_modification_is_rejected'
+case_id = 'inst_012_outer_modification_is_reported_and_ignored'
 test_file = 'tests/inst_contracts.rs'
-kind = 'Parse'
-outcome = 'Reject'
+kind = 'Compile'
+outcome = 'Accept'
 
 [[cases]]
 contract_id = 'INST-014'
@@ -3104,10 +3104,10 @@ outcome = 'Reject'
 
 [[cases]]
 contract_id = 'INST-040'
-case_id = 'inst_040_each_on_scalar_component_rejected'
+case_id = 'inst_040_each_on_scalar_component_ignored_with_warning'
 test_file = 'tests/inst_contracts.rs'
 kind = 'Compile'
-outcome = 'Reject'
+outcome = 'Accept'
 
 [[cases]]
 contract_id = 'INST-041'

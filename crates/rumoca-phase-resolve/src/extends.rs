@@ -153,7 +153,18 @@ impl Resolver {
         // Use class_scope so that class-local imports (like `import D = Package`) are visible.
         // The `exclude` parameter in resolve_qualified_name_excluding handles self-references
         // (e.g., `record ThermodynamicState extends ThermodynamicState` won't find itself).
+        let class_short_name = class.name.text.clone();
         for extend in class.extends.iter_mut() {
+            if self.defer_class_extends_slot(
+                extend,
+                emit_errors,
+                &class_short_name,
+                qualified_name,
+                class_def_id,
+                class_scope,
+            ) {
+                continue;
+            }
             self.resolve_extends(
                 extend,
                 class_scope,
@@ -186,6 +197,50 @@ impl Resolver {
         }
 
         self.resolving_extends.remove(&class_def_id);
+    }
+
+    /// MLS §7.3.1: in `redeclare class extends B`, `B` names the element `B`
+    /// inherited by the enclosing class, never whatever `B` a lexical lookup
+    /// would reach first. The lexical lookup can hit a builtin function of the
+    /// same name (`redeclare function extends product` would otherwise bind
+    /// to the builtin reduction `product` and lose every inherited input), so
+    /// the inherited slot is consulted first for the same-name form.
+    ///
+    /// Returns true when the clause must stay unbound for now: the inherited
+    /// view is only published between fixed-point rounds, so until it exists
+    /// a same-name lookup that reaches a non-class declaration is deferred
+    /// instead of being bound to it.
+    fn defer_class_extends_slot(
+        &mut self,
+        extend: &mut ast::Extend,
+        final_round: bool,
+        class_short_name: &str,
+        qualified_name: &str,
+        class_def_id: DefId,
+        class_scope: ScopeId,
+    ) -> bool {
+        if extend.base_def_id.is_some() {
+            return false;
+        }
+        let same_name = extend.base_name.name.len() == 1
+            && extend.base_name.name[0].text.as_ref() == class_short_name;
+        if !same_name {
+            return false;
+        }
+        if let Some(inherited) = self.try_inherited_member_lookup(&extend.base_name, class_def_id)
+            && inherited != class_def_id
+        {
+            self.record_extends_result(extend, qualified_name, class_def_id, inherited, false);
+            return false;
+        }
+        !final_round
+            && self
+                .resolve_qualified_name_excluding(
+                    &extend.base_name,
+                    class_scope,
+                    Some(class_def_id),
+                )
+                .is_some_and(|lexical| !self.class_def_scopes.contains_key(&lexical))
     }
 
     /// Resolve an extends clause (MLS §7.1).

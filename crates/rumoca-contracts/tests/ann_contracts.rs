@@ -1,7 +1,7 @@
 //! ANN (Annotation) contract tests - MLS §18
 
 use rumoca_contracts::test_support::{
-    expect_parse_err_with_code, expect_resolve_failure_with_code, expect_success,
+    expect_compile_warning, expect_parse_err_with_code, expect_success,
 };
 
 // =============================================================================
@@ -71,9 +71,12 @@ fn ann_008_parameter_evaluate_ok() {
     );
 }
 
+/// MLS §18.3: Evaluate "only has effect for a component declared with the
+/// prefix parameter"; OpenModelica ignores it elsewhere (CDL's
+/// `Real Dzero annotation(Evaluate=true)`). Accepted with WR006.
 #[test]
-fn ann_008_variable_evaluate_rejected() {
-    expect_resolve_failure_with_code(
+fn ann_008_variable_evaluate_ignored_with_warning() {
+    expect_compile_warning(
         r#"
         model Test
             Real p annotation(Evaluate = true);
@@ -82,7 +85,7 @@ fn ann_008_variable_evaluate_rejected() {
         end Test;
     "#,
         "Test",
-        "ER070",
+        "WR006",
     );
 }
 
@@ -109,24 +112,27 @@ fn ann_008_function_local_evaluate_ignored() {
     );
 }
 
+/// ThermoPower's `Flow1DBase` carries a class-level `annotation(Evaluate=true)`.
 #[test]
-fn ann_008_class_annotation_evaluate_rejected() {
-    expect_resolve_failure_with_code(
+fn ann_008_class_annotation_evaluate_ignored_with_warning() {
+    expect_compile_warning(
         r#"
         model Test
+            Real x = 1;
             annotation(Evaluate = true);
         end Test;
     "#,
         "Test",
-        "ER070",
+        "WR006",
     );
 }
 
 #[test]
-fn ann_008_extends_annotation_evaluate_rejected() {
-    expect_resolve_failure_with_code(
+fn ann_008_extends_annotation_evaluate_ignored_with_warning() {
+    expect_compile_warning(
         r#"
         model Base
+            Real x = 1;
         end Base;
 
         model Test
@@ -134,7 +140,7 @@ fn ann_008_extends_annotation_evaluate_rejected() {
         end Test;
     "#,
         "Test",
-        "ER070",
+        "WR006",
     );
 }
 

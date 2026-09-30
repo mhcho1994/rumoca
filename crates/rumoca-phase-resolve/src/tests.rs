@@ -15,6 +15,7 @@ mod function_calls;
 mod imports;
 mod inherited_lookup;
 mod loops_and_scopes;
+mod overstrict_checks;
 mod partial_replaceable;
 mod redeclare_modifiers;
 mod semantic_rules;

@@ -9,9 +9,24 @@ use rumoca_ir_ast as ast;
 /// Returns true if:
 /// - The component has `annotation(Evaluate=true)`, or
 /// - The component is declared `final` (implies compile-time evaluation)
-pub(crate) fn has_evaluate_annotation(comp: &ast::Component) -> bool {
+///
+/// MLS §18.3: `Evaluate` "only has effect for a component declared with the
+/// prefix parameter" (or constant, which is always evaluable). Resolve accepts
+/// the annotation on other components with the WR006 advisory; here it is
+/// ignored, so a `Real Dzero annotation(Evaluate=true)` stays an ordinary
+/// variable instead of being treated as a structural value.
+pub(crate) fn has_evaluate_annotation(
+    comp: &ast::Component,
+    effective_variability: &rumoca_core::Variability,
+) -> bool {
     if comp.is_final {
         return true;
+    }
+    if !matches!(
+        effective_variability,
+        rumoca_core::Variability::Parameter(_) | rumoca_core::Variability::Constant(_)
+    ) {
+        return false;
     }
 
     comp.annotation.iter().any(is_evaluate_true_annotation)

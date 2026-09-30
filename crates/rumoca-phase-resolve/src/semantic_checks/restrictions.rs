@@ -24,7 +24,6 @@ pub(super) const ER099_CARDINALITY_CONTEXT: &str = "ER099";
 pub(super) const ER101_CONNECT_MULTIPLE_SOURCES: &str = "ER101";
 pub(super) const ER102_ASSIGN_TO_PARAMETER: &str = "ER102";
 pub(super) const ER103_CONNECT_OUTER_PAIR: &str = "ER103";
-pub(super) const ER104_EACH_ON_SCALAR: &str = "ER104";
 pub(super) const ER105_MODIFICATION_SIZE_MISMATCH: &str = "ER105";
 pub(super) const ER106_BREAK_TARGET_KIND: &str = "ER106";
 pub(super) const ER107_ENUM_CONVERSION_RANGE: &str = "ER107";
@@ -47,6 +46,9 @@ pub(super) const ER122_AMBIGUOUS_OPERATOR_OVERLOAD: &str = "ER122";
 pub(super) const ER123_CLASS_EXTENDS_NON_REPLACEABLE: &str = "ER123";
 pub(super) const WR005_EVALUATE_NOT_EVALUABLE: &str = "WR005";
 pub(super) const WR007_OUTER_MODIFICATION_IGNORED: &str = "WR007";
+pub(super) const WR008_EMPTY_INCOMPATIBLE_BASE: &str = "WR008";
+pub(super) const WR009_EACH_ON_SCALAR: &str = "WR009";
+pub(super) const WR012_IMPURE_CALL_IN_CLOCKED_EQUATION: &str = "WR012";
 pub(super) const ER124_NONEVAL_NESTED_FOR_RANGE: &str = "ER124";
 pub(super) const ER125_OPERATOR_CONSTRUCTOR_PAIR: &str = "ER125";
 
@@ -84,6 +86,7 @@ fn check_class_restrictions(
             def,
             diags,
             iterators: HashSet::new(),
+            clocked_class: class_uses_clocked_operators(class),
         };
         scan.scan_equations(&class.equations, EqContext::default());
         scan.scan_equations(
@@ -142,6 +145,56 @@ struct EquationScan<'a> {
     def: &'a StoredDefinition,
     diags: &'a mut Vec<Diagnostic>,
     iterators: HashSet<String>,
+    /// The class's equations use synchronous (clocked) operators, so its
+    /// plain equations may belong to a clocked partition (MLS §16.7).
+    clocked_class: bool,
+}
+
+/// Whether any equation of `class` calls a synchronous-language operator
+/// that only makes sense in a clocked partition (MLS §16.4-§16.5).
+fn class_uses_clocked_operators(class: &ClassDef) -> bool {
+    struct ClockedOpFinder {
+        found: bool,
+    }
+    impl ast::Visitor for ClockedOpFinder {
+        fn visit_expr_function_call_ctx(
+            &mut self,
+            comp: &ComponentReference,
+            args: &[Expression],
+            ctx: ast::FunctionCallContext,
+        ) -> std::ops::ControlFlow<()> {
+            if matches!(
+                builtin_name(comp),
+                Some(
+                    "previous"
+                        | "interval"
+                        | "subSample"
+                        | "superSample"
+                        | "shiftSample"
+                        | "backSample"
+                        | "firstTick"
+                        | "Clock"
+                )
+            ) {
+                self.found = true;
+                return std::ops::ControlFlow::Break(());
+            }
+            ast::visitor::walk_expr_function_call_ctx_default(self, comp, args, ctx)
+        }
+    }
+    let mut finder = ClockedOpFinder { found: false };
+    for equation in &class.equations {
+        let _ = finder.visit_equation(equation);
+        if finder.found {
+            return true;
+        }
+    }
+    class.components.values().any(|comp| {
+        comp.binding.as_ref().is_some_and(|binding| {
+            let _ = finder.visit_expression(binding);
+            finder.found
+        })
+    })
 }
 
 impl EquationScan<'_> {
@@ -540,13 +593,38 @@ impl EquationScan<'_> {
         let Some(token) = comp.parts.first().map(|part| &part.ident) else {
             return;
         };
+        let token = token.clone();
+        self.push_impure_call(&reference_text(comp), &token);
+    }
+
+    /// Report an impure call in a plain equation. In a class that uses
+    /// clocked operators the equation may belong to a clocked partition,
+    /// which is evaluated only at clock ticks exactly like a when-clause;
+    /// OpenModelica accepts impure calls there (Modelica_DeviceDrivers'
+    /// clocked `Packager` prints from such an equation), so it is WR012.
+    fn push_impure_call(&mut self, name: &str, token: &Token) {
+        if self.clocked_class {
+            self.diags.push(Diagnostic::warning(
+                WR012_IMPURE_CALL_IN_CLOCKED_EQUATION,
+                format!(
+                    "impure function '{name}' is called from an equation of a class with clocked \
+                     partitions; it is accepted on the assumption that the equation is clocked \
+                     (MLS §12.3, §16.7)"
+                ),
+                label_from_token(
+                    token,
+                    "restrictions/impure_call_clocked_context",
+                    "impure call in a (presumably clocked) equation",
+                ),
+            ));
+            return;
+        }
         self.diags.push(semantic_error(
             ER088_IMPURE_CALL_CONTEXT,
             format!(
-                "impure function '{}' may only be called from an impure function, a \
+                "impure function '{name}' may only be called from an impure function, a \
                  `when` equation or statement, an initial equation or initial algorithm, or a \
-                 `parameter` binding (MLS §12.3)",
-                reference_text(comp)
+                 `parameter` binding (MLS §12.3)"
             ),
             label_from_token(
                 token,
@@ -567,19 +645,7 @@ impl EquationScan<'_> {
         };
         let _ = collector.visit_expression(expr);
         for (name, token) in collector.found {
-            self.diags.push(semantic_error(
-                ER088_IMPURE_CALL_CONTEXT,
-                format!(
-                    "impure function '{name}' may only be called from an impure function, a \
-                     `when` equation or statement, an initial equation or initial algorithm, or a \
-                     `parameter` binding (MLS §12.3)"
-                ),
-                label_from_token(
-                    &token,
-                    "restrictions/impure_call_context",
-                    "impure call in a continuous-time equation",
-                ),
-            ));
+            self.push_impure_call(&name, &token);
         }
     }
 

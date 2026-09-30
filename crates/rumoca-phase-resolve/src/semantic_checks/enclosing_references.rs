@@ -57,16 +57,29 @@ struct EnclosingReferenceVisitor<'a> {
 }
 
 impl EnclosingReferenceVisitor<'_> {
+    /// True when `target` is reached through a class that lexically encloses
+    /// the current class rather than through the current class itself.
+    ///
+    /// The nearest class scope that declares or inherits `target` is the one
+    /// the reference goes through. A nested class and its enclosing class can
+    /// inherit the very same declaration (both extend a common base, e.g. a
+    /// nested `block UnitDelay extends Modelica.Blocks.Discrete.UnitDelay`
+    /// inside a `DiscreteSISO` block); the nested class's own inherited
+    /// member then wins and the reference is not an enclosing capture.
     fn is_declared_in_enclosing_class(&self, current_scope: ScopeId, target: DefId) -> bool {
-        let mut enclosing = self.tree.scope_tree.parent(current_scope);
-        while let Some(scope) = enclosing {
-            let is_class_scope = self.tree.scope_to_class.contains_key(&scope);
-            let declares_target = self.tree.scope_tree.declares(scope, target)
-                || self.tree.scope_tree.inherits_unique(scope, target);
+        let mut scope = Some(current_scope);
+        let mut is_current_class = true;
+        while let Some(candidate) = scope {
+            let is_class_scope = self.tree.scope_to_class.contains_key(&candidate);
+            let declares_target = self.tree.scope_tree.declares(candidate, target)
+                || self.tree.scope_tree.inherits_unique(candidate, target);
             if is_class_scope && declares_target {
-                return true;
+                return !is_current_class;
             }
-            enclosing = self.tree.scope_tree.parent(scope);
+            if is_class_scope {
+                is_current_class = false;
+            }
+            scope = self.tree.scope_tree.parent(candidate);
         }
         false
     }

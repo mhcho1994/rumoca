@@ -514,7 +514,7 @@ fn clk_006_clocked_variable_continuous_access_rejected() {
             when c then
                 xc = previous(xc) + 1;
             end when;
-            y = 2 * xc;
+            der(y) = 2 * xc;
         end M;
     "#,
         "M",
