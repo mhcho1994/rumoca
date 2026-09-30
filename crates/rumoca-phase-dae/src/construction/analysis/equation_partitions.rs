@@ -211,8 +211,19 @@ fn oriented_discrete_connection<'flat>(
     else {
         return None;
     };
-    let (lhs_name, lhs_subscripts) = discrete_value_base_reference(lhs, roles)?;
-    let (rhs_name, rhs_subscripts) = discrete_value_base_reference(rhs, roles)?;
+    let (lhs_name, lhs_subscripts) = discrete_connection_endpoint(lhs, roles)?;
+    let (rhs_name, rhs_subscripts) = discrete_connection_endpoint(rhs, roles)?;
+    // An external input is never a target: it can only drive the other side.
+    match (roles.get(lhs_name), roles.get(rhs_name)) {
+        (Some(PlannedRole::Input), Some(PlannedRole::DiscreteValue)) => {
+            return Some((rhs_name, rhs_subscripts, lhs.as_ref()));
+        }
+        (Some(PlannedRole::DiscreteValue), Some(PlannedRole::Input)) => {
+            return Some((lhs_name, lhs_subscripts, rhs.as_ref()));
+        }
+        (Some(PlannedRole::DiscreteValue), Some(PlannedRole::DiscreteValue)) => {}
+        _ => return None,
+    }
     let lhs_variable = flat.variables.get(lhs_name)?;
     let rhs_variable = flat.variables.get(rhs_name)?;
     let lhs_rank = connection_ranks.get(lhs_name).copied();
@@ -541,12 +552,19 @@ pub(super) fn discrete_connection_ranks(
         else {
             continue;
         };
-        let Some((lhs, _)) = discrete_value_base_reference(lhs, roles) else {
+        let Some((lhs, _)) = discrete_connection_endpoint(lhs, roles) else {
             continue;
         };
-        let Some((rhs, _)) = discrete_value_base_reference(rhs, roles) else {
+        let Some((rhs, _)) = discrete_connection_endpoint(rhs, roles) else {
             continue;
         };
+        // MLS §4.4.2.2: a top-level input is driven by the environment, so it
+        // is the producer of every discrete-valued connector it connects to.
+        for endpoint in [lhs, rhs] {
+            if matches!(roles.get(endpoint), Some(PlannedRole::Input)) {
+                producers.insert(endpoint.clone());
+            }
+        }
         neighbors.entry(lhs.clone()).or_default().push(rhs.clone());
         neighbors.entry(rhs.clone()).or_default().push(lhs.clone());
     }
@@ -620,6 +638,26 @@ fn discrete_value_base_reference<'flat>(
     let name = name.var_name();
     matches!(roles.get(name), Some(PlannedRole::DiscreteValue))
         .then_some((name, subscripts.as_slice()))
+}
+
+/// A connection endpoint that can take part in a discrete-value connection
+/// set: a discrete-valued coordinate, or a top-level input that drives one.
+fn discrete_connection_endpoint<'flat>(
+    expression: &'flat Expression,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> Option<(&'flat VarName, &'flat [Subscript])> {
+    let Expression::VarRef {
+        name, subscripts, ..
+    } = expression
+    else {
+        return None;
+    };
+    let name = name.var_name();
+    matches!(
+        roles.get(name),
+        Some(PlannedRole::DiscreteValue | PlannedRole::Input)
+    )
+    .then_some((name, subscripts.as_slice()))
 }
 
 pub(in crate::construction) fn discrete_value_assignment<'flat>(
