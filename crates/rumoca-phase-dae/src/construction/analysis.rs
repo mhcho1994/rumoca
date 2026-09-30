@@ -19,6 +19,7 @@ mod function_ranges;
 mod function_record_assemblies;
 mod function_reductions;
 mod function_returns;
+mod function_static_extents;
 mod function_value_types;
 mod history_operators;
 mod initial_algorithms;
@@ -657,7 +658,22 @@ fn analyze_expression_support(
     constants: &EvalContext,
 ) -> Result<ExpressionSupportPlans, ToDaeError> {
     Ok(ExpressionSupportPlans {
-        comprehensions: analyze_comprehensions(all_model_expressions(flat), constants)?,
+        // MLS §8.3.7: an assertion's condition, message and level are model
+        // expressions too, and a comprehension there (`andTrue({... for i in
+        // 1:n})`) is lowered through the same model-wide plan.
+        comprehensions: analyze_comprehensions(
+            all_model_expressions(flat).chain(
+                flat.assert_equations
+                    .iter()
+                    .chain(&flat.initial_assert_equations)
+                    .flat_map(|assertion| {
+                        [&assertion.condition, &assertion.message]
+                            .into_iter()
+                            .chain(assertion.level.as_ref())
+                    }),
+            ),
+            constants,
+        )?,
         delays: analyze_delays(flat, constants)?,
     })
 }

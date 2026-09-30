@@ -133,6 +133,11 @@ fn validate_statement_function(
         context.flat,
         returned.has_returns,
     )?;
+    let source = super::function_static_extents::settle_static_extents(
+        &source,
+        returned_context.static_integers,
+        returned_context.shapes,
+    );
     let mut definitions = FunctionDefinitions::new(function);
     let certified_output_seeds = certified_return_output_seeds(
         function,
@@ -176,6 +181,11 @@ fn validate_nonreturn_path(
         context.flat,
         false,
     )?;
+    let source = super::function_static_extents::settle_static_extents(
+        &source,
+        context.static_integers,
+        &shapes,
+    );
     let mut definitions = FunctionDefinitions::new(function);
     validate_function_statements(&source, nonreturn_context, &mut definitions)?;
     require_total_outputs(function, &definitions)

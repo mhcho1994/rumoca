@@ -111,6 +111,7 @@ fn local_modifier_replaces_unrelated_parent_final_key() {
             value: make_int_expr(5),
             source: Some(make_comp_ref_expr(&["outer_m"])),
             source_scope: None,
+            structural_real: None,
             prefixes: ModifierPrefixes::default(),
         },
         &parent_snapshot,

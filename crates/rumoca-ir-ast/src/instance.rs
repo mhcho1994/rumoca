@@ -406,6 +406,15 @@ pub struct ModificationValue {
     /// MLS §7.2.4: component modifications are evaluated in the scope where the
     /// modification appears, which may differ from the modified component's scope.
     pub source_scope: Option<QualifiedName>,
+    /// The Real value of the modifier decided in the scope that wrote it.
+    ///
+    /// MLS §7.2.4 evaluates a modifier where it is written, but a Real value
+    /// keeps its symbolic form in `value` so parameter propagation survives
+    /// into the flat model. A structural parameter expression (MLS §4.4.5,
+    /// §10.1) read in the modified component, such as `noDynamics = not (T >
+    /// 0)` under `T = T1`, needs the value the writing scope gave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_real: Option<f64>,
     /// True if the modification has `each` prefix.
     pub each: bool,
     /// True if the modification has `final` prefix.
@@ -421,6 +430,7 @@ impl ModificationValue {
             value,
             source: None,
             source_scope: None,
+            structural_real: None,
             each: false,
             final_: false,
         }
@@ -435,6 +445,7 @@ impl ModificationValue {
             value,
             source: None,
             source_scope: None,
+            structural_real: None,
             each,
             final_,
         }
@@ -466,6 +477,7 @@ impl ModificationValue {
             value,
             source,
             source_scope,
+            structural_real: None,
             each,
             final_,
         }

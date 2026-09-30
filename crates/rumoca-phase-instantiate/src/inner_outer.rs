@@ -90,6 +90,12 @@ pub(crate) fn retry_with_synthetic_inners(
 
         let qn = ast::QualifiedName::from_ident(&mi.name);
 
+        // MLS §4.4.5/§5.4: conditions below compare the synthesized inner's
+        // Real parameters (`sphereDiameter > 0` with `sphereDiameter =
+        // world.defaultBodyDiameter`), so record their class defaults exactly
+        // as a declared inner without modifiers is pre-registered.
+        register_synthetic_inner_reals(tree, inner_class, &qn, &mut ctx)
+            .map_err(|_| SyntheticInnerError::InstantiationFailed)?;
         // Register in root scope so outer lookups will find it
         ctx.register_inner_in_root(&mi.name, qn, &mi.type_name, mi.type_def_id);
 
@@ -296,6 +302,26 @@ struct InnerParamPrescan<'a> {
     resolved_type_name: &'a str,
     instance_path: &'a ast::QualifiedName,
     parent_components: &'a IndexMap<String, ast::Component>,
+}
+
+/// Record the Real parameter values of a synthesized default inner (MLS §5.4).
+fn register_synthetic_inner_reals(
+    tree: &ast::ClassTree,
+    inner_class: &ast::ClassDef,
+    instance_path: &ast::QualifiedName,
+    ctx: &mut InstantiateContext,
+) -> InstantiateResult<()> {
+    let template = get_or_compute_template(tree, inner_class, &mut ctx.template_cache)?;
+    let class_scope = ast::ModificationEnvironment::new();
+    let inner_ctx = InstantiateEvalCtx {
+        tree,
+        mod_env: &class_scope,
+        effective_components: &template.effective_components,
+        resolve_class_components: resolve_effective_components_for_eval,
+    };
+    let reals = extract_real_params_with_mods(&inner_ctx, &FxHashMap::default());
+    ctx.register_known_real_params(instance_path, &reals);
+    Ok(())
 }
 
 /// Record the Boolean and Real parameter values of a not-yet-instantiated `inner`.

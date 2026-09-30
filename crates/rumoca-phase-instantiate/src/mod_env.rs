@@ -12,7 +12,8 @@ use super::nested_scope::remap_redeclare_class_modifier;
 use super::type_overrides::{TypeOverrideMap, find_nested_class_in_hierarchy};
 use super::{InstantiateContext, InstantiateError, InstantiateResult};
 use rumoca_eval_ast::eval_instantiate::{
-    InstantiateEvalCtx, evaluate_component_condition, try_eval_integer_expr, try_eval_string_expr,
+    InstantiateEvalCtx, evaluate_component_condition, try_eval_integer_expr, try_eval_real_expr,
+    try_eval_string_expr,
 };
 use rumoca_ir_ast as ast;
 use rumoca_ir_ast::AstIndexMap as IndexMap;
@@ -96,6 +97,7 @@ struct ScopedModifierBinding {
     value: ast::Expression,
     source: Option<ast::Expression>,
     source_scope: Option<ast::QualifiedName>,
+    structural_real: Option<f64>,
     prefixes: ModifierPrefixes,
 }
 
@@ -166,6 +168,17 @@ fn insert_modifier_value_with_structural_overrides(
         },
         options.allow_string_eval,
     )?;
+    // MLS §7.2.4: decide a Real modifier where it is written, so structural
+    // parameter expressions of the modified component can read it.
+    let structural_real = try_eval_real_expr(
+        &InstantiateEvalCtx {
+            tree,
+            mod_env: ctx.mod_env(),
+            effective_components,
+            resolve_class_components: resolve_effective_components_for_eval,
+        },
+        value_expr,
+    );
     let structural_field_overrides = collect_structural_integer_fields_from_sibling_reference(
         value_expr,
         ctx.mod_env(),
@@ -179,6 +192,7 @@ fn insert_modifier_value_with_structural_overrides(
             value: resolved_expr,
             source: binding_source,
             source_scope: binding_source_scope.clone(),
+            structural_real,
             prefixes: options.prefixes,
         },
         insert_ctx.parent_snapshot,
@@ -193,6 +207,7 @@ fn insert_modifier_value_with_structural_overrides(
                 value: field_value,
                 source: None,
                 source_scope: binding_source_scope.clone(),
+                structural_real: None,
                 prefixes: options.prefixes,
             },
             insert_ctx.parent_snapshot,
@@ -430,6 +445,7 @@ fn insert_scoped_modifier_binding(
         value,
         source,
         source_scope,
+        structural_real,
         prefixes,
     } = binding;
     // MLS §7.2: local modifier bindings must replace colliding parent-scope keys.
@@ -459,16 +475,15 @@ fn insert_scoped_modifier_binding(
     if replace_parent {
         mod_env.active.shift_remove(&key);
     }
-    mod_env.add(
-        key,
-        rumoca_ir_ast::ModificationValue::with_source_scope_and_prefixes(
-            value,
-            source,
-            source_scope,
-            prefixes.each,
-            prefixes.final_,
-        ),
+    let mut modification = rumoca_ir_ast::ModificationValue::with_source_scope_and_prefixes(
+        value,
+        source,
+        source_scope,
+        prefixes.each,
+        prefixes.final_,
     );
+    modification.structural_real = structural_real;
+    mod_env.add(key, modification);
     Ok(())
 }
 

@@ -81,7 +81,7 @@ pub fn instantiate_model_with_outcome_options(
 
     // Instantiate the root model
     if let Err(e) = instantiate_class(tree, model, None, None, &mut ctx, &mut overlay) {
-        return InstantiationOutcome::Error(e);
+        return retry_failed_instantiation_with_synthetic_inners(tree, model, &ctx, options, e);
     }
 
     // Check if there are missing inner declarations
@@ -89,15 +89,7 @@ pub fn instantiate_model_with_outcome_options(
         // MLS §5.4: Attempt to synthesize default inner declarations and retry.
         let missing = ctx.missing_inner_infos().to_vec();
         match retry_with_synthetic_inners(tree, model, &missing, options) {
-            Ok(mut retry_overlay) => {
-                retry_overlay.synthesized_inners = missing
-                    .iter()
-                    .map(|info| info.name.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                successful_instantiation_outcome(tree, retry_overlay)
-            }
+            Ok(retry_overlay) => synthesized_inner_outcome(tree, retry_overlay, &missing),
             Err(SyntheticInnerError::StillMissing { names }) => {
                 let span_by_name: std::collections::HashMap<_, _> = missing
                     .iter()
@@ -126,6 +118,45 @@ pub fn instantiate_model_with_outcome_options(
     } else {
         successful_instantiation_outcome(tree, overlay)
     }
+}
+
+/// Retry a failed instantiation once its missing inners are synthesized.
+///
+/// MLS §5.4: an `outer` element without an enclosing `inner` denotes the
+/// default inner a tool synthesizes. A structural decision that reads such an
+/// element — `Parts.Body`'s `sphere if world.enableAnimation and ...` — cannot
+/// be taken before that inner exists, so the first pass fails on it. When the
+/// failure left inners missing, the synthesized instance is authoritative;
+/// otherwise, or when the retry fails too, the original error stands.
+fn retry_failed_instantiation_with_synthetic_inners(
+    tree: &ast::ClassTree,
+    model: &ast::ClassDef,
+    ctx: &InstantiateContext,
+    options: InstantiateOptions,
+    error: Box<InstantiateError>,
+) -> InstantiationOutcome {
+    if !ctx.has_missing_inners() {
+        return InstantiationOutcome::Error(error);
+    }
+    let missing = ctx.missing_inner_infos().to_vec();
+    match retry_with_synthetic_inners(tree, model, &missing, options) {
+        Ok(retry_overlay) => synthesized_inner_outcome(tree, retry_overlay, &missing),
+        Err(_) => InstantiationOutcome::Error(error),
+    }
+}
+
+fn synthesized_inner_outcome(
+    tree: &ast::ClassTree,
+    mut overlay: ast::InstanceOverlay,
+    missing: &[MissingInnerInfo],
+) -> InstantiationOutcome {
+    overlay.synthesized_inners = missing
+        .iter()
+        .map(|info| info.name.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    successful_instantiation_outcome(tree, overlay)
 }
 
 fn successful_instantiation_outcome(
