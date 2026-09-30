@@ -371,6 +371,10 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             argument_value = self.coerce_value(argument_value, value_type, at)?;
         }
         let value = argument_value.only_register(at)?;
+        let boolean_elements = self
+            .view
+            .expression(argument)
+            .is_some_and(|node| node.value_type().scalar_type() == dae::ScalarType::Boolean);
         let register = match builtin {
             dae::PureBuiltin::Abs => self
                 .builder
@@ -442,6 +446,20 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             dae::PureBuiltin::Product => {
                 self.builder
                     .reduce(solve::SolveReductionOperator::Product, value, at)
+            }
+            // `false < true`: the least Boolean element is `false` unless all
+            // are true, and the greatest is `true` unless none is.
+            dae::PureBuiltin::Min if arguments.len() == 1 && boolean_elements => self
+                .builder
+                .reduce(solve::SolveReductionOperator::All, value, at),
+            dae::PureBuiltin::Max if arguments.len() == 1 && boolean_elements => {
+                let negated = self
+                    .builder
+                    .unary(solve::SolveUnaryOperator::Not, value, at)?;
+                let none = self
+                    .builder
+                    .reduce(solve::SolveReductionOperator::All, negated, at)?;
+                self.builder.unary(solve::SolveUnaryOperator::Not, none, at)
             }
             dae::PureBuiltin::Min if arguments.len() == 1 => {
                 self.builder

@@ -385,8 +385,8 @@ pub(super) fn builtin_result<'dae>(
     if builtin == PureBuiltin::Size {
         return size_result(storage, arguments, first, at);
     }
-    if builtin == PureBuiltin::Integer {
-        return integer_result(arguments, &first, at);
+    if let Some(result) = non_numeric_operand_result(builtin, arguments, &first, at) {
+        return result;
     }
     expect_numeric(first.scalar_type(), at)?;
     match builtin {
@@ -463,6 +463,29 @@ pub(super) fn builtin_result<'dae>(
         PureBuiltin::NoEvent => {
             unreachable!("type-preserving noEvent returns before numeric builtin checks")
         }
+    }
+}
+
+/// The builtins whose operand need not be numeric: `Integer(e)` (see
+/// [`integer_result`]) and the one-argument `min(A)`/`max(A)` of a Boolean
+/// array, which MLS §10.3.4 defines "as defined by <", ordering
+/// `false < true` (MSL `BooleanVectors.andTrue`/`orTrue`).
+fn non_numeric_operand_result(
+    builtin: PureBuiltin,
+    arguments: &[ExprId<'_>],
+    first: &ValueType,
+    at: DaeProvenance,
+) -> Option<Result<ValueType, DaeConstructionError>> {
+    match builtin {
+        PureBuiltin::Integer => Some(integer_result(arguments, first, at)),
+        PureBuiltin::Min | PureBuiltin::Max
+            if arguments.len() == 1
+                && first.scalar_type() == ScalarType::Boolean
+                && !first.is_scalar() =>
+        {
+            Some(Ok(ValueType::scalar(ScalarType::Boolean)))
+        }
+        _ => None,
     }
 }
 
