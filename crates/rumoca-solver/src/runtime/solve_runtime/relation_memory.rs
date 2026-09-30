@@ -438,8 +438,7 @@ impl SolveRuntime {
         for mode in 0..(1usize << candidates.len()) {
             let sides = mode_sides(mode, candidates.len());
             if self.mode_is_consistent(&candidates, &sides, input, project_algebraics)? {
-                root_relation_overrides
-                    .retain(|(root, _)| !candidates.iter().any(|(c, _)| c == root));
+                drop_overrides_of(root_relation_overrides, &roots);
                 root_relation_overrides.extend(roots.iter().copied().zip(sides));
                 return Ok(ModeSearch::Found);
             }
@@ -1229,6 +1228,17 @@ enum ModeSearch {
     Unsearched { roots: Vec<usize>, limit: usize },
 }
 
+/// Remove the pinned sides of every root in `roots`, keeping the others in order.
+fn drop_overrides_of(overrides: &mut Vec<(usize, f64)>, roots: &[usize]) {
+    let mut kept = Vec::with_capacity(overrides.len());
+    for entry in overrides.drain(..) {
+        if !roots.contains(&entry.0) {
+            kept.push(entry);
+        }
+    }
+    *overrides = kept;
+}
+
 /// The relation sides one joint mode assigns: bit `k` of `mode` picks the
 /// upper side for candidate `k`.
 fn mode_sides(mode: usize, count: usize) -> Vec<f64> {
@@ -1237,4 +1247,16 @@ fn mode_sides(mode: usize, count: usize) -> Vec<f64> {
         sides.push(if mode >> bit & 1 == 1 { 1.0 } else { 0.0 });
     }
     sides
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    #[test]
+    fn dropping_overrides_keeps_only_the_other_roots_in_order() {
+        let mut overrides = vec![(3, 1.0), (1, 0.0), (5, 1.0), (1, 1.0)];
+        drop_overrides_of(&mut overrides, &[1, 4]);
+        assert_eq!(overrides, vec![(3, 1.0), (5, 1.0)]);
+    }
 }

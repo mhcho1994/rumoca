@@ -111,13 +111,14 @@ pub trait StatementRewriter: ExpressionRewriter {
     }
 
     fn rewrite_for_indices(&mut self, indices: &[ForIndex]) -> Vec<ForIndex> {
-        indices
-            .iter()
-            .map(|index| ForIndex {
+        let mut rewritten = Vec::with_capacity(indices.len());
+        for index in indices {
+            rewritten.push(ForIndex {
                 ident: index.ident.clone(),
                 range: self.rewrite_expression(&index.range),
-            })
-            .collect()
+            });
+        }
+        rewritten
     }
 
     fn rewrite_component_reference(
@@ -276,15 +277,14 @@ pub trait FallibleStatementRewriter: FallibleExpressionRewriter {
     }
 
     fn rewrite_for_indices(&mut self, indices: &[ForIndex]) -> Result<Vec<ForIndex>, Self::Error> {
-        indices
-            .iter()
-            .map(|index| {
-                Ok(ForIndex {
-                    ident: index.ident.clone(),
-                    range: self.rewrite_expression(&index.range)?,
-                })
-            })
-            .collect()
+        let mut rewritten = Vec::with_capacity(indices.len());
+        for index in indices {
+            rewritten.push(ForIndex {
+                ident: index.ident.clone(),
+                range: self.rewrite_expression(&index.range)?,
+            });
+        }
+        Ok(rewritten)
     }
 
     fn rewrite_component_reference(
