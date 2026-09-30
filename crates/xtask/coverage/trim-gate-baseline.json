@@ -259,7 +259,7 @@
       "needs_targeted_test_candidates": 120
     },
     "rumoca-solver": {
-      "zero_count_functions_total": 2476,
+      "zero_count_functions_total": 2501,
       "candidates_total": 1296,
       "dead_likely_candidates": 162,
       "needs_targeted_test_candidates": 902
