@@ -1268,7 +1268,11 @@ fn constant_context(flat: &flat::Model) -> Result<EvalContext, ToDaeError> {
             {
                 continue;
             }
-            let Some(binding) = &variable.binding else {
+            // MLS §8.6: a fixed parameter with no binding equation takes its
+            // `start` value (tools accept it with a warning, as `samplePeriod`
+            // of `Modelica.Blocks.Interfaces.DiscreteBlock` relies on).
+            let from_start = variable.binding.is_none();
+            let Some(binding) = variable.binding.as_ref().or(variable.start.as_ref()) else {
                 continue;
             };
             match eval_expr(binding, &context) {
@@ -1276,6 +1280,7 @@ fn constant_context(flat: &flat::Model) -> Result<EvalContext, ToDaeError> {
                     context.add_instance_parameter(variable.instance_id, name.to_string(), value);
                     progress = true;
                 }
+                Err(_) if from_start => {}
                 Err(error) if error.runtime_dependent_reason().is_some() => {}
                 Err(error) => {
                     return Err(ToDaeError::unsupported_flat(
