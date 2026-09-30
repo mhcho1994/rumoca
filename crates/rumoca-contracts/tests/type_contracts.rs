@@ -1046,6 +1046,40 @@ fn type_022_replacement_with_replaceable_member_rejected() {
     );
 }
 
+#[test]
+fn type_022_nominal_subclass_with_replaceable_member_accepted() {
+    // A replacement that extends the constraint is its subtype even when it
+    // adds a replaceable element (AixLib/Buildings `Terminal extends
+    // BaseTerminal` with a replaceable `PhaseSystem`). OpenModelica accepts.
+    expect_success(
+        r#"
+        model M
+            connector BaseTerminal
+            end BaseTerminal;
+            connector Terminal
+                extends BaseTerminal;
+                replaceable package P = Pk;
+                Real v;
+                flow Real i;
+            end Terminal;
+            package Pk
+                constant Integer n = 1;
+            end Pk;
+            model Holder
+                replaceable BaseTerminal t;
+            end Holder;
+            model Use
+                extends Holder(redeclare Terminal t);
+            equation
+                t.v = 1;
+            end Use;
+            Use u;
+        end M;
+    "#,
+        "M",
+    );
+}
+
 // =============================================================================
 // TYPE-026: If B is final, A must also be final and have same semantic contents
 // =============================================================================

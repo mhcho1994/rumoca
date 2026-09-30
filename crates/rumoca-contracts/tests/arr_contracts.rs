@@ -390,6 +390,75 @@ fn arr_026_excess_subscripts_rejected() {
     );
 }
 
+#[test]
+fn arr_026_size_condition_selects_if_equation_branch() {
+    // MLS §3.8 / §8.3.4: `size(u, 1)` is a parameter expression even when
+    // `u` is a time-varying input, so the if-equation is resolved at
+    // translation time and the unselected `uTemp[1]` branches are not
+    // bounds-checked against the empty array (CDL `MultiOr` pattern).
+    expect_success(
+        r#"
+        model Test
+            parameter Integer nin = 0;
+            input Boolean u[nin];
+            output Boolean y;
+        protected
+            Boolean uTemp[nin];
+        equation
+            if size(u, 1) > 1 then
+                uTemp[1] = u[1];
+                for i in 2:size(u, 1) loop
+                    uTemp[i] = u[i] or uTemp[i - 1];
+                end for;
+                y = uTemp[nin];
+            elseif size(u, 1) == 1 then
+                uTemp[1] = u[1];
+                y = uTemp[1];
+            else
+                y = false;
+            end if;
+        end Test;
+    "#,
+        "Test",
+    );
+}
+
+#[test]
+fn arr_026_parameter_if_expression_skips_unselected_branch() {
+    // `X_w = if Medium.nXi == 0 then 0 else Xi[1]` (IBPSA MediumColumn):
+    // only the selected branch of a parameter if-expression is evaluated.
+    expect_success(
+        r#"
+        model Test
+            parameter Integer n = 0;
+            Real xs[n];
+            Real y;
+        equation
+            y = if n == 0 then 0 else xs[1];
+        end Test;
+    "#,
+        "Test",
+    );
+}
+
+#[test]
+fn arr_026_parameter_if_expression_checks_selected_branch() {
+    expect_failure_in_phase_with_code(
+        r#"
+        model Test
+            parameter Integer n = 0;
+            Real xs[n];
+            Real y;
+        equation
+            y = if n == 0 then xs[1] else 0;
+        end Test;
+    "#,
+        "Test",
+        FailedPhase::Typecheck,
+        "ET009",
+    );
+}
+
 // =============================================================================
 // ARR-028: Equality type equivalent
 // "The operands need to be type equivalent"
@@ -841,8 +910,11 @@ fn arr_013_size_of_undeclared_expandable_member_rejected() {
         end M;
     "#,
         "M",
-        FailedPhase::Instantiate,
-        "EI007",
+        // No connection creates `b.sig` (MLS §9.1.3), so the reference names
+        // nothing; Instantiate leaves undeclared expandable members
+        // unresolved (TOOLBUG-078) and Typecheck reports the unknown member.
+        FailedPhase::Typecheck,
+        "ET001",
     );
 }
 

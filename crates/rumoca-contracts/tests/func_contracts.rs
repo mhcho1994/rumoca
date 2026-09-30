@@ -1324,3 +1324,42 @@ fn func_038_explicit_destructor_call_rejected() {
         "ER134",
     );
 }
+
+#[test]
+fn func_redeclared_package_function_is_selected_through_alias() {
+    // `Medium.f(T)` against `replaceable package Medium = PM`, with the
+    // instance selecting `Air`, which redeclares `f` (TOOLBUG-077).
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        package E
+            partial package PM
+                replaceable partial function f
+                    input Real x;
+                    output Real y;
+                end f;
+            end PM;
+            package Air
+                extends PM;
+                redeclare function extends f
+                algorithm
+                    y := 2 * x;
+                end f;
+            end Air;
+            model Src
+                replaceable package Medium = PM;
+                parameter Real T = 3;
+                Real z = Medium.f(T);
+            end Src;
+            model Top
+                Src s(redeclare package Medium = Air);
+                Real t(start = 0, fixed = true);
+            equation
+                der(t) = 1;
+            end Top;
+        end E;
+    "#,
+        "E.Top",
+        0.1,
+    );
+    assert_eq!(trace.final_value("s.z"), 6.0);
+}

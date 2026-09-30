@@ -153,6 +153,9 @@ fn exact_function_exposure(
             &mut exposures,
         );
         if exposures.is_empty() {
+            collect_selected_package_exposures(ctx, owner, implementation, &mut exposures);
+        }
+        if exposures.is_empty() {
             return Err(FlattenError::missing_function_selection_identity(
                 reference.as_str(),
                 "exact callable owner does not expose the selected implementation",
@@ -175,6 +178,41 @@ fn exact_function_exposure(
             span,
         )),
     }
+}
+
+/// Exposures of a function selected through a replaceable package alias.
+///
+/// `Medium.f(x)` written against `replaceable package Medium = PM` keeps the
+/// lexical alias as the prefix identity, while Instantiate has already
+/// retargeted the call to the implementation of the package this instance
+/// selected (`redeclare package Medium = Air` -> `Air.f`). The alias's own
+/// hierarchy cannot expose `Air.f`, so the owner that exposes it is the
+/// package declaring the selected implementation. Only a replaceable alias
+/// has an instance-dependent selection; any other owner keeps the strict
+/// check.
+fn collect_selected_package_exposures(
+    ctx: &FunctionOverrideRewriteContext<'_>,
+    owner: rumoca_core::DefId,
+    implementation: rumoca_core::DefId,
+    exposures: &mut FxHashSet<rumoca_core::DefId>,
+) {
+    if !ctx
+        .class_index
+        .get(owner)
+        .is_some_and(|class| class.is_replaceable)
+    {
+        return;
+    }
+    let Some(selected_package) = ctx.class_index.parent_def_id(implementation) else {
+        return;
+    };
+    collect_function_exposures_for_implementation(
+        ctx.class_index,
+        selected_package,
+        implementation,
+        &mut FxHashSet::default(),
+        exposures,
+    );
 }
 
 fn resolved_function_rewrite(

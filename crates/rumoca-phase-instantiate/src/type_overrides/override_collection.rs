@@ -39,6 +39,15 @@ pub(crate) fn build_type_override_map(
         }
     });
 
+    // 1b. Nested classes inherited through extends are elements of the class
+    // too (MLS §7.1), and are found before the enclosing scope's. A
+    // `package Medium = Air` declared in a base model must still be the
+    // `Medium` that `sou(redeclare package Medium = Medium)` forwards when
+    // a derived model is instantiated.
+    for base in extends_base_classes(tree, class) {
+        collect_nested_overrides_in_extends_chain(tree, base, mod_env, &mut overrides);
+    }
+
     // 2. Collect from the enclosing class's nested classes.
     // This handles the pattern where a record type (like ThermodynamicState)
     // is redeclared in the enclosing package, and components in the model

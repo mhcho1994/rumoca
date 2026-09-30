@@ -18,9 +18,19 @@ pub(super) fn extract_component_attrs_and_binding(
     mod_env: &ast::ModificationEnvironment,
     eval_ctx: &InstantiateEvalCtx<'_>,
     imports: &[(String, String)],
+    owner_path: &ast::QualifiedName,
 ) -> InstantiateResult<ComponentAttrsAndBinding> {
     // Pass component name so mod_env can be checked for outer modifications.
-    let mut attrs = extract_attributes(comp, mod_env, &comp.name, eval_ctx, imports)?;
+    let mut attrs = extract_attributes(
+        comp,
+        &AttributeScope {
+            mod_env,
+            comp_name: &comp.name,
+            owner_path,
+        },
+        eval_ctx,
+        imports,
+    )?;
     let (binding, binding_from_modification, binding_source_scope) = extract_binding(comp, mod_env);
     let binding_path = ast::QualifiedName::from_ident(&comp.name);
     let binding_modification = binding_from_modification
@@ -422,11 +432,13 @@ fn should_promote_binding_to_start(
 /// MLS §7.2.4.
 pub(super) fn extract_attributes(
     comp: &ast::Component,
-    mod_env: &ast::ModificationEnvironment,
-    comp_name: &str,
+    scope: &AttributeScope<'_>,
     eval_ctx: &InstantiateEvalCtx<'_>,
     imports: &[(String, String)],
 ) -> InstantiateResult<ExtractedAttributes> {
+    let AttributeScope {
+        mod_env, comp_name, ..
+    } = *scope;
     let mut source_scopes = IndexMap::default();
     let start_path = ast::QualifiedName::from_ident(comp_name).child("start");
     let start_from_mod_env = mod_env.get(&start_path).map(|value| {
@@ -452,6 +464,7 @@ pub(super) fn extract_attributes(
             eval_ctx,
             imports,
             value.source_scope.as_ref(),
+            scope.owner_path,
         )?),
         None => None,
     };
@@ -490,7 +503,8 @@ pub(super) fn extract_attributes(
                 attrs.display_unit = expr_to_string(value)
             }
             "stateSelect" if !has_outer_state_select => {
-                attrs.state_select = parse_required_state_select(value, eval_ctx, imports, None)?
+                attrs.state_select =
+                    parse_required_state_select(value, eval_ctx, imports, None, scope.owner_path)?
             }
             _ => {}
         }
@@ -509,6 +523,7 @@ fn parse_required_state_select(
     eval_ctx: &InstantiateEvalCtx<'_>,
     imports: &[(String, String)],
     source_scope: Option<&ast::QualifiedName>,
+    owner_path: &ast::QualifiedName,
 ) -> InstantiateResult<rumoca_core::StateSelect> {
     parse_state_select(value)
         .or_else(|| eval_state_select_expr_with_source_scope(eval_ctx, value, source_scope))
@@ -519,6 +534,14 @@ fn parse_required_state_select(
             let qualified = crate::dims::qualify_shape_expr_imports(eval_ctx.tree, value, imports);
             eval_state_select_expr_with_source_scope(eval_ctx, &qualified, source_scope)
         })
+        .or_else(|| {
+            // `medium(p(stateSelect = if medium.preferredMediumStates ...))`:
+            // the modifier is written outside the instance being built but
+            // names that instance's own members, which only its effective
+            // components know.
+            let local = reanchor_to_owner_instance(value, source_scope?, owner_path)?;
+            eval_state_select_expr_with_source_scope(eval_ctx, &local, None)
+        })
         .ok_or_else(|| {
             Box::new(InstantiateError::InvalidTypeAttribute {
                 attribute: "stateSelect".to_string(),
@@ -526,4 +549,69 @@ fn parse_required_state_select(
                 span: value.span(),
             })
         })
+}
+
+/// Where a component's attributes are looked up: the modification
+/// environment, the component's name in it, and the instance path of the
+/// class that declares the component (absolute, like modifier source scopes).
+#[derive(Clone, Copy)]
+pub(super) struct AttributeScope<'a> {
+    pub(super) mod_env: &'a ast::ModificationEnvironment,
+    pub(super) comp_name: &'a str,
+    pub(super) owner_path: &'a ast::QualifiedName,
+}
+
+/// Rewrite references written in `source_scope` that denote members of the
+/// instance at `owner_path` into references local to that instance.
+///
+/// MLS §7.2.4 evaluates a modifier in the scope where it is written. A
+/// modifier on `medium` written in `vol` is scoped at `vol`; its reference
+/// `medium.preferredMediumStates` then denotes `vol.medium.preferredMediumStates`,
+/// which is the local `preferredMediumStates` of the instance `vol.medium`
+/// being built. Returns `None` when nothing was re-anchored.
+fn reanchor_to_owner_instance(
+    value: &ast::Expression,
+    source_scope: &ast::QualifiedName,
+    owner_path: &ast::QualifiedName,
+) -> Option<ast::Expression> {
+    let relative = owner_path
+        .parts
+        .strip_prefix(source_scope.parts.as_slice())?;
+    if relative.is_empty() || relative.iter().any(|(_, subs)| !subs.is_empty()) {
+        return None;
+    }
+    let mut reanchor = OwnerReanchor {
+        relative,
+        rewritten: false,
+    };
+    let local = ast::ExpressionTransformer::transform_expression(&mut reanchor, value.clone());
+    reanchor.rewritten.then_some(local)
+}
+
+struct OwnerReanchor<'a> {
+    relative: &'a [(String, Vec<i64>)],
+    rewritten: bool,
+}
+
+impl ast::ExpressionTransformer for OwnerReanchor<'_> {
+    fn transform_component_ref_inner(
+        &mut self,
+        mut reference: ast::ComponentReference,
+    ) -> ast::ComponentReference {
+        let count = self.relative.len();
+        let names_owner_member = reference.parts.len() > count
+            && reference
+                .parts
+                .iter()
+                .zip(self.relative)
+                .all(|(part, (name, _))| {
+                    part.subs.as_ref().is_none_or(Vec::is_empty) && part.ident.text.as_ref() == name
+                });
+        if names_owner_member {
+            reference.parts.drain(..count);
+            reference.qualified_display_name = None;
+            self.rewritten = true;
+        }
+        reference
+    }
 }

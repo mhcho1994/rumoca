@@ -1563,6 +1563,13 @@ struct ComponentBindingInfo {
     binding_is_each: bool,
 }
 
+/// Instance path of the class declaring the component being instantiated.
+fn enclosing_instance_path(ctx: &InstantiateContext) -> ast::QualifiedName {
+    let mut path = ctx.current_path();
+    path.parts.pop();
+    path
+}
+
 fn prepare_component_binding_info(
     tree: &ast::ClassTree,
     comp: &ast::Component,
@@ -1585,7 +1592,13 @@ fn prepare_component_binding_info(
         binding_source_scope,
         binding_from_modification,
         binding_is_each,
-    } = extract_component_attrs_and_binding(comp, ctx.mod_env(), &eval_ctx, imports)?;
+    } = extract_component_attrs_and_binding(
+        comp,
+        ctx.mod_env(),
+        &eval_ctx,
+        imports,
+        &enclosing_instance_path(ctx),
+    )?;
     // Sibling component occurrences of this class are still being materialized,
     // so only class-alias selections can be proved for declaration-side
     // expressions here. A member that stays unproven keeps its absent identity

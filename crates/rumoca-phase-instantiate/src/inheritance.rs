@@ -203,8 +203,14 @@ fn validate_redeclaration(
             .map(|n| n.to_string())
             .unwrap_or_else(|| component.type_name.to_string());
 
-        // Try to resolve constraint type using def_id or tree lookup
-        let constraint_type = if let Some(def_id) = component.type_def_id
+        // Try to resolve constraint type using def_id or tree lookup. An
+        // explicit `constrainedby` clause is the constraint (MLS §7.3.2); the
+        // declared type is only the constraint when that clause is absent.
+        let constraint_def_id = match component.constrainedby.as_ref() {
+            Some(constraint) => constraint.def_id,
+            None => component.type_def_id,
+        };
+        let constraint_type = if let Some(def_id) = constraint_def_id
             && let Some(qualified) = tree.def_map.get(&def_id)
         {
             qualified.clone()
@@ -458,7 +464,8 @@ pub fn is_type_subtype_cached(
 
     // For class types, check if subtype's class extends supertype's class
     let result = if let Some(subtype_class) = find_class_in_tree(tree, subtype) {
-        let accepted = if class_extends_cached(tree, subtype_class, supertype, cache) {
+        let nominal = class_extends_cached(tree, subtype_class, supertype, cache);
+        let accepted = if nominal {
             true
         } else if let Some(supertype_class) = find_class_in_tree(tree, supertype) {
             // Check for sibling types: both extend the same base class.
@@ -483,6 +490,11 @@ pub fn is_type_subtype_cached(
                 subtype_class,
                 find_class_in_tree(tree, supertype),
             )
+            && (nominal
+                || crate::plug_compat::replaceability_compatible(
+                    subtype_class,
+                    find_class_in_tree(tree, supertype),
+                ))
     } else {
         false
     };
@@ -999,6 +1011,22 @@ fn apply_extends_modifications(
         )));
     }
 
+    if extend
+        .modifications
+        .iter()
+        .any(|modification| modification.redeclare)
+    {
+        let extend_span = location_to_span(&extend.location, &tree.source_map, "extends clause")?;
+        let redeclarations = collect_inherited_redeclarations(
+            tree,
+            base_class,
+            &target.components,
+            extend,
+            extend_span,
+        )?;
+        apply_collected_redeclarations(tree, target, &redeclarations);
+    }
+
     merge_nested_extends_modifications(target, extend);
     Ok(())
 }
@@ -1491,49 +1519,7 @@ fn merge_class_content(
         }
     }
 
-    // MLS §7.3: record every redeclared inherited component *before* applying
-    // the type changes. The redeclared type and its array dimensions are
-    // consumed below; anything else the redeclaration stated is still lost
-    // here, and the mark keeps later phases from reading the surviving
-    // declaration as evidence about the source.
-    //
-    // The mark is deliberately *not* narrowed by the dimension propagation
-    // below: a redeclaration reaching a component through a modifier on an
-    // enclosing declaration (`Holder h(redeclare C a[2])`) still loses its
-    // dimensions — and its type — on a path this function does not own, so
-    // `InstanceData::had_redeclare` must keep covering it.
-    for comp_name in &redeclarations.components {
-        if let Some(comp) = target.components.get_mut(comp_name) {
-            comp.redeclared_by_modification = true;
-        }
-    }
-
-    // MLS §7.3: a redeclaration is a whole declaration, so the dimensions it
-    // states replace the replaced declaration's. This is keyed independently of
-    // the type changes below, because a redeclaration states its shape whether
-    // or not this phase could extract its type.
-    for (comp_name, dims) in &redeclarations.dims {
-        if let Some(comp) = target.components.get_mut(comp_name) {
-            apply_redeclared_dimensions(comp, dims);
-        }
-    }
-
-    // MLS §7.3: Apply redeclared types to inherited components
-    // This updates the component's type so that instantiation uses the new type's fields
-    for (comp_name, new_type_name) in &redeclarations.types {
-        if let Some(comp) = target.components.get_mut(comp_name) {
-            comp.type_name = rumoca_ir_ast::Name::from_string(new_type_name);
-            comp.type_def_id = tree.name_map.get(new_type_name).copied().or_else(|| {
-                // Try with shorter name (last segment) for unqualified lookups
-                let short_name = path_utils::class_name_leaf(new_type_name);
-                tree.name_map.get(short_name).copied()
-            });
-
-            // MLS §7.3.2: Activate constraining-clause defaults for redeclared
-            // replaceable components.
-            activate_constrainedby_defaults_for_redeclare(comp);
-        }
-    }
+    apply_collected_redeclarations(tree, target, &redeclarations);
 
     apply_value_modifications(target, value_modifications, extend_span)?;
 
@@ -1590,6 +1576,66 @@ fn merge_class_content(
     }
 
     Ok(())
+}
+
+/// Apply what an extends clause's redeclarations state to the merged
+/// components they target (MLS §7.3).
+fn apply_collected_redeclarations(
+    tree: &ast::ClassTree,
+    target: &mut InheritedContent,
+    redeclarations: &CollectedRedeclarations,
+) {
+    // MLS §7.3: record every redeclared inherited component *before* applying
+    // the type changes. The redeclared type and its array dimensions are
+    // consumed below; anything else the redeclaration stated is still lost
+    // here, and the mark keeps later phases from reading the surviving
+    // declaration as evidence about the source.
+    //
+    // The mark is deliberately *not* narrowed by the dimension propagation
+    // below: a redeclaration reaching a component through a modifier on an
+    // enclosing declaration (`Holder h(redeclare C a[2])`) still loses its
+    // dimensions — and its type — on a path this function does not own, so
+    // `InstanceData::had_redeclare` must keep covering it.
+    for comp_name in &redeclarations.components {
+        if let Some(comp) = target.components.get_mut(comp_name) {
+            comp.redeclared_by_modification = true;
+        }
+    }
+
+    // MLS §7.3: a redeclaration is a whole declaration, so the dimensions it
+    // states replace the replaced declaration's. This is keyed independently of
+    // the type changes below, because a redeclaration states its shape whether
+    // or not this phase could extract its type.
+    for (comp_name, dims) in &redeclarations.dims {
+        if let Some(comp) = target.components.get_mut(comp_name) {
+            apply_redeclared_dimensions(comp, dims);
+        }
+    }
+
+    // MLS §7.3: Apply redeclared types to inherited components
+    // This updates the component's type so that instantiation uses the new type's fields
+    for (comp_name, new_type_name) in &redeclarations.types {
+        if let Some(comp) = target.components.get_mut(comp_name) {
+            // MLS §7.3.2: without a constraining clause the *original*
+            // declaration's type is the constraint, and it stays the
+            // constraint for further redeclarations of the element.
+            if comp.constrainedby.is_none() {
+                let mut original = comp.type_name.clone();
+                original.def_id = comp.type_def_id.or(original.def_id);
+                comp.constrainedby = Some(original);
+            }
+            comp.type_name = rumoca_ir_ast::Name::from_string(new_type_name);
+            comp.type_def_id = tree.name_map.get(new_type_name).copied().or_else(|| {
+                // Try with shorter name (last segment) for unqualified lookups
+                let short_name = path_utils::class_name_leaf(new_type_name);
+                tree.name_map.get(short_name).copied()
+            });
+
+            // MLS §7.3.2: Activate constraining-clause defaults for redeclared
+            // replaceable components.
+            activate_constrainedby_defaults_for_redeclare(comp);
+        }
+    }
 }
 
 fn collect_value_modifications(
