@@ -52,7 +52,8 @@ use rumoca_compile::parsing::collect_compile_unit_source_files;
 use rumoca_compile::source_roots::{
     PackageLayoutError, canonical_path_key, parse_source_root_with_cache, plan_source_root_loads,
     referenced_unloaded_source_root_paths, render_source_root_status_message,
-    resolve_source_root_cache_dir, source_root_source_set_key,
+    resolve_source_root_cache_dir, source_root_paths_referenced_by_files,
+    source_root_source_set_key,
 };
 use rumoca_core::DiagnosticSeverity;
 use rumoca_phase_resolve::ResolvedTree;
@@ -407,11 +408,14 @@ impl Compiler {
     /// Load a source-root path into the session.
     ///
     /// Handles both single files and directories recursively.
+    ///
+    /// Returns the files the root contributed, so root selection can follow
+    /// the top-level names they use.
     fn load_source_root_into_session(
         &self,
         session: &mut Session,
         path: &str,
-    ) -> Result<(), CompilerError> {
+    ) -> Result<Vec<String>, CompilerError> {
         let path_obj = Path::new(path);
         let parsed_source_root = parse_source_root_with_cache(path_obj).map_err(|e| {
             if let Some(package_layout_error) = e.downcast_ref::<PackageLayoutError>() {
@@ -424,6 +428,11 @@ impl Compiler {
             CompilerError::ParseError(format!("{}: {}", path, e))
         })?;
 
+        let files = parsed_source_root
+            .documents
+            .iter()
+            .map(|(file, _)| file.clone())
+            .collect();
         let source_root_key = source_root_source_set_key(path);
         session.replace_parsed_source_set(
             &source_root_key,
@@ -443,52 +452,54 @@ impl Compiler {
         {
             eprintln!("{}", render_source_root_status_message(&status));
         }
-        Ok(())
+        Ok(files)
     }
 
+    /// Load the source roots the compile unit uses, closed over the roots
+    /// the loaded roots themselves use.
     fn load_required_source_roots(
         &self,
         session: &mut Session,
         source: &str,
     ) -> Result<(), CompilerError> {
-        let loaded_source_root_path_keys = HashSet::new();
-        let referenced_source_root_paths = referenced_unloaded_source_root_paths(
+        let mut loaded_source_root_path_keys = HashSet::new();
+        let mut referenced = referenced_unloaded_source_root_paths(
             source,
             &self.source_root_paths,
             &loaded_source_root_path_keys,
         );
-        let referenced_path_keys = referenced_source_root_paths
-            .iter()
-            .map(|path| canonical_path_key(path))
-            .collect::<HashSet<_>>();
-        for source_root_path in &self.source_root_paths {
-            let path_key = canonical_path_key(source_root_path);
-            if referenced_path_keys.contains(&path_key) {
-                continue;
+        while !referenced.is_empty() {
+            let load_plan = plan_source_root_loads(&referenced, &loaded_source_root_path_keys);
+            for skipped in &load_plan.duplicate_root_skips {
+                self.log_verbose(format!(
+                    "[rumoca] Skipping source root {} (duplicate root '{}' already loaded from {})",
+                    skipped.source_root_path, skipped.root_name, skipped.provider_path
+                ));
+                loaded_source_root_path_keys.insert(canonical_path_key(&skipped.source_root_path));
             }
-            self.log_verbose(format!(
-                "[rumoca] Skipping unused source root: {}",
-                source_root_path
-            ));
+            let mut loaded_files = Vec::new();
+            for source_root_path in &load_plan.load_paths {
+                self.log_verbose(format!(
+                    "[rumoca] Loading source root: {}",
+                    source_root_path
+                ));
+                loaded_files.extend(self.load_source_root_into_session(session, source_root_path)?);
+                loaded_source_root_path_keys.insert(canonical_path_key(source_root_path));
+            }
+            referenced = source_root_paths_referenced_by_files(
+                &loaded_files,
+                &self.source_root_paths,
+                &loaded_source_root_path_keys,
+            );
         }
-
-        let load_plan =
-            plan_source_root_loads(&referenced_source_root_paths, &loaded_source_root_path_keys);
-        for skipped in &load_plan.duplicate_root_skips {
-            self.log_verbose(format!(
-                "[rumoca] Skipping source root {} (duplicate root '{}' already loaded from {})",
-                skipped.source_root_path, skipped.root_name, skipped.provider_path
-            ));
+        for source_root_path in &self.source_root_paths {
+            if !loaded_source_root_path_keys.contains(&canonical_path_key(source_root_path)) {
+                self.log_verbose(format!(
+                    "[rumoca] Skipping unused source root: {}",
+                    source_root_path
+                ));
+            }
         }
-
-        for source_root_path in &load_plan.load_paths {
-            self.log_verbose(format!(
-                "[rumoca] Loading source root: {}",
-                source_root_path
-            ));
-            self.load_source_root_into_session(session, source_root_path)?;
-        }
-
         Ok(())
     }
 
@@ -1241,6 +1252,43 @@ mod tests {
         assert!(
             result.is_ok(),
             "compile unit must include the enclosing package tree without unrelated parents: {:?}",
+            result.err()
+        );
+    }
+
+    /// TOOLBUG-105: a library `package.mo` compiled as the main file never
+    /// names the other library its classes use (ThermoSysPro has no `uses`
+    /// annotation), so that root must be selected through the files of the
+    /// roots that were loaded.
+    #[test]
+    fn test_compile_package_file_loads_roots_its_classes_use() {
+        let temp = tempdir().expect("tempdir");
+        let lib = temp.path().join("lib");
+        let dep = temp.path().join("dep");
+        fs::create_dir_all(lib.join("L")).expect("mkdir lib");
+        fs::create_dir_all(dep.join("Mod")).expect("mkdir dep");
+        fs::write(lib.join("L/package.mo"), "package L\nend L;\n").expect("write L");
+        fs::write(
+            lib.join("L/T.mo"),
+            "within L;\nmodel T\n  parameter Real a = Mod.C.eps;\n  Real x;\nequation\n  x = a*time;\nend T;\n",
+        )
+        .expect("write T");
+        fs::write(dep.join("Mod/package.mo"), "package Mod\nend Mod;\n").expect("write Mod");
+        fs::write(
+            dep.join("Mod/C.mo"),
+            "within Mod;\npackage C\n  final constant Real eps = 1e-15;\nend C;\n",
+        )
+        .expect("write C");
+
+        let result = Compiler::new()
+            .model("L.T")
+            .source_root(&dep.to_string_lossy())
+            .source_root(&lib.to_string_lossy())
+            .compile_file(&lib.join("L/package.mo").to_string_lossy());
+
+        assert!(
+            result.is_ok(),
+            "a root used only by the loaded library's classes must be loaded: {:?}",
             result.err()
         );
     }
