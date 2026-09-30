@@ -26,15 +26,18 @@ sample schedule, delay bounds, clock arguments and any other translation-time
 consumer saw an unknown name.
 
 Affected in the cluster: `IBPSA.Controls.Discrete.BooleanDelay`,
-`IDEAS.Controls.OBC.CDL.Discrete.ZeroOrderHold`,
-`ThermoPower.Examples.HRB.Models.DigitalPI` (3).
+`ThermoPower.Examples.HRB.Models.DigitalPI`, OpenIPSL `DEGOV`
+(`parameter Time TD` with no value at all feeds `FixedDelay.delayTime`), and
+`IDEAS.Controls.OBC.CDL.Discrete.ZeroOrderHold` (whose `samplePeriod` has no
+value and no `start`, so it now correctly reports a zero sample interval).
 
 ## Fix
 
-`constant_context` falls back to the `start` expression of a constant or a
-fixed parameter that has no binding. A `start` that does not evaluate is
-skipped (it was never an error to lack a value there). `fixed = false`
-parameters are still excluded (they are settled by initialization).
+`constant_context` (`unbound_parameter_value`) gives a constant or fixed
+parameter without a binding its `start` value, or its type's default start
+(`0.0`, `0`, `false`) when no `start` is written, as OpenModelica does (with a
+warning). A `start` that does not evaluate leaves it without a value.
+`fixed = false` parameters are still excluded (initialization settles them).
 
 ## Test
 

@@ -1268,19 +1268,18 @@ fn constant_context(flat: &flat::Model) -> Result<EvalContext, ToDaeError> {
             {
                 continue;
             }
-            // MLS §8.6: a fixed parameter with no binding equation takes its
-            // `start` value (tools accept it with a warning, as `samplePeriod`
-            // of `Modelica.Blocks.Interfaces.DiscreteBlock` relies on).
-            let from_start = variable.binding.is_none();
-            let Some(binding) = variable.binding.as_ref().or(variable.start.as_ref()) else {
-                continue;
+            let evaluated = match &variable.binding {
+                Some(binding) => eval_expr(binding, &context),
+                None => match unbound_parameter_value(flat, variable, &context) {
+                    Some(value) => Ok(value),
+                    None => continue,
+                },
             };
-            match eval_expr(binding, &context) {
+            match evaluated {
                 Ok(value) => {
                     context.add_instance_parameter(variable.instance_id, name.to_string(), value);
                     progress = true;
                 }
-                Err(_) if from_start => {}
                 Err(error) if error.runtime_dependent_reason().is_some() => {}
                 Err(error) => {
                     return Err(ToDaeError::unsupported_flat(
@@ -1297,6 +1296,32 @@ fn constant_context(flat: &flat::Model) -> Result<EvalContext, ToDaeError> {
     }
     register_deferred_parameters(flat, &mut context);
     Ok(context)
+}
+
+/// The value of a constant or fixed parameter that has no binding equation.
+///
+/// MLS §8.6: such a parameter takes its `start` value, and a type's default
+/// `start` (`0`, `0.0`, `false`) when none is written; tools accept it with a
+/// warning. `Modelica.Blocks.Interfaces.DiscreteBlock.samplePeriod` (declared
+/// with `start = 0.1` only) and OpenIPSL `DEGOV.TD` (no value at all) rely on
+/// it. A `start` that does not evaluate leaves the parameter without a value.
+fn unbound_parameter_value(
+    flat: &flat::Model,
+    variable: &flat::Variable,
+    context: &EvalContext,
+) -> Option<EvalValue> {
+    if let Some(start) = &variable.start {
+        return eval_expr(start, context).ok();
+    }
+    if !variable.dims.is_empty() {
+        return None;
+    }
+    match effective_variable_scalar_type(flat, variable)? {
+        dae::ScalarType::Real => Some(EvalValue::Real(0.0)),
+        dae::ScalarType::Integer => Some(EvalValue::Integer(0)),
+        dae::ScalarType::Boolean => Some(EvalValue::Bool(false)),
+        _ => None,
+    }
 }
 
 /// Name every `fixed = false` parameter the initialization system settles, and
