@@ -660,3 +660,147 @@ fn oprec_011_unused_zero_sized_array_is_legal() {
         "P.M",
     );
 }
+
+// =============================================================================
+// MLS §14.5: operator-record arithmetic in equations denotes calls of the
+// operator functions; record equations count one equation per field.
+
+const MINI_COMPLEX: &str = r#"
+operator record Cx
+    Real re;
+    Real im;
+    encapsulated operator 'constructor'
+        import Cx;
+        function fromReal
+            input Real re;
+            input Real im = 0;
+            output Cx result(re = re, im = im);
+        algorithm
+            annotation(Inline = true);
+        end fromReal;
+    end 'constructor';
+    encapsulated operator '-'
+        import Cx;
+        function negate
+            input Cx c1;
+            output Cx c2;
+        algorithm
+            c2 := Cx(-c1.re, -c1.im);
+        end negate;
+        function subtract
+            input Cx c1;
+            input Cx c2;
+            output Cx c3;
+        algorithm
+            c3 := Cx(c1.re - c2.re, c1.im - c2.im);
+        end subtract;
+    end '-';
+    encapsulated operator '*'
+        import Cx;
+        function multiply
+            input Cx c1;
+            input Cx c2;
+            output Cx c3;
+        algorithm
+            c3 := Cx(c1.re*c2.re - c1.im*c2.im, c1.re*c2.im + c1.im*c2.re);
+        end multiply;
+    end '*';
+    encapsulated operator function '+'
+        import Cx;
+        input Cx c1;
+        input Cx c2;
+        output Cx c3;
+    algorithm
+        c3 := Cx(c1.re + c2.re, c1.im + c2.im);
+    end '+';
+end Cx;
+"#;
+
+fn with_mini_complex(model: &str) -> String {
+    format!("{MINI_COMPLEX}\n{model}")
+}
+
+#[test]
+fn oprec_operator_expressions_lower_to_operator_function_calls() {
+    let source = with_mini_complex(
+        r#"
+        model OperatorCalls
+            Cx a;
+            Cx b(re = 1, im = 1);
+            Cx c;
+            Cx d;
+        equation
+            a = -b;
+            c = a + b*Cx(2, 3);
+            d = 2*b - a;
+        end OperatorCalls;
+    "#,
+    );
+    rumoca_contracts::test_support::expect_balanced(&source, "OperatorCalls");
+    let trace = rumoca_contracts::test_support::simulate_model(&source, "OperatorCalls", 0.1);
+    for (name, expected) in [
+        ("a.re", -1.0),
+        ("a.im", -1.0),
+        ("c.re", -2.0),
+        ("c.im", 4.0),
+        ("d.re", 3.0),
+        ("d.im", 3.0),
+    ] {
+        assert!(
+            (trace.final_value(name) - expected).abs() < 1e-9,
+            "{name} = {}, expected {expected}",
+            trace.final_value(name)
+        );
+    }
+}
+
+#[test]
+fn oprec_if_equation_with_record_branches_counts_every_field() {
+    let source = with_mini_complex(
+        r#"
+        model RecordBranches
+            Cx vs;
+            Cx vr(re = time, im = 1);
+            Cx is;
+            Cx ir;
+            Boolean open = time > 0.5;
+        equation
+            if open then
+                is = Cx(0);
+                ir = Cx(0);
+            else
+                vs = vr;
+                is = -ir;
+            end if;
+            vs.re = is.re;
+            vs.im = is.im;
+        end RecordBranches;
+    "#,
+    );
+    rumoca_contracts::test_support::expect_balanced(&source, "RecordBranches");
+    let trace = rumoca_contracts::test_support::simulate_model(&source, "RecordBranches", 1.0);
+    assert!(trace.final_value("ir.re").abs() < 1e-9);
+    assert!(trace.final_value("is.im").abs() < 1e-9);
+    let early = trace.channel("ir.im")[1];
+    assert!((early + 1.0).abs() < 1e-9, "ir.im before opening = {early}");
+}
+
+#[test]
+fn oprec_conditional_record_operand_is_lowered_per_branch() {
+    let source = with_mini_complex(
+        r#"
+        model ConditionalOperand
+            parameter Boolean negateInput = false;
+            parameter Cx k = Cx(2, 1);
+            Cx u(re = 1, im = 1);
+            Cx y;
+        equation
+            y = k*(if negateInput then -u else u);
+        end ConditionalOperand;
+    "#,
+    );
+    rumoca_contracts::test_support::expect_balanced(&source, "ConditionalOperand");
+    let trace = rumoca_contracts::test_support::simulate_model(&source, "ConditionalOperand", 0.1);
+    assert!((trace.final_value("y.re") - 1.0).abs() < 1e-9);
+    assert!((trace.final_value("y.im") - 3.0).abs() < 1e-9);
+}

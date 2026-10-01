@@ -1019,6 +1019,11 @@ pub(crate) fn finalize_flat_model(
     seed_flat_functions_from_context(ctx, flat);
     rewrite_function_extends_aliases_in_flat_functions(flat, tree, class_index)?;
     functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
+    // MLS §14.5: operator-record arithmetic denotes operator-function calls;
+    // the overloads are selected from the collected callees' result types.
+    if crate::postprocess::lower_operator_record_equations(flat, class_index) {
+        functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
+    }
     // Callable identity is attached once, after the rewrite fixed point below,
     // where it also covers every call the fixed point introduced.
     mark_record_constructor_calls(flat, tree);
