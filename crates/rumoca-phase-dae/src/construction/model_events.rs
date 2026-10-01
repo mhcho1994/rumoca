@@ -64,6 +64,8 @@ struct WhenLowering<'work, 'input, 'shape, 'dae> {
     discrete_values: &'work mut DiscreteValueStaging<'dae>,
     request: WhenChainsRequest<'input, 'shape, 'dae>,
     target_owners: WhenTargetOwners,
+    /// Every coordinate the chain being lowered assigns.
+    chain_targets: HashSet<VarName>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,7 @@ pub(super) fn lower_when_chains<'dae>(
         discrete_values,
         request,
         target_owners: WhenTargetOwners::default(),
+        chain_targets: HashSet::new(),
     };
     for (index, chain) in chains.iter().enumerate() {
         let source_owner =
@@ -226,6 +229,10 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
         )?;
         let guards = self.lower_chain_guards(chain)?;
         self.own_chain_clocks(chain, &guards)?;
+        self.chain_targets.clear();
+        for branch in chain.branches() {
+            collect_when_targets(&branch.equations, &mut self.chain_targets);
+        }
         let owners = WhenSemanticOwners {
             source: source_owner,
             discrete_value,
@@ -657,6 +664,14 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
         else_branch: Option<&[flat::WhenEquation]>,
         span: Span,
     ) -> Result<(), dae::DaeConstructionError> {
+        if let Some(values) =
+            conditional_target_values(branches, else_branch, &self.chain_targets, span)
+        {
+            for (target, value, span) in values {
+                self.lower_assignment(owners, parent, &target, &value, span)?;
+            }
+            return Ok(());
+        }
         let mut previous = None;
         for (condition, equations) in branches {
             previous = Some(
@@ -749,4 +764,116 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
         };
         self.lower_equations(owners, guard, equations)
     }
+}
+
+/// An if-equation inside a when-branch whose guard reads the *current* value
+/// of a coordinate the same chain assigns, rewritten to one conditional value
+/// per target.
+///
+/// MLS §8.3.5 when-equations are simultaneous, so `if leap[k] then m = pre(m)
+/// + 1; else m = pre(m); end if;` beside an equation for `k` reads the `k`
+/// that equation defines (IBPSA/IDEAS `CalendarTime`). A DAE discrete-value
+/// owner's branch activation may not read the owner's own targets, but a
+/// target's value may read targets ordered before it, so the guard moves into
+/// each value: `m = if leap[k] then pre(m) + 1 else pre(m)`. This is exact
+/// only when every arm, `else` included, assigns the same targets with plain
+/// assignments — then exactly one arm's value holds whenever the branch is
+/// active, which is what the if-expression selects. Any other shape keeps the
+/// guard lowering (and its typed rejection of a current self-read).
+fn conditional_target_values(
+    branches: &[(Expression, Vec<flat::WhenEquation>)],
+    else_branch: Option<&[flat::WhenEquation]>,
+    chain_targets: &HashSet<VarName>,
+    span: Span,
+) -> Option<Vec<(VarName, Expression, Span)>> {
+    let else_branch = else_branch?;
+    let reads_current_target = branches.iter().any(|(condition, _)| {
+        current_coordinate_reads(condition)
+            .iter()
+            .any(|name| chain_targets.contains(name))
+    });
+    if !reads_current_target {
+        return None;
+    }
+    let fallback = plain_assignments(else_branch)?;
+    let arms = branches
+        .iter()
+        .map(|(condition, equations)| Some((condition, plain_assignments(equations)?)))
+        .collect::<Option<Vec<_>>>()?;
+    let value_of = |assignments: &[(VarName, Expression, Span)], target: &VarName| {
+        assignments
+            .iter()
+            .find(|(written, _, _)| written == target)
+            .map(|(_, value, _)| value.clone())
+    };
+    let same_targets = arms.iter().all(|(_, assignments)| {
+        assignments.len() == fallback.len()
+            && assignments
+                .iter()
+                .all(|(target, _, _)| value_of(&fallback, target).is_some())
+    });
+    if !same_targets {
+        return None;
+    }
+    let values = fallback
+        .iter()
+        .map(|(target, otherwise, target_span)| {
+            let value = Expression::If {
+                branches: arms
+                    .iter()
+                    .map(|(condition, assignments)| {
+                        let value = value_of(assignments, target)
+                            .expect("every arm assigns the same targets");
+                        ((*condition).clone(), value)
+                    })
+                    .collect(),
+                else_branch: Box::new(otherwise.clone()),
+                span,
+            };
+            (target.clone(), value, *target_span)
+        })
+        .collect();
+    Some(values)
+}
+
+/// The assignments of one if-arm, in source order; `None`
+/// when the arm holds anything but plain, once-per-target assignments.
+fn plain_assignments(equations: &[flat::WhenEquation]) -> Option<Vec<(VarName, Expression, Span)>> {
+    let mut assignments: Vec<(VarName, Expression, Span)> = Vec::new();
+    for equation in equations {
+        let flat::WhenEquation::Assign {
+            target,
+            value,
+            span,
+            ..
+        } = equation
+        else {
+            return None;
+        };
+        if assignments.iter().any(|(written, _, _)| written == target) {
+            return None;
+        }
+        assignments.push((target.clone(), value.clone(), *span));
+    }
+    Some(assignments)
+}
+
+/// Coordinates an expression reads outside `pre()`.
+fn current_coordinate_reads(expression: &Expression) -> Vec<VarName> {
+    let mut reads = Vec::new();
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expression::BuiltinCall {
+                function: BuiltinFunction::Pre,
+                ..
+            } => {}
+            Expression::VarRef { name, .. } => {
+                reads.push(name.var_name().clone());
+                pending.extend(expression_children(expression));
+            }
+            _ => pending.extend(expression_children(expression)),
+        }
+    }
+    reads
 }

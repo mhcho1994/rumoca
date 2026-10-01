@@ -419,3 +419,79 @@ fn an_array_constructor_in_a_when_body_writes_the_selected_slot() {
     assert_eq!(value_at(&sim, "ySample[1]", 4.0), 3.5);
     assert_eq!(value_at(&sim, "index", 4.0), 1.0);
 }
+
+/// TOOLBUG-181: an initial algorithm with a `for` loop over a parameter range,
+/// a coordinate assigned only on some paths (it keeps its `start`, MLS
+/// §11.1.2), an array constructor, and an enumeration-literal guard
+/// (IBPSA/IDEAS/AixLib `CalendarTime`).
+const INITIAL_ALGORITHM_LOOP: &str = "model InitialLoop
+  type Zero = enumeration(A, B);
+  parameter Zero z = Zero.B;
+  parameter Integer days[3] = {31, 28, 31};
+  parameter Real ts[4] = {-1, 1, 2, 3};
+  parameter Real off(fixed = false);
+  discrete Integer idx;
+  discrete Integer k(start = 5);
+  Real x(start = 0, fixed = true);
+initial algorithm
+  off := 0;
+  if z == Zero.B then
+    off := sum({days[i] for i in 1:2});
+  end if;
+  for i in 2:4 loop
+    if time < ts[i] and time >= ts[i - 1] then
+      idx := i - 1;
+    end if;
+    if time > 100 then
+      k := i;
+    end if;
+  end for;
+equation
+  der(x) = off;
+  when time > 10 then
+    idx = pre(idx) + 1;
+    k = pre(k) + 1;
+  end when;
+end InitialLoop;";
+
+#[test]
+fn an_initial_algorithm_loop_unrolls_and_keeps_unassigned_starts() {
+    let sim = simulate("InitialLoop", INITIAL_ALGORITHM_LOOP, 1.0);
+    assert_eq!(value_at(&sim, "idx", 0.0), 1.0);
+    assert_eq!(value_at(&sim, "k", 0.0), 5.0);
+    assert!((value_at(&sim, "x", 1.0) - 59.0).abs() < 1.0e-6);
+}
+
+/// TOOLBUG-182: an if-equation in a when-branch whose guard reads the current
+/// value another equation of the same branch defines (`CalendarTime`'s
+/// `isLeapYear[yearIndex]`).
+const WHEN_GUARD_READS_CURRENT_TARGET: &str = "model GuardCurrent
+  parameter Real ts[4] = {1, 2, 3, 4};
+  parameter Boolean leap[4] = {true, false, false, true};
+  discrete Integer yearIndex(start = 1, fixed = true);
+  discrete Integer month(start = 1, fixed = true);
+equation
+  when sample(0.5, 1) then
+    if time - ts[pre(yearIndex)] > 0 then
+      yearIndex = pre(yearIndex) + 1;
+    else
+      yearIndex = pre(yearIndex);
+    end if;
+    if leap[yearIndex] then
+      month = pre(month) + 1;
+    else
+      month = pre(month);
+    end if;
+  end when;
+end GuardCurrent;";
+
+#[test]
+fn a_when_branch_guard_reads_the_current_value_of_an_earlier_target() {
+    let sim = simulate("GuardCurrent", WHEN_GUARD_READS_CURRENT_TARGET, 4.0);
+    // t=0.5: index 1 (leap) -> month 2; t=1.5: index 2 -> 2; t=2.5: 3 -> 2;
+    // t=3.5: index 4 (leap) -> 3. Reading pre(yearIndex) would give 3 at 1.5.
+    assert_eq!(value_at(&sim, "month", 1.0), 2.0);
+    assert_eq!(value_at(&sim, "month", 2.0), 2.0);
+    assert_eq!(value_at(&sim, "yearIndex", 3.0), 3.0);
+    assert_eq!(value_at(&sim, "month", 4.0), 3.0);
+}

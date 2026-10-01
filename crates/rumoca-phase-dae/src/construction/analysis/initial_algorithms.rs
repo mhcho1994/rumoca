@@ -282,6 +282,14 @@ fn reject_unsupported_statements(
                     reject_unsupported_statements(flat, statements)?;
                 }
             }
+            // MLS §11.2.2: a `for` over a parameter-evaluable range is exactly
+            // its unrolled sequence; the range itself is evaluated at replay.
+            rumoca_core::Statement::For {
+                equations, span, ..
+            } => {
+                require_span(*span, "initial algorithm for statement")?;
+                reject_unsupported_statements(flat, equations)?;
+            }
             rumoca_core::Statement::FunctionCall {
                 comp,
                 outputs,
@@ -307,8 +315,9 @@ fn reject_unsupported_statements(
                     required_statement_span(statement, "unsupported initial algorithm statement")?;
                 return Err(unsupported(
                     "an initial algorithm is accepted as sequential scalar assignments, `if` \
-                     conditionals, and `assert` statements; loops, `when`, and `reinit` carry \
-                     implicit memory with no checked initialization owner",
+                     conditionals, `for` loops over parameter-evaluable ranges, and `assert` \
+                     statements; `while`, `when`, and `reinit` carry implicit memory with no \
+                     checked initialization owner",
                     span,
                 ));
             }
@@ -620,10 +629,9 @@ fn reject_runtime_reads(
     target: &VarName,
     roles: &HashMap<VarName, PlannedRole>,
 ) -> Result<(), ToDaeError> {
-    if let Expression::VarRef { name, span, .. } = expression {
-        let referenced = name.var_name();
+    for (referenced, span) in free_references(expression) {
         if !matches!(
-            roles.get(referenced),
+            roles.get(&referenced),
             Some(PlannedRole::Parameter | PlannedRole::Constant | PlannedRole::EnumerationLiteral)
         ) {
             return Err(unsupported(
@@ -632,14 +640,55 @@ fn reject_runtime_reads(
                      parameters are computed; an algorithm-determined parameter reads only \
                      parameters and constants"
                 ),
-                *span,
+                span,
             ));
         }
     }
-    for child in expression_children(expression) {
-        reject_runtime_reads(child, target, roles)?;
-    }
     Ok(())
+}
+
+/// Every name an expression reads that is not bound by an enclosing array
+/// constructor's iterator (MLS §10.4.1: `{dayInMonth[i] for i in 1:m}` binds
+/// `i`; its range is read in the enclosing scope).
+fn free_references(expression: &Expression) -> Vec<(VarName, Span)> {
+    fn walk(expression: &Expression, bound: &mut Vec<String>, out: &mut Vec<(VarName, Span)>) {
+        match expression {
+            Expression::VarRef { name, span, .. } => {
+                let referenced = name.var_name();
+                if !bound.iter().any(|binder| binder == referenced.as_str()) {
+                    out.push((referenced.clone(), *span));
+                }
+                for child in expression_children(expression) {
+                    walk(child, bound, out);
+                }
+            }
+            Expression::ArrayComprehension {
+                expr,
+                indices,
+                filter,
+                ..
+            } => {
+                let depth = bound.len();
+                for index in indices {
+                    walk(&index.range, bound, out);
+                    bound.push(index.name.clone());
+                }
+                walk(expr, bound, out);
+                if let Some(filter) = filter {
+                    walk(filter, bound, out);
+                }
+                bound.truncate(depth);
+            }
+            _ => {
+                for child in expression_children(expression) {
+                    walk(child, bound, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(expression, &mut Vec::new(), &mut out);
+    out
 }
 
 /// One replayed coordinate value and the statement that last wrote it.
@@ -721,6 +770,13 @@ impl Replay<'_> {
                     ));
                 }
                 let expression = substitute(value, values);
+                reject_oversized_replay(
+                    &target,
+                    &ReplayedValue {
+                        expression: expression.clone(),
+                        span: *span,
+                    },
+                )?;
                 values.insert(
                     target,
                     ReplayedValue {
@@ -735,8 +791,117 @@ impl Replay<'_> {
                 else_block,
                 span,
             } => self.conditional(cond_blocks, else_block.as_deref(), guard, *span, values),
+            rumoca_core::Statement::For {
+                indices, equations, ..
+            } => self.unrolled(indices, equations, guard, values),
             _ => unreachable!("the statement grammar is proven before analysis replays it"),
         }
+    }
+
+    /// The value a coordinate holds when the section starts, before any
+    /// statement assigns it (MLS §11.1.2): its `start` value, or the type's
+    /// default start when none is declared. A path that leaves the coordinate
+    /// unassigned keeps exactly that value.
+    fn entry_value(&self, target: &VarName, span: Span) -> Option<ReplayedValue> {
+        let variable = self.flat.variables.get(target)?;
+        if !variable.dims.is_empty() {
+            return None;
+        }
+        let expression = match &variable.start {
+            Some(start) => start.clone(),
+            None => {
+                let value = match super::effective_variable_scalar_type(self.flat, variable)? {
+                    dae::ScalarType::Real => rumoca_core::Literal::Real(0.0),
+                    dae::ScalarType::Integer => rumoca_core::Literal::Integer(0),
+                    dae::ScalarType::Boolean => rumoca_core::Literal::Boolean(false),
+                    _ => return None,
+                };
+                Expression::Literal { value, span }
+            }
+        };
+        Some(ReplayedValue { expression, span })
+    }
+
+    /// Replay a `for` as its unrolled sequence (MLS §11.2.2).
+    ///
+    /// Each iteration binds the index to its Integer literal in the same
+    /// substitution map the assignments use, so a subscript `a[i]` and a
+    /// condition `i == 1` read the iteration's value; the binding is removed
+    /// (and any shadowed one restored) once the loop ends, so the index never
+    /// becomes a written coordinate.
+    fn unrolled(
+        &mut self,
+        indices: &[rumoca_core::ForIndex],
+        body: &[rumoca_core::Statement],
+        guard: Option<&Expression>,
+        values: &mut ReplayValues,
+    ) -> Result<(), ToDaeError> {
+        let Some((index, rest)) = indices.split_first() else {
+            return self.statements(body, guard, values);
+        };
+        let name = VarName::new(&index.ident);
+        let range_span = expression_span(&index.range)?;
+        let (start, step, end) = self.evaluated_range(&index.range, values, range_span)?;
+        let shadowed = values.remove(&name);
+        let mut current = start;
+        while (step > 0 && current <= end) || (step < 0 && current >= end) {
+            let literal = Expression::Literal {
+                value: rumoca_core::Literal::Integer(current),
+                span: range_span,
+            };
+            values.insert(
+                name.clone(),
+                ReplayedValue {
+                    expression: literal,
+                    span: range_span,
+                },
+            );
+            self.unrolled(rest, body, guard, values)?;
+            let Some(next) = current.checked_add(step) else {
+                break;
+            };
+            current = next;
+        }
+        values.remove(&name);
+        if let Some(shadowed) = shadowed {
+            values.insert(name, shadowed);
+        }
+        Ok(())
+    }
+
+    fn evaluated_range(
+        &self,
+        range: &Expression,
+        values: &ReplayValues,
+        span: Span,
+    ) -> Result<(i64, i64, i64), ToDaeError> {
+        let Expression::Range {
+            start, step, end, ..
+        } = range
+        else {
+            return Err(unsupported(
+                "a `for` in an initial algorithm must iterate over a range with \
+                 parameter-evaluable bounds",
+                span,
+            ));
+        };
+        let bound = |expression: &Expression| {
+            eval_expr(&substitute(expression, values), self.constants)
+                .ok()
+                .and_then(|value| value.as_integer())
+                .ok_or_else(|| {
+                    unsupported(
+                        "a `for` bound in an initial algorithm is not a parameter-evaluable \
+                         Integer, so its iterations are not known at translation time",
+                        span,
+                    )
+                })
+        };
+        let step = step.as_deref().map(bound).transpose()?.unwrap_or(1);
+        if step == 0 {
+            return Err(unsupported("a `for` range has a zero step", span));
+        }
+        Ok((bound(start)?, step, bound(end)?))
     }
 
     /// Replay one `if` chain into a conditional value per written coordinate.
@@ -802,12 +967,55 @@ impl Replay<'_> {
         }
         let mut merged = merged.into_iter().collect::<Vec<_>>();
         merged.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        let mut entry = entry;
+        for target in &merged {
+            if !entry.contains_key(target)
+                && let Some(value) = self.entry_value(target, span)
+            {
+                entry.insert(target.clone(), value);
+            }
+        }
         for target in merged {
             let value = merge_target(&target, &entry, &branches, &otherwise, span)?;
+            reject_oversized_replay(&target, &value)?;
             values.insert(target, value);
         }
         Ok(())
     }
+}
+
+/// Largest replayed value, in expression nodes, an initial algorithm may
+/// hand to a declarative owner.
+///
+/// The replay substitutes each earlier assignment into every later read, and
+/// the Flat expression tree has no shared temporaries, so a loop whose guard
+/// reads the coordinate it updates (`if f(e) < d then ... else e := e + d`)
+/// copies the previous value three times per iteration: twelve iterations of
+/// IBPSA `CalendarTime`'s month search are over half a million copies. Past
+/// this bound the section is refused with a typed diagnostic instead of
+/// exhausting time and memory.
+const MAX_REPLAYED_VALUE_NODES: usize = 50_000;
+
+fn reject_oversized_replay(target: &VarName, value: &ReplayedValue) -> Result<(), ToDaeError> {
+    let mut pending = vec![&value.expression];
+    let mut nodes = 0usize;
+    while let Some(expression) = pending.pop() {
+        nodes += 1;
+        if nodes > MAX_REPLAYED_VALUE_NODES {
+            return Err(unsupported(
+                format!(
+                    "the initial-algorithm value of `{target}` exceeds \
+                     {MAX_REPLAYED_VALUE_NODES} expression nodes once earlier assignments are \
+                     substituted (a loop whose guard reads the coordinate it updates duplicates \
+                     it every iteration); the declarative owner has no shared temporaries to \
+                     express it"
+                ),
+                value.span,
+            ));
+        }
+        pending.extend(expression_children(expression));
+    }
+    Ok(())
 }
 
 fn merge_target(

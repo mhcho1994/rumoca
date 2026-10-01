@@ -103,10 +103,19 @@ pub(super) fn analyze_comprehensions<'expression>(
     constants: &EvalContext,
 ) -> Result<ComprehensionPlans, ToDaeError> {
     let mut plans = ComprehensionPlans::default();
-    for expression in expressions {
-        analyze_expression(expression, constants, &mut plans)?;
-    }
+    extend_comprehensions(&mut plans, expressions, constants)?;
     Ok(plans)
+}
+
+pub(super) fn extend_comprehensions<'expression>(
+    plans: &mut ComprehensionPlans,
+    expressions: impl IntoIterator<Item = &'expression Expression>,
+    constants: &EvalContext,
+) -> Result<(), ToDaeError> {
+    for expression in expressions {
+        analyze_expression(expression, constants, plans)?;
+    }
+    Ok(())
 }
 
 /// Every expression a when-chain lowers: activation conditions and the

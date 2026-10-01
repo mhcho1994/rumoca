@@ -985,6 +985,16 @@ fn claim_when_equation_target(
     ))
 }
 
+/// Current-value reads that decide whether a when-chain branch is active.
+///
+/// Every target of the chain depends on them: which branch's equations hold
+/// is decided before any target is assigned. The guard of an if-equation
+/// *inside* a branch is a dependency only of the targets that if-equation
+/// assigns (see `collect_when_equation_target_dependencies`), so one branch
+/// may write `k` in one if-equation and read the current `k` in the guard of a
+/// later one (MLS §8.3.5 equations are simultaneous; the guard reads the value
+/// the first if-equation defines). IDEAS/IBPSA `CalendarTime` does exactly
+/// this with `yearIndex` and `month`.
 fn when_control_dependencies(
     chain: &flat::WhenChain,
     roles: &HashMap<VarName, PlannedRole>,
@@ -992,32 +1002,8 @@ fn when_control_dependencies(
     let mut dependencies = HashSet::new();
     for branch in chain.branches() {
         collect_current_discrete_dependencies(&branch.condition, roles, &mut dependencies);
-        collect_when_control_dependencies(&branch.equations, roles, &mut dependencies);
     }
     dependencies
-}
-
-fn collect_when_control_dependencies(
-    equations: &[flat::WhenEquation],
-    roles: &HashMap<VarName, PlannedRole>,
-    dependencies: &mut HashSet<VarName>,
-) {
-    for equation in equations {
-        if let flat::WhenEquation::Conditional {
-            branches,
-            else_branch,
-            ..
-        } = equation
-        {
-            for (condition, equations) in branches {
-                collect_current_discrete_dependencies(condition, roles, dependencies);
-                collect_when_control_dependencies(equations, roles, dependencies);
-            }
-            if let Some(else_branch) = else_branch {
-                collect_when_control_dependencies(else_branch, roles, dependencies);
-            }
-        }
-    }
 }
 
 fn collect_when_target_dependencies(
@@ -1077,6 +1063,13 @@ fn collect_when_equation_target_dependencies(
                         roles,
                         dependencies,
                     ));
+                }
+                // The guards select which of this if-equation's values the
+                // target takes, so they are read before the target is written.
+                if nested.is_some() {
+                    for (condition, _) in branches {
+                        collect_current_discrete_dependencies(condition, roles, dependencies);
+                    }
                 }
                 nested
             }

@@ -45,10 +45,10 @@ use clocks::{ClockAnalysis, ClockDomainAnalysis, analyze_clocks};
 pub(super) use clocks::{
     ClockPlan, ClockedValuePlan, is_inferred_clock_condition, is_whole_clock_coordinate,
 };
-use comprehensions::{analyze_comprehensions, when_chain_expressions};
 pub(super) use comprehensions::{
     ComprehensionKey, ComprehensionPlans, specialized_comprehension_plan,
 };
+use comprehensions::{analyze_comprehensions, extend_comprehensions, when_chain_expressions};
 pub(super) use delays::DelayPlan;
 use delays::analyze_delays;
 pub(super) use derived_parameters::DerivedParameterPlan;
@@ -579,7 +579,29 @@ fn analyze_model_owners(
         model_values: function_shapes.model_values(),
     };
     let (initial_algorithms, initial_discrete_equation_rows) =
-        analyze_initial_owners(flat, &roles, assertions, &mut sample_lattices)?;
+        analyze_initial_owners(flat, &expression_roles, assertions, &mut sample_lattices)?;
+    // The replayed initial-algorithm values are what gets lowered, so their
+    // array constructors (`sum({d[i] for i in 1:m})`) need plans too.
+    let mut comprehension_plans = expression_support.comprehensions;
+    extend_comprehensions(
+        &mut comprehension_plans,
+        initial_algorithms
+            .parameters
+            .values()
+            .chain(
+                initial_algorithms
+                    .discrete_values
+                    .values()
+                    .map(|v| &v.value),
+            )
+            .chain(
+                initial_algorithms
+                    .assertions
+                    .iter()
+                    .flat_map(|assertion| [&assertion.condition, &assertion.message]),
+            ),
+        &constants,
+    )?;
     let balance = analyze_source_balance(SourceBalanceAnalysisInput {
         flat,
         roles: &roles,
@@ -621,7 +643,7 @@ fn analyze_model_owners(
         initial_algorithm_assertions: initial_algorithms.assertions,
         function_plans,
         function_shapes,
-        comprehension_plans: expression_support.comprehensions,
+        comprehension_plans,
         record_array_fields,
         derived_parameters: derived_parameters.plans,
         derived_parameter_families: derived_parameters.families,
