@@ -217,9 +217,12 @@ fn inst_006_conflicting_inherited_components_fail() {
 // "Expression must not depend on the variable itself"
 // =============================================================================
 
+// A non-final binding is a default that a modification replaces, so the cycle
+// is judged on the instance (DAE construction, ED023); a final cyclic binding
+// can never be broken and is rejected by Resolve (ER007).
 #[test]
 fn inst_008_no_cyclic_binding() {
-    expect_resolve_failure_with_code(
+    expect_failure_in_phase_with_code(
         r#"
         model Test
             parameter Real a = b;
@@ -230,7 +233,40 @@ fn inst_008_no_cyclic_binding() {
         end Test;
     "#,
         "Test",
+        FailedPhase::ToDae,
+        "ED023",
+    );
+    expect_resolve_failure_with_code(
+        r#"
+        model Test
+            final parameter Real a = b;
+            final parameter Real b = a;
+            Real x;
+        equation
+            x = a;
+        end Test;
+    "#,
+        "Test",
         "ER007",
+    );
+}
+
+#[test]
+fn inst_008_modification_breaks_a_default_cycle() {
+    expect_success(
+        r#"
+        model Pipe
+            parameter Real a = b;
+            parameter Real b = a;
+            Real x;
+        equation
+            x = a + b;
+        end Pipe;
+        model Test
+            Pipe p(a = 2);
+        end Test;
+    "#,
+        "Test",
     );
 }
 

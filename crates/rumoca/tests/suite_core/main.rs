@@ -49,6 +49,7 @@ mod forward_param_jacobian_test;
 mod frontend_event_lowering;
 mod frontend_functions_names;
 mod function_assertion_message_projection;
+mod function_body_and_binding_regressions;
 mod function_conditional_sequence_test;
 mod function_inner_index_slice_compaction;
 mod function_input_shadow_state_test;

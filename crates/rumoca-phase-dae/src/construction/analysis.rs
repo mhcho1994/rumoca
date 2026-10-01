@@ -30,6 +30,7 @@ mod model_algorithms;
 mod model_expression_owners;
 mod model_roles;
 mod multi_output_equations;
+mod parameter_cycles;
 mod record_array_fields;
 mod record_equations;
 mod sample_aliases;
@@ -64,7 +65,7 @@ use equation_partitions::{
 };
 use event_conditions::{
     evaluate_clock_seconds, evaluate_sample_schedule, validate_algorithm_condition,
-    validate_condition_expression, validate_when_activation_condition,
+    validate_assertion_condition, validate_when_activation_condition,
     validate_when_condition_expression,
 };
 use expression_events::analyze_expression_events;
@@ -571,14 +572,14 @@ fn analyze_model_owners(
     )?;
     let (discrete_connection_ranks, aggregate_discrete_connections, discrete_value_topology) =
         analyze_discrete_connections(flat, &roles)?;
-    let (initial_algorithms, initial_discrete_equation_rows) = analyze_initial_owners(
-        flat,
-        &roles,
-        &expression_roles,
-        &states,
-        &constants,
-        &mut sample_lattices,
-    )?;
+    let assertions = AssertionScope {
+        expression_roles: &expression_roles,
+        states: &states,
+        constants: &constants,
+        model_values: function_shapes.model_values(),
+    };
+    let (initial_algorithms, initial_discrete_equation_rows) =
+        analyze_initial_owners(flat, &roles, assertions, &mut sample_lattices)?;
     let balance = analyze_source_balance(SourceBalanceAnalysisInput {
         flat,
         roles: &roles,
@@ -817,19 +818,11 @@ fn analyze_expression_event_ownership(
 fn analyze_initial_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
-    expression_roles: &HashMap<VarName, PlannedRole>,
-    states: &HashSet<VarName>,
-    constants: &EvalContext,
+    assertions: AssertionScope<'_>,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<(InitialAlgorithmAnalysis, HashSet<usize>), ToDaeError> {
-    let mut algorithms = analyze_initial_algorithm_owners(
-        flat,
-        roles,
-        expression_roles,
-        states,
-        constants,
-        sample_lattices,
-    )?;
+    let mut algorithms =
+        analyze_initial_algorithm_owners(flat, roles, assertions, sample_lattices)?;
     let rows = claim_initial_discrete_equations(flat, roles, &mut algorithms.discrete_values)?;
     Ok((algorithms, rows))
 }
@@ -1159,21 +1152,17 @@ fn analyze_source_balance(
 fn analyze_initial_algorithm_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
-    expression_roles: &HashMap<VarName, PlannedRole>,
-    states: &HashSet<VarName>,
-    constants: &EvalContext,
+    assertions: AssertionScope<'_>,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<InitialAlgorithmAnalysis, ToDaeError> {
-    let initial_algorithms = analyze_initial_algorithms(flat, roles, states, constants)?;
+    let initial_algorithms =
+        analyze_initial_algorithms(flat, roles, assertions.states, assertions.constants)?;
     validate_assertions(
         flat.assert_equations
             .iter()
             .chain(&flat.initial_assert_equations)
             .chain(&initial_algorithms.assertions),
-        roles,
-        expression_roles,
-        states,
-        constants,
+        assertions,
         sample_lattices,
     )?;
     Ok(initial_algorithms)
@@ -1182,37 +1171,49 @@ fn analyze_initial_algorithm_owners(
 /// `message` and `level` are ordinary value expressions, so they resolve
 /// against `expression_roles` — the plan plus the names that may denote a value
 /// without being a coordinate, which is where MLS §4.9.5 enumeration literals
-/// live. The condition keeps the coordinate plan because it is an event-domain
-/// expression.
+/// live.
 ///
 /// Reading `level` against the coordinate plan is what made
 /// `assert(c, "m", AssertionLevel.warning)` fail with `ED008` on a literal the
 /// front end had already resolved and Flat carried in `enum_literal_ordinals` —
 /// the same defect `when` bodies had before they were given the expression
 /// roles.
+///
+/// The condition is an event-domain expression, but like a when activation
+/// guard it may compare against an enumeration literal
+/// (`assert(not choice == Choice.adaptive, ...)`, PowerGrids `System`), so it
+/// also reads the expression roles, with each literal checked against the
+/// model's literal catalog (`model_values`).
 fn validate_assertions<'flat>(
     assertions: impl IntoIterator<Item = &'flat flat::AssertEquation>,
-    roles: &HashMap<VarName, PlannedRole>,
-    expression_roles: &HashMap<VarName, PlannedRole>,
-    states: &HashSet<VarName>,
-    constants: &EvalContext,
+    scope: AssertionScope<'_>,
     sample_lattices: &mut Vec<(Span, PeriodicClockSchedule)>,
 ) -> Result<(), ToDaeError> {
     for assertion in assertions {
         require_span(assertion.span, "assert equation")?;
-        validate_condition_expression(
+        validate_assertion_condition(
             &assertion.condition,
-            roles,
-            states,
-            constants,
+            scope.expression_roles,
+            scope.states,
+            scope.constants,
             sample_lattices,
+            scope.model_values,
         )?;
-        validate_expression(&assertion.message, expression_roles, states)?;
+        validate_expression(&assertion.message, scope.expression_roles, scope.states)?;
         if let Some(level) = &assertion.level {
-            validate_expression(level, expression_roles, states)?;
+            validate_expression(level, scope.expression_roles, scope.states)?;
         }
     }
     Ok(())
+}
+
+/// The symbol tables an assertion owner is validated against.
+#[derive(Clone, Copy)]
+struct AssertionScope<'a> {
+    expression_roles: &'a HashMap<VarName, PlannedRole>,
+    states: &'a HashSet<VarName>,
+    constants: &'a EvalContext,
+    model_values: &'a ShapeEnvironment,
 }
 
 pub(super) fn analyze_record_array_field_plans(
@@ -1298,6 +1299,12 @@ fn constant_context(flat: &flat::Model) -> Result<EvalContext, ToDaeError> {
                     progress = true;
                 }
                 Err(error) if error.runtime_dependent_reason().is_some() => {}
+                // A division by zero over parameter values (typically a
+                // parameter left at its default `start = 0` that the user is
+                // expected to set) is not a translation-time defect: the
+                // binding stays a runtime parameter equation, and a consumer
+                // that needs its value structurally reports its own error.
+                Err(rumoca_eval_flat::constant::EvalError::DivisionByZero { .. }) => {}
                 Err(error) => {
                     return Err(ToDaeError::unsupported_flat(
                         "parameter binding",
@@ -1311,6 +1318,7 @@ fn constant_context(flat: &flat::Model) -> Result<EvalContext, ToDaeError> {
             break;
         }
     }
+    parameter_cycles::reject_cyclic_parameter_bindings(flat, &context)?;
     register_deferred_parameters(flat, &mut context);
     Ok(context)
 }

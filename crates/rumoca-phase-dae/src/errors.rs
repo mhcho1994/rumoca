@@ -57,6 +57,20 @@ pub enum ToDaeError {
         span: Span,
     },
 
+    #[error("cyclic dependency in parameter binding: {cycle}")]
+    #[diagnostic(
+        code(rumoca::todae::ED023),
+        help(
+            "MLS §8.6: parameter and constant bindings must be solvable in a sequential order; \
+             modify one of the parameters on the cycle to break it"
+        )
+    )]
+    CyclicParameterBinding {
+        cycle: String,
+        #[label("binding on the cycle")]
+        span: Span,
+    },
+
     #[error("Flat semantic owner is missing source provenance: {owner}")]
     #[diagnostic(
         code(rumoca::todae::ED007),
@@ -188,6 +202,13 @@ impl ToDaeError {
         }
     }
 
+    pub fn cyclic_parameter_binding(cycle: impl Into<String>, span: Span) -> Self {
+        Self::CyclicParameterBinding {
+            cycle: cycle.into(),
+            span,
+        }
+    }
+
     pub fn unresolved_reference(name: impl Into<String>, span: Span) -> Self {
         Self::UnresolvedReference {
             name: name.into(),
@@ -268,6 +289,7 @@ impl ToDaeError {
     fn diagnostic_source_spans(&self) -> &[Span] {
         match self {
             Self::UnresolvedReference { span, .. }
+            | Self::CyclicParameterBinding { span, .. }
             | Self::ReinitNonState { span, .. }
             | Self::DerivativeOfInput { span, .. }
             | Self::DiscreteSolvedFormViolation { span, .. }

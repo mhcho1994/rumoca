@@ -365,12 +365,12 @@ pub(super) fn analyze_initial_algorithms(
             }
         }
     }
+    // Only the condition is a coordinate read here. `message` and `level` are
+    // value expressions that may name MLS §4.9.5 enumeration literals
+    // (`AssertionLevel.error`); the caller validates them against the
+    // expression roles together with every other assertion owner.
     for assertion in &analysis.assertions {
         validate_expression(&assertion.condition, roles, states)?;
-        validate_expression(&assertion.message, roles, states)?;
-        if let Some(level) = &assertion.level {
-            validate_expression(level, roles, states)?;
-        }
     }
     reject_competing_initial_equations(flat, roles, &analysis.parameters)?;
     Ok(analysis)

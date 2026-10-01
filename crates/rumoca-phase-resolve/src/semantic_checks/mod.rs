@@ -1313,6 +1313,18 @@ fn check_cyclic_parameter_bindings(class: &ClassDef, diags: &mut Vec<Diagnostic>
             continue;
         }
         let mut refs = BTreeSet::new();
+        // A non-final binding is only a default: any modification of the
+        // component (MLS §7.2) replaces it, so a cycle through it is not a
+        // property of this class. Libraries rely on that for mutually
+        // defaulted parameters (`totLen = sum(segLen)` with
+        // `segLen = fill(totLen/nSeg, nSeg)`, where every use sets one of
+        // the two). Only final bindings form edges here; a cycle that is still
+        // present in an instantiated model is diagnosed when its parameter
+        // values are evaluated.
+        if !comp.is_final {
+            deps.insert(name.clone(), refs);
+            continue;
+        }
         if let Some(binding) = &comp.binding {
             // Skip if-branches to avoid false cycles from conditional mutual deps
             collect_component_refs(binding, &param_name_set, &mut refs, true);
