@@ -77,12 +77,18 @@ pub(in crate::fmi_me) trait MeDerivativeComponent {
     /// its active chart cannot certify, and the plugin retries a smaller step
     /// (SPEC_0040 STRUCT-T07 constraint-fold chart rows).
     fn discards_failed_trials(&self) -> bool;
+
+    /// Rows per state column of the state Jacobian's structural pattern: a
+    /// superset of the nonzeros of every directional derivative, or `None`
+    /// when the component proves none.
+    fn state_jacobian_columns(&self) -> Option<&[Vec<usize>]>;
 }
 
 /// The sole production derivative source: the one leased FMI component.
 struct KernelDerivatives {
     kernel: Rc<RefCell<SolveMeKernel>>,
     state_count: usize,
+    state_jacobian_columns: Option<Rc<[Vec<usize>]>>,
 }
 
 impl MeDerivativeComponent for KernelDerivatives {
@@ -119,6 +125,10 @@ impl MeDerivativeComponent for KernelDerivatives {
 
     fn discards_failed_trials(&self) -> bool {
         self.kernel.borrow().switches_reduced_charts()
+    }
+
+    fn state_jacobian_columns(&self) -> Option<&[Vec<usize>]> {
+        self.state_jacobian_columns.as_deref()
     }
 }
 
@@ -314,6 +324,15 @@ impl MeDerivativeHandle {
         }
     }
 
+    /// Rows per state column of the state Jacobian's structural pattern, a
+    /// superset of the nonzeros of every directional derivative this handle
+    /// evaluates, when the component proves one (SPEC_0039). A plugin that
+    /// colors a sparse Jacobian reads it instead of probing the derivative.
+    #[must_use]
+    pub fn state_jacobian_columns(&self) -> Option<&[Vec<usize>]> {
+        self.shared.component.state_jacobian_columns()
+    }
+
     /// Acknowledge a recoverable trial discard: whether a callback since the
     /// last acknowledgement refused its trial point (its output is NaN) without
     /// latching a failure. A plugin that reads `true` must reject the trial and
@@ -353,9 +372,11 @@ impl MeDerivativeController {
     /// The production controller over the one leased FMI component.
     pub(in crate::fmi_me) fn over_kernel(kernel: Rc<RefCell<SolveMeKernel>>) -> Self {
         let state_count = kernel.borrow().model_description().continuous_state_count;
+        let state_jacobian_columns = kernel.borrow().state_jacobian_columns();
         Self::over_component(Box::new(KernelDerivatives {
             kernel,
             state_count,
+            state_jacobian_columns,
         }))
     }
 
@@ -501,6 +522,10 @@ impl MeDerivativeComponent for ClosureDerivatives {
     fn discards_failed_trials(&self) -> bool {
         false
     }
+
+    fn state_jacobian_columns(&self) -> Option<&[Vec<usize>]> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -639,6 +664,20 @@ mod tests {
         assert!(!controller.is_active());
     }
 
+    /// A component that proves no state-Jacobian relation hands the plugin
+    /// none, so the plugin colors from no claimed pattern.
+    #[test]
+    fn a_component_without_a_state_jacobian_relation_exposes_none() {
+        let controller = controller();
+        assert!(controller.issue_handle().state_jacobian_columns().is_none());
+        assert!(
+            folding(false)
+                .issue_handle()
+                .state_jacobian_columns()
+                .is_none()
+        );
+    }
+
     /// The first failure is the one that survives: a later consequence must not
     /// overwrite the cause.
     #[test]
@@ -709,6 +748,10 @@ mod tests {
 
         fn discards_failed_trials(&self) -> bool {
             self.discards
+        }
+
+        fn state_jacobian_columns(&self) -> Option<&[Vec<usize>]> {
+            None
         }
     }
 
