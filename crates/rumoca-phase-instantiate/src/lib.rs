@@ -40,6 +40,7 @@ mod array_expansion;
 mod attributes;
 mod component_loop;
 mod conditional_components;
+mod connection_subscript_constants;
 mod connections;
 mod dims;
 mod entry;
@@ -985,6 +986,14 @@ fn instantiate_class(
         // record-field integers (e.g., cellData.nRC) are available for top-level
         // for-loop and if-equation connection extraction.
         let mut conn_int_params = ctx.merged_int_params_for_connections(&int_params);
+        connection_subscript_constants::seed(
+            all_equations,
+            tree,
+            ctx.mod_env(),
+            effective_components,
+            &qualified_name,
+            &mut conn_int_params,
+        );
         propagate_record_alias_integer_params(&mut conn_int_params, ctx.mod_env());
         propagate_scoped_record_alias_integer_params(
             &mut conn_int_params,

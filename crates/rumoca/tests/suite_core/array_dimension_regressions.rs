@@ -380,3 +380,34 @@ end G;
     let y = initial_value(FIXTURE, "G.M", "extractor.y");
     assert!((y - 19.0).abs() < 1e-9, "y = {y}");
 }
+
+/// TOOLBUG-173: a connect-statement slice whose extent is a constant of the
+/// component's medium package (Buildings/IDEAS/AixLib `Fluid.Sources`:
+/// `connect(X_in_internal[1:Medium.nXi], Xi_in_internal)`).
+#[test]
+fn connect_slice_reads_package_constant() {
+    const FIXTURE: &str = "\
+package C
+  connector RI = input Real;
+  connector RO = output Real;
+  package Med
+    constant Integer nX = 3;
+    constant Integer nXi = nX - 1;
+  end Med;
+  block Src
+    replaceable package Medium = Med;
+    RO X_in_internal[Medium.nX];
+    RI Xi_in_internal[Medium.nXi];
+    Real s = sum(Xi_in_internal);
+  equation
+    X_in_internal = {1, 2, 3};
+    connect(X_in_internal[1:Medium.nXi], Xi_in_internal);
+  end Src;
+  model M
+    Src src;
+  end M;
+end C;
+";
+    let s = initial_value(FIXTURE, "C.M", "src.s");
+    assert!((s - 3.0).abs() < 1e-9, "s = {s}");
+}
