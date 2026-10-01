@@ -18,13 +18,17 @@ pub(super) fn eval_binary_op(
         return Err(refusal);
     }
     match op {
-        OpBinary::Add | OpBinary::AddElem => eval_add(lhs, rhs, span),
-        OpBinary::Sub | OpBinary::SubElem => eval_sub(lhs, rhs, span),
+        OpBinary::Add => eval_add(lhs, rhs, span),
+        OpBinary::AddElem => broadcast_elementwise(eval_add, lhs, rhs, span),
+        OpBinary::Sub => eval_sub(lhs, rhs, span),
+        OpBinary::SubElem => broadcast_elementwise(eval_sub, lhs, rhs, span),
         // MLS array semantics: `*` is linear algebra multiply; `.*` is element-wise.
         OpBinary::Mul => eval_mul(lhs, rhs, span),
         OpBinary::MulElem => eval_mul_elem(lhs, rhs, span),
-        OpBinary::Div | OpBinary::DivElem => eval_div(lhs, rhs, span),
-        OpBinary::Exp | OpBinary::ExpElem => eval_exp(lhs, rhs, span),
+        OpBinary::Div => eval_div(lhs, rhs, span),
+        OpBinary::DivElem => broadcast_elementwise(eval_div, lhs, rhs, span),
+        OpBinary::Exp => eval_exp(lhs, rhs, span),
+        OpBinary::ExpElem => broadcast_elementwise(eval_exp, lhs, rhs, span),
         OpBinary::Eq => eval_eq(lhs, rhs),
         OpBinary::Neq => eval_neq(lhs, rhs),
         OpBinary::Lt => eval_lt(lhs, rhs, span),
@@ -37,6 +41,37 @@ pub(super) fn eval_binary_op(
             kind: format!("binary operator: {:?}", op),
             span,
         }),
+    }
+}
+
+/// MLS 3.6 §10.6.2-§10.6.6: the element-wise operators `.+`, `.-`, `./` and
+/// `.^` also accept one scalar operand, which is applied to every element of
+/// the other (array) operand: `2 .+ {1, 2}` is `{3, 4}` and `{1, 2} .- 1` is
+/// `{0, 1}`. Array-array and scalar-scalar operands keep the base rule.
+fn broadcast_elementwise(
+    op: fn(&Value, &Value, Span) -> Result<Value, EvalError>,
+    lhs: &Value,
+    rhs: &Value,
+    span: Span,
+) -> Result<Value, EvalError> {
+    match (lhs, rhs) {
+        (Value::Array(elements), Value::Integer(_) | Value::Real(_)) => elements
+            .iter()
+            .map(|element| broadcast_elementwise(op, element, rhs, span))
+            .collect::<Result<_, _>>()
+            .map(Value::Array),
+        (Value::Integer(_) | Value::Real(_), Value::Array(elements)) => elements
+            .iter()
+            .map(|element| broadcast_elementwise(op, lhs, element, span))
+            .collect::<Result<_, _>>()
+            .map(Value::Array),
+        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| broadcast_elementwise(op, x, y, span))
+            .collect::<Result<_, _>>()
+            .map(Value::Array),
+        _ => op(lhs, rhs, span),
     }
 }
 

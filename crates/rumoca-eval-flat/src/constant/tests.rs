@@ -859,3 +859,36 @@ fn a_deferred_parameter_is_reported_as_deferred_rather_than_unknown() {
         EvalError::UnknownVariable { .. }
     ));
 }
+
+/// MLS §10.6.2: `.+`/`.-` apply a scalar operand to every array element
+/// (IBPSA `SelectCable_low`: `{65, 95, 110} .- 10`).
+#[test]
+fn elementwise_add_sub_broadcast_a_scalar_operand() {
+    let ctx = EvalContext::new();
+    let binary = |op, lhs, rhs| Expression::Binary {
+        op,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+        span: test_span(),
+    };
+    let elements = |value: Value| -> Vec<Option<i64>> {
+        match value {
+            Value::Array(items) => items.iter().map(Value::as_integer).collect(),
+            other => panic!("expected an array, got {other:?}"),
+        }
+    };
+    let sub = binary(OpBinary::SubElem, make_vector(&[65, 95, 110]), make_int(10));
+    assert_eq!(
+        elements(eval_expr(&sub, &ctx).expect(".- broadcasts")),
+        vec![Some(55), Some(85), Some(100)]
+    );
+    let add = binary(
+        OpBinary::AddElem,
+        make_int(2),
+        make_matrix(&[&[1, 2], &[3, 4]]),
+    );
+    let Value::Array(rows) = eval_expr(&add, &ctx).expect(".+ broadcasts over a matrix") else {
+        panic!("expected a matrix");
+    };
+    assert_eq!(elements(rows[1].clone()), vec![Some(5), Some(6)]);
+}
