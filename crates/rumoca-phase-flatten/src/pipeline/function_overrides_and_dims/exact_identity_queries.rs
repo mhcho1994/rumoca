@@ -68,6 +68,74 @@ pub(super) fn resolve_function_extends_target_def_id(
     class_index: &rumoca_ir_ast::ClassDefIndex<'_>,
     exposure: rumoca_core::DefId,
 ) -> Option<rumoca_core::DefId> {
+    let mut visited = FxHashSet::default();
+    if let FunctionBody::Unique(implementation) =
+        unique_function_body(class_index, exposure, &mut visited)
+        && implementation != exposure
+    {
+        return Some(implementation);
+    }
+    single_function_extends_chain_end(class_index, exposure)
+}
+
+/// The algorithm or external body a function denotes through its function
+/// base classes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FunctionBody {
+    /// Interface only: no base supplies a body.
+    None,
+    Unique(rumoca_core::DefId),
+    Ambiguous,
+}
+
+/// Find the one body a function inherits (MLS §12.2: a function has at most
+/// one algorithm section or external clause). A function such as MSL's
+/// `Files.loadResource` extends both the partial interface and an
+/// implementation that itself extends that interface; the interface-only base
+/// contributes no body, so the implementation is the unique selection.
+fn unique_function_body(
+    class_index: &rumoca_ir_ast::ClassDefIndex<'_>,
+    current: rumoca_core::DefId,
+    visited: &mut FxHashSet<rumoca_core::DefId>,
+) -> FunctionBody {
+    let Some(class_def) = class_index.get(current) else {
+        return FunctionBody::Ambiguous;
+    };
+    if class_def.class_type != rumoca_core::ClassType::Function {
+        return FunctionBody::Ambiguous;
+    }
+    if !class_def.algorithms.is_empty() || class_def.external.is_some() {
+        return FunctionBody::Unique(current);
+    }
+    if !visited.insert(current) {
+        return FunctionBody::Ambiguous;
+    }
+    // `visited` is the active extends path: a shared interface reached along
+    // two branches (a diamond) is not a cycle.
+    let mut body = FunctionBody::None;
+    for base in class_def.extends.iter().filter_map(|ext| ext.base_def_id) {
+        let is_function = class_index
+            .get(base)
+            .is_some_and(|base| base.class_type == rumoca_core::ClassType::Function);
+        if !is_function {
+            continue;
+        }
+        body = match (body, unique_function_body(class_index, base, visited)) {
+            (FunctionBody::None, next) => next,
+            (current, FunctionBody::None) => current,
+            (FunctionBody::Unique(a), FunctionBody::Unique(b)) if a == b => body,
+            _ => FunctionBody::Ambiguous,
+        };
+    }
+    visited.remove(&current);
+    body
+}
+
+/// The end of a single function-extends chain whose functions carry no body.
+fn single_function_extends_chain_end(
+    class_index: &rumoca_ir_ast::ClassDefIndex<'_>,
+    exposure: rumoca_core::DefId,
+) -> Option<rumoca_core::DefId> {
     let mut current = exposure;
     let mut visited = FxHashSet::default();
 

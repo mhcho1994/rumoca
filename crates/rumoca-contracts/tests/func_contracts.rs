@@ -1470,6 +1470,46 @@ fn function_selected_by_instance_package_redeclaration_keeps_record_members() {
 }
 
 // =============================================================================
+// Function extending its interface and an implementation (TOOLBUG-141)
+// =============================================================================
+
+/// MLS §12.2: MSL's `Files.loadResource` extends the partial interface
+/// `PartialLoadResource` and `ModelicaServices...loadResource`, which itself
+/// extends that interface and supplies the algorithm. The interface-only base
+/// contributes no body, so the implementation is the unique selection.
+#[test]
+fn function_extending_interface_and_implementation_selects_implementation() {
+    let source = r#"
+        package P
+            partial function PI
+                input Real x;
+                output Real y;
+            end PI;
+            function Impl
+                extends PI;
+            algorithm
+                y := 2 * x;
+            end Impl;
+            function F
+                extends PI;
+                extends Impl;
+            end F;
+            model M
+                Real w(start = 0, fixed = true);
+            equation
+                der(w) = F(1.5);
+            end M;
+        end P;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "P.M", 1.0);
+    let value = trace.final_value("w");
+    assert!(
+        (value - 3.0).abs() < 1e-6,
+        "w must integrate 2*1.5, got {value}"
+    );
+}
+
+// =============================================================================
 // Flexible-size protected function locals (TOOLBUG-132)
 // =============================================================================
 
