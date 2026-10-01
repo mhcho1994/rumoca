@@ -770,14 +770,15 @@ impl<'shape, 'dae> WhenLowering<'_, '_, 'shape, 'dae> {
 /// of a coordinate the same chain assigns, rewritten to one conditional value
 /// per target.
 ///
-/// MLS §8.3.5 when-equations are simultaneous, so `if leap[k] then m = pre(m)
-/// + 1; else m = pre(m); end if;` beside an equation for `k` reads the `k`
+/// MLS §8.3.5 when-equations are simultaneous, so
+/// `if leap[k] then m = pre(m) + 1; else m = pre(m); end if;` beside an
+/// equation for `k` reads the `k`
 /// that equation defines (IBPSA/IDEAS `CalendarTime`). A DAE discrete-value
 /// owner's branch activation may not read the owner's own targets, but a
 /// target's value may read targets ordered before it, so the guard moves into
 /// each value: `m = if leap[k] then pre(m) + 1 else pre(m)`. This is exact
 /// only when every arm, `else` included, assigns the same targets with plain
-/// assignments — then exactly one arm's value holds whenever the branch is
+/// assignments; then exactly one arm's value holds whenever the branch is
 /// active, which is what the if-expression selects. Any other shape keeps the
 /// guard lowering (and its typed rejection of a current self-read).
 fn conditional_target_values(

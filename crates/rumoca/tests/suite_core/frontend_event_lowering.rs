@@ -495,3 +495,31 @@ fn a_when_branch_guard_reads_the_current_value_of_an_earlier_target() {
     assert_eq!(value_at(&sim, "yearIndex", 3.0), 3.0);
     assert_eq!(value_at(&sim, "month", 4.0), 3.0);
 }
+
+/// TOOLBUG-183: `floor`/`ceil`/`integer` of a continuous-time argument
+/// generate events (MLS §3.7.2); a discrete `Integer` defined from them was
+/// never re-evaluated and stayed at its initial value for the whole run.
+const EVENT_ROUNDING: &str = "model EventRounding
+  Integer f;
+  Integer c;
+  Integer i;
+equation
+  f = integer(floor(2 * time - 1.25));
+  c = integer(ceil(2 * time - 1.25));
+  i = integer(2 * time - 1.25);
+end EventRounding;";
+
+#[test]
+fn rounding_a_continuous_argument_updates_discrete_integers_at_each_crossing() {
+    let sim = simulate("EventRounding", EVENT_ROUNDING, 1.5);
+    for (t, floor, ceil) in [
+        (0.0, -2.0, -1.0),
+        (0.3, -1.0, 0.0),
+        (0.8, 0.0, 1.0),
+        (1.4, 1.0, 2.0),
+    ] {
+        assert_eq!(value_at(&sim, "f", t), floor, "floor at t={t}");
+        assert_eq!(value_at(&sim, "c", t), ceil, "ceil at t={t}");
+        assert_eq!(value_at(&sim, "i", t), floor, "integer at t={t}");
+    }
+}

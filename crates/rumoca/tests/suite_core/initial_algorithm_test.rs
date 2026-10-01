@@ -354,8 +354,9 @@ end InitialAlgorithmAssertThenLoop;
 "#;
     let rendered = rejection(SOURCE, "InitialAlgorithmAssertThenLoop");
     assert!(
-        rendered.contains("ED013") && rendered.contains("implicit memory"),
-        "a loop in an initial algorithm must name its missing owner, got: {rendered}"
+        rendered.contains("ED013") && rendered.contains("whole, unsubscripted coordinate"),
+        "the loop unrolls (TOOLBUG-181); its element assignment must name the missing \
+         owner, got: {rendered}"
     );
     assert!(
         !rendered.contains("unresolved Flat reference"),

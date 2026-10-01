@@ -1006,6 +1006,16 @@ fn when_control_dependencies(
     dependencies
 }
 
+fn collect_guard_dependencies(
+    branches: &[(Expression, Vec<flat::WhenEquation>)],
+    roles: &HashMap<VarName, PlannedRole>,
+    dependencies: &mut HashSet<VarName>,
+) {
+    for (condition, _) in branches {
+        collect_current_discrete_dependencies(condition, roles, dependencies);
+    }
+}
+
 fn collect_when_target_dependencies(
     chain: &flat::WhenChain,
     target: &VarName,
@@ -1067,9 +1077,7 @@ fn collect_when_equation_target_dependencies(
                 // The guards select which of this if-equation's values the
                 // target takes, so they are read before the target is written.
                 if nested.is_some() {
-                    for (condition, _) in branches {
-                        collect_current_discrete_dependencies(condition, roles, dependencies);
-                    }
+                    collect_guard_dependencies(branches, roles, dependencies);
                 }
                 nested
             }

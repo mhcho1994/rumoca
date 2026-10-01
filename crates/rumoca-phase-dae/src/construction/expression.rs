@@ -1,4 +1,5 @@
 mod calls;
+mod discontinuities;
 mod operators;
 mod temporal;
 
@@ -6,6 +7,7 @@ use super::*;
 
 use calls::*;
 pub(super) use calls::{FunctionCallLowering, classify_function_call};
+use discontinuities::*;
 use operators::*;
 use temporal::*;
 
@@ -1264,31 +1266,10 @@ fn lower_builtin_call<'dae>(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let builtin = pure_builtin(function);
-    // MLS §3.7.2 div/mod/rem generate events at quotient changes. The static
-    // path folds a fully static call; a call the static proof refuses as a
-    // runtime discontinuity is handed to the checked runtime owner, which
-    // admits it exactly when the divisor is proven time-invariant and builds
-    // the sin-indicator event root. A statically undefined domain (proven
-    // zero divisor) stays rejected — only the non-static refusal reroutes.
-    if matches!(
-        builtin,
-        dae::PureBuiltin::Div | dae::PureBuiltin::Mod | dae::PureBuiltin::Rem
-    ) && let [lhs, rhs] = arguments.as_slice()
+    if let Some(lowered) =
+        lower_event_discontinuity(construction, symbols, builtin, &arguments, provenance)?
     {
-        let (lhs, rhs) = (*lhs, *rhs);
-        let attempted = construction
-            .expressions(|expressions| expressions.at(provenance).builtin(builtin, arguments));
-        let Err(dae::DaeConstructionError::NonStaticDiscontinuity { .. }) = attempted else {
-            return attempted;
-        };
-        // MLS §3.7.2: no events are generated inside a function body — the
-        // quotient stands alone, proven against the exact open body
-        // capability; at model scope the checked runtime owner builds the
-        // discontinuity root.
-        if let Some(body) = symbols.function_body {
-            return construction.function_runtime_quotient(body, builtin, [lhs, rhs], provenance);
-        }
-        return construction.runtime_quotient(builtin, [lhs, rhs], provenance);
+        return Ok(lowered);
     }
     construction.expressions(|expressions| expressions.at(provenance).builtin(builtin, arguments))
 }

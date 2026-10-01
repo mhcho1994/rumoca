@@ -518,14 +518,16 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
     let function_plans = validate_functions(flat, &function_shapes)?;
     let record_equations = analyze_record_equation_sets(flat)?;
     let expression_support = analyze_expression_support(flat, &constants)?;
-    analyze_model_owners(
+    let mut analysis = analyze_model_owners(
         flat,
         constants,
         function_shapes,
         function_plans,
         record_equations,
         expression_support,
-    )
+    )?;
+    plan_initial_algorithm_comprehensions(&mut analysis)?;
+    Ok(analysis)
 }
 
 fn analyze_model_owners(
@@ -580,28 +582,6 @@ fn analyze_model_owners(
     };
     let (initial_algorithms, initial_discrete_equation_rows) =
         analyze_initial_owners(flat, &expression_roles, assertions, &mut sample_lattices)?;
-    // The replayed initial-algorithm values are what gets lowered, so their
-    // array constructors (`sum({d[i] for i in 1:m})`) need plans too.
-    let mut comprehension_plans = expression_support.comprehensions;
-    extend_comprehensions(
-        &mut comprehension_plans,
-        initial_algorithms
-            .parameters
-            .values()
-            .chain(
-                initial_algorithms
-                    .discrete_values
-                    .values()
-                    .map(|v| &v.value),
-            )
-            .chain(
-                initial_algorithms
-                    .assertions
-                    .iter()
-                    .flat_map(|assertion| [&assertion.condition, &assertion.message]),
-            ),
-        &constants,
-    )?;
     let balance = analyze_source_balance(SourceBalanceAnalysisInput {
         flat,
         roles: &roles,
@@ -643,7 +623,7 @@ fn analyze_model_owners(
         initial_algorithm_assertions: initial_algorithms.assertions,
         function_plans,
         function_shapes,
-        comprehension_plans,
+        comprehension_plans: expression_support.comprehensions,
         record_array_fields,
         derived_parameters: derived_parameters.plans,
         derived_parameter_families: derived_parameters.families,
@@ -691,6 +671,25 @@ fn analyze_expression_support(
         )?,
         delays: analyze_delays(flat, constants)?,
     })
+}
+
+/// The replayed initial-algorithm values are what gets lowered, so their
+/// array constructors (`sum({d[i] for i in 1:m})`) need plans too.
+fn plan_initial_algorithm_comprehensions(analysis: &mut Analysis) -> Result<(), ToDaeError> {
+    extend_comprehensions(
+        &mut analysis.comprehension_plans,
+        analysis
+            .initial_parameters
+            .values()
+            .chain(analysis.initial_discrete_values.values().map(|v| &v.value))
+            .chain(
+                analysis
+                    .initial_algorithm_assertions
+                    .iter()
+                    .flat_map(|assertion| [&assertion.condition, &assertion.message]),
+            ),
+        &analysis.constants,
+    )
 }
 
 fn assertion_expressions(flat: &flat::Model) -> impl Iterator<Item = &Expression> {
