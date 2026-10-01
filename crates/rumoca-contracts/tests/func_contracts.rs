@@ -1536,6 +1536,151 @@ fn undeclared_purity_function_calling_impure_compiles_with_warning() {
 }
 
 // =============================================================================
+// Media function selection through replaceable packages (TOOLBUG-143..146)
+// =============================================================================
+
+/// MLS §12.2 / §7.3: a partial interface that declares its own formals and
+/// only extends an empty icon is its own interface, not an alias of the icon;
+/// and `replaceable package Medium = PM` puts both the alias and `PM` on the
+/// override list without making the selection ambiguous. The call to the
+/// still-partial function survives Flatten and is rejected at the DAE, which
+/// owns executable semantics (OpenModelica checks such models but cannot
+/// simulate them).
+#[test]
+fn partial_medium_interface_call_is_selected_through_its_alias() {
+    let source = r#"
+        package P
+            partial function Icon
+            end Icon;
+            partial package PM
+                replaceable partial function f
+                    extends Icon;
+                    input Real x;
+                    output Real y;
+                end f;
+                replaceable partial function g
+                    extends Icon;
+                    input Real x;
+                    output Real y;
+                end g;
+            end PM;
+            model S
+                replaceable package Medium = PM;
+                Real y = Medium.f(Medium.g(time));
+            end S;
+        end P;
+    "#;
+    rumoca_contracts::test_support::expect_failure_in_phase_with_code(
+        source,
+        "P.S",
+        FailedPhase::ToDae,
+        "ED008",
+    );
+}
+
+const INHERITED_PACKAGE_FUNCTION_SOURCE: &str = r#"
+    package L
+        partial package PM
+            replaceable partial function f
+                input Real x;
+                output Real y;
+            end f;
+            replaceable function twice
+                input Real x;
+                output Real y;
+            algorithm
+                y := 2 * f(x);
+            end twice;
+        end PM;
+        package W
+            extends PM;
+            redeclare function extends f
+            algorithm
+                y := 3 * x;
+            end f;
+        end W;
+        model Q
+            replaceable package Medium = PM;
+            Real w(start = 0, fixed = true);
+            Real v(start = 0, fixed = true);
+        equation
+            der(w) = Medium.twice(1);
+            der(v) = Medium.twice(time);
+        end Q;
+        model ByComponent
+            Q q(redeclare package Medium = W);
+        end ByComponent;
+        model ByExtends
+            extends Q(redeclare package Medium = W);
+        end ByExtends;
+    end L;
+"#;
+
+/// MLS §5.3: the inherited, non-redeclared `PM.twice` calls `f` in the
+/// package it is an element of, so with `Medium = W` it reaches `W.f`. A
+/// component redeclaration used to keep the call exposed as `Q.Medium.twice`
+/// (the partial default), leaving `PM.f` unresolved; and the call's `time`
+/// argument was captured as the package member `q.Medium.time`.
+#[test]
+fn inherited_package_function_reaches_selected_package_members() {
+    for (model, prefix) in [("L.ByComponent", "q."), ("L.ByExtends", "")] {
+        let trace = rumoca_contracts::test_support::simulate_model(
+            INHERITED_PACKAGE_FUNCTION_SOURCE,
+            model,
+            1.0,
+        );
+        let w = trace.final_value(&format!("{prefix}w"));
+        let v = trace.final_value(&format!("{prefix}v"));
+        assert!(
+            (w - 6.0).abs() < 1e-6,
+            "{model}: w must integrate 2*3*1, got {w}"
+        );
+        assert!(
+            (v - 3.0).abs() < 1e-4,
+            "{model}: v must integrate 6*t, got {v}"
+        );
+    }
+}
+
+/// MLS §4.5.1: MSL's `IF97_Utilities.phase_ph` calls the short alias
+/// `hl_p = BaseIF97.Regions.hl_p`, and nothing calls the alias by its own name,
+/// so no exposure under that name is collected; the call is matched to the
+/// renamed declaration instead of failing with EF005.
+#[test]
+fn short_function_alias_called_only_by_a_sibling() {
+    let source = r#"
+        package P
+            package B
+                function f
+                    input Real x;
+                    output Real y;
+                algorithm
+                    y := 2 * x;
+                end f;
+            end B;
+            function f = B.f;
+            function g
+                input Real x;
+                output Real y;
+            algorithm
+                y := if x < 0 then 0 else f(x);
+            end g;
+            model M
+                Real w(start = 0, fixed = true);
+            equation
+                der(w) = g(1.5);
+            end M;
+        end P;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "P.M", 1.0);
+    let value = trace.final_value("w");
+    assert!(
+        (value - 3.0).abs() < 1e-6,
+        "w must integrate 2*1.5, got {value}"
+    );
+}
+
+// =============================================================================
 // Flexible-size protected function locals (TOOLBUG-132)
 // =============================================================================
 

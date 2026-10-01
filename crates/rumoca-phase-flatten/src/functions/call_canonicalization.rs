@@ -306,6 +306,42 @@ impl CanonicalFunctionIndex {
         matched
     }
 
+    /// Match a call through a pure short function alias (MLS §4.5.1:
+    /// `function hl_p = BaseIF97.Regions.hl_p` in MSL `IF97_Utilities`) to the
+    /// collected declaration it renames. When only sibling functions call the
+    /// alias, no exposure under the alias's own name is collected; the alias
+    /// adds no components, body or modifiers, so its target's collected
+    /// declaration is the same function.
+    fn by_pure_alias_target(
+        &self,
+        reference: &rumoca_core::Reference,
+        class_index: &ast::ClassDefIndex<'_>,
+    ) -> Option<CanonicalFunctionMatch<'_>> {
+        if reference.resolved_function().is_some() {
+            return None;
+        }
+        let target_def_id = reference.target_def_id()?;
+        let alias = class_index.get_by_qualified_name(reference.as_str())?;
+        let [base] = alias.extends.as_slice() else {
+            return None;
+        };
+        let pure_alias = alias.components.is_empty()
+            && alias.algorithms.is_empty()
+            && alias.external.is_none()
+            && alias.classes.is_empty()
+            && base.modifications.is_empty();
+        if !pure_alias || base.base_def_id != Some(target_def_id) {
+            return None;
+        }
+        let declaration = class_index.qualified_name(target_def_id)?;
+        let entry = *self.by_name.get(&rumoca_core::VarName::new(declaration))?;
+        let function = &self.entries[entry];
+        (function.def_id == Some(target_def_id)).then_some(CanonicalFunctionMatch {
+            function,
+            exact_instance: false,
+        })
+    }
+
     fn sole_by_def(&self, def_id: rumoca_core::DefId) -> Option<&CanonicalFunction> {
         self.unique_by_def
             .get(&def_id)
@@ -351,6 +387,10 @@ impl CollectedFunctionCallCanonicalizer<'_> {
             .or_else(|| {
                 self.canonical_functions
                     .by_lexical_path(reference, self.class_index)
+            })
+            .or_else(|| {
+                self.canonical_functions
+                    .by_pure_alias_target(reference, self.class_index)
             })
     }
 

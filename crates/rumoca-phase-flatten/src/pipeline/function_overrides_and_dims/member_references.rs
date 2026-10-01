@@ -7,7 +7,9 @@ pub(super) fn resolve_override_member_name(
     reference: &rumoca_core::Reference,
     ctx: &FunctionOverrideRewriteContext<'_>,
 ) -> Option<String> {
-    if reference_component_ref_is_instance_path(reference, ctx) {
+    if reference_component_ref_is_instance_path(reference, ctx)
+        || is_predefined_time(reference, ctx)
+    {
         return None;
     }
     if let Some(resolved) = resolve_override_member_projection_name(reference, ctx) {
@@ -33,6 +35,20 @@ pub(super) fn resolve_override_member_name(
     }
     resolve_member_in_package_chain_exposed(ctx.tree, ctx.class_index, package, member_leaf)
         .filter(|resolved| resolved != reference.as_str())
+}
+
+/// The predefined `time` (MLS §3.6.7) is no package member, so no replaceable
+/// package selected for the scope may capture it as `scope.Medium.time`.
+fn is_predefined_time(
+    reference: &rumoca_core::Reference,
+    ctx: &FunctionOverrideRewriteContext<'_>,
+) -> bool {
+    reference.target_def_id().is_some_and(|def_id| {
+        ctx.tree
+            .scope_tree
+            .predefined_member(&ComponentPath::from_flat_path("time"))
+            == Some(def_id)
+    })
 }
 
 /// Whether the reference already names a class/package-owned member.

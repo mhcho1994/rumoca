@@ -150,6 +150,12 @@ fn single_function_extends_chain_end(
         if !class_def.algorithms.is_empty() || class_def.external.is_some() {
             return (current != exposure).then_some(current);
         }
+        // A base that declares its own formals is the interface the alias
+        // renames (`replaceable function position = positionBase`, where
+        // `positionBase` only extends the empty `Modelica.Icons.Function`).
+        if current != exposure && !class_def.components.is_empty() {
+            return Some(current);
+        }
         let mut candidates = class_def.extends.iter().filter_map(|ext| {
             let target = ext.base_def_id?;
             (class_index.get(target)?.class_type == rumoca_core::ClassType::Function)
@@ -260,9 +266,14 @@ pub(super) fn exact_package_function_exposure(
     Ok(selected)
 }
 
+/// A body-less function that only extends other functions renames the body
+/// they supply. One that declares its own formals is its own interface, not
+/// an alias: MSL's partial `PartialMedium.setState_phX` declares its inputs
+/// and only extends the empty icon `Modelica.Icons.Function`.
 pub(super) fn function_alias_requires_exact_selection(class_def: &rumoca_ir_ast::ClassDef) -> bool {
     class_def.class_type == rumoca_core::ClassType::Function
         && class_def.algorithms.is_empty()
         && class_def.external.is_none()
+        && class_def.components.is_empty()
         && !class_def.extends.is_empty()
 }
