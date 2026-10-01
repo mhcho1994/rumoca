@@ -391,3 +391,31 @@ fn a_comprehension_in_an_assertion_condition_lowers() {
     let sim = simulate("Cmp", ASSERTED_COMPREHENSION, 0.1);
     assert!((value_at(&sim, "x", 0.1) - 0.1).abs() < 1.0e-9);
 }
+
+/// TOOLBUG-180: an array constructor inside a when-equation body (CDL
+/// `TriggeredMovingMean`) had no comprehension plan, because the analysis only
+/// planned constructors of plain equations, and lowering panicked.
+const WHEN_BODY_COMPREHENSION: &str = "model TriggeredRing
+  parameter Integer n = 3;
+  Real u = time;
+  Integer iSample(start = 0, fixed = true);
+  Integer index(start = 0, fixed = true);
+  discrete Real ySample[n](start = zeros(n), each fixed = true);
+equation
+  when sample(0.5, 1) then
+    index = mod(pre(iSample), n) + 1;
+    ySample = {if i == index then u else pre(ySample[i]) for i in 1:n};
+    iSample = pre(iSample) + 1;
+  end when;
+end TriggeredRing;";
+
+#[test]
+fn an_array_constructor_in_a_when_body_writes_the_selected_slot() {
+    let sim = simulate("TriggeredRing", WHEN_BODY_COMPREHENSION, 4.0);
+    // Events at 0.5, 1.5, 2.5 fill slots 1..3; the event at 3.5 wraps to slot 1.
+    assert_eq!(value_at(&sim, "ySample[1]", 3.0), 0.5);
+    assert_eq!(value_at(&sim, "ySample[2]", 3.0), 1.5);
+    assert_eq!(value_at(&sim, "ySample[3]", 3.0), 2.5);
+    assert_eq!(value_at(&sim, "ySample[1]", 4.0), 3.5);
+    assert_eq!(value_at(&sim, "index", 4.0), 1.0);
+}

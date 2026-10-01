@@ -109,6 +109,63 @@ pub(super) fn analyze_comprehensions<'expression>(
     Ok(plans)
 }
 
+/// Every expression a when-chain lowers: activation conditions and the
+/// operands of each body equation, nested conditional bodies included.
+///
+/// MLS §8.3.5 when-equation bodies are lowered through the same expression
+/// owner as plain equations, so an array constructor written there
+/// (`ySample = {if i == k then u else pre(ySample[i]) for i in 1:n}`, CDL
+/// `TriggeredMovingMean`) needs the same comprehension plan.
+pub(super) fn when_chain_expressions(flat: &flat::Model) -> Vec<&Expression> {
+    let mut expressions = Vec::new();
+    for chain in &flat.when_chains {
+        for branch in chain.branches() {
+            expressions.push(&branch.condition);
+            collect_when_equation_expressions(&branch.equations, &mut expressions);
+        }
+    }
+    expressions
+}
+
+fn collect_when_equation_expressions<'flat>(
+    equations: &'flat [flat::WhenEquation],
+    expressions: &mut Vec<&'flat Expression>,
+) {
+    for equation in equations {
+        match equation {
+            flat::WhenEquation::Assign { value, .. } | flat::WhenEquation::Reinit { value, .. } => {
+                expressions.push(value);
+            }
+            flat::WhenEquation::Assert {
+                condition,
+                message,
+                level,
+                ..
+            } => {
+                expressions.extend([condition, message]);
+                expressions.extend(level.as_deref());
+            }
+            flat::WhenEquation::Terminate { message, .. } => expressions.push(message),
+            flat::WhenEquation::FunctionCallOutputs { function, .. } => {
+                expressions.push(function);
+            }
+            flat::WhenEquation::Conditional {
+                branches,
+                else_branch,
+                ..
+            } => {
+                for (condition, body) in branches {
+                    expressions.push(condition);
+                    collect_when_equation_expressions(body, expressions);
+                }
+                if let Some(body) = else_branch {
+                    collect_when_equation_expressions(body, expressions);
+                }
+            }
+        }
+    }
+}
+
 fn analyze_expression(
     expression: &Expression,
     constants: &EvalContext,

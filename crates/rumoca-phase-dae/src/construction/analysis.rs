@@ -45,7 +45,7 @@ use clocks::{ClockAnalysis, ClockDomainAnalysis, analyze_clocks};
 pub(super) use clocks::{
     ClockPlan, ClockedValuePlan, is_inferred_clock_condition, is_whole_clock_coordinate,
 };
-use comprehensions::analyze_comprehensions;
+use comprehensions::{analyze_comprehensions, when_chain_expressions};
 pub(super) use comprehensions::{
     ComprehensionKey, ComprehensionPlans, specialized_comprehension_plan,
 };
@@ -662,7 +662,9 @@ fn analyze_expression_support(
         // Assertion conditions are lowered through the same comprehension
         // plans (CDL `ExtractSignal`: `assert(andTrue({... for i in 1:n}))`).
         comprehensions: analyze_comprehensions(
-            all_model_expressions(flat).chain(assertion_expressions(flat)),
+            all_model_expressions(flat)
+                .chain(assertion_expressions(flat))
+                .chain(when_chain_expressions(flat)),
             constants,
         )?,
         delays: analyze_delays(flat, constants)?,
