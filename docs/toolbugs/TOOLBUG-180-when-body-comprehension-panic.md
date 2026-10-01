@@ -31,7 +31,16 @@ operand (nested if-equations included); `extend_comprehensions` adds the
 replayed initial-algorithm values, assertions and parameter bindings.
 `analysis.rs` feeds both into the comprehension plans.
 
+Follow-up: the standalone block (size parameter `n` unbound, so the arrays are
+zero-size) then failed in the bitcode pass stage ("dependency projection
+failed: scalar projection 0 is outside an expression containing 0
+scalars"). `rumoca-bitcode/src/export.rs::dependencies` now returns no reads
+for a zero-size value instead of projecting its scalar 0.
+`IBPSA.Controls.OBC.CDL.Discrete.TriggeredMovingMean` now compiles. Its
+validation model stops on the ED018 pulse source (TOOLBUG-184).
+
 ## Test
 
 `suite_core/frontend_event_lowering.rs::an_array_constructor_in_a_when_body_writes_the_selected_slot`
-(simulates the ring buffer and checks each slot and the wrap-around).
+(simulates the ring buffer and checks each slot and the wrap-around), and
+`an_empty_when_body_array_constructor_exports` (fails without the export fix).

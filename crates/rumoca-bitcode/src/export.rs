@@ -1311,6 +1311,15 @@ fn dependencies<'dae>(
     residual: dae::ExprId<'dae>,
 ) -> Result<Reads, ExportError> {
     let mut reads = Reads::default();
+    // A zero-size value (an array whose extent is an empty parameter range)
+    // reads nothing; projecting its scalar 0 would be out of bounds.
+    if view
+        .expression(residual)
+        .and_then(|expression| expression.value_type().scalar_count())
+        == Some(0)
+    {
+        return Ok(reads);
+    }
     match rumoca_eval_dae::for_each_scalar_coordinate(view, residual, 0, None, |coordinate, _| {
         reads.visit(coordinate);
     }) {

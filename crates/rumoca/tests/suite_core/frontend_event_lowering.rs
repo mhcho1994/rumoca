@@ -523,3 +523,25 @@ fn rounding_a_continuous_argument_updates_discrete_integers_at_each_crossing() {
         assert_eq!(value_at(&sim, "i", t), floor, "integer at t={t}");
     }
 }
+
+/// TOOLBUG-180 follow-up: with its size parameter unbound the same block has
+/// zero-size arrays, and the bitcode export projected scalar 0 of the empty
+/// when-assignment value to collect its reads.
+#[test]
+fn an_empty_when_body_array_constructor_exports() {
+    let source = WHEN_BODY_COMPREHENSION
+        .replace("parameter Integer n = 3;", "parameter Integer n = 0;")
+        .replace("TriggeredRing", "EmptyRing");
+    let compiled = compile("EmptyRing", &source);
+    let exported = rumoca_bitcode::export(
+        &compiled.dae,
+        None,
+        "EmptyRing",
+        &rumoca_bitcode::ExportOptions::default(),
+    );
+    assert!(
+        exported.is_ok(),
+        "zero-size when assignment should export: {:?}",
+        exported.err()
+    );
+}
