@@ -28,6 +28,10 @@ pub(crate) struct Context {
     /// Constant values keyed by their exact Resolve declaration identity.
     pub constant_values_by_def_id:
         rustc_hash::FxHashMap<rumoca_core::DefId, rumoca_core::Expression>,
+    /// Declarations recorded with differing values: an inherited package
+    /// constant takes a value per extending package (MLS §7.2), so its
+    /// declaration identity alone does not select one.
+    pub(crate) ambiguous_constant_def_ids: rustc_hash::FxHashSet<rumoca_core::DefId>,
     /// Component-local overrides keyed by exact instantiated occurrence and
     /// exact Resolve declaration identity.
     pub(crate) constant_values_by_occurrence:

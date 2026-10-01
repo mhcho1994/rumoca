@@ -1751,6 +1751,62 @@ fn package_forwarded_under_another_name_selects_the_enclosing_choice() {
 }
 
 // =============================================================================
+// Inherited package constant per extending package (TOOLBUG-148)
+// =============================================================================
+
+const INHERITED_PACKAGE_CONSTANT_SOURCE: &str = r#"
+    package L
+        partial package PM
+            constant String names[:] = {"a"};
+            constant Boolean red = false;
+            final constant Integer nS = size(names, 1);
+            final constant Integer n = if red then nS - 1 else nS;
+        end PM;
+        partial package PM2
+            extends PM(red = true);
+        end PM2;
+        package W
+            extends PM2(names = {"x", "y", "z"});
+        end W;
+        model C
+            replaceable package Medium = PM;
+            parameter Real s[Medium.n] = {i for i in 1:Medium.n};
+            Real y = s[Medium.n] * time;
+        end C;
+        model ByAlias
+            package Medium = W;
+            parameter Real s[Medium.n] = {i for i in 1:Medium.n};
+            Real y = s[Medium.n] * time;
+        end ByAlias;
+        model ByComponent
+            C c(redeclare package Medium = W);
+        end ByComponent;
+    end L;
+"#;
+
+/// MLS §7.2: `W` modifies `names` two extends levels above the declaration of
+/// `nS = size(names, 1)`, so `W.n = 2`. The declaration-keyed constant table
+/// held one value per declaration (the last package extracted, here `PM2`'s
+/// `size({"a"}, 1) - 1 = 0`), so `{i for i in 1:Medium.n}` lost its elements;
+/// and the comprehension range was demanded before package constants existed
+/// (EF004 "for-equation range end must be a constant integer or parameter").
+#[test]
+fn inherited_package_constant_takes_the_extending_package_value() {
+    for (model, var) in [("L.ByAlias", "y"), ("L.ByComponent", "c.y")] {
+        let trace = rumoca_contracts::test_support::simulate_model(
+            INHERITED_PACKAGE_CONSTANT_SOURCE,
+            model,
+            1.0,
+        );
+        let value = trace.final_value(var);
+        assert!(
+            (value - 2.0).abs() < 1e-6,
+            "{model}: {var} must be s[2]*1 = 2, got {value}"
+        );
+    }
+}
+
+// =============================================================================
 // Flexible-size protected function locals (TOOLBUG-132)
 // =============================================================================
 

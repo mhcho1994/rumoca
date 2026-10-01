@@ -191,7 +191,12 @@ fn try_expand_index_ranges<'a>(
     let mut ranges = Vec::new();
     for idx in indices {
         let idx_name = idx.ident.text.as_ref();
-        let values = expand_range_indices(ctx, &idx.range, prefix, idx.range.span())?;
+        // Package constants (`1:Medium.nXi`) are injected after this early
+        // expansion, so a range not yet evaluable keeps the comprehension
+        // structured; later lowering evaluates it with those constants.
+        let Ok(values) = expand_range_indices(ctx, &idx.range, prefix, idx.range.span()) else {
+            return Ok(None);
+        };
         ranges.push((idx_name, values));
     }
     Ok(Some(ranges))

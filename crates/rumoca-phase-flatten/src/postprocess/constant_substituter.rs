@@ -323,7 +323,18 @@ fn substitute_scalar_var_ref(
     if name.is_generated() {
         return substitute_generated_scalar_var_ref(name, span, env);
     }
-    if name.target_def_id().is_some() {
+    if let Some(declaration) = name.target_def_id() {
+        // An inherited package constant recorded with different values by
+        // different extending packages is selected by the package the
+        // occurrence names (`Medium.nXi`), not by its declaration alone.
+        if env.ctx.ambiguous_constant_def_ids.contains(&declaration)
+            && !occurrence_names_declaring_class(name, declaration, env.ctx)
+            && let Some((candidate, value)) = package_scoped_constant_value(key, env)
+        {
+            return Ok(Some(substitute_resolved_generated_constant(
+                &candidate, value, span, env,
+            )?));
+        }
         return substitute_source_scalar_var_ref(name, span, env);
     }
     if generated_constant_candidate_exists(key, env.ctx, env.scope) {
@@ -332,6 +343,45 @@ fn substitute_scalar_var_ref(
         )));
     }
     Ok(None)
+}
+
+/// Whether the occurrence's owner prefix is the class that declares the
+/// constant (`Base.cp` written explicitly), which selects the declaration's
+/// own binding rather than any extending package's modification.
+fn occurrence_names_declaring_class(
+    name: &rumoca_core::Reference,
+    declaration: rumoca_core::DefId,
+    ctx: &Context,
+) -> bool {
+    let Some(prefix) = name
+        .component_ref()
+        .and_then(|reference| reference.component_scope().prefix_parts().last())
+    else {
+        return true;
+    };
+    let declaring_class = ctx
+        .target_def_names
+        .get(&declaration)
+        .and_then(|qualified| crate::path_utils::scope_split(qualified))
+        .map(|(scope, _)| scope);
+    declaring_class.is_some_and(|scope| {
+        ctx.target_def_names.get(&prefix.def_id).map(String::as_str) == Some(scope)
+    })
+}
+
+/// The value recorded for the spelled package path of a constant occurrence
+/// (`ce.Medium.nXi`, then `Medium.nXi`), innermost scope first.
+fn package_scoped_constant_value<'a>(
+    key: &str,
+    env: ConstantSubstitutionEnv<'a>,
+) -> Option<(String, &'a rumoca_core::Expression)> {
+    let mut candidates = scoped_lookup_candidates_with_scope(key, env.scope);
+    if candidates.iter().all(|(candidate, _)| candidate != key) {
+        candidates.push((key.to_string(), String::new()));
+    }
+    candidates.into_iter().find_map(|(candidate, _)| {
+        resolve_constant_value_expr(&candidate, env.ctx).map(|value| (candidate, value))
+    })
 }
 
 fn substitute_source_scalar_var_ref(
