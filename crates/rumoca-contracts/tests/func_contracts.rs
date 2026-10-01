@@ -1509,6 +1509,32 @@ fn function_extending_interface_and_implementation_selects_implementation() {
     );
 }
 
+/// MLS §12.3 / OpenModelica: `ModelicaServices...loadResource` writes no purity
+/// prefix but calls the impure `Files.fullPathName`. It is compiled as impure
+/// with WR013 instead of being rejected as a pure body reaching an impure call.
+#[test]
+fn undeclared_purity_function_calling_impure_compiles_with_warning() {
+    let source = r#"
+        package P
+            impure function g
+                input Real x;
+                output Real y;
+                external "C" y = sin(x);
+            end g;
+            function f
+                input Real x;
+                output Real y;
+            algorithm
+                y := P.g(x);
+            end f;
+            model M
+                parameter Real p = f(1);
+            end M;
+        end P;
+    "#;
+    rumoca_contracts::test_support::expect_compile_warning(source, "P.M", "WR013");
+}
+
 // =============================================================================
 // Flexible-size protected function locals (TOOLBUG-132)
 // =============================================================================
