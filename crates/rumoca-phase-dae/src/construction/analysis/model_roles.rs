@@ -237,6 +237,12 @@ fn validate_variable(
         return Ok(PlannedRole::Clock);
     }
     let scalar_type = validate_variable_header(flat, name, variable)?;
+    if external_input && states.contains(name) {
+        return Err(ToDaeError::DerivativeOfInput {
+            name: name.to_string(),
+            span: variable.source_span,
+        });
+    }
     let role = classify_variable_role(
         name,
         variable,

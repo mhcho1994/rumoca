@@ -16,6 +16,7 @@ mod index_collapse;
 mod indexed_dimension_recovery;
 mod occurrence_graph;
 mod package_constants;
+mod parameter_derivatives;
 mod record_alias;
 #[cfg(test)]
 mod record_alias_postprocess_tests;
@@ -33,6 +34,7 @@ pub(super) use field_access::{
 };
 pub(crate) use index_collapse::{collapse_index_refs_to_known_varrefs, field_access_flat_path};
 pub(crate) use indexed_dimension_recovery::recover_indexed_lhs_dimensions;
+pub(crate) use parameter_derivatives::fold_time_invariant_derivatives;
 
 use constant_substituter::{
     substitute_known_constants_expr_with_options, substitute_known_constants_statement,

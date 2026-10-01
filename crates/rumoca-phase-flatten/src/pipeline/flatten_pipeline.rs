@@ -1080,6 +1080,7 @@ pub(crate) fn finalize_flat_model(
     // executable call slots cannot reintroduce an unresolved constant.
     inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
     substitute_known_constants_in_flat(flat, ctx)?;
+    fold_time_invariant_derivatives(flat);
     resolve_nested_constructor_field_access_bindings(flat);
     // Reachability is decided from the call graph as written, before any call
     // is folded to its result. Folding first makes a pure call with settled
