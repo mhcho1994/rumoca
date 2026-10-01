@@ -113,13 +113,12 @@ pub fn instantiate_model_with_outcome_options(
                     partial_overlay: overlay,
                 }
             }
-            Err(SyntheticInnerError::InstantiationFailed) => {
-                // Retry failed; fall back to original NeedsInner result.
-                InstantiationOutcome::NeedsInner {
-                    missing_inners: ctx.missing_inner_names(),
-                    missing_spans: ctx.missing_inner_spans(),
-                    partial_overlay: overlay,
-                }
+            // MLS §5.4: the model is instantiated with a default inner for
+            // every missing one. When that fails, the failure is the reason
+            // the model cannot be checked; reporting only the missing inner
+            // would hide it.
+            Err(SyntheticInnerError::InstantiationFailed(error)) => {
+                InstantiationOutcome::Error(error)
             }
             Err(SyntheticInnerError::SourceContext(error)) => InstantiationOutcome::Error(error),
         }

@@ -342,6 +342,9 @@ pub struct InstantiateContext {
     /// Integer parameter values discovered during instantiation, keyed by
     /// qualified path (e.g., `cellData.nRC`).
     known_int_params: rustc_hash::FxHashMap<String, i64>,
+    /// Settled extents of instantiated array components, keyed by qualified
+    /// path, so a structural integer bound to `size(a, k)` evaluates.
+    known_dims: rustc_hash::FxHashMap<String, Vec<usize>>,
     /// Boolean parameter values discovered during instantiation, keyed by
     /// qualified instance path (e.g., `world.driveTrainMechanics3D`).
     /// MLS §5.4 outer references in conditional-component conditions are
@@ -413,6 +416,7 @@ impl InstantiateContext {
             scope_frames: vec![ScopeFrame::default()],
             template_cache: ClassTemplateCache::default(),
             known_int_params: rustc_hash::FxHashMap::default(),
+            known_dims: rustc_hash::FxHashMap::default(),
             known_bool_params: rustc_hash::FxHashMap::default(),
             known_real_params: rustc_hash::FxHashMap::default(),
             allow_partial_instantiation: false,
@@ -519,6 +523,32 @@ impl InstantiateContext {
     /// here replaces that seed at the earliest point where modifier source scope
     /// and projected record fields are both known.
     fn register_known_integer_instance(&mut self, data: &ast::InstanceData) {
+        // MLS §10.3.1: `size(a, k)` of a component whose extents are settled is
+        // a structural integer (`final parameter Integer n = size(a, 1)` in
+        // IDEAS `PartialSimInfoManager`, used as a connect for-range).
+        let settled_dims = if data.dims.is_empty() {
+            // Only flexible extents (`a[:] = {...}`, MLS §10.1) are left
+            // unsettled here; they are the shape of the array-constructor
+            // binding.
+            let all_flexible = !data.dims_expr.is_empty()
+                && data
+                    .dims_expr
+                    .iter()
+                    .all(|subscript| matches!(subscript, ast::Subscript::Range { .. }));
+            all_flexible
+                .then(|| data.binding.as_ref().and_then(array_constructor_shape))
+                .flatten()
+                .filter(|shape| shape.len() == data.dims_expr.len())
+        } else {
+            data.dims
+                .iter()
+                .map(|&extent| usize::try_from(extent).ok())
+                .collect::<Option<Vec<_>>>()
+        };
+        if let Some(dims) = settled_dims.filter(|dims| !dims.is_empty()) {
+            self.known_dims
+                .insert(data.qualified_name.to_flat_string(), dims);
+        }
         if !data.is_discrete_type
             || !matches!(
                 data.variability,
@@ -549,6 +579,11 @@ impl InstantiateContext {
             self.known_int_params
                 .iter()
                 .map(|(name, value)| (name.clone(), *value)),
+        );
+        eval_ctx.dimensions.extend(
+            self.known_dims
+                .iter()
+                .map(|(name, dims)| (name.clone(), dims.clone())),
         );
         let Some(value) =
             rumoca_eval_ast::eval::eval_integer_with_scope(binding, &eval_ctx, &scope)
@@ -677,11 +712,6 @@ impl InstantiateContext {
             }
         }
         names
-    }
-
-    /// Get missing inner source spans.
-    pub fn missing_inner_spans(&self) -> Vec<Span> {
-        self.missing_inners.iter().map(|mi| mi.span).collect()
     }
 
     /// Get the current qualified path.
@@ -1884,3 +1914,28 @@ mod conditional_outer_tests;
 mod conditional_scope_tests;
 #[cfg(test)]
 mod tests;
+
+/// The exact shape of a nest of `{...}` array constructors whose leaves are
+/// not themselves constructors, or `None` when the nest is ragged or empty.
+/// Leaves are taken as scalars, so callers check the rank against the
+/// declaration before trusting the result.
+fn array_constructor_shape(expression: &ast::Expression) -> Option<Vec<usize>> {
+    let ast::Expression::Array {
+        elements,
+        is_matrix: false,
+        ..
+    } = expression
+    else {
+        return Some(Vec::new());
+    };
+    let (first, rest) = elements.split_first()?;
+    let inner = array_constructor_shape(first)?;
+    for element in rest {
+        if array_constructor_shape(element)? != inner {
+            return None;
+        }
+    }
+    let mut shape = vec![elements.len()];
+    shape.extend(inner);
+    Some(shape)
+}
