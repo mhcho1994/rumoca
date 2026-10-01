@@ -144,9 +144,14 @@ fn collect_component_modifier_member_types(
             ctx.type_ids_by_def_id,
             ctx.source_map,
         )?;
-        if let Some(member_type_id) = member_type_id {
-            member_types.insert(member_name.clone(), member_type_id);
-        }
+        // A member whose declared type crosses a replaceable edge
+        // (`flow Medium.MassFlowRate m_flow` in a fluid port) still exists;
+        // only its type is instance-dependent (MLS §7.3), so it is recorded
+        // with an unknown type rather than dropped.
+        member_types.insert(
+            member_name.clone(),
+            member_type_id.unwrap_or(rumoca_core::TypeId::UNKNOWN),
+        );
     }
 
     visiting.remove(&def_id);

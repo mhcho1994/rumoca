@@ -1681,6 +1681,76 @@ fn short_function_alias_called_only_by_a_sibling() {
 }
 
 // =============================================================================
+// Package forwarded under another name; port members typed through it
+// (TOOLBUG-146, TOOLBUG-147)
+// =============================================================================
+
+const FORWARDED_MEDIUM_SOURCE: &str = r#"
+    package L
+      partial package PM
+        type MassFlowRate = Real(unit = "kg/s");
+        replaceable partial model BaseProperties
+          Real x;
+        end BaseProperties;
+      end PM;
+      package W
+        extends PM;
+        constant Real k = 2;
+        redeclare model extends BaseProperties
+        equation
+          x = k * time;
+        end BaseProperties;
+      end W;
+      connector Port
+        replaceable package Medium = PM;
+        flow Medium.MassFlowRate m_flow;
+        Real p;
+      end Port;
+      block Pass
+        input Real u;
+        output Real y = u;
+      end Pass;
+      model Vol
+        replaceable package Medium = PM;
+        Medium.BaseProperties medium;
+        Port port_a(redeclare package Medium = Medium);
+        Pass pas(u = abs(port_a.m_flow));
+      equation
+        port_a.p = medium.x;
+      end Vol;
+      model Mach
+        replaceable package MediumCon = PM;
+        Vol vol(redeclare package Medium = MediumCon);
+      end Mach;
+      model T
+        Mach chi(redeclare package MediumCon = W);
+      end T;
+    end L;
+"#;
+
+/// MLS §7.3: `Vol vol(redeclare package Medium = MediumCon)` names the
+/// enclosing replaceable alias, so `vol.Medium` is the selection `chi` made
+/// (`W`), not `MediumCon`'s partial default (EI012 on `Medium.BaseProperties`).
+/// `pas(u = abs(port_a.m_flow))` reads a port member whose declared type
+/// crosses the replaceable edge `Medium.MassFlowRate`; the member exists
+/// (ET001 claimed it did not).
+#[test]
+fn package_forwarded_under_another_name_selects_the_enclosing_choice() {
+    let trace = rumoca_contracts::test_support::simulate_model(FORWARDED_MEDIUM_SOURCE, "L.T", 1.0);
+    let pressure = trace.final_value("chi.vol.port_a.p");
+    assert!(
+        (pressure - 2.0).abs() < 1e-6,
+        "W.BaseProperties gives k*time = 2, got {pressure}"
+    );
+    // The unconnected port's flow is zero (MLS §9.2), so the block reads 0.
+    let passed = trace.final_value("chi.vol.pas.y");
+    assert!(
+        passed.abs() < 1e-9,
+        "pas.y must read the zero port flow, got {passed}"
+    );
+}
+
+// =============================================================================
 // Flexible-size protected function locals (TOOLBUG-132)
 // =============================================================================
 
