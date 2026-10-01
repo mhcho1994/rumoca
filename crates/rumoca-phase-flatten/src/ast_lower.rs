@@ -22,6 +22,8 @@ pub(crate) struct LoweringContext<'a> {
 pub(crate) struct PredefinedIntrinsicIds {
     identities: [Option<DefId>; rumoca_core::BuiltinFunction::PREDEFINED_IDENTITY_REQUIRED.len()],
     assertion: Option<DefId>,
+    /// The predefined `array(...)` constructor (MLS §10.4.1).
+    array_constructor: Option<DefId>,
 }
 
 impl PredefinedIntrinsicIds {
@@ -36,6 +38,9 @@ impl PredefinedIntrinsicIds {
             assertion: tree
                 .scope_tree
                 .predefined_member(&rumoca_core::ComponentPath::from_flat_path("assert")),
+            array_constructor: tree
+                .scope_tree
+                .predefined_member(&rumoca_core::ComponentPath::from_flat_path("array")),
         }
     }
 
@@ -49,6 +54,10 @@ impl PredefinedIntrinsicIds {
 
     fn is_assertion(self, target: Option<DefId>) -> bool {
         self.assertion.is_some() && self.assertion == target
+    }
+
+    fn is_array_constructor(self, target: Option<DefId>) -> bool {
+        self.array_constructor.is_some() && self.array_constructor == target
     }
 }
 
@@ -885,6 +894,21 @@ fn convert_function_call_with_context(
             && context.predefined_string_declaration.is_some()
         {
             return lower_string_conversion(comp, args, call_span, context);
+        }
+        // MLS §10.4.1: `array(A, B, C, ...)` is the array constructor that
+        // `{A, B, C, ...}` abbreviates.
+        if context
+            .predefined_intrinsics
+            .is_array_constructor(comp.target_def_id())
+        {
+            return Ok(rumoca_core::Expression::Array {
+                elements: args
+                    .iter()
+                    .map(|argument| expression_from_ast_with_context(argument, context))
+                    .collect::<LowerResult<Vec<_>>>()?,
+                is_matrix: false,
+                span: call_span,
+            });
         }
         if let Some(intrinsic) = context.predefined_intrinsics.resolve(comp.target_def_id()) {
             return Ok(rumoca_core::Expression::BuiltinCall {

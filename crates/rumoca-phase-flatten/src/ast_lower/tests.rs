@@ -356,6 +356,7 @@ fn interval_requires_the_exact_predefined_declaration_identity() {
         predefined_intrinsics: PredefinedIntrinsicIds {
             identities,
             assertion: None,
+            array_constructor: None,
         },
         ..LoweringContext::default()
     };

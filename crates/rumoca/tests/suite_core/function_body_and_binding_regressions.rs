@@ -205,3 +205,28 @@ end Az;
 ";
     assert_compiles(FIXTURE, "Az.M");
 }
+
+/// TOOLBUG-157: the `array(...)` constructor (MLS §10.4.1) in a binding and
+/// in a function's protected constant (ThermoSysPro `BaseIF97`:
+/// `constant Real[42] nn = array(...)`).
+#[test]
+fn array_constructor_call_is_an_array() {
+    const FIXTURE: &str = "\
+package Arr
+  function f
+    input Real x;
+    output Real y;
+  protected
+    constant Real nn[3] = array(1, 2, 3);
+  algorithm
+    y := x*nn[2];
+  end f;
+  model M
+    Real z = f(time);
+    parameter Real p[2] = array(4, 5);
+    Real w = p[2]*time;
+  end M;
+end Arr;
+";
+    assert_compiles(FIXTURE, "Arr.M");
+}
