@@ -305,7 +305,7 @@ pub(crate) fn infer_expression_shape(
             ..
         } => {
             if *is_matrix {
-                ExpressionShape::Other
+                matrix_literal_shape(elements, prefix, ctx)
             } else if elements
                 .iter()
                 .all(|e| infer_expression_shape(e, prefix, ctx) == ExpressionShape::Scalar)
@@ -325,6 +325,48 @@ pub(crate) fn infer_expression_shape(
         | ast::Expression::ClassModification { .. }
         | ast::Expression::Empty { .. } => ExpressionShape::Other,
     }
+}
+
+/// Shape of a matrix constructor whose entries are scalars (MLS §10.4.2):
+/// `[a, b, c]` is a 1x3 matrix and `[a, b; c, d]` (rows parsed as nested
+/// matrix rows) a 2x2 one. Concatenations of array blocks stay unknown.
+fn matrix_literal_shape(
+    elements: &[ast::Expression],
+    prefix: &ast::QualifiedName,
+    ctx: &Context,
+) -> ExpressionShape {
+    // Scalar components carry no recorded dimensions, so an entry naming a
+    // component without them is a scalar entry (its shape is otherwise
+    // unknown and would leave the whole constructor unknown).
+    let all_scalar = |entries: &[ast::Expression]| {
+        entries.iter().all(|entry| match entry {
+            ast::Expression::ComponentReference(cr) => {
+                infer_component_ref_dims(cr, prefix, ctx).is_none_or(|dims| dims.is_empty())
+            }
+            _ => infer_expression_shape(entry, prefix, ctx) == ExpressionShape::Scalar,
+        })
+    };
+    if all_scalar(elements) {
+        return ExpressionShape::Matrix(1, elements.len() as i64);
+    }
+    let mut columns = None;
+    for row in elements {
+        let ast::Expression::Array {
+            elements: entries,
+            is_matrix: true,
+            ..
+        } = row
+        else {
+            return ExpressionShape::Other;
+        };
+        if !all_scalar(entries) || columns.is_some_and(|count| count != entries.len()) {
+            return ExpressionShape::Other;
+        }
+        columns = Some(entries.len());
+    }
+    columns.map_or(ExpressionShape::Other, |count| {
+        ExpressionShape::Matrix(elements.len() as i64, count as i64)
+    })
 }
 
 /// Infer the exact result shape of the predefined array operators whose shape

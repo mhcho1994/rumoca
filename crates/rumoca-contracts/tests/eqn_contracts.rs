@@ -1306,3 +1306,22 @@ fn eqn_028_noneval_nested_for_range_rejected() {
         "ER124",
     );
 }
+
+// MLS §10.4.2 / §8.3.1: an equation between matrix constructors stands for
+// one scalar equation per element; `[a; b]` is a 2x1 matrix.
+#[test]
+fn eqn_matrix_constructor_equation_counts_every_element() {
+    let source = r#"
+        model MatrixEquation
+            parameter Real k = 1;
+            Real a, b;
+            Real c = 1, d = 2;
+        equation
+            [a; b] = -k*[1, 2; 3, 4]*[c; d];
+        end MatrixEquation;
+    "#;
+    rumoca_contracts::test_support::expect_balanced(source, "MatrixEquation");
+    let trace = rumoca_contracts::test_support::simulate_model(source, "MatrixEquation", 0.1);
+    assert!((trace.final_value("a") + 5.0).abs() < 1e-9);
+    assert!((trace.final_value("b") + 11.0).abs() < 1e-9);
+}
