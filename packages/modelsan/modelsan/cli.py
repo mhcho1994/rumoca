@@ -1,4 +1,8 @@
-"""Explicit-backend behavioral campaigns: python -m modelsan.cli contracts ..."""
+"""ModelSan command line.
+
+    modelsan check Model.mo --model M -fsanitize=default   sanitize one model
+    modelsan contracts campaign.json --backend ...          behavioural contracts
+"""
 from __future__ import annotations
 
 import argparse
@@ -11,10 +15,11 @@ from .backends.rumoca import RumocaBackend
 from .backends.rumoca_source import RumocaSourceBackend
 from .campaign import run_campaign
 from .campaign_provenance import capture
+from . import check as check_command
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='ModelSan behavioral contract campaigns')
+    parser = argparse.ArgumentParser(description='ModelSan: sanitizers for Modelica models')
     commands = parser.add_subparsers(dest='command', required=True)
     contracts = commands.add_parser('contracts', help='check declared properties of actual executions')
     contracts.add_argument('campaign', type=Path)
@@ -29,7 +34,10 @@ def main(argv=None):
     contracts.add_argument('--intervals', type=int, default=400)
     contracts.add_argument('--timeout', type=float, default=90.0)
     contracts.add_argument('--output', type=Path, required=True)
+    check_command.add_parser(commands)
     args = parser.parse_args(argv)
+    if args.command == 'check':
+        return check_command.run(args)
     if args.intervals < 1 or args.stop_time <= 0:
         parser.error('intervals and stop-time must be positive')
     if args.backend != 'openmodelica' and args.library:

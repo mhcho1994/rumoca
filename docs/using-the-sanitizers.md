@@ -39,48 +39,58 @@ equation
 end Tank;
 ```
 
-`check.py` compiles it, runs the default sanitizers, and prints what they found:
+Check it with one command, the way `gcc -fsanitize=...` works:
 
-```python
-import subprocess
-from rumoca_bitcode import Model
-from modelsan.backends.rumoca import RumocaBackend
-from modelsan.pipeline import Pipeline
-from modelsan.sanitizers import DEFAULT, SanitizerRegistry
-
-rumoca = "./target/debug/rumoca"
-subprocess.run([rumoca, "compile", "Tank.mo", "--model", "Tank",
-                "--emit-bitcode", "Tank.rbc"], check=True)
-model = Model.load("Tank.rbc")
-
-registry = SanitizerRegistry()
-for sanitizer in DEFAULT:
-    registry.register(sanitizer())
-
-backend = RumocaBackend(rumoca, t_end=5.0)
-outcome = Pipeline(registry, backend).run(model, "Tank.rbc", model.name)
-
-for bug in outcome.database.bugs:
-    for finding in bug.findings:
-        print(finding.summary())
-print("not checked:", outcome.coverage)
+```sh
+modelsan check Tank.mo --model Tank --stop-time 5
 ```
 
-Output:
+```
+Tank.mo:2: medium: [singularity] vanishing-coefficient: parameter multiplies a derivative; zero removes the equation's only determination of that state
+Tank.mo: high: [solver] simulation-failure: simulation failed: non-finite (NaN) value computed for `q`
+note: not checked: domain.runtime: observe_expression unavailable
+2 finding(s) from 12 sanitizer(s)
+```
 
-```
-[singularity] vanishing-coefficient at Tank.mo:2
-[solver] simulation-failure [simulation]
-not checked: {'domain.runtime': 'observe_expression unavailable', ...}
-```
+(`modelsan` is installed by `pip install -e packages/modelsan`; without
+installing, run `python3 -m modelsan.cli check ...` with the `PYTHONPATH`
+above. Rumoca is found on `PATH`, or pass `--rumoca ./target/debug/rumoca`.)
 
 - `singularity` found the `A` problem without running anything.
 - `solver` reports that the run itself failed. Its evidence
   (`finding.evidence`) says a NaN was computed for `q`, which is the negative
   `sqrt`.
-- `not checked` lists what could not be examined, and why. **An empty finding
+- `note: not checked` lists what could not be examined, and why. **An empty finding
   list only means "clean" for the sanitizers that actually ran**; always read
   the coverage.
+
+## The `check` command
+
+```sh
+modelsan check FILE.mo --model NAME [-fsanitize=LIST] [options]
+```
+
+| Option | Meaning |
+|---|---|
+| `-fsanitize=LIST` | sanitizers and groups, comma-separated; a leading `-` removes one: `-fsanitize=default`, `-fsanitize=domain,range`, `-fsanitize=all,-network`. Default: `default` |
+| `--list` | show every sanitizer and group |
+| `--source-root DIR` | load a library (repeatable), e.g. the MSL for `Modelica.*` models |
+| `--stop-time T`, `--start-time T` | simulation interval (default 0 to 1) |
+| `--timeout S` | give up on a run after S seconds (default 300) |
+| `--rumoca PATH` | the Rumoca executable (default: `rumoca` on `PATH`) |
+| `--json FILE` | also write the findings and coverage as JSON |
+
+Groups: `default` (the table below), `static` (structure only: singularity,
+structure, dimension, quantity, network, init-static, divisor,
+discontinuity), `runtime` (watchers of the simulation), `all`.
+
+Exit status: **0** nothing found, **1** findings, **2** the model did not
+compile or the command was misused, so it slots into scripts and CI:
+
+```sh
+modelsan check Pkg/package.mo --model Pkg.Examples.Demo \
+    --source-root path/to/ModelicaStandardLibrary -fsanitize=default || exit 1
+```
 
 ## How it works
 
@@ -146,8 +156,31 @@ Opt-in sanitizers, registered the same way:
 | **BehaviorSan** | user-declared behavioural contracts (see below) |
 | **DeterminismSan**, **DifferentialSan** (`COMPARATIVE`) | the same run giving different answers; two tools disagreeing. These schedule extra runs; use `Pipeline.run_comparative` |
 
-Enable a subset by registering only those classes, or pass
-`registry.register(SomeSan(), enabled=False)` to keep one registered but off.
+Pick a subset with `-fsanitize=...` (the name in parentheses), e.g.
+`-fsanitize=domain,range,quantity`.
+
+## Using it from Python
+
+`modelsan check` is a thin wrapper over the pipeline. To script campaigns
+(sweeping parameters, custom sanitizers, comparing backends), use it
+directly:
+
+```python
+from rumoca_bitcode import Model
+from modelsan.backends.rumoca import RumocaBackend
+from modelsan.pipeline import Pipeline
+from modelsan.sanitizers import DEFAULT, SanitizerRegistry
+
+model = Model.load("Tank.rbc")          # rumoca compile Tank.mo --model Tank --emit-bitcode Tank.rbc
+registry = SanitizerRegistry()
+for sanitizer in DEFAULT:
+    registry.register(sanitizer())
+outcome = Pipeline(registry, RumocaBackend("rumoca", t_end=5.0)).run(model, "Tank.rbc", model.name)
+for bug in outcome.database.bugs:
+    for finding in bug.findings:
+        print(finding.summary())
+print("not checked:", outcome.coverage)
+```
 
 ## Checking declared behaviour: the contracts CLI
 
