@@ -1406,6 +1406,70 @@ fn call_through_inherited_replaceable_package_alias() {
 }
 
 // =============================================================================
+// Function selected through a per-instance package redeclaration (TOOLBUG-140)
+// =============================================================================
+
+const REDECLARED_MEDIUM_STATE_SOURCE: &str = r#"
+    package P
+        partial package PM
+            replaceable record State
+            end State;
+            replaceable partial function temperature
+                input State state;
+                output Real T;
+            end temperature;
+        end PM;
+        partial package PS
+            extends PM;
+            redeclare record extends State
+                Real T;
+            end State;
+            redeclare function extends temperature
+            algorithm
+                T := state.T;
+            end temperature;
+        end PS;
+        package W
+            extends PS;
+        end W;
+        model Q
+            replaceable package Medium = PM;
+            Medium.State st(T = 2);
+            Real w(start = 0, fixed = true);
+        equation
+            der(w) = Medium.temperature(st);
+        end Q;
+        model ByComponent
+            Q q(redeclare package Medium = W);
+        end ByComponent;
+        model ByExtends
+            extends Q(redeclare package Medium = W);
+        end ByExtends;
+    end P;
+"#;
+
+/// MLS §7.3: `Medium.temperature` in `Q` names the implementation selected by
+/// the redeclaration (`PS.temperature`), whose formal `state` has the
+/// redeclared `State` with member `T`. The class-tree exposure `Q.Medium`
+/// still denotes the partial default, so converting the body in that scope
+/// lost `state.T` (EF024) and the record argument's fields.
+#[test]
+fn function_selected_by_instance_package_redeclaration_keeps_record_members() {
+    for (model, var) in [("P.ByComponent", "q.w"), ("P.ByExtends", "w")] {
+        let trace = rumoca_contracts::test_support::simulate_model(
+            REDECLARED_MEDIUM_STATE_SOURCE,
+            model,
+            1.0,
+        );
+        let value = trace.final_value(var);
+        assert!(
+            (value - 2.0).abs() < 1e-6,
+            "{model}: {var} must integrate state.T = 2, got {value}"
+        );
+    }
+}
+
+// =============================================================================
 // Flexible-size protected function locals (TOOLBUG-132)
 // =============================================================================
 
