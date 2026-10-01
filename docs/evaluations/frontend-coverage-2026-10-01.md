@@ -172,6 +172,7 @@ constructor/destructor lifecycle, `while` and nested-range loops in function
 bodies, a sample start read after initialization, and discrete-valued
 initialization. Those cover roughly 150 of the 455 sample failures.
 After that, re-run the full 7,892-model backlog for a dataset-level number.
+The full list, with approaches, is in [../future-work.md](../future-work.md).
 
 ## Also delivered in this session
 
