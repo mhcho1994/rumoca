@@ -279,7 +279,13 @@ fn oriented_discrete_connection<'flat>(
             _ => return None,
         },
     };
-    Some((target, target_subscripts, value))
+    // An external input is supplied by the environment; it is always the
+    // value of the connection and never the coordinate it defines.
+    matches!(roles.get(target), Some(PlannedRole::DiscreteValue)).then_some((
+        target,
+        target_subscripts,
+        value,
+    ))
 }
 
 pub(super) fn aggregate_discrete_connections(
@@ -831,23 +837,12 @@ fn selection_denotes_whole_aggregate(target: &flat::Variable, subscripts: &[Subs
             })
 }
 
-fn discrete_value_base_reference<'flat>(
-    expression: &'flat Expression,
-    roles: &HashMap<VarName, PlannedRole>,
-) -> Option<(&'flat VarName, &'flat [Subscript])> {
-    let Expression::VarRef {
-        name, subscripts, ..
-    } = expression
-    else {
-        return None;
-    };
-    let name = name.var_name();
-    matches!(roles.get(name), Some(PlannedRole::DiscreteValue))
-        .then_some((name, subscripts.as_slice()))
-}
-
-/// A connection endpoint that can take part in a discrete-value connection
-/// set: a discrete-valued coordinate, or a top-level input that drives one.
+/// A discrete-connection endpoint: a discrete-value coordinate, or an
+/// external input (the environment's value) connected to one.
+///
+/// A connection equation between two external inputs defines nothing, so an
+/// input endpoint is only accepted when the other side is a discrete value;
+/// `oriented_discrete_connection` enforces that by refusing an input target.
 fn discrete_connection_endpoint<'flat>(
     expression: &'flat Expression,
     roles: &HashMap<VarName, PlannedRole>,
@@ -864,6 +859,21 @@ fn discrete_connection_endpoint<'flat>(
         Some(PlannedRole::DiscreteValue | PlannedRole::Input)
     )
     .then_some((name, subscripts.as_slice()))
+}
+
+fn discrete_value_base_reference<'flat>(
+    expression: &'flat Expression,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> Option<(&'flat VarName, &'flat [Subscript])> {
+    let Expression::VarRef {
+        name, subscripts, ..
+    } = expression
+    else {
+        return None;
+    };
+    let name = name.var_name();
+    matches!(roles.get(name), Some(PlannedRole::DiscreteValue))
+        .then_some((name, subscripts.as_slice()))
 }
 
 pub(in crate::construction) fn discrete_value_assignment<'flat>(

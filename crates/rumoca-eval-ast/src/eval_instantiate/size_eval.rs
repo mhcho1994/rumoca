@@ -88,7 +88,9 @@ fn component_extent(
             )
         }
         Some(ast::Subscript::Empty | ast::Subscript::Range { .. }) => {
-            constructor_extent(binding?, axis)
+            let binding = binding?;
+            constructor_extent(binding, axis)
+                .or_else(|| comprehension_extent(binding, axis, env, scope, depth))
         }
         None if component.shape_expr.is_empty() => component
             .shape
@@ -96,6 +98,58 @@ fn component_extent(
             .and_then(|d| i64::try_from(*d).ok()),
         None => None,
     }
+}
+
+/// Leading extent of a single-iterator comprehension over an integer range,
+/// `{f(i) for i in lo:step:hi}` (MLS §10.4.1), which may be empty.
+fn comprehension_extent(
+    binding: &ast::Expression,
+    axis: usize,
+    env: IntegerEvalEnv<'_>,
+    scope: &IndexMap<String, ast::Component>,
+    depth: usize,
+) -> Option<i64> {
+    let ast::Expression::ArrayComprehension {
+        indices,
+        filter: None,
+        ..
+    } = binding
+    else {
+        return None;
+    };
+    let ([index], 0) = (indices.as_slice(), axis) else {
+        return None;
+    };
+    let ast::Expression::Range {
+        start, step, end, ..
+    } = &index.range
+    else {
+        return None;
+    };
+    let eval = |expression: &ast::Expression| {
+        try_eval_integer_expr_with_depth_and_locals(
+            expression,
+            env.mod_env,
+            scope,
+            env.tree,
+            env.resolve_class_components,
+            depth + 1,
+            None,
+        )
+    };
+    let (start, end) = (eval(start)?, eval(end)?);
+    let step = match step {
+        Some(step) => eval(step)?,
+        None => 1,
+    };
+    if step == 0 {
+        return None;
+    }
+    let span = end.checked_sub(start)?;
+    if span != 0 && span.signum() != step.signum() {
+        return Some(0);
+    }
+    Some(span / step + 1)
 }
 
 /// Extent along `axis` of a nested `{...}` array constructor.

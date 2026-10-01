@@ -366,6 +366,7 @@ fn is_external_input(
         .as_ref()
         .and_then(|reference| reference.parts().first())
         .map(|part| part.ident.as_str())
+        .or_else(|| augmented_member_root(name, variable))
         .ok_or_else(|| {
             ToDaeError::unsupported_flat(
                 "input ownership",
@@ -374,6 +375,22 @@ fn is_external_input(
             )
         })?;
     Ok(flat.top_level_input_components.contains(root) || flat.top_level_connectors.contains(root))
+}
+
+/// Root component of an expandable-connector member that augmentation added.
+///
+/// Such a member has no declaration, so it carries no component reference;
+/// its flat name is the bus path it was added under (MLS §9.1.3), and that
+/// path's first segment is the component that owns it.
+fn augmented_member_root<'name>(
+    name: &'name VarName,
+    variable: &flat::Variable,
+) -> Option<&'name str> {
+    if !variable.from_expandable_connector {
+        return None;
+    }
+    let head = name.as_str().split('.').next()?;
+    Some(head.split('[').next().unwrap_or(head))
 }
 
 fn validate_variable_role(

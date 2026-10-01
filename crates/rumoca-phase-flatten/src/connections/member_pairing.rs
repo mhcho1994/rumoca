@@ -84,7 +84,10 @@
 //!   CONN-028 contract). MLS §9.3 admits only parameter-to-parameter and
 //!   constant-to-constant. Dropping the pair, which is what this phase did
 //!   before, leaves the non-structural side with no equation at all. Reported
-//!   against both member declarations.
+//!   against both member declarations. One exception, matching OpenModelica:
+//!   when the structural side is a member of an expandable connector the pair
+//!   is connected, so the variable side is defined by the bus parameter
+//!   (TOOLBUG-123).
 //!
 //! ## Scope of `EF027`/`EF028`
 //!
@@ -196,6 +199,18 @@ pub(super) fn classify_connection_member_pair(
         structural_variability_label(decl_b),
     ) {
         (Some(_), Some(_)) => return Ok(MemberPairing::NoEquation),
+        // A parameter member of an expandable connector is a bus signal
+        // (MLS §9.1.3: "all components in an expandable connector are seen as
+        // connector instances"), and reading it through a connect is how a bus
+        // hands a parameter to a block input. OpenModelica generates the
+        // equality `u = bus.p` for exactly this pair rather than the §9.3
+        // assertion, which would leave the input undefined; do the same.
+        (Some(_), None) if decl_a.from_expandable_connector => {
+            return Ok(MemberPairing::Connect);
+        }
+        (None, Some(_)) if decl_b.from_expandable_connector => {
+            return Ok(MemberPairing::Connect);
+        }
         (Some(label), None) => {
             return Err(FlattenError::structural_member_paired_with_variable(
                 var_a.as_str(),

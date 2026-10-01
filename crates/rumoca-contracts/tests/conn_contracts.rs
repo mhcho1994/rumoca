@@ -1333,9 +1333,15 @@ fn unsupported_expandable_duplicate_sources_fail_closed() {
     );
 }
 
+/// A member of the model's own bus that only feeds an input is an input of the
+/// model (MLS §9.1.3: the member takes the causality of the input it is
+/// connected to), supplied by whoever connects the bus. OpenModelica accepts
+/// it; so does this compiler since TOOLBUG-121. The balance is what pins that
+/// `bus.sig` is not an unknown: `k.u` is defined by the connection and
+/// `bus.sig` is external.
 #[test]
-fn unsupported_expandable_input_without_source_fails_closed() {
-    expect_failure_in_phase_with_code(
+fn expandable_input_member_of_top_level_bus_is_a_model_input() {
+    expect_balanced(
         r#"
         model M
             expandable connector Bus
@@ -1351,7 +1357,5 @@ fn unsupported_expandable_input_without_source_fails_closed() {
         end M;
     "#,
         "M",
-        FailedPhase::Flatten,
-        "EF033",
     );
 }
