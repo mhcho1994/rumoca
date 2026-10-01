@@ -28,6 +28,7 @@ mod history_operator_checked;
 
 mod algorithm_parameter_range;
 mod array_der_coupling_test;
+mod array_dimension_regressions;
 mod array_subscript_test;
 mod backend_executor_differential;
 mod balance_diagnostic;

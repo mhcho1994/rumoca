@@ -45,6 +45,18 @@ pub trait DimensionInferenceContext {
     ) -> Option<Vec<usize>> {
         None
     }
+
+    /// Dimensions of field `field` of the record returned by a user function call.
+    fn infer_user_function_field_dimensions(
+        &self,
+        _function: &str,
+        _arguments: &[Expression],
+        _output: Option<&str>,
+        _field: &str,
+        _scope: &str,
+    ) -> Option<Vec<usize>> {
+        None
+    }
 }
 
 /// Epsilon for compile-time real equality checks.
@@ -238,6 +250,23 @@ impl DimensionInferenceContext for TypeCheckEvalContext {
         scope: &str,
     ) -> Option<Vec<usize>> {
         infer_dims_from_user_func(function, arguments, self, scope)
+    }
+
+    fn infer_user_function_field_dimensions(
+        &self,
+        function: &str,
+        arguments: &[Expression],
+        output: Option<&str>,
+        field: &str,
+        scope: &str,
+    ) -> Option<Vec<usize>> {
+        let call = record_output_dims::OutputFieldQuery {
+            function,
+            arguments,
+            output,
+            field,
+        };
+        record_output_dims::infer_function_output_field_dims(&call, self, scope)
     }
 }
 
@@ -1543,6 +1572,7 @@ fn infer_range_len_numeric(
     Some(compute_range_len_real(s, st, e))
 }
 mod dimension_inference;
+mod record_output_dims;
 
 mod eval_lookup_impl;
 

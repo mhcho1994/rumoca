@@ -6,6 +6,8 @@
 //! - Normalizing structured record-field component references
 //! - Rewriting FieldAccess expressions on decomposed record params to direct VarRef
 
+mod record_field_locals;
+mod sibling_field_shapes;
 #[cfg(test)]
 mod tests;
 
@@ -645,6 +647,7 @@ fn record_param_reference(param: &str, _span: rumoca_core::Span) -> rumoca_core:
 /// 3. Walk all equations/functions and decompose call-site arguments.
 pub(crate) fn lower_record_function_params(flat: &mut flat::Model) -> Result<(), FlattenError> {
     seed_complete_record_defaults(flat);
+    record_field_locals::localize_record_value_fields(flat);
     // Each pass decomposes one record-nesting level of every function input;
     // record types cannot legally be recursive, so the fixpoint is bounded by
     // the deepest record nesting in the model.
@@ -801,8 +804,15 @@ fn lower_record_function_params_once(flat: &mut flat::Model) -> Result<bool, Fla
                 continue;
             };
             for field in &dp.fields {
-                func.inputs
-                    .push(decomposed_record_field_param(&dp.param_name, &input, field));
+                let mut param = decomposed_record_field_param(&dp.param_name, &input, field);
+                sibling_field_shapes::qualify_sibling_field_extents(
+                    &mut param,
+                    &dp.param_name,
+                    &dp.fields,
+                    input.dimensions().len(),
+                    field.shape_expr.len(),
+                );
+                func.inputs.push(param);
             }
         }
 

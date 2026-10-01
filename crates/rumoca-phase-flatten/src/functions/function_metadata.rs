@@ -848,6 +848,20 @@ fn finish_function_param(
                 expressions.predefined_intrinsics,
             )?);
         }
+    } else if type_identity
+        .class_def
+        .is_some_and(|c| c.class_type == rumoca_core::ClassType::Record)
+        && let Some(default) = super::record_value_modifiers::record_modifier_default(
+            class_index,
+            component,
+            type_identity.def_id,
+        )
+    {
+        let qualified = qualify_function_expr(&default, imports, locals);
+        param = param.with_default(ast_lower::expression_from_ast_with_intrinsics(
+            &qualified,
+            expressions.predefined_intrinsics,
+        )?);
     }
 
     apply_component_description(&mut param, component);

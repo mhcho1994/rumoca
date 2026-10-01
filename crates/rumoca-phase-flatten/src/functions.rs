@@ -24,6 +24,7 @@ mod function_requests;
 mod higher_order;
 mod package_constants;
 mod pure_constants;
+mod record_value_modifiers;
 #[cfg(test)]
 mod tests;
 

@@ -1,5 +1,6 @@
 mod expression_rules;
 mod integer_bounds;
+mod record_field_shapes;
 #[cfg(test)]
 mod tests;
 mod value_relevance;
@@ -1024,10 +1025,19 @@ impl ShapeAnalyzer<'_> {
         }
         let mut inputs = Vec::with_capacity(arguments.len());
         let mut fields = Vec::with_capacity(arguments.len());
+        // MLS §10.1: a later field's extent may read an earlier field.
+        let mut siblings = Vec::with_capacity(arguments.len());
         for (parameter, argument) in constructor.inputs.iter().zip(arguments) {
             let actual = self.discover_expression(argument, values)?;
             inputs.push(actual.clone());
-            fields.push(resolve_declared_shape(parameter, Some(&actual), values)?);
+            let field = record_field_shapes::resolve_field_shape(
+                parameter,
+                Some(&actual),
+                &siblings,
+                values,
+            )?;
+            siblings.push((VarName::new(&parameter.name), field.clone()));
+            fields.push(field);
         }
         let function = name.var_name().clone();
         let input_values = self
@@ -1661,27 +1671,7 @@ fn resolve_certificate(
             _ => values.insert(name, shape),
         }
     }
-    // MLS §12.2: a record value's declared fields are readable through the
-    // joined reference identity Flat renders, so each field carries its own
-    // proven shape in the same environment as the value that declares it.
-    for value in function
-        .inputs
-        .iter()
-        .chain(&function.outputs)
-        .chain(&function.locals)
-    {
-        for (path, parent, field) in record_field_projections(value, flat) {
-            let mut shape = values.get(&parent).cloned().ok_or_else(|| {
-                ToDaeError::unsupported_flat(
-                    "function shape proof",
-                    format!("record field `{path}` has no proven parent shape"),
-                    field.span,
-                )
-            })?;
-            shape.extend(resolve_declared_shape(field, None, &values)?);
-            values.insert(path, shape);
-        }
-    }
+    record_field_shapes::bind_record_field_shapes(flat, function, &mut values)?;
     infer_function_integer_bounds(&function.body, &mut values);
     Ok(FunctionShapeCertificate {
         key,

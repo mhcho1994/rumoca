@@ -83,6 +83,16 @@ pub fn infer_dimensions_from_binding_with_scope(
 
         // FieldAccess: `base.field` resolves as a full path in scope.
         Expression::FieldAccess { base, field, .. } => {
+            if let Some((comp, args, output)) = function_output_base(base) {
+                let func_name = comp
+                    .parts
+                    .iter()
+                    .map(|p| p.ident.text.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                return ctx
+                    .infer_user_function_field_dimensions(&func_name, args, output, field, scope);
+            }
             let base_path = extract_simple_component_path(base)?;
             let full_path = format!("{base_path}.{field}");
             ctx.lookup_dimensions(&full_path, scope)
@@ -95,6 +105,27 @@ pub fn infer_dimensions_from_binding_with_scope(
             ..
         } => infer_dims_from_array_comprehension(inner_expr, indices, ctx, scope),
 
+        _ => None,
+    }
+}
+
+/// Split a record-projection base into the called function, its arguments
+/// and the selected output: `f(a)` (first output) or `f(a).out`.
+fn function_output_base(
+    base: &Expression,
+) -> Option<(
+    &rumoca_ir_ast::ComponentReference,
+    &[Expression],
+    Option<&str>,
+)> {
+    match base {
+        Expression::FunctionCall { comp, args, .. } => Some((comp, args.as_slice(), None)),
+        Expression::FieldAccess { base, field, .. } => match base.as_ref() {
+            Expression::FunctionCall { comp, args, .. } => {
+                Some((comp, args.as_slice(), Some(field.as_str())))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }

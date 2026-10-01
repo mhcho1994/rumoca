@@ -217,7 +217,18 @@ fn function_signature<'dae>(
         .iter()
         .zip(&certificate.parameters)
         .map(|(parameter, shape)| {
-            function_value_type(construction, flat, parameter, shape, &mut HashSet::new())
+            let proven = ProvenFieldShapes {
+                values: &certificate.values,
+                path: &parameter.name,
+            };
+            function_value_type_proven(
+                construction,
+                flat,
+                parameter,
+                shape,
+                &mut HashSet::new(),
+                Some(proven),
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     let results = function
@@ -225,7 +236,18 @@ fn function_signature<'dae>(
         .iter()
         .zip(&certificate.results)
         .map(|(result, shape)| {
-            function_value_type(construction, flat, result, shape, &mut HashSet::new())
+            let proven = ProvenFieldShapes {
+                values: &certificate.values,
+                path: &result.name,
+            };
+            function_value_type_proven(
+                construction,
+                flat,
+                result,
+                shape,
+                &mut HashSet::new(),
+                Some(proven),
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(
@@ -240,6 +262,29 @@ pub(super) fn function_value_type<'dae>(
     value: &rumoca_core::FunctionParam,
     dimensions: &ValueShape,
     active_records: &mut HashSet<rumoca_core::DefId>,
+) -> Result<dae::ValueTypeId<'dae>, dae::DaeConstructionError> {
+    function_value_type_proven(construction, flat, value, dimensions, active_records, None)
+}
+
+/// The proven shapes of a function value's record fields: the specialization's
+/// shape environment and the value's joined reference path in it.
+#[derive(Clone, Copy)]
+pub(super) struct ProvenFieldShapes<'a> {
+    pub(super) values: &'a ShapeEnvironment,
+    pub(super) path: &'a str,
+}
+
+/// [`function_value_type`] for a named function value whose record fields'
+/// extents the shape proof settled. MLS §10.1 lets a record field be flexible
+/// (`Real y[:]`); its extent is a property of the value, proven by the
+/// specialization, not of the record declaration.
+pub(super) fn function_value_type_proven<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    flat: &flat::Model,
+    value: &rumoca_core::FunctionParam,
+    dimensions: &ValueShape,
+    active_records: &mut HashSet<rumoca_core::DefId>,
+    proven: Option<ProvenFieldShapes<'_>>,
 ) -> Result<dae::ValueTypeId<'dae>, dae::DaeConstructionError> {
     let provenance = dae::DaeProvenance::source(value.span)?;
     if let Some(scalar) = effective_function_scalar_type(flat, value) {
@@ -265,12 +310,37 @@ pub(super) fn function_value_type<'dae>(
     .expect("function analysis requires resolved record constructor metadata");
     let mut fields = Vec::with_capacity(constructor.inputs.len());
     for field in &constructor.inputs {
-        let shape = field
-            .dimensions()
-            .iter()
-            .map(|extent| u32::try_from(*extent).expect("function shape analysis proves extents"))
-            .collect::<Vec<_>>();
-        let value_type = function_value_type(construction, flat, field, &shape, active_records)?;
+        let field_path = proven.map(|proven| format!("{}.{}", proven.path, field.name));
+        let shape = proven
+            .zip(field_path.as_deref())
+            .and_then(|(proven, path)| proven.values.get(&VarName::new(path)))
+            .and_then(|full| full.get(dimensions.len()..))
+            .filter(|own| own.len() == field.dimensions().len())
+            .map(<[u32]>::to_vec)
+            .unwrap_or_else(|| {
+                field
+                    .dimensions()
+                    .iter()
+                    .map(|extent| {
+                        u32::try_from(*extent).expect("function shape analysis proves extents")
+                    })
+                    .collect()
+            });
+        let field_proven =
+            proven
+                .zip(field_path.as_deref())
+                .map(|(proven, path)| ProvenFieldShapes {
+                    values: proven.values,
+                    path,
+                });
+        let value_type = function_value_type_proven(
+            construction,
+            flat,
+            field,
+            &shape,
+            active_records,
+            field_proven,
+        )?;
         fields.push((VarName::new(&field.name), value_type));
     }
     active_records.remove(&type_def_id);
@@ -313,12 +383,17 @@ fn define_function<'dae>(
     for local in &function.locals {
         let provenance = dae::DaeProvenance::source(local.span)?;
         let shape = &certificate.values[&VarName::new(&local.name)];
-        let value_type = function_value_type(
+        let proven = ProvenFieldShapes {
+            values: &certificate.values,
+            path: &local.name,
+        };
+        let value_type = function_value_type_proven(
             construction,
             functions.flat,
             local,
             shape,
             &mut HashSet::new(),
+            Some(proven),
         )?;
         let value = construction.functions(|functions| {
             functions.local(
