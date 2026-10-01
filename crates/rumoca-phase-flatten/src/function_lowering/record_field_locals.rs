@@ -4,7 +4,8 @@
 //! protected record one at a time, including inside loops and branches
 //! (`for j in 1:n loop r.eta[j] := ...; end for;`). The checked function IR
 //! assembles a record value only from straight-line field writes, so such a
-//! value is carried as one local per field instead: each local starts from the
+//! value whose every field has an entry value is carried as one local per
+//! field instead: each local starts from the
 //! field's entry value (the value's constructor default, else the field's own
 //! declaration equation), the body reads and writes the locals, and the record
 //! is assembled from them by its constructor wherever the function returns.
@@ -65,6 +66,15 @@ fn localization_candidates(flat: &flat::Model, function: &rumoca_core::Function)
             .ok()?;
             let instance_id = constructor.instance_id?;
             let fields = constructor.inputs.to_vec();
+            // Every field needs an entry value; a field the body may leave
+            // unwritten without one stays with the record-assembly checks,
+            // which report it by its field name.
+            let entry_values = constructor_default(function, &value.name)
+                .is_some_and(|args| args.len() == fields.len())
+                || fields.iter().all(|field| field.default.is_some());
+            if !entry_values {
+                return None;
+            }
             let clash = fields.iter().any(|field| {
                 let local = local_name(&value.name, &field.name);
                 field.def_id.is_none() || declares(function, &local)
