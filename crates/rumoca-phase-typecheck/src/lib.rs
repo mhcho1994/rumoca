@@ -30,6 +30,7 @@
 //! - Structural parameters are identified before Flat is produced
 //! - Array sizes for for-loops can be computed at compile time
 
+mod component_class_constants;
 mod constant_collection;
 mod enum_context;
 mod function_signatures;

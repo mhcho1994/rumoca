@@ -85,7 +85,7 @@ impl TypeChecker {
     }
 
     /// Collect `(alias, def_id)` pairs from direct model extends redeclare modifiers.
-    fn collect_redeclare_override_roots(
+    pub(crate) fn collect_redeclare_override_roots(
         tree: &ClassTree,
         model_name: &str,
         model_class: &ClassDef,
@@ -154,10 +154,20 @@ impl TypeChecker {
         {
             return Some(def_id);
         }
-        if let Some(def_id) = cref.root_def_id() {
+        // The root segment's identity names the class only for a one-segment
+        // reference; for a relative multi-segment one (`PhaseSystems.OnePhase`)
+        // it is the enclosing package, so take the last resolved segment or
+        // resolve the name lexically.
+        if let Some(def_id) = cref.parts.last().and_then(|part| part.def_id)
+            && cref.parts.len() > 1
+        {
             return Some(def_id);
         }
-
+        if cref.parts.len() == 1
+            && let Some(def_id) = cref.root_def_id()
+        {
+            return Some(def_id);
+        }
         let (class, resolved_qname) =
             Self::resolve_class_name_with_qname(tree, &target_name, resolve_context);
         class.and_then(|c| {
@@ -186,7 +196,7 @@ impl TypeChecker {
     }
 
     /// Extract constants for one resolved redeclare override root under one prefix.
-    fn extract_override_class_constants_at_prefix(
+    pub(crate) fn extract_override_class_constants_at_prefix(
         tree: &ClassTree,
         alias: &str,
         def_id: DefId,

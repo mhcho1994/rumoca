@@ -329,7 +329,9 @@ impl TypeChecker {
         Self::collect_component_type_enclosing_constants(tree, overlay, &mut self.eval_ctx);
         Self::collect_enclosing_class_constants(tree, model_name, &mut self.eval_ctx);
         Self::collect_function_defs(tree, &mut self.eval_ctx);
+        Self::collect_component_extends_redeclare_constants(tree, overlay, &mut self.eval_ctx);
         Self::collect_instance_class_override_constants(tree, overlay, &mut self.eval_ctx);
+        Self::seed_dimension_reference_classes(tree, overlay, &mut self.eval_ctx);
         true
     }
 

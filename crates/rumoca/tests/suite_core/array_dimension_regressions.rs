@@ -178,3 +178,69 @@ end H;
     let x = initial_value(FIXTURE, "H.M", "floMacSta.x");
     assert!((x - 12.0).abs() < 1e-9, "x = {x}");
 }
+
+/// TOOLBUG-167: a component's dimension reads a sibling package constant by a
+/// relative name (`C.n`), which typecheck never collected.
+#[test]
+fn component_dimension_reads_sibling_package_constant() {
+    const FIXTURE: &str = "\
+package L
+  package C
+    constant Integer n = 2;
+  end C;
+  model A
+    Real x[C.n] = {1, 2};
+  end A;
+  model B
+    A a;
+  end B;
+end L;
+";
+    assert_compiles(FIXTURE, "L.B");
+}
+
+/// TOOLBUG-167: a component's class redeclares its replaceable package in an
+/// `extends` clause with a relative name; the dimension must use the
+/// redeclared package's constant, set by an extends modifier
+/// (IBPSA/Buildings `Electrical.Interfaces.Source.S[PhaseSystem.n]`).
+#[test]
+fn component_dimension_uses_extends_redeclared_package() {
+    const FIXTURE: &str = "\
+package P
+  package PhaseSystems
+    partial package PartialPhaseSystem
+      constant Integer n;
+    end PartialPhaseSystem;
+    package OnePhase
+      extends PartialPhaseSystem(n=2);
+    end OnePhase;
+    package ThreePhase
+      extends PartialPhaseSystem(n=3);
+    end ThreePhase;
+  end PhaseSystems;
+  package Interfaces
+    partial model Source
+      replaceable package PhaseSystem = P.PhaseSystems.OnePhase
+        constrainedby P.PhaseSystems.PartialPhaseSystem;
+      Real S[PhaseSystem.n];
+    end Source;
+  end Interfaces;
+  package AC
+    package Sources
+      model FixedVoltage
+        extends P.Interfaces.Source(
+          redeclare package PhaseSystem = PhaseSystems.ThreePhase);
+      equation
+        S = {1, 2, 3};
+      end FixedVoltage;
+    end Sources;
+    model M
+      Sources.FixedVoltage E;
+      Real s3 = E.S[3];
+    end M;
+  end AC;
+end P;
+";
+    let s3 = initial_value(FIXTURE, "P.AC.M", "s3");
+    assert!((s3 - 3.0).abs() < 1e-9, "s3 = {s3}");
+}
