@@ -88,15 +88,105 @@ fn component_extent(
             )
         }
         Some(ast::Subscript::Empty | ast::Subscript::Range { .. }) => {
-            let binding = binding?;
-            constructor_extent(binding, axis)
-                .or_else(|| comprehension_extent(binding, axis, env, scope, depth))
+            binding_extent(binding?, axis, env, scope, depth)
         }
         None if component.shape_expr.is_empty() => component
             .shape
             .get(axis)
             .and_then(|d| i64::try_from(*d).ok()),
         None => None,
+    }
+}
+
+/// Extent along `axis` of a `:` declaration's binding (MLS §10.1).
+fn binding_extent(
+    binding: &ast::Expression,
+    axis: usize,
+    env: IntegerEvalEnv<'_>,
+    scope: &IndexMap<String, ast::Component>,
+    depth: usize,
+) -> Option<i64> {
+    if depth > super::MAX_CONDITION_DEPTH {
+        return None;
+    }
+    constructor_extent(binding, axis)
+        .or_else(|| comprehension_extent(binding, axis, env, scope, depth))
+        .or_else(|| reference_extent(binding, axis, env, depth))
+        .or_else(|| scaled_extent(binding, axis, env, scope, depth))
+}
+
+/// `stageInputs = massFlowRates`: the extent of the referenced array.
+fn reference_extent(
+    binding: &ast::Expression,
+    axis: usize,
+    env: IntegerEvalEnv<'_>,
+    depth: usize,
+) -> Option<i64> {
+    let ast::Expression::ComponentReference(reference) = binding else {
+        return None;
+    };
+    let axis_literal = ast::Expression::Terminal {
+        terminal_type: ast::TerminalType::UnsignedInteger,
+        token: rumoca_core::Token {
+            text: (axis + 1).to_string().into(),
+            ..Default::default()
+        },
+        span: binding.span(),
+    };
+    let args = [
+        ast::Expression::ComponentReference(reference.clone()),
+        axis_literal,
+    ];
+    eval_integer_size_call(&args, env, depth + 1, None)
+}
+
+/// `k * {...}` / `{...} / k`: element-wise scaling by a scalar keeps the
+/// array operand's extent (MLS §10.6.4).
+fn scaled_extent(
+    binding: &ast::Expression,
+    axis: usize,
+    env: IntegerEvalEnv<'_>,
+    scope: &IndexMap<String, ast::Component>,
+    depth: usize,
+) -> Option<i64> {
+    let ast::Expression::Binary { op, lhs, rhs, .. } = binding else {
+        return None;
+    };
+    use rumoca_core::OpBinary;
+    let array_side = match op {
+        OpBinary::Mul | OpBinary::MulElem if is_scalar_operand(lhs, scope) => rhs,
+        OpBinary::Mul | OpBinary::MulElem | OpBinary::Div | OpBinary::DivElem
+            if is_scalar_operand(rhs, scope) =>
+        {
+            lhs
+        }
+        _ => return None,
+    };
+    binding_extent(array_side, axis, env, scope, depth + 1)
+}
+
+/// A numeric literal or a reference to a scalar declaration.
+fn is_scalar_operand(
+    expression: &ast::Expression,
+    scope: &IndexMap<String, ast::Component>,
+) -> bool {
+    match expression {
+        ast::Expression::Terminal {
+            terminal_type: ast::TerminalType::UnsignedInteger | ast::TerminalType::UnsignedReal,
+            ..
+        } => true,
+        ast::Expression::Parenthesized { inner, .. } => is_scalar_operand(inner, scope),
+        ast::Expression::ComponentReference(reference) => match reference.parts.as_slice() {
+            [part] if part.subs.is_none() => {
+                scope
+                    .get(part.ident.text.as_ref())
+                    .is_some_and(|component| {
+                        component.shape_expr.is_empty() && component.shape.is_empty()
+                    })
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 

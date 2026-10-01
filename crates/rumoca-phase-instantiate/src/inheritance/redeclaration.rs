@@ -20,6 +20,15 @@ pub(super) fn extract_extend_modification_target(
         ast::Expression::Modification { target, .. }
         | ast::Expression::ClassModification { target, .. } => target,
         ast::Expression::NamedArgument { name, .. } => return Some(name.text.to_string()),
+        // `x(attr = v) = e`: attribute modifiers together with a binding.
+        ast::Expression::Binary {
+            op: rumoca_core::OpBinary::Assign,
+            lhs,
+            ..
+        } => match lhs.as_ref() {
+            ast::Expression::ClassModification { target, .. } => target,
+            _ => return None,
+        },
         _ => return None,
     };
     extend_relative_component_target(extend, target)
@@ -78,6 +87,13 @@ pub(super) fn extract_modification_value(expr: &ast::Expression) -> Option<ast::
     let value = match expr {
         ast::Expression::Modification { value, .. } => Some(value),
         ast::Expression::NamedArgument { value, .. } => Some(value),
+        // MLS §7.2: in `x(attr = v) = e` the binding is `e`.
+        ast::Expression::Binary {
+            op: rumoca_core::OpBinary::Assign,
+            lhs,
+            rhs,
+            ..
+        } if matches!(lhs.as_ref(), ast::Expression::ClassModification { .. }) => Some(rhs),
         _ => None,
     }?;
 

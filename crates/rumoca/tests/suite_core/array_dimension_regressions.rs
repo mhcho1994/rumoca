@@ -307,3 +307,76 @@ end Z;
     let y = initial_value(FIXTURE, "Z.M", "y");
     assert!((y - 0.5).abs() < 1e-9, "y = {y}");
 }
+
+/// TOOLBUG-170: a modifier written as an if-expression over the writing
+/// scope's parameters decides a nested instance's conditional component
+/// (IBPSA/TRANSFORM `LimPID`: `I(final reset = if reset == Reset.Disabled
+/// then reset else Reset.Input)` and `IntegratorWithReset.y_reset_in`).
+#[test]
+fn if_expression_modifier_decides_nested_conditional_component() {
+    const FIXTURE: &str = "\
+package E
+  connector RealInput = input Real;
+  type Reset = enumeration(Disabled, Parameter, Input);
+  block Integ
+    parameter E.Reset reset = E.Reset.Disabled;
+    RealInput y_reset_in if reset == E.Reset.Input;
+    Real y = time;
+  end Integ;
+  block PID
+    parameter E.Reset res = E.Reset.Disabled;
+    RealInput y_reset_in if res == E.Reset.Input;
+    Integ I(final reset = if res == E.Reset.Disabled then res else E.Reset.Input);
+  equation
+    connect(y_reset_in, I.y_reset_in);
+  end PID;
+  model M
+    PID pid(res = E.Reset.Input, y_reset_in = 2);
+  end M;
+end E;
+";
+    assert_compiles(FIXTURE, "E.M");
+}
+
+/// TOOLBUG-171: an extends modifier carrying attribute modifiers together
+/// with a binding, `x(each final unit = \"kg/s\") = e`, keeps the binding
+/// (IBPSA/IDEAS/AixLib `Movers.FlowControlled_*.stageInputs`).
+/// TOOLBUG-172: a component array sized `size(x, 1)` where `x` is bound to
+/// another array, itself a scaled comprehension.
+#[test]
+fn extends_attribute_modifier_keeps_binding_and_sizes_component_array() {
+    const FIXTURE: &str = "\
+package G
+  connector RealOutput = output Real;
+  connector RealInput = input Real;
+  block Const
+    parameter Real k;
+    RealOutput y = k;
+  end Const;
+  block Extract
+    parameter Integer nin = 1;
+    RealInput u[nin];
+    RealOutput y = sum(u);
+  end Extract;
+  record Gen
+    parameter Real[:] speeds(each final min = 0) = {0.3, 0.6, 1};
+  end Gen;
+  partial model PFM
+    replaceable parameter Gen per;
+    parameter Real stageInputs[:];
+    Const[size(stageInputs, 1)] stageValues(final k = stageInputs);
+    Extract extractor(final nin = size(stageInputs, 1));
+  equation
+    connect(stageValues.y, extractor.u);
+  end PFM;
+  model M
+    extends PFM(final stageInputs(each final unit=\"kg/s\") = massFlowRates);
+    parameter Real m_flow_nominal = 10;
+    parameter Real[:] massFlowRates =
+      m_flow_nominal*{per.speeds[i]/per.speeds[end] for i in 1:size(per.speeds, 1)};
+  end M;
+end G;
+";
+    let y = initial_value(FIXTURE, "G.M", "extractor.y");
+    assert!((y - 19.0).abs() < 1e-9, "y = {y}");
+}

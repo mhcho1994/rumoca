@@ -706,6 +706,23 @@ fn resolve_modification_expr_with_depth(
         });
     }
 
+    // MLS §3.6.5: an if-expression whose conditions this (writing) scope
+    // decides is its selected branch. Selecting it here, where the
+    // conditions' names are visible, lets a nested instance read the value
+    // (e.g. `I(final reset = if reset == Reset.Disabled then reset else
+    // Reset.Input)` deciding `I`'s conditional components, MLS §4.4.5).
+    if mode == ModificationResolveMode::Modifier
+        && let Some(branch) = decided_if_branch(expr, &eval_ctx)
+    {
+        return resolve_modification_expr_with_depth(
+            branch,
+            scope,
+            allow_string_eval,
+            mode,
+            depth + 1,
+        );
+    }
+
     // Resolve direct references in current scope (e.g. resolveInFrame=resolveInFrame).
     if mode == ModificationResolveMode::Modifier
         && let Some(resolved_ref) =
@@ -732,6 +749,27 @@ fn resolve_modification_expr_with_depth(
     }
 
     Ok(expr.clone())
+}
+
+/// The branch of an if-expression whose conditions all evaluate here.
+fn decided_if_branch<'e>(
+    expr: &'e ast::Expression,
+    eval_ctx: &InstantiateEvalCtx<'_>,
+) -> Option<&'e ast::Expression> {
+    let ast::Expression::If {
+        branches,
+        else_branch,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    for (condition, value) in branches {
+        if evaluate_component_condition(eval_ctx, condition)? {
+            return Some(value);
+        }
+    }
+    Some(else_branch)
 }
 
 fn resolve_single_part_ref_expr(

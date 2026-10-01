@@ -1781,6 +1781,26 @@ fn extend_nested_target_modifications<'a>(
                 modifications.as_slice(),
             ))
         }
+        // `x(attr = v) = e`: the attribute modifiers; the binding `e` is a
+        // value modification.
+        ast::Expression::Binary {
+            op: rumoca_core::OpBinary::Assign,
+            lhs,
+            ..
+        } => {
+            let ast::Expression::ClassModification {
+                target,
+                modifications,
+                ..
+            } = lhs.as_ref()
+            else {
+                return None;
+            };
+            Some((
+                extend_relative_component_target(extend, target)?,
+                modifications.as_slice(),
+            ))
+        }
         _ => None,
     }
 }
