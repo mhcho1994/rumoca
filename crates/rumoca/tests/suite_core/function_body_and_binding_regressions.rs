@@ -152,3 +152,30 @@ end Cy;
         "the cycle is named on the instance: {stderr}"
     );
 }
+
+/// TOOLBUG-155: `String(x)` in a package-constant modifier is the predefined
+/// String conversion (IDEAS/AixLib `PropyleneGlycolWater`:
+/// `mediumName = "PropyleneGlycolWater(X_a = " + String(X_a) + ")"`).
+#[test]
+fn package_constant_string_conversion_is_the_predefined_operator() {
+    const FIXTURE: &str = "\
+package Str
+  package Base
+    constant String mediumName = \"unknown\";
+    constant Real c = 1;
+  end Base;
+  package Med
+    constant Real X_a = 0.4;
+    extends Base(mediumName = \"PG(X_a = \" + String(X_a) + \")\");
+  end Med;
+  model M
+    package Medium = Med;
+    parameter String n = Medium.mediumName;
+    Real y = time*Medium.c;
+  equation
+    assert(y < 10, \"medium \" + Medium.mediumName);
+  end M;
+end Str;
+";
+    assert_compiles(FIXTURE, "Str.M");
+}

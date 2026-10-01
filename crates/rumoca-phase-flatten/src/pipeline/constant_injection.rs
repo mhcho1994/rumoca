@@ -1135,6 +1135,26 @@ fn try_eval_const_function_call_expr(
         .map(|part| part.ident.text.as_ref())
         .unwrap_or(textual_name.as_str());
 
+    // MLS §3.7.1.2: a call of the predefined `String` type is the String
+    // conversion, which the rest of the pipeline only knows as
+    // `StringConversion` (a package constant such as IDEAS
+    // `mediumName = "..." + String(X_a)` reaches Flat through this path).
+    if let ([value], Some(declaration)) =
+        (evaluated_args.as_slice(), ctx.predefined_string_declaration)
+        && comp.target_def_id() == Some(declaration)
+    {
+        return Some(rumoca_core::Expression::StringConversion {
+            declaration,
+            value: Box::new(value.clone()),
+            format: rumoca_core::StringConversionFormat::Options {
+                minimum_length: None,
+                left_justified: None,
+                significant_digits: None,
+            },
+            span: owner_span,
+        });
+    }
+
     if short_name == "array" {
         return Some(rumoca_core::Expression::Array {
             elements: evaluated_args,
