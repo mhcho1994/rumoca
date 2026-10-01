@@ -467,7 +467,7 @@ pub(crate) fn extract_constants_from_class(class_def: &ClassDef, ctx: &mut Conte
                     })
             });
             if let Some(value) = value {
-                ctx.constant_values_by_def_id.insert(def_id, value);
+                crate::constant_extraction::record_constant_value_by_def_id(ctx, def_id, value);
             }
         }
     }

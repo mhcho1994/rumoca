@@ -356,3 +356,31 @@ end P;
     assert!(codes.iter().any(|code| code == "WR009"), "{codes:?}");
     assert!(codes.iter().any(|code| code == "WR010"), "{codes:?}");
 }
+
+/// TOOLBUG-141: a function without a purity prefix that calls an impure
+/// function (MSL `ModelicaServices.ExternalReferences.loadResource` calling
+/// `Files.fullPathName`) is accepted as impure with WR013, as OpenModelica
+/// does; an explicitly `pure` caller gets no such allowance here.
+#[test]
+fn undeclared_purity_function_calling_impure_warns() {
+    let source = r#"
+package P
+  impure function g
+    input Real x;
+    output Real y;
+    external "C" y = sin(x);
+  end g;
+  function f
+    input Real x;
+    output Real y;
+  algorithm
+    y := P.g(x);
+  end f;
+  model M
+    parameter Real p = f(1);
+  end M;
+end P;
+"#;
+    let codes = resolve_warning_codes(source);
+    assert!(codes.iter().any(|code| code == "WR013"), "{codes:?}");
+}

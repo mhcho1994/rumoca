@@ -87,6 +87,7 @@ impl TypeChecker {
         if Self::is_unresolved_alias_root(type_table, expected_root)
             || Self::is_unresolved_alias_root(type_table, found_root)
             || self.assignment_types_compatible(type_table, expected, found)
+            || Self::enumeration_subtype(type_table, expected_root, found_root)
         {
             return;
         }
@@ -94,6 +95,18 @@ impl TypeChecker {
             return;
         };
         self.emit_assignment_type_mismatch(expected, found, location, context, label, type_table);
+    }
+
+    /// MLS §6.4: a value bound to an enumeration-typed declaration may have
+    /// another enumeration type with the same literals in the same order (CDL
+    /// `Types.ZeroTime` bound to `Utilities.Time.Types.ZeroTime`; TRANSFORM's
+    /// `Types.Dynamics` bound to `Modelica.Fluid.Types.Dynamics`).
+    fn enumeration_subtype(type_table: &TypeTable, expected: TypeId, found: TypeId) -> bool {
+        matches!(
+            (type_table.get(expected), type_table.get(found)),
+            (Some(Type::Enumeration(expected)), Some(Type::Enumeration(found)))
+                if expected.literals == found.literals
+        )
     }
 
     fn emit_assignment_type_mismatch(

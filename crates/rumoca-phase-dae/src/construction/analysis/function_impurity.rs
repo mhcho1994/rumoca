@@ -42,7 +42,9 @@ pub(super) fn validate_impure_call_contexts(flat: &flat::Model) -> Result<(), To
         }
     }
     for function in flat.functions.values() {
-        if !function.pure {
+        // A function that wrote no purity prefix and calls an impure one is
+        // treated as impure, as OpenModelica does; Resolve reports it (WR013).
+        if !function.pure || !function.purity_declared {
             continue;
         }
         let context = "a pure function body";

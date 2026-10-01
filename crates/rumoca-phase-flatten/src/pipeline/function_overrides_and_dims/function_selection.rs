@@ -279,6 +279,11 @@ pub(super) fn exact_override_package_for_source_package<'a>(
     {
         candidates.retain(|package| package.def_id == lexical_package);
     }
+    if candidates.len() > 1 {
+        retain_most_specific_packages(&mut candidates, ctx).map_err(|reason| {
+            FlattenError::missing_function_selection_identity(reference.as_str(), reason, span)
+        })?;
+    }
     match candidates.as_slice() {
         [] => Ok(None),
         [package] => Ok(Some(*package)),
@@ -288,6 +293,40 @@ pub(super) fn exact_override_package_for_source_package<'a>(
             span,
         )),
     }
+}
+
+/// Drop every candidate package another candidate specializes.
+///
+/// `replaceable package Medium = PartialMedium` puts both the alias and its
+/// target on the override list. The alias's package chain contains the
+/// target, so it is the more specific selection and the target is not a
+/// competing one (MLS §7.3: the alias denotes its target, possibly modified).
+/// Unrelated packages both containing the source package stay ambiguous.
+fn retain_most_specific_packages(
+    candidates: &mut Vec<&OverrideTarget>,
+    ctx: &FunctionOverrideRewriteContext<'_>,
+) -> Result<(), &'static str> {
+    let mut specialized = FxHashSet::default();
+    for package in candidates.iter() {
+        for other in candidates.iter() {
+            if package.def_id != other.def_id
+                && exact_package_chain_contains_def_id(
+                    ctx.class_index,
+                    package.def_id,
+                    other.def_id,
+                    &mut FxHashSet::default(),
+                )?
+            {
+                specialized.insert(other.def_id);
+            }
+        }
+    }
+    candidates.retain(|package| !specialized.contains(&package.def_id));
+    // Mutual containment (a cycle) would empty the list; report it.
+    if candidates.is_empty() {
+        return Err("function source package candidates specialize each other");
+    }
+    Ok(())
 }
 
 /// Project a call through the scope's replaceable-function redeclares
@@ -441,7 +480,17 @@ fn exact_package_function_rewrite(
         exposure,
         implementation,
     };
-    if projected == selection {
+    // An inherited, non-redeclared function keeps its implementation, but its
+    // body still resolves sibling members (`f(x)` in `PartialMedium`'s
+    // `specificEnthalpy_pTX`) in the package it is an element of (MLS §5.3).
+    // When the call is written through the replaceable alias this package
+    // is selected for, a package other than the declaring one (or a pure
+    // alias of it) therefore re-exposes the call, so the body is converted in
+    // the selected package's scope.
+    if projected == selection
+        && (is_pure_package_alias_of(ctx.class_index, package.def_id, source_owner)
+            || !prefix_is_replaceable_alias_for(reference, package, ctx))
+    {
         return Ok(None);
     }
     let mut rewrite = resolved_function_rewrite(
@@ -454,6 +503,57 @@ fn exact_package_function_rewrite(
     )?;
     rewrite.exposed_package = Some((package.name.clone(), package.def_id));
     Ok(Some(rewrite))
+}
+
+/// True when the call's owner prefix is the replaceable class alias that
+/// `package` was selected for (`Medium.f` with `redeclare package Medium =
+/// W`).
+fn prefix_is_replaceable_alias_for(
+    reference: &rumoca_core::Reference,
+    package: &OverrideTarget,
+    ctx: &FunctionOverrideRewriteContext<'_>,
+) -> bool {
+    let Some(component_ref) = reference.component_ref() else {
+        return false;
+    };
+    let scope = component_ref.component_scope();
+    let Some(prefix) = scope.prefix_parts().last() else {
+        return false;
+    };
+    prefix.ident == package.alias
+        && ctx
+            .class_index
+            .get(prefix.def_id)
+            .is_some_and(|class| class.is_replaceable)
+}
+
+/// True when `package` is `owner` or a chain of unmodified short aliases of it
+/// (`package Medium = Owner`), which select exactly `owner`'s members.
+fn is_pure_package_alias_of(
+    class_index: &rumoca_ir_ast::ClassDefIndex<'_>,
+    mut package: rumoca_core::DefId,
+    owner: rumoca_core::DefId,
+) -> bool {
+    let mut visited = FxHashSet::default();
+    while package != owner {
+        if !visited.insert(package) {
+            return false;
+        }
+        let Some(class_def) = class_index.get(package) else {
+            return false;
+        };
+        let [base] = class_def.extends.as_slice() else {
+            return false;
+        };
+        let pure = class_def.components.is_empty()
+            && class_def.classes.is_empty()
+            && base.modifications.is_empty();
+        let Some(base_def_id) = base.base_def_id.filter(|_| pure) else {
+            return false;
+        };
+        package = base_def_id;
+    }
+    true
 }
 
 pub(super) fn resolve_exact_function_rewrite(

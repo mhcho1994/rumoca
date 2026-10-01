@@ -49,6 +49,7 @@ pub(super) const WR007_OUTER_MODIFICATION_IGNORED: &str = "WR007";
 pub(super) const WR008_EMPTY_INCOMPATIBLE_BASE: &str = "WR008";
 pub(super) const WR009_EACH_ON_SCALAR: &str = "WR009";
 pub(super) const WR012_IMPURE_CALL_IN_CLOCKED_EQUATION: &str = "WR012";
+pub(super) const WR013_UNDECLARED_IMPURE_FUNCTION: &str = "WR013";
 pub(super) const ER124_NONEVAL_NESTED_FOR_RANGE: &str = "ER124";
 pub(super) const ER125_OPERATOR_CONSTRUCTOR_PAIR: &str = "ER125";
 
@@ -72,6 +73,7 @@ fn check_class_restrictions(
 
     if class.class_type == ClassType::Function {
         check_pure_extends_impure(class, def, diags);
+        check_undeclared_purity_calls_impure(class, def, diags);
         check_function_input_defaults(class, diags);
         check_function_binding_cycles(class, diags);
         check_operator_function_defaults(class, ancestors, diags);
@@ -757,6 +759,46 @@ impl ast::Visitor for ImpureCallCollector<'_> {
         }
         ast::visitor::walk_expr_function_call_ctx_default(self, comp, args, ctx)
     }
+}
+
+/// MLS §12.3 forbids a pure function from calling an impure one. A function
+/// that writes neither `pure` nor `impure` but calls an impure function (MSL's
+/// `ModelicaServices.ExternalReferences.loadResource` calls the impure
+/// `Files.fullPathName`) is accepted by OpenModelica and treated as impure, so
+/// it is reported as WR013 rather than rejected. An explicit `pure` keeps the
+/// error, which the DAE proves over the exact Flat callees.
+fn check_undeclared_purity_calls_impure(
+    class: &ClassDef,
+    def: &StoredDefinition,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if class.purity_declared || class.external.is_some() || !class.pure {
+        return;
+    }
+    let mut collector = ImpureCallCollector {
+        class,
+        def,
+        found: Vec::new(),
+    };
+    for statement in class.algorithms.iter().flatten() {
+        let _ = ast::Visitor::visit_statement(&mut collector, statement);
+    }
+    let Some((name, token)) = collector.found.into_iter().next() else {
+        return;
+    };
+    diags.push(Diagnostic::warning(
+        WR013_UNDECLARED_IMPURE_FUNCTION,
+        format!(
+            "function '{}' calls impure function '{name}' without declaring `impure`; it is \
+             treated as impure (MLS §12.3)",
+            class.name.text
+        ),
+        label_from_token(
+            &token,
+            "restrictions/undeclared_impure_function",
+            "impure call in a function without a purity prefix",
+        ),
+    ));
 }
 
 /// True when the call target resolves (within this stored definition) to a

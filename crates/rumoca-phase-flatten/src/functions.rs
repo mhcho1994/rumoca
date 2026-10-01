@@ -522,8 +522,8 @@ fn lookup_function_request_with_scope_uncertified<'tree>(
         && is_callable_class_candidate(&class_def.class_type)
         && !class_def.partial
     {
-        let exposed_name =
-            request_exposed_qualified_name(class_index, request).unwrap_or_else(|| {
+        let exposed_name = request_exposed_qualified_name(tree, class_index, request)
+            .unwrap_or_else(|| {
                 class_index
                     .qualified_name(def_id)
                     .unwrap_or(request.name.as_str())
@@ -553,7 +553,17 @@ fn lookup_function_request_with_scope_uncertified<'tree>(
     )
 }
 
+/// The qualified name a call reaches its selected implementation through.
+///
+/// The exposure is the call's owner prefix only when that prefix, looked up in
+/// the class tree, denotes the selected implementation. A replaceable package
+/// alias redeclared per instance or per extends clause (MLS §7.3) still names
+/// its declared default in the class tree, so `Model.Medium.f` would scope the
+/// body's type names (`ThermodynamicState`, ...) in the partial default. Such
+/// an exposure is rejected and the caller falls back to the implementation's
+/// own declaring class.
 fn request_exposed_qualified_name(
+    tree: &ast::ClassTree,
     class_index: &ast::ClassDefIndex<'_>,
     request: &FunctionRequest,
 ) -> Option<String> {
@@ -561,7 +571,11 @@ fn request_exposed_qualified_name(
     let scope = reference.component_scope();
     let owner = scope.prefix_parts().last()?;
     let owner_name = class_index.qualified_name(owner.def_id)?;
-    Some(format!("{owner_name}.{}", scope.leaf_ident()?))
+    let exposed = format!("{owner_name}.{}", scope.leaf_ident()?);
+    let target = request.target_def_id?;
+    let denotes_target = resolve_function_class_with_scope(tree, class_index, &exposed, None)
+        .is_some_and(|resolution| resolution.class_def.def_id == Some(target));
+    denotes_target.then_some(exposed)
 }
 
 fn request_proves_transitive_non_replaceability(

@@ -1406,6 +1406,407 @@ fn call_through_inherited_replaceable_package_alias() {
 }
 
 // =============================================================================
+// Function selected through a per-instance package redeclaration (TOOLBUG-140)
+// =============================================================================
+
+const REDECLARED_MEDIUM_STATE_SOURCE: &str = r#"
+    package P
+        partial package PM
+            replaceable record State
+            end State;
+            replaceable partial function temperature
+                input State state;
+                output Real T;
+            end temperature;
+        end PM;
+        partial package PS
+            extends PM;
+            redeclare record extends State
+                Real T;
+            end State;
+            redeclare function extends temperature
+            algorithm
+                T := state.T;
+            end temperature;
+        end PS;
+        package W
+            extends PS;
+        end W;
+        model Q
+            replaceable package Medium = PM;
+            Medium.State st(T = 2);
+            Real w(start = 0, fixed = true);
+        equation
+            der(w) = Medium.temperature(st);
+        end Q;
+        model ByComponent
+            Q q(redeclare package Medium = W);
+        end ByComponent;
+        model ByExtends
+            extends Q(redeclare package Medium = W);
+        end ByExtends;
+    end P;
+"#;
+
+/// MLS §7.3: `Medium.temperature` in `Q` names the implementation selected by
+/// the redeclaration (`PS.temperature`), whose formal `state` has the
+/// redeclared `State` with member `T`. The class-tree exposure `Q.Medium`
+/// still denotes the partial default, so converting the body in that scope
+/// lost `state.T` (EF024) and the record argument's fields.
+#[test]
+fn function_selected_by_instance_package_redeclaration_keeps_record_members() {
+    for (model, var) in [("P.ByComponent", "q.w"), ("P.ByExtends", "w")] {
+        let trace = rumoca_contracts::test_support::simulate_model(
+            REDECLARED_MEDIUM_STATE_SOURCE,
+            model,
+            1.0,
+        );
+        let value = trace.final_value(var);
+        assert!(
+            (value - 2.0).abs() < 1e-6,
+            "{model}: {var} must integrate state.T = 2, got {value}"
+        );
+    }
+}
+
+// =============================================================================
+// Function extending its interface and an implementation (TOOLBUG-141)
+// =============================================================================
+
+/// MLS §12.2: MSL's `Files.loadResource` extends the partial interface
+/// `PartialLoadResource` and `ModelicaServices...loadResource`, which itself
+/// extends that interface and supplies the algorithm. The interface-only base
+/// contributes no body, so the implementation is the unique selection.
+#[test]
+fn function_extending_interface_and_implementation_selects_implementation() {
+    let source = r#"
+        package P
+            partial function PI
+                input Real x;
+                output Real y;
+            end PI;
+            function Impl
+                extends PI;
+            algorithm
+                y := 2 * x;
+            end Impl;
+            function F
+                extends PI;
+                extends Impl;
+            end F;
+            model M
+                Real w(start = 0, fixed = true);
+            equation
+                der(w) = F(1.5);
+            end M;
+        end P;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "P.M", 1.0);
+    let value = trace.final_value("w");
+    assert!(
+        (value - 3.0).abs() < 1e-6,
+        "w must integrate 2*1.5, got {value}"
+    );
+}
+
+/// MLS §12.3 / OpenModelica: `ModelicaServices...loadResource` writes no purity
+/// prefix but calls the impure `Files.fullPathName`. It is compiled as impure
+/// with WR013 instead of being rejected as a pure body reaching an impure call.
+#[test]
+fn undeclared_purity_function_calling_impure_compiles_with_warning() {
+    let source = r#"
+        package P
+            impure function g
+                input Real x;
+                output Real y;
+                external "C" y = sin(x);
+            end g;
+            function f
+                input Real x;
+                output Real y;
+            algorithm
+                y := P.g(x);
+            end f;
+            model M
+                parameter Real p = f(1);
+            end M;
+        end P;
+    "#;
+    rumoca_contracts::test_support::expect_compile_warning(source, "P.M", "WR013");
+}
+
+// =============================================================================
+// Media function selection through replaceable packages (TOOLBUG-143..146)
+// =============================================================================
+
+/// MLS §12.2 / §7.3: a partial interface that declares its own formals and
+/// only extends an empty icon is its own interface, not an alias of the icon;
+/// and `replaceable package Medium = PM` puts both the alias and `PM` on the
+/// override list without making the selection ambiguous. The call to the
+/// still-partial function survives Flatten and is rejected at the DAE, which
+/// owns executable semantics (OpenModelica checks such models but cannot
+/// simulate them).
+#[test]
+fn partial_medium_interface_call_is_selected_through_its_alias() {
+    let source = r#"
+        package P
+            partial function Icon
+            end Icon;
+            partial package PM
+                replaceable partial function f
+                    extends Icon;
+                    input Real x;
+                    output Real y;
+                end f;
+                replaceable partial function g
+                    extends Icon;
+                    input Real x;
+                    output Real y;
+                end g;
+            end PM;
+            model S
+                replaceable package Medium = PM;
+                Real y = Medium.f(Medium.g(time));
+            end S;
+        end P;
+    "#;
+    rumoca_contracts::test_support::expect_failure_in_phase_with_code(
+        source,
+        "P.S",
+        FailedPhase::ToDae,
+        "ED008",
+    );
+}
+
+const INHERITED_PACKAGE_FUNCTION_SOURCE: &str = r#"
+    package L
+        partial package PM
+            replaceable partial function f
+                input Real x;
+                output Real y;
+            end f;
+            replaceable function twice
+                input Real x;
+                output Real y;
+            algorithm
+                y := 2 * f(x);
+            end twice;
+        end PM;
+        package W
+            extends PM;
+            redeclare function extends f
+            algorithm
+                y := 3 * x;
+            end f;
+        end W;
+        model Q
+            replaceable package Medium = PM;
+            Real w(start = 0, fixed = true);
+            Real v(start = 0, fixed = true);
+        equation
+            der(w) = Medium.twice(1);
+            der(v) = Medium.twice(time);
+        end Q;
+        model ByComponent
+            Q q(redeclare package Medium = W);
+        end ByComponent;
+        model ByExtends
+            extends Q(redeclare package Medium = W);
+        end ByExtends;
+    end L;
+"#;
+
+/// MLS §5.3: the inherited, non-redeclared `PM.twice` calls `f` in the
+/// package it is an element of, so with `Medium = W` it reaches `W.f`. A
+/// component redeclaration used to keep the call exposed as `Q.Medium.twice`
+/// (the partial default), leaving `PM.f` unresolved; and the call's `time`
+/// argument was captured as the package member `q.Medium.time`.
+#[test]
+fn inherited_package_function_reaches_selected_package_members() {
+    for (model, prefix) in [("L.ByComponent", "q."), ("L.ByExtends", "")] {
+        let trace = rumoca_contracts::test_support::simulate_model(
+            INHERITED_PACKAGE_FUNCTION_SOURCE,
+            model,
+            1.0,
+        );
+        let w = trace.final_value(&format!("{prefix}w"));
+        let v = trace.final_value(&format!("{prefix}v"));
+        assert!(
+            (w - 6.0).abs() < 1e-6,
+            "{model}: w must integrate 2*3*1, got {w}"
+        );
+        assert!(
+            (v - 3.0).abs() < 1e-4,
+            "{model}: v must integrate 6*t, got {v}"
+        );
+    }
+}
+
+/// MLS §4.5.1: MSL's `IF97_Utilities.phase_ph` calls the short alias
+/// `hl_p = BaseIF97.Regions.hl_p`, and nothing calls the alias by its own name,
+/// so no exposure under that name is collected; the call is matched to the
+/// renamed declaration instead of failing with EF005.
+#[test]
+fn short_function_alias_called_only_by_a_sibling() {
+    let source = r#"
+        package P
+            package B
+                function f
+                    input Real x;
+                    output Real y;
+                algorithm
+                    y := 2 * x;
+                end f;
+            end B;
+            function f = B.f;
+            function g
+                input Real x;
+                output Real y;
+            algorithm
+                y := if x < 0 then 0 else f(x);
+            end g;
+            model M
+                Real w(start = 0, fixed = true);
+            equation
+                der(w) = g(1.5);
+            end M;
+        end P;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "P.M", 1.0);
+    let value = trace.final_value("w");
+    assert!(
+        (value - 3.0).abs() < 1e-6,
+        "w must integrate 2*1.5, got {value}"
+    );
+}
+
+// =============================================================================
+// Package forwarded under another name; port members typed through it
+// (TOOLBUG-146, TOOLBUG-147)
+// =============================================================================
+
+const FORWARDED_MEDIUM_SOURCE: &str = r#"
+    package L
+      partial package PM
+        type MassFlowRate = Real(unit = "kg/s");
+        replaceable partial model BaseProperties
+          Real x;
+        end BaseProperties;
+      end PM;
+      package W
+        extends PM;
+        constant Real k = 2;
+        redeclare model extends BaseProperties
+        equation
+          x = k * time;
+        end BaseProperties;
+      end W;
+      connector Port
+        replaceable package Medium = PM;
+        flow Medium.MassFlowRate m_flow;
+        Real p;
+      end Port;
+      block Pass
+        input Real u;
+        output Real y = u;
+      end Pass;
+      model Vol
+        replaceable package Medium = PM;
+        Medium.BaseProperties medium;
+        Port port_a(redeclare package Medium = Medium);
+        Pass pas(u = abs(port_a.m_flow));
+      equation
+        port_a.p = medium.x;
+      end Vol;
+      model Mach
+        replaceable package MediumCon = PM;
+        Vol vol(redeclare package Medium = MediumCon);
+      end Mach;
+      model T
+        Mach chi(redeclare package MediumCon = W);
+      end T;
+    end L;
+"#;
+
+/// MLS §7.3: `Vol vol(redeclare package Medium = MediumCon)` names the
+/// enclosing replaceable alias, so `vol.Medium` is the selection `chi` made
+/// (`W`), not `MediumCon`'s partial default (EI012 on `Medium.BaseProperties`).
+/// `pas(u = abs(port_a.m_flow))` reads a port member whose declared type
+/// crosses the replaceable edge `Medium.MassFlowRate`; the member exists
+/// (ET001 claimed it did not).
+#[test]
+fn package_forwarded_under_another_name_selects_the_enclosing_choice() {
+    let trace = rumoca_contracts::test_support::simulate_model(FORWARDED_MEDIUM_SOURCE, "L.T", 1.0);
+    let pressure = trace.final_value("chi.vol.port_a.p");
+    assert!(
+        (pressure - 2.0).abs() < 1e-6,
+        "W.BaseProperties gives k*time = 2, got {pressure}"
+    );
+    // The unconnected port's flow is zero (MLS §9.2), so the block reads 0.
+    let passed = trace.final_value("chi.vol.pas.y");
+    assert!(
+        passed.abs() < 1e-9,
+        "pas.y must read the zero port flow, got {passed}"
+    );
+}
+
+// =============================================================================
+// Inherited package constant per extending package (TOOLBUG-148)
+// =============================================================================
+
+const INHERITED_PACKAGE_CONSTANT_SOURCE: &str = r#"
+    package L
+        partial package PM
+            constant String names[:] = {"a"};
+            constant Boolean red = false;
+            final constant Integer nS = size(names, 1);
+            final constant Integer n = if red then nS - 1 else nS;
+        end PM;
+        partial package PM2
+            extends PM(red = true);
+        end PM2;
+        package W
+            extends PM2(names = {"x", "y", "z"});
+        end W;
+        model C
+            replaceable package Medium = PM;
+            parameter Real s[Medium.n] = {i for i in 1:Medium.n};
+            Real y = s[Medium.n] * time;
+        end C;
+        model ByAlias
+            package Medium = W;
+            parameter Real s[Medium.n] = {i for i in 1:Medium.n};
+            Real y = s[Medium.n] * time;
+        end ByAlias;
+        model ByComponent
+            C c(redeclare package Medium = W);
+        end ByComponent;
+    end L;
+"#;
+
+/// MLS §7.2: `W` modifies `names` two extends levels above the declaration of
+/// `nS = size(names, 1)`, so `W.n = 2`. The declaration-keyed constant table
+/// held one value per declaration (the last package extracted, here `PM2`'s
+/// `size({"a"}, 1) - 1 = 0`), so `{i for i in 1:Medium.n}` lost its elements;
+/// and the comprehension range was demanded before package constants existed
+/// (EF004 "for-equation range end must be a constant integer or parameter").
+#[test]
+fn inherited_package_constant_takes_the_extending_package_value() {
+    for (model, var) in [("L.ByAlias", "y"), ("L.ByComponent", "c.y")] {
+        let trace = rumoca_contracts::test_support::simulate_model(
+            INHERITED_PACKAGE_CONSTANT_SOURCE,
+            model,
+            1.0,
+        );
+        let value = trace.final_value(var);
+        assert!(
+            (value - 2.0).abs() < 1e-6,
+            "{model}: {var} must be s[2]*1 = 2, got {value}"
+        );
+    }
+}
+
+// =============================================================================
 // Flexible-size protected function locals (TOOLBUG-132)
 // =============================================================================
 

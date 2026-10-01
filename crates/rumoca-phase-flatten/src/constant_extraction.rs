@@ -1183,6 +1183,11 @@ pub(super) fn extract_extends_modification_expr(
         // MLS §7.2: extends modifiers override inherited declarations.
         // Preserve explicitly modified keys from later default-constant extraction.
         ctx.modified_constant_keys.insert(full_name.clone());
+        // The modified declaration now has a value per extending package, so
+        // its declaration identity alone no longer selects one.
+        if let Some(declaration) = target.target_def_id() {
+            ctx.ambiguous_constant_def_ids.insert(declaration);
+        }
         extract_extends_numeric_modification(
             ctx,
             prefix,
@@ -1636,8 +1641,26 @@ fn record_exact_constant_value(
                 })
         });
     if let Some(value) = value {
-        ctx.constant_values_by_def_id.insert(def_id, value);
+        record_constant_value_by_def_id(ctx, def_id, value);
     }
+}
+
+/// Record `value` for declaration `def_id`, remembering when the declaration
+/// was already recorded with a different value (an inherited package constant
+/// modified differently by two extending packages).
+pub(crate) fn record_constant_value_by_def_id(
+    ctx: &mut Context,
+    def_id: rumoca_core::DefId,
+    value: rumoca_core::Expression,
+) {
+    if ctx
+        .constant_values_by_def_id
+        .get(&def_id)
+        .is_some_and(|existing| *existing != value)
+    {
+        ctx.ambiguous_constant_def_ids.insert(def_id);
+    }
+    ctx.constant_values_by_def_id.insert(def_id, value);
 }
 
 pub(super) fn try_extract_constant_alias_expr(

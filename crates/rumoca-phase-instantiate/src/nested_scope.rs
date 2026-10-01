@@ -298,6 +298,19 @@ pub(super) fn resolve_component_nested_type_overrides(
         }
     }
 
+    // MLS §7.3: `redeclare package Medium = MediumCon` names the enclosing
+    // scope's replaceable alias, whose selection is instance-local; the
+    // nested alias denotes that selection, not the alias's declared default.
+    for class_override in class_overrides.values_mut() {
+        if let Some(effective_def_id) =
+            type_overrides.target_for_alias_def_id(class_override.target_def_id)
+            && effective_def_id != class_override.target_def_id
+        {
+            class_override.target_def_id = effective_def_id;
+            has_forwarding_class_redeclare = true;
+        }
+    }
+
     let mut nested_type_overrides = type_overrides.clone();
     if let Some(exposed_package) = exposed_type_package(tree, comp) {
         let exposure_overrides = build_type_override_map(tree, exposed_package, Some(mod_env));
