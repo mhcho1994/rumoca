@@ -816,25 +816,25 @@ fn conditional_target_values(
     if !same_targets {
         return None;
     }
-    let values = fallback
+    // Every arm assigns exactly the fallback's targets (checked above), so a
+    // missing value cannot occur; `?` keeps that a refusal, not a panic.
+    fallback
         .iter()
         .map(|(target, otherwise, target_span)| {
+            let branches = arms
+                .iter()
+                .map(|(condition, assignments)| {
+                    Some(((*condition).clone(), value_of(assignments, target)?))
+                })
+                .collect::<Option<Vec<_>>>()?;
             let value = Expression::If {
-                branches: arms
-                    .iter()
-                    .map(|(condition, assignments)| {
-                        let value = value_of(assignments, target)
-                            .expect("every arm assigns the same targets");
-                        ((*condition).clone(), value)
-                    })
-                    .collect(),
+                branches,
                 else_branch: Box::new(otherwise.clone()),
                 span,
             };
-            (target.clone(), value, *target_span)
+            Some((target.clone(), value, *target_span))
         })
-        .collect();
-    Some(values)
+        .collect()
 }
 
 /// The assignments of one if-arm, in source order; `None`
