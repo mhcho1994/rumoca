@@ -17,8 +17,13 @@ impl TypeChecker {
         let mut progress = false;
         let type_scope_hints = Self::build_type_scope_hints(tree, overlay);
         for (_def_id, instance_data) in overlay.components.iter_mut() {
-            // Skip components without explicit dims.
+            // Components without dimension expressions keep the extents
+            // instantiation recorded; they only need to stay readable by
+            // `size()` and binding-shape inference. Constant collection may
+            // have cleared them with a redeclared component's alias scope
+            // (MLS §7.3), so a missing entry is restored, never overwritten.
             if instance_data.dims_expr.is_empty() {
+                progress |= self.restore_recorded_dimensions(instance_data);
                 continue;
             }
 
@@ -42,19 +47,35 @@ impl TypeChecker {
                 .map(|sub| self.eval_dimension_with_fallback(sub, &scope, &type_scope_hints))
                 .collect();
 
-            if let Some(dims) = evaluated
-                && dims != instance_data.dims
-            {
+            let Some(dims) = evaluated else {
+                continue;
+            };
+            // Extents instantiation already recorded must still be readable
+            // through the evaluation context (see above).
+            let ctx_dims: Vec<usize> = dims.iter().map(|&d| d as usize).collect();
+            if dims != instance_data.dims || self.eval_ctx.get_dimensions(&name).is_none() {
                 instance_data.dims = dims;
-                self.eval_ctx.add_dimensions(
-                    &name,
-                    instance_data.dims.iter().map(|&d| d as usize).collect(),
-                );
+                self.eval_ctx.add_dimensions(&name, ctx_dims);
                 progress = true;
             }
         }
 
         progress
+    }
+
+    /// Re-register extents instantiation recorded (no dimension expression)
+    /// when the evaluation context lost them; never overwrites an entry.
+    fn restore_recorded_dimensions(&mut self, instance_data: &rumoca_ir_ast::InstanceData) -> bool {
+        if instance_data.dims.is_empty() {
+            return false;
+        }
+        let name = Self::instance_component_path(&instance_data.qualified_name).to_flat_string();
+        if self.eval_ctx.get_dimensions(&name).is_some() {
+            return false;
+        }
+        let dims = instance_data.dims.iter().map(|&d| d as usize).collect();
+        self.eval_ctx.add_dimensions(&name, dims);
+        true
     }
 
     /// Evaluate one dimension expression using instance scope, then type-scope fallback.

@@ -139,3 +139,42 @@ end B;
     let x = initial_value(FIXTURE, "B.M", "x");
     assert!((x - 18.0).abs() < 1e-9, "x = {x}");
 }
+
+/// TOOLBUG-166: extents instantiation recorded for a literal-size array must
+/// stay readable after constant collection clears a redeclared component's
+/// alias scope (IDEAS `Movers.Validation.Pump_stratos`:
+/// `powEu(V_flow = powEu_internal.V_flow)` inside a redeclared mover).
+#[test]
+fn literal_extents_survive_component_redeclaration() {
+    const FIXTURE: &str = "\
+package H
+  record PW
+    parameter Real V_flow[3];
+  end PW;
+  record PP
+    parameter Real V_flow[:];
+    parameter Real P[size(V_flow, 1)];
+  end PP;
+  partial model Iface
+    parameter Real k = 1;
+  end Iface;
+  model Impl
+    extends Iface;
+    final parameter PW inter(V_flow = {k, 2*k, 3*k});
+    final parameter PP powEu(V_flow = inter.V_flow, P = 2*inter.V_flow);
+    Real x;
+  equation
+    x = powEu.P[3];
+  end Impl;
+  model Base
+    replaceable Iface floMacSta;
+  end Base;
+  model M
+    extends Base(redeclare Impl floMacSta(k = 2));
+  end M;
+end H;
+";
+    assert_compiles(FIXTURE, "H.M");
+    let x = initial_value(FIXTURE, "H.M", "floMacSta.x");
+    assert!((x - 12.0).abs() < 1e-9, "x = {x}");
+}
