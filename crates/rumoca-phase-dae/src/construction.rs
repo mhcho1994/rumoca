@@ -326,6 +326,7 @@ fn build_checked<'dae>(
             assigned_discrete_targets: &analysis.assigned_discrete_targets,
             derived_parameters: &analysis.derived_parameters,
             initial_parameters: &analysis.initial_parameters,
+            constants: &analysis.constants,
         },
         variable_plan,
         variable_identities.reserved,

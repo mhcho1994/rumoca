@@ -14,6 +14,7 @@ pub mod function_eval;
 pub mod value;
 
 mod builtin_dispatch;
+mod comprehension_eval;
 mod context;
 mod expr_eval;
 mod indexing;

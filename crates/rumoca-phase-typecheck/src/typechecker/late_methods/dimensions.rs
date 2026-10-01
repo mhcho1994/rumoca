@@ -282,6 +282,10 @@ impl TypeChecker {
             if !self.eval_ctx.enums.contains_key(&name) {
                 progress |= self.try_eval_enum(instance_data, &name);
             }
+
+            if !self.eval_ctx.real_arrays.contains_key(&name) {
+                progress |= self.try_eval_real_array(instance_data, &name);
+            }
         }
 
         progress
@@ -323,6 +327,30 @@ impl TypeChecker {
             return true;
         }
         false
+    }
+
+    /// Element values of a one-dimensional array parameter whose binding is
+    /// evaluable (structural reductions such as `sum(AExt)` read them).
+    pub(crate) fn try_eval_real_array(
+        &mut self,
+        data: &rumoca_ir_ast::InstanceData,
+        name: &str,
+    ) -> bool {
+        let structural = matches!(
+            data.variability,
+            rumoca_core::Variability::Parameter(_) | rumoca_core::Variability::Constant(_)
+        );
+        if !structural || data.dims.len() > 1 {
+            return false;
+        }
+        let binding_scope = Self::instance_binding_scope_name(data);
+        let Some(values) = data.binding.as_ref().and_then(|b| {
+            rumoca_eval_ast::eval::eval_real_array_with_scope(b, &self.eval_ctx, &binding_scope)
+        }) else {
+            return false;
+        };
+        self.eval_ctx.real_arrays.insert(name.to_string(), values);
+        true
     }
 
     /// Try to evaluate an enum value from binding or start.

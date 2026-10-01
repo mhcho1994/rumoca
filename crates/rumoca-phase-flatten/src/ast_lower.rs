@@ -1,3 +1,4 @@
+pub(crate) mod static_size;
 #[cfg(test)]
 mod tests;
 
@@ -924,12 +925,18 @@ fn convert_function_call_with_context(
             if builtin.requires_predefined_identity() {
                 return lower_user_function_call(comp, args, call_span, context);
             }
+            let args = args
+                .iter()
+                .map(|a| expression_from_ast_with_context(a, context))
+                .collect::<LowerResult<Vec<_>>>()?;
+            if builtin == rumoca_core::BuiltinFunction::Size
+                && let Some(extent) = static_size::fold_static_size(&args)
+            {
+                return Ok(extent);
+            }
             return Ok(rumoca_core::Expression::BuiltinCall {
                 function: builtin,
-                args: args
-                    .iter()
-                    .map(|a| expression_from_ast_with_context(a, context))
-                    .collect::<LowerResult<Vec<_>>>()?,
+                args,
                 span: call_span,
             });
         }

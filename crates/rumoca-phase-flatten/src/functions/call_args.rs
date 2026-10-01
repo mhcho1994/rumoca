@@ -532,7 +532,7 @@ impl ExpressionRewriter for DefaultInputSubstituter<'_> {
     }
 }
 
-pub(super) fn rewrite_model_expressions(
+pub(crate) fn rewrite_model_expressions(
     flat: &mut flat::Model,
     rewriter: &mut impl FallibleStatementRewriter<Error = FlattenError>,
 ) -> Result<(), FlattenError> {

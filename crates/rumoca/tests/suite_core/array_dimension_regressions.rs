@@ -58,13 +58,27 @@ fn initial_value(fixture: &str, model: &str, column: &str) -> f64 {
     );
     let csv = csv.expect("result csv written");
     let mut lines = csv.lines();
-    let header: Vec<&str> = lines.next().expect("header").split(',').collect();
-    let row: Vec<&str> = lines.next().expect("first row").split(',').collect();
+    let header = csv_cells(lines.next().expect("header"));
+    let row = csv_cells(lines.next().expect("first row"));
     let index = header
         .iter()
-        .position(|name| *name == column)
+        .position(|name| name == column)
         .unwrap_or_else(|| panic!("column {column} in {header:?}"));
     row[index].parse().expect("numeric value")
+}
+
+/// Split one CSV line, honoring quoted cells (`"x[1,1]"`).
+fn csv_cells(line: &str) -> Vec<String> {
+    let mut cells = vec![String::new()];
+    let mut quoted = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            ',' if !quoted => cells.push(String::new()),
+            _ => cells.last_mut().expect("one cell").push(ch),
+        }
+    }
+    cells
 }
 
 /// TOOLBUG-165: a record parameter bound to a function call whose record
@@ -243,4 +257,53 @@ end P;
 ";
     let s3 = initial_value(FIXTURE, "P.AC.M", "s3");
     assert!((s3 - 3.0).abs() < 1e-9, "s3 = {s3}");
+}
+
+/// TOOLBUG-168: a structural Integer parameter reduces an array parameter
+/// through a comprehension over its elements (AixLib/IDEAS/Buildings
+/// `ReducedOrder.RC.OneElement.dimension`).
+#[test]
+fn structural_parameter_reduces_array_parameter_elements() {
+    const FIXTURE: &str = "\
+package S
+  model Z
+    parameter Real AExt[2] = {1, 2};
+    parameter Real A1 = sum(AExt);
+    parameter Real A2 = 0;
+    parameter Real A3 = 5;
+    final parameter Real AArray[3] = {A1, A2, A3};
+    parameter Integer dimension = sum({if A > 0 then 1 else 0 for A in AArray});
+    parameter Integer k = if AArray[2] > 0 then 3 else 1;
+    Real x[dimension, k];
+    Real n = dimension;
+  equation
+    x = fill(1.0, dimension, k);
+  end Z;
+end S;
+";
+    let n = initial_value(FIXTURE, "S.Z", "n");
+    assert!((n - 2.0).abs() < 1e-9, "n = {n}");
+}
+
+/// TOOLBUG-169: `size()` of a literal-shaped array is a literal extent once
+/// constant substitution exposes it (MSL `PartialMedium.nX =
+/// size(substanceNames, 1)`, `X_default = fill(1/nX, nX)`).
+#[test]
+fn size_of_literal_array_is_a_literal_extent() {
+    const FIXTURE: &str = "\
+package Z
+  package Med
+    constant String substanceNames[:] = {\"a\", \"b\"};
+    constant Integer nX = size(substanceNames, 1);
+    constant Real X_default[nX] = fill(1/nX, nX);
+  end Med;
+  model M
+    replaceable package Medium = Med;
+    parameter Real X_start[Medium.nX] = Medium.X_default;
+    Real y = X_start[2];
+  end M;
+end Z;
+";
+    let y = initial_value(FIXTURE, "Z.M", "y");
+    assert!((y - 0.5).abs() < 1e-9, "y = {y}");
 }

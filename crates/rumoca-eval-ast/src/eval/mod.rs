@@ -130,6 +130,8 @@ pub struct TypeCheckEvalContext {
     scalar_spans: FxHashMap<String, Span>,
     pub enums: FxHashMap<String, String>,
     pub dimensions: FxHashMap<String, Vec<usize>>,
+    /// Element values of one-dimensional Real array parameters.
+    pub real_arrays: FxHashMap<String, Vec<f64>>,
     /// Function definitions for compile-time evaluation (MLS §12.4).
     pub functions: Arc<FxHashMap<String, ClassDef>>,
     pub func_eval_depth: usize,
@@ -154,6 +156,7 @@ impl TypeCheckEvalContext {
             scalar_spans: FxHashMap::default(),
             enums: FxHashMap::default(),
             dimensions: FxHashMap::default(),
+            real_arrays: FxHashMap::default(),
             functions: Arc::new(FxHashMap::default()),
             func_eval_depth: 0,
             enum_sizes: FxHashMap::default(),
@@ -890,6 +893,12 @@ fn eval_integer_array_with_scope(
                 .collect()
         }
         Expression::Parenthesized { inner, .. } => eval_integer_array_with_scope(inner, ctx, scope),
+        Expression::ArrayComprehension {
+            expr: body,
+            indices,
+            filter: None,
+            ..
+        } => array_values::eval_integer_comprehension(body, indices, ctx, scope),
         _ => None,
     }
 }
@@ -913,6 +922,7 @@ impl AstScalarContext for TypeCheckScalarAdapter<'_> {
             .or_else(|| {
                 lookup_by_scope(&path, scope, &self.ctx.integers).map(|value| *value as f64)
             })
+            .or_else(|| array_values::lookup_real_element(expr, self.ctx, scope))
     }
 
     fn lookup_boolean(&self, expr: &Expression, scope: &str, _depth: usize) -> Option<bool> {
@@ -1017,6 +1027,15 @@ fn eval_real_func_with_scope(
             let b = eval_real_with_scope(&args[1], ctx, scope)?;
             Some(a.min(b))
         }
+        "sum" if args.len() == 1 => {
+            eval_real_array_with_scope(&args[0], ctx, scope).map(|values| values.iter().sum())
+        }
+        "max" if args.len() == 1 => eval_real_array_with_scope(&args[0], ctx, scope)?
+            .into_iter()
+            .reduce(f64::max),
+        "min" if args.len() == 1 => eval_real_array_with_scope(&args[0], ctx, scope)?
+            .into_iter()
+            .reduce(f64::min),
         _ => None,
     }
 }
@@ -1571,6 +1590,8 @@ fn infer_range_len_numeric(
     let st = step.map(|x| ctx.eval_real(x, scope)).unwrap_or(Some(1.0))?;
     Some(compute_range_len_real(s, st, e))
 }
+mod array_values;
+pub use array_values::eval_real_array_with_scope;
 mod dimension_inference;
 mod record_output_dims;
 

@@ -23,7 +23,7 @@ impl Context {
             let span = instance_source_span(instance_data, tree)?;
             let resolved_dims = self.resolve_component_dims_expr(
                 var_name.as_str(),
-                &instance_data.dims_expr,
+                instance_data,
                 flat_var,
                 tree,
                 span,
@@ -49,16 +49,26 @@ impl Context {
     fn resolve_component_dims_expr(
         &self,
         var_name: &str,
-        dims_expr: &[ast::Subscript],
+        instance_data: &ast::InstanceData,
         flat_var: &flat::Variable,
         tree: &ClassTree,
         span: rumoca_core::Span,
     ) -> Result<Vec<i64>, FlattenError> {
+        let dims_expr = &instance_data.dims_expr;
+        // Extents typecheck already evaluated (MLS §10.1 structural
+        // dimensions) for exactly these subscripts.
+        let checked = (instance_data.dims.len() == dims_expr.len()).then_some(&instance_data.dims);
         let mut dims = Vec::with_capacity(dims_expr.len());
         for (index, subscript) in dims_expr.iter().enumerate() {
+            let checked_dim = checked
+                .and_then(|dims| dims.get(index).copied())
+                .filter(|dim| *dim >= 0);
             let dim = match subscript {
                 ast::Subscript::Expression(_) => {
-                    self.eval_component_dim_subscript(var_name, subscript, tree, span)?
+                    match self.eval_component_dim_subscript(var_name, subscript, tree, span) {
+                        Ok(dim) => dim,
+                        Err(error) => checked_dim.ok_or(error)?,
+                    }
                 }
                 ast::Subscript::Range { .. } | ast::Subscript::Empty => {
                     self.resolve_colon_component_dimension(var_name, flat_var, index, tree, span)?

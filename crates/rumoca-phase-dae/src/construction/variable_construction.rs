@@ -40,6 +40,7 @@ pub(super) fn insert_variable_identities<'flat, 'dae>(
                     assigned_discrete_targets: &analysis.assigned_discrete_targets,
                     derived_parameters: &analysis.derived_parameters,
                     initial_parameters: &analysis.initial_parameters,
+                    constants: &analysis.constants,
                 },
                 VariableSpec {
                     flat: variable,
@@ -151,6 +152,8 @@ pub(super) struct VariableDefinitionContext<'scope, 'dae> {
     pub(super) derived_parameters: &'scope HashMap<VarName, DerivedParameterPlan>,
     /// `fixed = false` parameters an initial algorithm determines (MLS §8.6).
     pub(super) initial_parameters: &'scope HashMap<VarName, Expression>,
+    /// Translation-time values of constants and fixed parameters.
+    pub(super) constants: &'scope EvalContext,
 }
 
 #[derive(Clone, Copy)]
@@ -372,12 +375,52 @@ fn lower_variable_binding<'dae>(
     ) {
         return Ok(None);
     }
+    if let Some(value) = settled_integer_parameter(context, variable) {
+        let provenance = dae::DaeProvenance::generated(
+            dae::DaeGeneration::BindingEquation,
+            variable.flat.source_span,
+        )?;
+        return construction
+            .expressions(|expressions| {
+                expressions
+                    .at(provenance)
+                    .literal(dae::DaeLiteral::Integer(value))
+            })
+            .map(Some);
+    }
     lower_optional_variable_attribute(
         construction,
         context,
         variable,
         variable.flat.binding.as_ref(),
     )
+}
+
+/// MLS §18.3 / §10.1: a scalar Integer parameter whose binding the constant
+/// evaluation settled is a structural value — array extents and `fill` sizes
+/// read it, and the checked DAE requires those as literals. Flat could not
+/// fold it when its binding reads array-parameter elements
+/// (`k = if a[2] > 0 then 3 else 2`), which the DAE constant evaluation can.
+fn settled_integer_parameter(
+    context: VariableDefinitionContext<'_, '_>,
+    variable: VariableSpec<'_, '_>,
+) -> Option<i64> {
+    if variable.scalar_type != dae::ScalarType::Integer
+        || !variable.flat.dims.is_empty()
+        || matches!(
+            variable.flat.binding,
+            None | Some(Expression::Literal { .. })
+        )
+    {
+        return None;
+    }
+    match context
+        .constants
+        .instance_value(variable.flat.instance_id)?
+    {
+        rumoca_eval_flat::constant::Value::Integer(value) => Some(*value),
+        _ => None,
+    }
 }
 
 fn lower_optional_variable_attribute<'dae>(
