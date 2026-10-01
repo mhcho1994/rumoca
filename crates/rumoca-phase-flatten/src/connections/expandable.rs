@@ -420,7 +420,8 @@ fn check_augmented_member_sources(
             && variable.from_expandable_connector
         {
             variable.causality = rumoca_core::Causality::Input(Default::default());
-            if let Some((bus, _)) = top_level_member.split_once('.') {
+            let member_name = rumoca_core::VarName::new(top_level_member.as_str());
+            if let [bus, _, ..] = member_name.segments().as_slice() {
                 let (bus, _) = split_trailing_indices(bus);
                 flat.top_level_connectors.insert(bus.to_string());
             }

@@ -389,7 +389,7 @@ fn augmented_member_root<'name>(
     if !variable.from_expandable_connector {
         return None;
     }
-    let head = name.as_str().split('.').next()?;
+    let head = *name.segments().first()?;
     Some(head.split('[').next().unwrap_or(head))
 }
 
