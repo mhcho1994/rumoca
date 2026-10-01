@@ -1638,7 +1638,8 @@ fn resolve_certificate(
     // it, because a reassigned local has no single entry value to read.
     let assigned = assigned_function_targets(&function.body);
     for local in &function.locals {
-        let shape = resolve_declared_shape(local, None, &values)?;
+        let entry_shape = local_entry_shape(local, &assigned, &values);
+        let shape = resolve_declared_shape(local, entry_shape.as_ref(), &values)?;
         let name = VarName::new(&local.name);
         match local.default.as_ref() {
             Some(default)
@@ -1688,6 +1689,28 @@ fn resolve_certificate(
         results,
         values,
     })
+}
+
+/// MLS §12.4.4 / §10.1: a protected flexible-size local (`Real a[:] = {...}`)
+/// takes its extents from its declaration equation, which is the value that
+/// holds on function entry. The declaration equation stands in for the
+/// call-site equality an input formal has, but only when the body never
+/// assigns the local (a reassigned `:` local may change size) and only for a
+/// call-free default whose shape this scope proves exactly.
+fn local_entry_shape(
+    local: &rumoca_core::FunctionParam,
+    assigned: &HashSet<String>,
+    values: &ShapeEnvironment,
+) -> Option<ValueShape> {
+    let flexible = local
+        .shape_expr
+        .iter()
+        .any(|subscript| matches!(subscript, Subscript::Colon { .. }));
+    if !flexible || assigned.contains(&local.name) {
+        return None;
+    }
+    let shape = call_free_expression_shape(local.default.as_ref()?, values)?;
+    (shape.len() == local.dimensions().len()).then_some(shape)
 }
 
 fn resolve_declared_shape(

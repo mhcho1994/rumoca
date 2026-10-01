@@ -1363,3 +1363,80 @@ fn func_redeclared_package_function_is_selected_through_alias() {
     );
     assert_eq!(trace.final_value("s.z"), 6.0);
 }
+
+// =============================================================================
+// Calls through an inherited replaceable package alias (TOOLBUG-130)
+// =============================================================================
+
+/// `replaceable package ref = R` declared in a base class and not redeclared:
+/// `ref.f(x)` in the derived class used to reach function collection without a
+/// member identity for `f` and panic.
+#[test]
+fn call_through_inherited_replaceable_package_alias() {
+    let source = r#"
+        package P
+            package R
+                function f
+                    input Real x;
+                    output Real y;
+                algorithm
+                    y := 2 * x;
+                end f;
+            end R;
+            partial model Base
+                replaceable package ref = P.R;
+                Real v;
+            equation
+                v = ref.f(1.5);
+            end Base;
+            model M
+                extends Base;
+                Real w(start = 0, fixed = true);
+            equation
+                der(w) = ref.f(v);
+            end M;
+        end P;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "P.M", 1.0);
+    let value = trace.final_value("w");
+    assert!(
+        (value - 6.0).abs() < 1e-6,
+        "w must integrate 2*2*1.5, got {value}"
+    );
+}
+
+// =============================================================================
+// Flexible-size protected function locals (TOOLBUG-132)
+// =============================================================================
+
+/// MLS §12.4.4: `Real a[:] = {...}` takes its size from its declaration
+/// equation (IBPSA/Buildings `R410A.pressureSatVap_T`).
+#[test]
+fn flexible_local_array_sized_by_declaration_equation() {
+    let source = r#"
+        package P
+            function f
+                input Real t;
+                output Real y;
+            protected
+                final Real a[:] = {1, 2, 3};
+            algorithm
+                y := 0;
+                for i in 1:size(a, 1) loop
+                    y := y + a[i] * t;
+                end for;
+            end f;
+            model M
+                Real x(start = 0, fixed = true);
+            equation
+                der(x) = f(1.0);
+            end M;
+        end P;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "P.M", 1.0);
+    let value = trace.final_value("x");
+    assert!(
+        (value - 6.0).abs() < 1e-6,
+        "x must integrate 6, got {value}"
+    );
+}

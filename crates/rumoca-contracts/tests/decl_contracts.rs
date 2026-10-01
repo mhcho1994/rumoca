@@ -927,3 +927,44 @@ fn decl_033_when_assigns_subcomponent_rejected() {
         "ER108",
     );
 }
+
+// =============================================================================
+// Structural `size()` of a flexible-size parameter array (TOOLBUG-134)
+// =============================================================================
+
+/// IDEAS `PartialSimInfoManager`: `final parameter Integer n = size(a, 1)` with
+/// `a[:, :] = {...}` bounds a connect for-loop. The extent of `a` comes from its
+/// array-constructor binding, so `n` is structural (MLS §10.1, §10.3.1).
+#[test]
+fn connect_for_range_over_size_of_flexible_parameter_array() {
+    let source = r#"
+        package P
+          connector C
+            Real e;
+          end C;
+          model Hub
+            parameter Real angles[:, :] = {{0.0, 1.0}, {2.0, 3.0}, {4.0, 5.0}};
+            final parameter Integer n = size(angles, 1);
+            C c[n];
+            C src;
+          equation
+            for i in 1:n loop
+              connect(src, c[i]);
+            end for;
+            src.e = 1;
+          end Hub;
+          model M
+            Hub h;
+            Real x(start = 0, fixed = true);
+          equation
+            der(x) = h.src.e;
+          end M;
+        end P;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "P.M", 1.0);
+    let value = trace.final_value("x");
+    assert!(
+        (value - 1.0).abs() < 1e-6,
+        "x must integrate src.e = 1, got {value}"
+    );
+}

@@ -206,13 +206,7 @@ impl TypeChecker {
             .unwrap_or(alias);
         for ext in &class.extends {
             Self::extract_extends_modification_constants(alias, ext, ctx);
-            Self::extract_class_constants_from_extends(
-                tree,
-                alias,
-                &ext.base_name.to_string(),
-                resolve_context,
-                ctx,
-            );
+            Self::extract_class_constants_from_extends(tree, alias, ext, resolve_context, ctx);
         }
     }
 
@@ -657,13 +651,7 @@ impl TypeChecker {
         for ext in &nested_class.extends {
             Self::extract_extends_modification_constants(alias, ext, ctx);
             Self::extract_nested_extends_redeclare_constants(tree, alias, model_name, ext, ctx);
-            Self::extract_class_constants_from_extends(
-                tree,
-                alias,
-                &ext.base_name.to_string(),
-                model_name,
-                ctx,
-            );
+            Self::extract_class_constants_from_extends(tree, alias, ext, model_name, ctx);
         }
     }
 
@@ -841,7 +829,7 @@ impl TypeChecker {
                 Self::extract_class_constants_from_extends(
                     tree,
                     &nested_alias,
-                    &ext.base_name.to_string(),
+                    ext,
                     resolve_context,
                     ctx,
                 );
@@ -884,30 +872,64 @@ impl TypeChecker {
 
     /// Extract constants from a class reached via an extends chain.
     /// Recursively follows extends to extract from all ancestor classes.
-    /// Uses scope-based resolution for relative extends names.
+    ///
+    /// The base is the declaration Resolve bound to the extends clause when it
+    /// has one; that is what makes `redeclare function extends F` (MLS §7.3.1)
+    /// reach the inherited `F` instead of the redeclaring class itself, which
+    /// a scope-based lookup of the spelling `F` finds first. Relative names
+    /// without a bound identity fall back to scope-based resolution. Every
+    /// class is visited once, so an extends cycle cannot recurse forever.
     fn extract_class_constants_from_extends(
         tree: &ClassTree,
         alias: &str,
-        base_name: &str,
+        ext: &rumoca_ir_ast::Extend,
         resolve_context: &str,
         ctx: &mut rumoca_eval_ast::eval::TypeCheckEvalContext,
     ) {
-        let (base_class, resolved_qname) =
-            Self::resolve_class_name_with_qname(tree, base_name, resolve_context);
-        let Some(base_class) = base_class else {
-            return;
+        let mut visited = std::collections::HashSet::new();
+        Self::extract_class_constants_from_extends_visited(
+            tree,
+            alias,
+            ext,
+            resolve_context,
+            ctx,
+            &mut visited,
+        );
+    }
+
+    fn extract_class_constants_from_extends_visited(
+        tree: &ClassTree,
+        alias: &str,
+        ext: &rumoca_ir_ast::Extend,
+        resolve_context: &str,
+        ctx: &mut rumoca_eval_ast::eval::TypeCheckEvalContext,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        let bound = ext.base_def_id.and_then(|def_id| {
+            let qname = tree.def_map.get(&def_id)?;
+            Some((tree.get_class_by_qualified_name(qname)?, qname.clone()))
+        });
+        let (base_class, qname) = match bound {
+            Some(found) => found,
+            None => {
+                let base_name = ext.base_name.to_string();
+                let (base_class, resolved_qname) =
+                    Self::resolve_class_name_with_qname(tree, &base_name, resolve_context);
+                let Some(base_class) = base_class else {
+                    return;
+                };
+                (base_class, resolved_qname.unwrap_or(base_name))
+            }
         };
-        let qname = resolved_qname.unwrap_or_else(|| base_name.to_string());
+        if !visited.insert(qname.clone()) {
+            return;
+        }
         Self::extract_class_constants(alias, base_class, ctx);
         // Recursively follow extends using resolved name as context
         for ext in &base_class.extends {
             Self::extract_extends_modification_constants(alias, ext, ctx);
-            Self::extract_class_constants_from_extends(
-                tree,
-                alias,
-                &ext.base_name.to_string(),
-                &qname,
-                ctx,
+            Self::extract_class_constants_from_extends_visited(
+                tree, alias, ext, &qname, ctx, visited,
             );
         }
     }

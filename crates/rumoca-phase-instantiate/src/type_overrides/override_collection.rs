@@ -39,24 +39,27 @@ pub(crate) fn build_type_override_map(
         }
     });
 
-    // 1b. Nested classes inherited through extends are elements of the class
-    // too (MLS §7.1), and are found before the enclosing scope's. A
-    // `package Medium = Air` declared in a base model must still be the
-    // `Medium` that `sou(redeclare package Medium = Medium)` forwards when
-    // a derived model is instantiated.
+    // 2. Collect package/type redeclarations from extends-modifications
+    // (e.g., extends Base(redeclare replaceable package Medium = ...)).
+    collect_extends_redeclare_overrides(tree, class, mod_env, &mut overrides);
+
+    // 3. Collect the nested classes inherited through the extends chain
+    // (MLS §7.1: inherited elements are members of the extending class). A
+    // replaceable package alias declared in a base class and not redeclared
+    // (`replaceable package Medium = R;` in `Base`, `Medium.f(x)` in `M`)
+    // selects its own default; without this entry a reference that Resolve
+    // deferred across that alias never receives its member identity. Entries
+    // from steps 1 and 2 win.
     for base in extends_base_classes(tree, class) {
         collect_nested_overrides_in_extends_chain(tree, base, mod_env, &mut overrides);
     }
 
-    // 2. Collect from the enclosing class's nested classes.
+    // 4. Collect from the enclosing class's nested classes.
     // This handles the pattern where a record type (like ThermodynamicState)
     // is redeclared in the enclosing package, and components in the model
-    // reference it by its short name.
+    // reference it by its short name. Members (steps 1-3) shadow enclosing
+    // declarations (MLS §5.3.1), so these entries only fill gaps.
     collect_enclosing_type_overrides(tree, class, mod_env, &mut overrides);
-
-    // 3. Collect package/type redeclarations from extends-modifications
-    // (e.g., extends Base(redeclare replaceable package Medium = ...)).
-    collect_extends_redeclare_overrides(tree, class, mod_env, &mut overrides);
 
     overrides
 }

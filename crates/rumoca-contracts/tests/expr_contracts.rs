@@ -1014,3 +1014,48 @@ fn expr_031_spatial_distribution_vectorized_rejected_as_unsupported() {
         "ED008",
     );
 }
+
+// =============================================================================
+// der() of time-invariant operands and of top-level inputs (TOOLBUG-131)
+// =============================================================================
+
+/// MLS §3.7.4.2: `der` of a parameter or constant is zero. It used to reach
+/// DAE construction as a derivative of a non-state and panic.
+#[test]
+fn der_of_parameter_is_zero() {
+    let source = r#"
+        model M
+            parameter Real p = 2;
+            parameter Real q[2] = {1, 2};
+            Real x(start = 0, fixed = true);
+        equation
+            der(x) = der(p) + sum(der(q)) + der(q[1]) + 1;
+        end M;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "M", 1.0);
+    let value = trace.final_value("x");
+    assert!(
+        (value - 1.0).abs() < 1e-6,
+        "x must integrate slope 1, got {value}"
+    );
+}
+
+/// `der(u)` of a top-level input needs the input's derivative, which the DAE
+/// does not carry: a source diagnostic (ED022), not a panic.
+#[test]
+fn der_of_top_level_input_is_diagnosed() {
+    expect_failure_in_phase_with_code(
+        r#"
+        block M
+            input Real u;
+            output Real y;
+            parameter Real T = 1;
+        equation
+            T * der(u) = y - u;
+        end M;
+    "#,
+        "M",
+        FailedPhase::ToDae,
+        "ED022",
+    );
+}

@@ -42,6 +42,21 @@ pub enum ToDaeError {
         span: Span,
     },
 
+    #[error("the model requires the derivative of top-level input `{name}`")]
+    #[diagnostic(
+        code(rumoca::todae::ED022),
+        help(
+            "a top-level input is supplied by the environment and is not a state (MLS §4.4.2.2); \
+             der(...) of it needs the input's derivative, which the canonical DAE does not carry. \
+             Provide the derivative as a separate input or filter the input through a state"
+        )
+    )]
+    DerivativeOfInput {
+        name: String,
+        #[label("input declared here; der(...) is applied to it in the equations")]
+        span: Span,
+    },
+
     #[error("Flat semantic owner is missing source provenance: {owner}")]
     #[diagnostic(
         code(rumoca::todae::ED007),
@@ -254,6 +269,7 @@ impl ToDaeError {
         match self {
             Self::UnresolvedReference { span, .. }
             | Self::ReinitNonState { span, .. }
+            | Self::DerivativeOfInput { span, .. }
             | Self::DiscreteSolvedFormViolation { span, .. }
             | Self::UnsupportedAlgorithm { span, .. }
             | Self::UnsupportedRuntimeOperator { span, .. }

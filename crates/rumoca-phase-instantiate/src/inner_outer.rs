@@ -21,8 +21,9 @@ pub(crate) enum SyntheticInnerError {
     StillMissing { names: Vec<String> },
     /// Synthetic declaration construction failed because required source context was missing.
     SourceContext(Box<InstantiateError>),
-    /// The retry instantiation itself failed.
-    InstantiationFailed,
+    /// The retry instantiation itself failed; the error says why the model
+    /// cannot be instantiated with the synthesized default inners.
+    InstantiationFailed(Box<InstantiateError>),
 }
 
 /// Create a minimal synthetic inner `ast::Component` for a missing inner declaration.
@@ -95,7 +96,7 @@ pub(crate) fn retry_with_synthetic_inners(
         // world.defaultBodyDiameter`), so record their class defaults exactly
         // as a declared inner without modifiers is pre-registered.
         register_synthetic_inner_reals(tree, inner_class, &qn, &mut ctx)
-            .map_err(|_| SyntheticInnerError::InstantiationFailed)?;
+            .map_err(SyntheticInnerError::InstantiationFailed)?;
         // Register in root scope so outer lookups will find it
         ctx.register_inner_in_root(&mi.name, qn, &mi.type_name, mi.type_def_id);
 
@@ -103,7 +104,7 @@ pub(crate) fn retry_with_synthetic_inners(
         let empty_siblings = IndexMap::default();
         let empty_type_overrides = TypeOverrideMap::new();
         ctx.push_path(&mi.name);
-        if instantiate_component(
+        instantiate_component(
             tree,
             &synthetic,
             &mut ctx,
@@ -115,15 +116,12 @@ pub(crate) fn retry_with_synthetic_inners(
                 imports: ComponentImports::EMPTY,
             },
         )
-        .is_err()
-        {
-            return Err(SyntheticInnerError::InstantiationFailed);
-        }
+        .map_err(SyntheticInnerError::InstantiationFailed)?;
         ctx.pop_path();
     }
 
     // Re-run the main model instantiation with inners now available
-    if instantiate_class(
+    instantiate_class(
         tree,
         model,
         None,
@@ -131,10 +129,7 @@ pub(crate) fn retry_with_synthetic_inners(
         &mut ctx,
         &mut overlay,
     )
-    .is_err()
-    {
-        return Err(SyntheticInnerError::InstantiationFailed);
-    }
+    .map_err(SyntheticInnerError::InstantiationFailed)?;
 
     // Check if there are still missing inners (transitive)
     if ctx.has_missing_inners() {
