@@ -133,26 +133,7 @@ impl ExpressionTransformer for DynamicExpressionTargetResolver<'_> {
         if self.error.is_some() || reference.target_def_id().is_some() {
             return reference;
         }
-        // The deferred edge is the last resolved segment: the root for
-        // `Medium.f`, an inner replaceable class for `Pkg.Medium.f`.
-        let Some(deferred_index) = reference
-            .parts
-            .iter()
-            .position(|part| part.def_id.is_none())
-            .and_then(|first_missing| first_missing.checked_sub(1))
-        else {
-            return reference;
-        };
-        let Some(root_def_id) = reference.parts[deferred_index].def_id else {
-            return reference;
-        };
-        // A replaceable class alias selects a class directly; a replaceable
-        // component selects one through the type of its instantiated occurrence.
-        let selected = self
-            .overrides
-            .target_for_alias_def_id(root_def_id)
-            .or_else(|| self.selected_component_types.get(&root_def_id).copied());
-        let Some(target_class_def_id) = selected.or_else(|| self.default_selection(root_def_id))
+        let Some((deferred_index, selected, target_class_def_id)) = self.deferred_edge(&reference)
         else {
             return reference;
         };
@@ -194,6 +175,36 @@ impl DynamicExpressionTargetResolver<'_> {
             selected_component_types,
             error: None,
         }
+    }
+
+    /// The segment a deferred reference is resolved from, the class it
+    /// selects and whether a modification selected it. The root comes first
+    /// (`Medium.f`, a replaceable component `comb.u`); the last resolved
+    /// segment is tried after it, for a replaceable class inside a qualified
+    /// name (`Pkg.Medium.f`).
+    fn deferred_edge(
+        &self,
+        reference: &ast::ComponentReference,
+    ) -> Option<(usize, Option<DefId>, DefId)> {
+        let inner = reference
+            .parts
+            .iter()
+            .position(|part| part.def_id.is_none())
+            .and_then(|first_missing| first_missing.checked_sub(1))
+            .filter(|index| *index > 0)
+            .and_then(|index| reference.parts[index].def_id.map(|def_id| (index, def_id)));
+        let root = reference.root_def_id().map(|def_id| (0, def_id));
+        root.into_iter().chain(inner).find_map(|(index, def_id)| {
+            // A replaceable class alias selects a class directly; a
+            // replaceable component selects one through the type of its
+            // instantiated occurrence.
+            let selected = self
+                .overrides
+                .target_for_alias_def_id(def_id)
+                .or_else(|| self.selected_component_types.get(&def_id).copied());
+            let target = selected.or_else(|| self.default_selection(def_id))?;
+            Some((index, selected, target))
+        })
     }
 
     /// MLS §7.3: a replaceable class that no enclosing modification
