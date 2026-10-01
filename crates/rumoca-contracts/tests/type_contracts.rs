@@ -1261,3 +1261,54 @@ fn type_007_external_object_mismatch_rejected() {
         "EI027",
     );
 }
+
+// =============================================================================
+// Equivalent enumeration types (TOOLBUG-149)
+// =============================================================================
+
+/// MLS §6.3: enumeration types with the same literals in the same order are
+/// equivalent. CDL `CalendarTime` passes its `CDL.Types.ZeroTime` parameter to
+/// a `Utilities.Time.Types.ZeroTime` parameter; TRANSFORM passes its own
+/// `Types.Dynamics` to MSL `Modelica.Fluid.Types.Dynamics`.
+#[test]
+fn equivalent_enumeration_types_are_assignable() {
+    let source = r#"
+        package P
+            type A = enumeration(One, Two, Three);
+            type B = enumeration(One, Two, Three);
+            model Inner
+                parameter B b = B.One;
+                Real y = if b == B.Two then 2 * time else time;
+            end Inner;
+            model M
+                parameter A a = A.Two;
+                Inner sub(b = a);
+            end M;
+        end P;
+    "#;
+    let trace = rumoca_contracts::test_support::simulate_model(source, "P.M", 1.0);
+    let value = trace.final_value("sub.y");
+    assert!(
+        (value - 2.0).abs() < 1e-9,
+        "A.Two selects the Two branch, got {value}"
+    );
+}
+
+/// Enumerations whose literal lists differ stay incompatible (ET002).
+#[test]
+fn different_enumeration_types_stay_incompatible() {
+    let source = r#"
+        package P
+            type A = enumeration(One, Two);
+            type B = enumeration(One, Two, Three);
+            model Inner
+                parameter B b = B.One;
+            end Inner;
+            model M
+                parameter A a = A.Two;
+                Inner sub(b = a);
+            end M;
+        end P;
+    "#;
+    expect_failure_in_phase_with_code(source, "P.M", FailedPhase::Typecheck, "ET002");
+}
