@@ -179,3 +179,29 @@ end Str;
 ";
     assert_compiles(FIXTURE, "Str.M");
 }
+
+/// TOOLBUG-156: package constants bound by a signed symbolic expression
+/// (IDEAS `Types.Azimuth`: `W = +pi/2`, `E = -pi/2`) fold into component
+/// modifiers.
+#[test]
+fn signed_symbolic_package_constants_fold_into_modifiers() {
+    const FIXTURE: &str = "\
+package Az
+  package Azimuth
+    constant Real pi = 3.141592653589793;
+    constant Real S = 0;
+    constant Real W = +pi/2;
+    constant Real E = -pi/2;
+  end Azimuth;
+  block Constant
+    parameter Real k;
+    output Real y = k;
+  end Constant;
+  model M
+    Constant azi[3](k = {Azimuth.S, Azimuth.W, Azimuth.E});
+    Constant c(k = Azimuth.E);
+  end M;
+end Az;
+";
+    assert_compiles(FIXTURE, "Az.M");
+}

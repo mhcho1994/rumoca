@@ -571,6 +571,39 @@ pub(crate) fn eval_const_real_function_with_scope(
     }
 }
 
+/// Negate one evaluated constant expression: literals fold, and a symbolic
+/// operand stays symbolic like `Binary` does
+/// (`E = -Modelica.Constants.pi/2`).
+fn negate_const_flat_expr(
+    operand: rumoca_core::Expression,
+    span: rumoca_core::Span,
+) -> Option<rumoca_core::Expression> {
+    match operand {
+        rumoca_core::Expression::Literal {
+            value: Literal::Real(v),
+            ..
+        } => Some(rumoca_core::Expression::Literal {
+            value: Literal::Real(-v),
+            span,
+        }),
+        rumoca_core::Expression::Literal {
+            value: Literal::Integer(v),
+            ..
+        } => Some(rumoca_core::Expression::Literal {
+            value: Literal::Integer(v.checked_neg()?),
+            span,
+        }),
+        operand @ (rumoca_core::Expression::Binary { .. }
+        | rumoca_core::Expression::Unary { .. }
+        | rumoca_core::Expression::VarRef { .. }) => Some(rumoca_core::Expression::Unary {
+            op: OpUnary::Minus,
+            rhs: Box::new(operand),
+            span,
+        }),
+        _ => None,
+    }
+}
+
 pub(crate) fn try_eval_const_flat_expr_with_scope(
     expr: &ast::Expression,
     ctx: &Context,
@@ -588,23 +621,16 @@ pub(crate) fn try_eval_const_flat_expr_with_scope(
             op: OpUnary::Minus,
             rhs,
             ..
-        } => match try_eval_const_flat_expr_with_scope(rhs, ctx, scope)? {
-            rumoca_core::Expression::Literal {
-                value: Literal::Real(v),
-                ..
-            } => Some(rumoca_core::Expression::Literal {
-                value: Literal::Real(-v),
-                span: expr.span(),
-            }),
-            rumoca_core::Expression::Literal {
-                value: Literal::Integer(v),
-                ..
-            } => Some(rumoca_core::Expression::Literal {
-                value: Literal::Integer(-v),
-                span: expr.span(),
-            }),
-            _ => None,
-        },
+        } => negate_const_flat_expr(
+            try_eval_const_flat_expr_with_scope(rhs, ctx, scope)?,
+            expr.span(),
+        ),
+        // MLS §10.6.1: unary `+` is the identity (IDEAS `Azimuth.W = +pi/2`).
+        ast::Expression::Unary {
+            op: OpUnary::Plus,
+            rhs,
+            ..
+        } => try_eval_const_flat_expr_with_scope(rhs, ctx, scope),
         ast::Expression::Parenthesized { inner, .. } => {
             try_eval_const_flat_expr_with_scope(inner, ctx, scope)
         }
