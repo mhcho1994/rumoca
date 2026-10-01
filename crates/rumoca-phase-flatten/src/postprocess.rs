@@ -148,7 +148,13 @@ pub(super) fn substitute_known_constants_in_flat(
     substitute_algorithms(&mut flat.algorithms, ctx, &live_vars, &no_locals)?;
     substitute_algorithms(&mut flat.initial_algorithms, ctx, &live_vars, &no_locals)?;
     substitute_variable_annotations(&mut flat.variables, ctx, &live_vars, &no_locals)?;
-    substitute_function_bodies(&mut flat.functions, ctx, &live_vars)?;
+    // A function body cannot read a model variable (MLS §12.2: only its
+    // formals, locals and package constants), so a model variable never
+    // shadows a name there. In particular a Real package constant that an
+    // equation also reads is declared as a model constant above, and must
+    // not stop the same constant from folding inside a function body: the
+    // DAE function owner has no access to model coordinates.
+    substitute_function_bodies(&mut flat.functions, ctx, &rustc_hash::FxHashSet::default())?;
     crate::zero_sized_arrays::materialize_referenced_zero_sized_array_variables(flat, ctx)?;
     Ok(())
 }
