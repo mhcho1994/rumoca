@@ -20,7 +20,7 @@ pub(super) use inline_calls::rebuild_inlined_calls;
 mod loop_guards;
 pub(super) use loop_guards::rebuild_loop_guards;
 mod formal;
-pub(super) use formal::rebuild_formal;
+pub(super) use formal::{FormalRebuildRefusal, rebuild_formal};
 mod state_candidates;
 pub(super) use state_candidates::rebuild_state_candidate;
 
@@ -106,9 +106,8 @@ pub(super) fn rebuild_requested_states(
                     matches!(
                         variable.role(),
                         dae::VariableRole::Algebraic | dae::VariableRole::Output
-                    ) && variable.variability() == dae::ExpressionVariability::Continuous
-                        && variable.value_type().scalar_type() == dae::ScalarType::Real
-                        && variable.state_select() == rumoca_core::StateSelect::Always
+                    ) && variable.continuous_state_select()
+                        == Some(rumoca_core::StateSelect::Always)
                 })
                 .map(|(id, _)| id.index())
                 .collect::<Vec<_>>();

@@ -22,6 +22,7 @@ mod function_metadata;
 mod function_output_validation;
 mod function_param_alias;
 mod function_requests;
+mod record_value_fields;
 #[cfg(test)]
 mod tests;
 
@@ -38,6 +39,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) use call_args::materialize_flat_function_call_args;
 pub(crate) use call_canonicalization::{
     canonicalize_collected_function_calls, canonicalize_function_calls_in_expression_with_scope,
+    expose_inherited_function_calls,
 };
 use call_collection::collect_function_call_requests;
 #[cfg(test)]
@@ -48,8 +50,9 @@ use constructor_signature::{
     normalize_function_local_references,
 };
 use function_context::{
-    collect_function_context, collect_lexical_constant_aliases, extend_imports_if_absent,
-    function_initial_import_map, resolve_import_pairs,
+    collect_exposed_package_constant_aliases, collect_function_context,
+    collect_lexical_constant_aliases, extend_imports_if_absent, function_initial_import_map,
+    resolve_import_pairs,
 };
 use function_derivatives::*;
 pub(crate) use function_metadata::FunctionTypeCatalog;
@@ -59,6 +62,7 @@ use function_output_validation::validate_function_outputs_assigned;
 use function_param_alias::function_param_type_alias_dims;
 use function_requests::{FunctionIdentitySet, same_function_request};
 pub(crate) use function_requests::{FunctionRequest, FunctionRequests};
+pub(crate) use record_value_fields::split_branch_assigned_records;
 
 use crate::algorithms;
 use crate::ast_lower;
@@ -1109,6 +1113,9 @@ fn convert_function<'tree>(
         tree,
         class_index,
         qualified_name,
+        class_def
+            .def_id
+            .and_then(|def_id| class_index.qualified_name(def_id)),
         &context.components,
         &mut context.algorithms,
     );
@@ -1120,6 +1127,7 @@ fn convert_function<'tree>(
     if let Some(class_def_id) = class_def.def_id {
         collect_lexical_constant_aliases(tree, class_index, class_def_id, &mut import_map, true);
     }
+    collect_exposed_package_constant_aliases(tree, class_index, qualified_name, &mut import_map);
     let prefix = ast::QualifiedName::new();
     let function_locals: HashSet<String> = effective_components.keys().cloned().collect();
 

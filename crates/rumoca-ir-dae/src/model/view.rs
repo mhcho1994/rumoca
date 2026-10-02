@@ -663,6 +663,14 @@ impl<'dae> VariableView<'dae> {
             .is_some_and(|values| values.iter().any(|&value| value))
     }
 
+    /// The `stateSelect` request of a continuous Real declaration, the only
+    /// kind state selection ranks (MLS 3.7 §4.9.7.1); `None` for any other.
+    pub fn continuous_state_select(self) -> Option<StateSelect> {
+        (self.entry.variability == ExpressionVariability::Continuous
+            && self.value_type.scalar_type() == ScalarType::Real)
+            .then(|| self.state_select())
+    }
+
     pub fn identity(self) -> VariableIdentity<'dae> {
         match self.entry.role {
             VariableRole::Parameter | VariableRole::Constant => {
@@ -686,6 +694,17 @@ impl<'dae> VariableView<'dae> {
         self.value_type
             .scalar_count()
             .expect("final DAE value type has a checked scalar capacity")
+    }
+
+    /// Spread a single evaluated attribute or binding value over this
+    /// variable's scalars; see [`broadcast_scalar_values`].
+    pub fn broadcast_values<T: Clone>(self, values: &mut Vec<T>) {
+        broadcast_scalar_values(values, self.scalar_count());
+    }
+
+    /// Every scalar name of this declaration, in flat order.
+    pub fn scalar_names(self) -> impl Iterator<Item = String> + 'dae {
+        (0..self.scalar_count()).filter_map(move |scalar| self.scalar_name(scalar))
     }
 
     pub fn scalar_name(self, flat_index: usize) -> Option<String> {
@@ -1852,5 +1871,19 @@ fn positive_parameter_view(entry: &PositiveParameterEntry) -> PositiveParameterV
         expression: ExprId::from_raw(entry.expression),
         value: entry.value,
         provenance: entry.provenance,
+    }
+}
+
+/// Spread one evaluated value over `scalar_count` scalars.
+///
+/// A scalar attribute of a type applies to every element of an array of that
+/// type (MLS §4.9, §10.1), so one value covers the whole array, including the
+/// empty element set of a zero-size array (MLS §10.3.1). Any other length is
+/// left for the caller's shape check.
+pub fn broadcast_scalar_values<T: Clone>(values: &mut Vec<T>, scalar_count: usize) {
+    if values.len() == 1 && scalar_count != 1 {
+        let value = values[0].clone();
+        values.clear();
+        values.resize(scalar_count, value);
     }
 }

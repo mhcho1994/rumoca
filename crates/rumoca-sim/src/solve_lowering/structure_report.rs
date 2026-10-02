@@ -27,15 +27,26 @@ pub fn structural_report_for_dae(
         rumoca_phase_structural::prepare_for_solve(analyzed).map_err(structural_error)?;
     let mut report = prepared.structural_report();
     report.aliases = aliases;
+    if let Ok(Some(reason)) = rumoca_phase_solve::withheld_state_preferences(model) {
+        report.notes.push(format!(
+            "the StateSelect preferences request another basis, withheld because {reason}"
+        ));
+    }
     if rumoca_phase_solve::executes_reduced_state_selection(analyzed, &prepared)
         .map_err(structural_error)?
     {
         report.notes.push(
-            "this is the structural reducer's BLT, which retains a constrained state manifold; \
-             Solve lowering instead executes a reduced state selection built from formal \
-             derivatives, whose blocks differ (inspect the emitted Solve IR for those)"
+            "this is the structural reducer's BLT; Solve lowering instead executes a state \
+             selection built from formal derivatives (for a constrained state manifold or for \
+             the StateSelect preferences), whose blocks differ (inspect the emitted Solve IR \
+             for those)"
                 .to_string(),
         );
+        if let Ok(names) = rumoca_phase_solve::integrated_state_names(model) {
+            report
+                .notes
+                .push(format!("Solve lowering integrates: {}", names.join(", ")));
+        }
         // The reduced candidate is prepared only by Solve lowering; a model that
         // does not lower still reports its reducer structure above.
         if let Ok(lowered) =

@@ -91,6 +91,22 @@ impl FallibleExpressionRewriter for KnownConstantSubstituter<'_> {
                 else_branch,
                 span,
             } => self.rewrite_if(branches, else_branch, *span),
+            rumoca_core::Expression::Index {
+                base,
+                subscripts,
+                span,
+            } => {
+                let base = self.rewrite_expression(base)?;
+                let subscripts = self.rewrite_subscripts(subscripts)?;
+                if let Some(element) = select_constant_element(&base, &subscripts) {
+                    return Ok(element.clone().with_span(*span));
+                }
+                Ok(rumoca_core::Expression::Index {
+                    base: Box::new(base),
+                    subscripts,
+                    span: *span,
+                })
+            }
             other => self.walk_expression(other),
         }
     }
@@ -298,11 +314,48 @@ fn substitute_indexed_constant_var_ref(
         }
         return Ok(None);
     };
+    if let Some(element) = select_constant_element(&constant_expr, &subscripts) {
+        return Ok(Some(element.clone().with_span(span)));
+    }
     Ok(Some(rumoca_core::Expression::Index {
         base: Box::new(constant_expr),
         subscripts,
         span,
     }))
+}
+
+/// The element a compile-time subscript tuple selects from a constant `{...}`
+/// array value (MLS §10.5): `{"a", "b"}[2]` is `"b"`. Only literal in-range
+/// indices through nested `{...}` constructors select; anything else keeps the
+/// indexed expression.
+fn select_constant_element<'value>(
+    value: &'value rumoca_core::Expression,
+    subscripts: &[rumoca_core::Subscript],
+) -> Option<&'value rumoca_core::Expression> {
+    let Some((first, rest)) = subscripts.split_first() else {
+        return Some(value);
+    };
+    let rumoca_core::Expression::Array {
+        elements,
+        kind: rumoca_core::ArrayConstructor::Array,
+        ..
+    } = value
+    else {
+        return None;
+    };
+    let index = match first {
+        rumoca_core::Subscript::Index { value, .. } => *value,
+        rumoca_core::Subscript::Expr { expr, .. } => match expr.as_ref() {
+            rumoca_core::Expression::Literal {
+                value: rumoca_core::Literal::Integer(value),
+                ..
+            } => *value,
+            _ => return None,
+        },
+        rumoca_core::Subscript::Colon { .. } => return None,
+    };
+    let element = elements.get(usize::try_from(index).ok()?.checked_sub(1)?)?;
+    select_constant_element(element, rest)
 }
 
 fn substitute_scalar_var_ref(
@@ -339,6 +392,15 @@ fn substitute_source_scalar_var_ref(
     span: rumoca_core::Span,
     env: ConstantSubstitutionEnv<'_>,
 ) -> Result<Option<rumoca_core::Expression>, FlattenError> {
+    // MLS §7.2: a constant an extends modification of the exposing package
+    // binds (`extends Base(k = 1)`) takes that binding, which outranks the
+    // declaration default and is keyed by the rendered exposing-package name.
+    let key = name.as_str();
+    if env.ctx.modified_constant_keys.contains(key)
+        && let Some(value) = resolve_constant_value_expr(key, env.ctx)
+    {
+        return substitute_resolved_generated_constant(key, value, span, env).map(Some);
+    }
     let Some((identity, value)) = resolve_source_constant(name, env.ctx) else {
         return Ok(None);
     };

@@ -153,6 +153,23 @@ fn exact_function_exposure(
             &mut exposures,
         );
         if exposures.is_empty() {
+            // MLS 7.3: the prefix names a replaceable package alias whose
+            // redeclaration provides the selected implementation.
+            for package in ctx
+                .override_packages
+                .iter()
+                .filter(|package| package.alias == prefix.ident.as_str())
+            {
+                collect_function_exposures_for_implementation(
+                    ctx.class_index,
+                    package.def_id,
+                    implementation,
+                    &mut FxHashSet::default(),
+                    &mut exposures,
+                );
+            }
+        }
+        if exposures.is_empty() {
             return Err(FlattenError::missing_function_selection_identity(
                 reference.as_str(),
                 "exact callable owner does not expose the selected implementation",
@@ -231,8 +248,16 @@ pub(super) fn exact_override_package_for_source_package<'a>(
     }
     let has_active = !active.is_empty();
     let mut candidates = if has_active { active } else { inherited };
+    // MLS §4.5.1: a short class definition without modifications
+    // (`package Medium = ConstantPropertyLiquidWater`) denotes the class it
+    // names, so selections that reach one package through its aliases are one.
     let mut seen = FxHashSet::default();
-    candidates.retain(|package| seen.insert(package.def_id));
+    candidates.retain(|package| {
+        seen.insert(
+            resolve_package_alias_chain(ctx.tree, ctx.class_index, package.def_id)
+                .map_or(package.def_id, |selected| selected.def_id),
+        )
+    });
     if !has_active
         && let Some(lexical_package) = ctx.lexical_package_def_id
         && candidates
@@ -410,7 +435,35 @@ fn exact_package_function_rewrite(
         exposure,
         implementation,
     };
-    if projected == selection {
+    // Instantiation may already have retargeted a call spelled through a
+    // package alias to the alias's redeclaration while the alias's own class
+    // (the replaceable slot's default) does not expose that implementation. The
+    // occurrence is then respelled through the redeclaring package so its
+    // function is converted in that package's scope, where the formal types
+    // resolve to the redeclared classes.
+    let prefix_part = reference
+        .component_ref()
+        .and_then(|component_ref| component_ref.component_scope().prefix_parts().last());
+    let alias_exposes_selection = prefix_part
+        .and_then(|prefix| exact_prefix_owner_def_id(ctx.class_index, prefix.def_id))
+        .is_some_and(|owner| {
+            let mut exposures = FxHashSet::default();
+            collect_function_exposures_for_implementation(
+                ctx.class_index,
+                owner,
+                projected.implementation,
+                &mut FxHashSet::default(),
+                &mut exposures,
+            );
+            !exposures.is_empty()
+        });
+    // An instance scope selects the package per instance, so a call there is
+    // respelled through that instance's concrete package even when the alias's
+    // default also exposes the implementation.
+    let instance_selects_package = package.active && !ctx.active_scope.is_root();
+    let respell_through_package = (instance_selects_package || !alias_exposes_selection)
+        && prefix_part.is_some_and(|prefix| prefix.ident == package.alias);
+    if projected == selection && !respell_through_package {
         return Ok(None);
     }
     let mut rewrite = resolved_function_rewrite(

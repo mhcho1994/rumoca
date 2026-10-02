@@ -344,6 +344,7 @@ pub const IMPLEMENTED_CONTRACT_IDS: &[&str] = &[
     "INST-050",
     "INST-053",
     "INST-054",
+    "INST-055",
     "LEX-001",
     "LEX-002",
     "LEX-003",
@@ -400,6 +401,7 @@ pub const IMPLEMENTED_CONTRACT_IDS: &[&str] = &[
     "STRM-009",
     "STRM-010",
     "STRM-011",
+    "STRM-012",
     "TYPE-001",
     "TYPE-004",
     "TYPE-005",
@@ -479,11 +481,11 @@ mod tests {
     #[test]
     fn test_registry_has_all_contracts() {
         let registry = create_registry();
-        // SPEC_0022 defines 446 contracts
+        // SPEC_0022 defines 448 contracts
         assert_eq!(
             registry.len(),
-            446,
-            "Expected 446 contracts, got {}",
+            448,
+            "Expected 448 contracts, got {}",
             registry.len()
         );
     }
@@ -502,7 +504,7 @@ mod tests {
             registry
                 .by_category(ContractCategory::Instantiation)
                 .count(),
-            54
+            55
         );
         assert_eq!(
             registry.by_category(ContractCategory::Expression).count(),
@@ -532,7 +534,7 @@ mod tests {
             10
         );
         assert_eq!(registry.by_category(ContractCategory::Clock).count(), 20);
-        assert_eq!(registry.by_category(ContractCategory::Stream).count(), 11);
+        assert_eq!(registry.by_category(ContractCategory::Stream).count(), 12);
         assert_eq!(
             registry.by_category(ContractCategory::StateMachine).count(),
             8

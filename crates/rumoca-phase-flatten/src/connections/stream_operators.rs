@@ -70,12 +70,16 @@ pub(super) struct StreamConnectionEndpoints {
     outside: StreamEndpointMap,
 }
 
+#[derive(Clone)]
 struct StreamAccess {
     name: VarName,
     subscripts: Vec<Subscript>,
     indexed: bool,
     original: Expression,
     field_base: Option<(Box<Expression>, rumoca_core::DefId)>,
+    /// The written index already selected one scalarized connector element, so
+    /// it does not apply to the peer connectors of its connection set.
+    element_resolved: bool,
     span: Span,
 }
 
@@ -172,6 +176,7 @@ impl StreamConnectionEndpoints {
             indexed: false,
             original: variable_reference(stream, &[], span),
             field_base: None,
+            element_resolved: false,
             span,
         };
         Some(in_stream_expression(&access, endpoint, span))
@@ -391,11 +396,16 @@ impl StreamOperatorRewriter {
         let expanded = if indexed_matches.len() > 1 {
             indexed_endpoint_expression(operator, &access, indexed_matches, span)?
         } else {
+            let resolved_access = StreamAccess {
+                element_resolved: !self.endpoints.contains_key(&access.name),
+                ..access.clone()
+            };
+            let access_ref = &resolved_access;
             let endpoint = self.endpoint_for(&access.name, span)?;
             if operator == "actualStream" {
-                actual_stream_expression(&access, &endpoint, span)
+                actual_stream_expression(access_ref, &endpoint, span)
             } else {
-                in_stream_expression(&access, &endpoint, span)
+                in_stream_expression(access_ref, &endpoint, span)
             }
         };
         self.resolve_nested_stream_operators(&access.name, expanded, span)
@@ -655,6 +665,7 @@ fn concrete_stream_access(access: &StreamAccess, stream: VarName, span: Span) ->
         indexed: false,
         original: variable_reference(&stream, &access.subscripts, span),
         field_base: None,
+        element_resolved: false,
         span: access.span,
     }
 }
@@ -672,7 +683,115 @@ impl FallibleExpressionRewriter for StreamOperatorRewriter {
                 return self.rewrite_stream_call(operator, args, *span);
             }
         }
+        if let Some(product) = self.flow_weighted_actual_stream(expr)? {
+            return Ok(product);
+        }
         self.walk_expression(expr)
+    }
+}
+
+impl StreamOperatorRewriter {
+    /// Lower `port.m_flow * actualStream(port.h_outflow)` as one continuous
+    /// product.
+    ///
+    /// MLS §15.3: actualStream switches between `inStream(v)` and `v` exactly
+    /// where its own port's flow is zero, so the product with that flow is
+    /// continuous and a tool may treat it as `smooth(0, ...)` without an event.
+    /// An event there only re-detects the flow's sign change; near a zero-flow
+    /// equilibrium the flow keeps crossing zero at round-off scale and every
+    /// crossing became an event, which stalled the integration. A standalone
+    /// actualStream keeps its event (the change of the observed stream value
+    /// is discontinuous).
+    fn flow_weighted_actual_stream(
+        &mut self,
+        expr: &Expression,
+    ) -> Result<Option<Expression>, FlattenError> {
+        let Expression::Binary {
+            op: OpBinary::Mul,
+            lhs,
+            rhs,
+            span,
+        } = expr
+        else {
+            return Ok(None);
+        };
+        let lhs_is_weight = self.weights_own_actual_stream(lhs, rhs);
+        if !lhs_is_weight && !self.weights_own_actual_stream(rhs, lhs) {
+            return Ok(None);
+        }
+        let product = Expression::Binary {
+            op: OpBinary::Mul,
+            lhs: Box::new(self.rewrite_expression(lhs)?),
+            rhs: Box::new(self.rewrite_expression(rhs)?),
+            span: *span,
+        };
+        Ok(Some(Expression::BuiltinCall {
+            function: BuiltinFunction::Smooth,
+            args: vec![
+                Expression::Literal {
+                    value: Literal::Integer(0),
+                    span: *span,
+                },
+                product,
+            ],
+            span: *span,
+        }))
+    }
+
+    /// Whether `weight` is the flow variable of the port whose stream
+    /// `call` reads through `actualStream`.
+    fn weights_own_actual_stream(&self, weight: &Expression, call: &Expression) -> bool {
+        let Expression::FunctionCall {
+            name, args, span, ..
+        } = call
+        else {
+            return false;
+        };
+        if name.var_name().last_segment() != "actualStream" {
+            return false;
+        }
+        let [argument] = args.as_slice() else {
+            return false;
+        };
+        let Some(access) = stream_access(argument) else {
+            return false;
+        };
+        let Some(flow_member) = self.connector_flow_member(&access, *span) else {
+            return false;
+        };
+        let Some(weight) = stream_access(weight) else {
+            return false;
+        };
+        let same_connector = match (&weight.field_base, &access.field_base) {
+            (Some((weight_base, _)), Some((stream_base, _))) => {
+                rumoca_core::expressions_semantically_equal(weight_base, stream_base)
+            }
+            (None, None) => {
+                ComponentPath::from_flat_path(weight.name.as_str()).parent()
+                    == ComponentPath::from_flat_path(access.name.as_str()).parent()
+                    && rumoca_core::expressions_semantically_equal(
+                        &subscript_selection(&weight.subscripts, *span),
+                        &subscript_selection(&access.subscripts, *span),
+                    )
+            }
+            _ => false,
+        };
+        same_connector && weight.name.last_segment() == flow_member
+    }
+
+    /// The flow member name of the connector a stream access reads; for an
+    /// access into a connector array, the one member every element shares.
+    fn connector_flow_member(&self, access: &StreamAccess, span: Span) -> Option<String> {
+        if let Ok(endpoint) = self.endpoint_for(&access.name, span) {
+            return Some(endpoint.flow.name.last_segment().to_string());
+        }
+        let matches = self.indexed_endpoint_matches(&access.name);
+        let (_, first) = matches.first()?;
+        let member = first.flow.name.last_segment();
+        matches
+            .iter()
+            .all(|(_, endpoint)| endpoint.flow.name.last_segment() == member)
+            .then(|| member.to_string())
     }
 }
 
@@ -690,6 +809,7 @@ fn stream_access(expression: &Expression) -> Option<StreamAccess> {
             indexed: false,
             original: expression.clone(),
             field_base: None,
+            element_resolved: false,
             span: *span,
         }),
         Expression::Index {
@@ -719,6 +839,7 @@ fn stream_access(expression: &Expression) -> Option<StreamAccess> {
                 indexed: false,
                 original: expression.clone(),
                 field_base: Some((base.clone(), *field_def_id)),
+                element_resolved: false,
                 span: *span,
             })
         }
@@ -930,11 +1051,14 @@ fn stream_member_reference(name: &VarName, access: &StreamAccess, span: Span) ->
             return variable_reference(name, &access.subscripts, span);
         };
         let reference = Expression::FieldAccess {
-            base: Box::new(retarget_reference_base(
-                base,
-                &VarName::new(parent.to_flat_string()),
-                span,
-            )),
+            base: Box::new(if name == &access.name || !access.element_resolved {
+                retarget_reference_base(base, &VarName::new(parent.to_flat_string()), span)
+            } else {
+                // A peer is its own connector instance: the written
+                // access's index selects an element of the accessed array,
+                // not of the peer.
+                variable_reference(&VarName::new(parent.to_flat_string()), &[], span)
+            }),
             field,
             field_def_id: *field_def_id,
             span,
@@ -1142,4 +1266,14 @@ fn rewrite_when_equations(
         }
     }
     Ok(())
+}
+
+/// The subscripts of an access as one expression, so two accesses compare by
+/// structure rather than by source span.
+fn subscript_selection(subscripts: &[Subscript], span: Span) -> Expression {
+    Expression::Index {
+        base: Box::new(real_literal(0.0, span)),
+        subscripts: subscripts.to_vec(),
+        span,
+    }
 }

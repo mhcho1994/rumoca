@@ -44,10 +44,10 @@ pub(super) fn plan_function_conditional(
     if let Some(selected) = statically_selected_branch(blocks, fallback, context)? {
         return plan_proven_conditional_branch(blocks, fallback, selected, context);
     }
-    let branch_context = FunctionValidationContext {
-        call_scoped_actions: false,
-        ..context
-    };
+    // A runtime branch keeps the enclosing action owner: its assertions lower
+    // to that owner guarded by the MLS §11.5 branch selection, so they keep
+    // their source order and can fail only on the executed path.
+    let branch_context = context;
     let mut branches = Vec::with_capacity(blocks.len());
     for block in blocks {
         validate_function_expression_with_roles(
@@ -169,7 +169,15 @@ pub(super) fn resolve_function_conditional(
             definitions,
         );
     }
+    // A conditional that only asserts defines no value but still owns the
+    // guarded actions of its branches.
+    let owns_actions = branches
+        .iter()
+        .map(Vec::as_slice)
+        .chain(fallback_plans.as_deref().map(Vec::as_slice))
+        .any(plans_carry_runtime_assertion);
     let mut branch_states = Vec::with_capacity(branches.len() + 1);
+    let mut completing_states = Vec::with_capacity(branches.len() + 1);
     let mut ordered = Vec::new();
     for (block, plans) in blocks.iter().zip(branches.iter_mut()) {
         definitions.require_readable(&block.cond, context, span)?;
@@ -177,6 +185,9 @@ pub(super) fn resolve_function_conditional(
         state.enter_guard(&block.cond, context);
         resolve_conditional_branch(&block.stmts, plans, context, &mut state)?;
         collect_branch_targets(plans, &mut ordered);
+        if !branch_never_completes(&block.stmts) {
+            completing_states.push(state.clone());
+        }
         branch_states.push(state);
     }
     let exhaustive = match (fallback_statements, fallback_plans) {
@@ -184,12 +195,18 @@ pub(super) fn resolve_function_conditional(
             let mut state = definitions.clone();
             resolve_conditional_branch(statements, plans, context, &mut state)?;
             collect_branch_targets(plans, &mut ordered);
+            if !branch_never_completes(statements) {
+                completing_states.push(state.clone());
+            }
             branch_states.push(state);
             true
         }
         (None, None) => false,
         _ => unreachable!("a planned function conditional keeps its source fallback shape"),
     };
+    if ordered.is_empty() && owns_actions {
+        return Ok(ordered);
+    }
     if ordered.is_empty() {
         return Err(ToDaeError::unsupported_flat(
             "function conditional",
@@ -200,11 +217,39 @@ pub(super) fn resolve_function_conditional(
             span,
         ));
     }
-    let joined = definitions.join_branches(&branch_states, exhaustive, &ordered, context, span)?;
+    // A branch that never completes defines nothing code after the
+    // conditional can observe, so only the completing branches are joined.
+    let joined_states = if completing_states.is_empty() {
+        &branch_states
+    } else {
+        &completing_states
+    };
+    let joined = definitions.join_branches(joined_states, exhaustive, &ordered, context, span)?;
     if !exhaustive && blocks.len() == 1 && is_immutable_guard(&blocks[0].cond, context) {
         definitions.remember_guarded_branch(&blocks[0].cond, &branch_states[0], &ordered, span);
     }
     Ok(joined)
+}
+
+/// Whether a runtime branch hands at least one assertion to its action owner.
+fn plans_carry_runtime_assertion(plans: &[FunctionStatementPlan]) -> bool {
+    plans.iter().any(|plan| match plan {
+        FunctionStatementPlan::RuntimeAssertion => true,
+        FunctionStatementPlan::If {
+            branches, fallback, ..
+        } => {
+            branches
+                .iter()
+                .any(|branch| plans_carry_runtime_assertion(branch))
+                || fallback
+                    .as_deref()
+                    .is_some_and(plans_carry_runtime_assertion)
+        }
+        FunctionStatementPlan::ProvenBranch { statements, .. } => {
+            plans_carry_runtime_assertion(statements)
+        }
+        _ => false,
+    })
 }
 
 fn statically_selected_branch(
@@ -446,9 +491,7 @@ fn validate_conditional_branch_shape(
     for (statement, plan) in statements.iter().zip(plans) {
         match (statement, plan) {
             (_, FunctionStatementPlan::ProvenAssertion) => continue,
-            (_, FunctionStatementPlan::RuntimeAssertion) => {
-                unreachable!("runtime conditional assertions are rejected during planning")
-            }
+            (_, FunctionStatementPlan::RuntimeAssertion) => continue,
             (_, FunctionStatementPlan::Assignment(_)) => continue,
             (_, FunctionStatementPlan::RecordAssembly(_))
             | (_, FunctionStatementPlan::RecordAssemblyMember) => continue,
@@ -533,4 +576,26 @@ fn collect_branch_target(target: &VarName, ordered: &mut Vec<VarName>) {
     if !ordered.contains(target) {
         ordered.push(target.clone());
     }
+}
+
+/// Whether a branch ends every execution in an assertion whose condition is
+/// the literal `false` (MLS §8.3.7: the assertion fails and the function call
+/// does not return), as in the `else assert(false, ...)` arm of an exhaustive
+/// region dispatch.
+pub(in crate::construction) fn branch_never_completes(
+    statements: &[rumoca_core::Statement],
+) -> bool {
+    statements.iter().any(|statement| {
+        matches!(
+            statement,
+            rumoca_core::Statement::Assert {
+                condition: Expression::Literal {
+                    value: Literal::Boolean(false),
+                    ..
+                },
+                level: None,
+                ..
+            }
+        )
+    })
 }

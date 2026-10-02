@@ -10,6 +10,10 @@ impl ConstantOccurrenceId {
     pub(crate) fn new(owner: rumoca_core::InstanceId, declaration: rumoca_core::DefId) -> Self {
         Self { owner, declaration }
     }
+
+    pub(crate) fn owner(self) -> rumoca_core::InstanceId {
+        self.owner
+    }
 }
 
 /// Context for flattening.
@@ -36,6 +40,19 @@ pub(crate) struct Context {
     /// Owning component occurrence for each instantiated class occurrence.
     pub(crate) class_owner_components:
         rustc_hash::FxHashMap<rumoca_core::InstanceId, rumoca_core::InstanceId>,
+    /// Package redeclarations each class occurrence applies: slot to selected
+    /// package (MLS §7.3).
+    pub(crate) class_package_selections: rustc_hash::FxHashMap<
+        rumoca_core::InstanceId,
+        rustc_hash::FxHashMap<rumoca_core::DefId, rumoca_core::DefId>,
+    >,
+    /// The class slot each component occurrence's type is spelled through
+    /// (`Medium` in `Medium.BaseProperties medium`) and its owning class
+    /// occurrence.
+    pub(crate) component_type_slots: rustc_hash::FxHashMap<
+        rumoca_core::InstanceId,
+        (rumoca_core::DefId, Option<rumoca_core::InstanceId>),
+    >,
     /// Instance path of each instantiated component occurrence, as the exact
     /// reference Instantiate proved for it (one part per enclosing component,
     /// each carrying its Resolve declaration identity).
@@ -111,6 +128,10 @@ pub(crate) struct Context {
     /// Set of DefIds that correspond to class definitions in the current tree.
     /// Used by qualification to distinguish class/type references from components.
     pub class_def_ids: std::sync::Arc<rustc_hash::FxHashSet<rumoca_core::DefId>>,
+    /// Resolve identities of package classes, including package aliases. A
+    /// constant reference spelled through one of them names the package that
+    /// exposes the constant (MLS §7.1).
+    pub package_def_ids: std::sync::Arc<rustc_hash::FxHashSet<rumoca_core::DefId>>,
     /// Canonical class scope path for the class instance currently being flattened.
     /// Derived from `def_map` via the owning class DefId.
     pub current_class_scope_path: Option<String>,

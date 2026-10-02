@@ -3029,6 +3029,15 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'INST-055'
+category = 'Instantiation'
+name = 'Extends redeclaration replaces element'
+mls_ref = '§7.3'
+requirement = 'A redeclaration in the modification of an extends-clause replaces the inherited element; the derived class and its descendants see the replacing class under the element name'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'LEX-001'
 category = 'Lexical'
 name = 'ASCII identifiers'
@@ -3619,6 +3628,15 @@ category = 'Stream'
 name = 'Flow/stream same level'
 mls_ref = '§15.1'
 requirement = 'Flow variable must exist at same level as stream variable in connector hierarchy'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'STRM-012'
+category = 'Stream'
+name = 'actualStream flow product'
+mls_ref = '§15.3'
+requirement = 'The product of a flow variable and actualStream of a stream variable of the same connector is continuous, so a tool may treat it as smooth(0, ...)'
 status = 'Implemented'
 tier = 1
 

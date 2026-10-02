@@ -449,6 +449,7 @@ Defines state-to-state transitions with priority and timing control.
 | INST-052 | Redeclaration dimension match | §7.3.2 | "Redeclaration must have same number of dimensions as original element" |
 | INST-053 | Conditional component removal | §5.6.2 | "Conditional components with false condition are removed and not part of simulation model"
 | INST-054 | Automatic inner creation | §5.4 | "If a unique non-partial class is used for all outer declarations of the same name lacking a matching inner declaration, an inner declaration of that class is automatically added at the top of the model and a diagnostic is given" (rumoca: WI013; conflicting classes EI015, partial class EI012) |
+| INST-055 | Extends redeclaration replaces element | §7.3 | "A redeclaration in the modification of an extends-clause replaces the inherited element; the derived class and its descendants see the replacing class under the element name" |
 
 ### 4.4 Expression/Operator Contracts (EXPR)
 
@@ -816,6 +817,7 @@ Defines state-to-state transitions with priority and timing control.
 | STRM-009 | No division by zero | §15.2 | "Division by zero can no longer occur; result is always well-defined" |
 | STRM-010 | actualStream argument | §15.3 | "Only argument of actualStream needs to be a reference to a stream variable" |
 | STRM-011 | Flow/stream same level | §15.1 | "Flow variable must exist at same level as stream variable in connector hierarchy" |
+| STRM-012 | actualStream flow product | §15.3 | "The product of a flow variable and actualStream of a stream variable of the same connector is continuous, so a tool may treat it as smooth(0, ...)" (rumoca: the product owns no event; a standalone actualStream keeps its flow-reversal event) |
 
 ### 4.16 State Machine Contracts (SM)
 
