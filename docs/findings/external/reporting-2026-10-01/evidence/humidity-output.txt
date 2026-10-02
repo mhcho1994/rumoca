@@ -1,0 +1,56 @@
+true
+true
+true
+true
+"Warning: This version of ModelicaServices does not appear to be patched for use with OpenModelica, consider using a version distributed by OpenModelica instead to avoid compatibility issues.
+Notification: Automatically loaded package Modelica 4.1.0 due to uses annotation from ModelicaServices.
+Notification: Automatically loaded package Complex 4.1.0 due to uses annotation from Modelica.
+"
+true
+""
+true
+""
+true
+""
+true
+""
+MODEL: Buildings.Controls.OBC.CDL.Psychrometrics.Validation.DewPoint_TDryBulPhi
+
+record SimulationResult
+    resultFile = "/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/DewPoint_TDryBulPhi_res.csv",
+    simulationOptions = "startTime = 0.0, stopTime = 1.0, numberOfIntervals = 100, tolerance = 1e-6, method = 'dassl', fileNamePrefix = 'DewPoint_TDryBulPhi', options = '', outputFormat = 'csv', variableFilter = '.*', cflags = '', simflags = ''",
+    messages = "LOG_SUCCESS       | info    | The initialization finished successfully without homotopy method.
+LOG_ASSERT        | info    | [/data/mrumoca/eval/_repos/buildings/Buildings/Controls/OBC/CDL/Reals/Sources/Ramp.mo:17:3-19:72:writable]
+|                 | |       | The following assertion has been violated at time 1.000000
+|                 | |       | ((phi.y >= 0.0 and phi.y <= 1.0)) --> \"Variable violating min/max constraint: 0.0 <= phi.y <= 1.0, has value: 1.001\"
+LOG_SUCCESS       | info    | The simulation finished successfully.
+",
+    timeFrontend = 0.005454059000000001,
+    timeBackend = 0.010712959000000001,
+    timeSimCode = 0.0035527,
+    timeTemplates = 0.0073352980000000005,
+    timeCompile = 0.348005392,
+    timeSimulation = 0.028119013,
+    timeTotal = 0.403293807
+end SimulationResult;
+""
+MODEL: Buildings.Controls.OBC.CDL.Psychrometrics.Validation.SpecificEnthalpy_TDryBulPhi
+
+record SimulationResult
+    resultFile = "/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/SpecificEnthalpy_TDryBulPhi_res.csv",
+    simulationOptions = "startTime = 0.0, stopTime = 1.0, numberOfIntervals = 100, tolerance = 1e-6, method = 'dassl', fileNamePrefix = 'SpecificEnthalpy_TDryBulPhi', options = '', outputFormat = 'csv', variableFilter = '.*', cflags = '', simflags = ''",
+    messages = "LOG_SUCCESS       | info    | The initialization finished successfully without homotopy method.
+LOG_ASSERT        | info    | [/data/mrumoca/eval/_repos/buildings/Buildings/Controls/OBC/CDL/Reals/Sources/Ramp.mo:17:3-19:72:writable]
+|                 | |       | The following assertion has been violated at time 1.000000
+|                 | |       | ((phi.y >= 0.0 and phi.y <= 1.0)) --> \"Variable violating min/max constraint: 0.0 <= phi.y <= 1.0, has value: 1.001\"
+LOG_SUCCESS       | info    | The simulation finished successfully.
+",
+    timeFrontend = 0.004051507,
+    timeBackend = 0.004976011000000001,
+    timeSimCode = 0.001248758,
+    timeTemplates = 0.006465432,
+    timeCompile = 0.316776552,
+    timeSimulation = 0.018950118000000002,
+    timeTotal = 0.352662237
+end SimulationResult;
+""

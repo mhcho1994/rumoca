@@ -1,0 +1,48 @@
+true
+true
+true
+true
+"Warning: This version of ModelicaServices does not appear to be patched for use with OpenModelica, consider using a version distributed by OpenModelica instead to avoid compatibility issues.
+Notification: Automatically loaded package Modelica 4.1.0 due to uses annotation from ModelicaServices.
+Notification: Automatically loaded package Complex 4.1.0 due to uses annotation from Modelica.
+"
+true
+""
+true
+""
+true
+""
+true
+""
+true
+""
+record SimulationResult
+    resultFile = "/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/DewPointControl_res.csv",
+    simulationOptions = "startTime = 0.0, stopTime = 1.0, numberOfIntervals = 100, tolerance = 1e-6, method = 'dassl', fileNamePrefix = 'DewPointControl', options = '', outputFormat = 'csv', variableFilter = '.*', cflags = '', simflags = ''",
+    messages = "LOG_SUCCESS       | info    | The initialization finished successfully without homotopy method.
+LOG_SUCCESS       | info    | The simulation finished successfully.
+",
+    timeFrontend = 0.0051382780000000005,
+    timeBackend = 0.010516983,
+    timeSimCode = 0.002229703,
+    timeTemplates = 0.007023871,
+    timeCompile = 0.34378166200000004,
+    timeSimulation = 0.018401767,
+    timeTotal = 0.38731590800000004
+end SimulationResult;
+""
+record SimulationResult
+    resultFile = "/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/EnthalpyControl_res.csv",
+    simulationOptions = "startTime = 0.0, stopTime = 1.0, numberOfIntervals = 100, tolerance = 1e-6, method = 'dassl', fileNamePrefix = 'EnthalpyControl', options = '', outputFormat = 'csv', variableFilter = '.*', cflags = '', simflags = ''",
+    messages = "LOG_SUCCESS       | info    | The initialization finished successfully without homotopy method.
+LOG_SUCCESS       | info    | The simulation finished successfully.
+",
+    timeFrontend = 0.004450371000000001,
+    timeBackend = 0.005724493000000001,
+    timeSimCode = 0.0013234190000000002,
+    timeTemplates = 0.004837306,
+    timeCompile = 0.313425241,
+    timeSimulation = 0.017832690999999956,
+    timeTotal = 0.34773822899999995
+end SimulationResult;
+""

@@ -1,0 +1,13 @@
+setCommandLineOptions("--unitChecking");
+setEnvironmentVar("CC","gcc");
+setEnvironmentVar("CXX","g++");
+loadFile("/data/mrumoca/rumoca/target/msl/ModelicaStandardLibrary-4.1.0/ModelicaServices 4.1.0/package.mo"); getErrorString();
+loadFile("/data/mrumoca/rumoca/target/msl/ModelicaStandardLibrary-4.1.0/Complex.mo"); getErrorString();
+loadFile("/data/mrumoca/rumoca/target/msl/ModelicaStandardLibrary-4.1.0/Modelica 4.1.0/package.mo"); getErrorString();
+loadFile("/data/mrumoca/eval/_repos/buildings/Buildings/package.mo"); getErrorString();
+loadFile("/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/Review.mo"); getErrorString();
+loadFile("/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/HumidityControls.mo"); getErrorString();
+simulate(DewPointControl, stopTime=1, numberOfIntervals=100, outputFormat="csv");
+getErrorString();
+simulate(EnthalpyControl, stopTime=1, numberOfIntervals=100, outputFormat="csv");
+getErrorString();

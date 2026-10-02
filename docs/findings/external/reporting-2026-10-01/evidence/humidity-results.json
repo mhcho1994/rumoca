@@ -1,0 +1,38 @@
+[
+  {
+    "file": "DewPoint_TDryBulPhi_res.csv",
+    "rows": 102,
+    "first_time": 0.0,
+    "last_time": 1.0,
+    "min_phi": 0.001,
+    "max_phi": 1.001,
+    "sha256": "a3e497afe1b4f2d8280cb3d476617c8213c2ba5f603ade0038d0ab6b359f6e81"
+  },
+  {
+    "file": "SpecificEnthalpy_TDryBulPhi_res.csv",
+    "rows": 102,
+    "first_time": 0.0,
+    "last_time": 1.0,
+    "min_phi": 0.001,
+    "max_phi": 1.001,
+    "sha256": "d2ad97eb7f58baea3f6d781811a978f4946f2f8f8261abba4848d300177fac87"
+  },
+  {
+    "file": "DewPointControl_res.csv",
+    "rows": 102,
+    "first_time": 0.0,
+    "last_time": 1.0,
+    "min_phi": 0.001,
+    "max_phi": 1.0,
+    "sha256": "d338f956838ec13679cd658e664fb867b02697b071a4789b5db821b90ee9510f"
+  },
+  {
+    "file": "EnthalpyControl_res.csv",
+    "rows": 102,
+    "first_time": 0.0,
+    "last_time": 1.0,
+    "min_phi": 0.001,
+    "max_phi": 1.0,
+    "sha256": "389e3c75c725fc0fcbca3a8e60d8aed5505804631a502cee2ecc9f7cbd7f4d00"
+  }
+]

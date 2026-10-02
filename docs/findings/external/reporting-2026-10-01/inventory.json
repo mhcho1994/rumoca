@@ -1,0 +1,290 @@
+{
+  "scope": "All retained static finding rows from five repositories and v3 runtime finding rows from eleven repositories were routed. Source review and fresh OMC runs cover the named shortlist only.",
+  "repositories": [
+    {
+      "library": "vehicleinterfaces",
+      "url": "https://github.com/modelica/VehicleInterfaces",
+      "commit": "ae1fe06d82c4edccdc2685895aa49bf4d8bed772",
+      "modified_paths": []
+    },
+    {
+      "library": "powergrids",
+      "url": "https://github.com/PowerGrids/PowerGrids",
+      "commit": "1858e8b1d5234a3d9506e89da89c3c1df793b866",
+      "modified_paths": []
+    },
+    {
+      "library": "devicedrivers",
+      "url": "https://github.com/modelica-3rdparty/Modelica_DeviceDrivers",
+      "commit": "f0ea4af79f50c7bd1e9560c88b3fb4d82f0f8e98",
+      "modified_paths": []
+    },
+    {
+      "library": "thermopower",
+      "url": "https://github.com/casella/ThermoPower",
+      "commit": "e2b011ac7fd90f9cf5771f29f1aefa160550b6ee",
+      "modified_paths": []
+    },
+    {
+      "library": "openipsl",
+      "url": "https://github.com/OpenIPSL/OpenIPSL",
+      "commit": "cad8ddf4a6fd7196bb5ff6257b57bb2e2e7e6a75",
+      "modified_paths": []
+    },
+    {
+      "library": "thermosyspro",
+      "url": "https://github.com/ThermoSysPro/ThermoSysPro",
+      "commit": "a896ab75ce22162369e7fa4ce79927eeca44ad4a",
+      "modified_paths": []
+    },
+    {
+      "library": "transform",
+      "url": "https://github.com/ORNL-Modelica/TRANSFORM-Library",
+      "commit": "2903b9c7b5ad03a6299dcd054dedc893a01b2054",
+      "modified_paths": []
+    },
+    {
+      "library": "ibpsa",
+      "url": "https://github.com/ibpsa/modelica-ibpsa",
+      "commit": "5b19c7eb8b86bb4a9963b21fe3deb407c762ba1c",
+      "modified_paths": []
+    },
+    {
+      "library": "ideas",
+      "url": "https://github.com/open-ideas/IDEAS",
+      "commit": "3c12883555885bcd5f17979d9028eadf94b21d92",
+      "modified_paths": []
+    },
+    {
+      "library": "aixlib",
+      "url": "https://github.com/RWTH-EBC/AixLib",
+      "commit": "e5df9a8da27833ee391c2f7a0adbcd80278f47d2",
+      "modified_paths": []
+    },
+    {
+      "library": "buildings",
+      "url": "https://github.com/lbl-srg/modelica-buildings",
+      "commit": "a3cfdde4e2fa1605f351875c2199b6aafaee7fe0",
+      "modified_paths": []
+    }
+  ],
+  "inputs": [
+    {
+      "path": "/data/mrumoca/eval/results/buildings/findings.jsonl",
+      "sha256": "7ba09c009993785446d83ca82755a399f212cb8009254c5964038dc76910683d",
+      "models": 626,
+      "phase": "historical-static"
+    },
+    {
+      "path": "/data/mrumoca/eval/results/ibpsa/findings.jsonl",
+      "sha256": "663c2f2fea6c61979effb214d55593d4ef53a029efcf60e3dfa1668443b3ba27",
+      "models": 352,
+      "phase": "historical-static"
+    },
+    {
+      "path": "/data/mrumoca/eval/results/powergrids/findings.jsonl",
+      "sha256": "fac1ecdff2b22ed25e116ca88817ddf74be00105d01e73afa5ce6cc4ddda9409",
+      "models": 25,
+      "phase": "historical-static"
+    },
+    {
+      "path": "/data/mrumoca/eval/results/thermopower/findings.jsonl",
+      "sha256": "be9c8d19c9a83c9186ca1d63b601904f06897048fd548ac2784c9db4ebabb219",
+      "models": 77,
+      "phase": "historical-static"
+    },
+    {
+      "path": "/data/mrumoca/eval/results/vehicleinterfaces/findings.jsonl",
+      "sha256": "a235c72899721a2522f8778e2b3d47cba180919842c0b5b115c9d08c54e8a33c",
+      "models": 26,
+      "phase": "historical-static"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/aixlib/runtime_free.jsonl",
+      "sha256": "0d1ee706d785a1d1d0d5a46f971d27e2af74a230ccc823ec5b38982f2f22e61d",
+      "models": 553,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/buildings/runtime_free.jsonl",
+      "sha256": "bb64c525983757717478879c9e57bdf29432eeab502696ad615a7123d37a7e8a",
+      "models": 530,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/devicedrivers/runtime_free.jsonl",
+      "sha256": "c4bc5a1a0fc795ada1d6676bf30c6d3078e581b57da2ead55452e945fc68f43c",
+      "models": 6,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/ibpsa/runtime_free.jsonl",
+      "sha256": "43b90ce31f1a99e037ebc82979c8b74fdebb3e4657308ebea286d365df12b2a6",
+      "models": 345,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/ideas/runtime_free.jsonl",
+      "sha256": "cac822475140e893aeb67d9bc5225962bb6364f5d13101131e3fedbc755d3b7b",
+      "models": 426,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/openipsl/runtime_free.jsonl",
+      "sha256": "62181a6267e8432306a364bb72ddb3bcedf9e3f5b7b2d39a1f9e4034759aab91",
+      "models": 255,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/powergrids/runtime_free.jsonl",
+      "sha256": "36a68a1f04abca9598322521402cc64ac65891ef3d8b6eebe5e4a7f2e48b331f",
+      "models": 26,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/thermopower/runtime_free.jsonl",
+      "sha256": "f0fdcf82e00abdb3847209e7358536ede2d4c08a59f47fa482c70f85d9f301f8",
+      "models": 77,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/thermosyspro/runtime_free.jsonl",
+      "sha256": "72cd40ec1666ad30fce6d2d05ec13c463fab3e2d5e6cef1bba736efc70792343",
+      "models": 50,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/transform/runtime_free.jsonl",
+      "sha256": "dae3243377116f062ce5facd15234ae60ec8ab4995f30bcbc6b7ed8e4fcfce5b",
+      "models": 397,
+      "phase": "runtime-v3"
+    },
+    {
+      "path": "/data/mrumoca/eval/results_v3/vehicleinterfaces/runtime_free.jsonl",
+      "sha256": "b2fbb10963583f7b2b48378181c66f9fd80840888f97c8ec84b9b1ad890b5827",
+      "models": 26,
+      "phase": "runtime-v3"
+    }
+  ],
+  "runtime": {
+    "aixlib": {
+      "models": 553,
+      "statuses": {
+        "did-not-run": 159,
+        "ran": 385,
+        "no-dynamics": 9
+      },
+      "held_runs": 195
+    },
+    "buildings": {
+      "models": 530,
+      "statuses": {
+        "no-dynamics": 11,
+        "ran": 420,
+        "did-not-run": 99
+      },
+      "held_runs": 173
+    },
+    "devicedrivers": {
+      "models": 6,
+      "statuses": {
+        "no-dynamics": 1,
+        "did-not-run": 3,
+        "ran": 2
+      },
+      "held_runs": 0
+    },
+    "ibpsa": {
+      "models": 345,
+      "statuses": {
+        "no-dynamics": 4,
+        "did-not-run": 56,
+        "ran": 285
+      },
+      "held_runs": 124
+    },
+    "ideas": {
+      "models": 426,
+      "statuses": {
+        "no-dynamics": 13,
+        "ran": 316,
+        "did-not-run": 97
+      },
+      "held_runs": 145
+    },
+    "openipsl": {
+      "models": 255,
+      "statuses": {
+        "no-dynamics": 14,
+        "did-not-run": 126,
+        "ran": 115
+      },
+      "held_runs": 90
+    },
+    "powergrids": {
+      "models": 26,
+      "statuses": {
+        "ran": 17,
+        "did-not-run": 1,
+        "no-dynamics": 8
+      },
+      "held_runs": 6
+    },
+    "thermopower": {
+      "models": 77,
+      "statuses": {
+        "did-not-run": 54,
+        "no-dynamics": 11,
+        "ran": 12
+      },
+      "held_runs": 7
+    },
+    "thermosyspro": {
+      "models": 50,
+      "statuses": {
+        "did-not-run": 14,
+        "ran": 36
+      },
+      "held_runs": 27
+    },
+    "transform": {
+      "models": 397,
+      "statuses": {
+        "no-dynamics": 90,
+        "ran": 223,
+        "did-not-run": 84
+      },
+      "held_runs": 48
+    },
+    "vehicleinterfaces": {
+      "models": 26,
+      "statuses": {
+        "no-dynamics": 6,
+        "did-not-run": 14,
+        "ran": 6
+      },
+      "held_runs": 3
+    }
+  },
+  "static_models": 1106,
+  "findings_by_phase": {
+    "historical-static": 4494,
+    "runtime-v3": 3723
+  },
+  "routes": {
+    "hold-needs-source-and-witness-review": 3124,
+    "advisory-or-explicit-non-defect": 667,
+    "standalone-topology-not-defect-proof": 1518,
+    "hold-check-unset-parameters-and-inputs": 43,
+    "source-unit-review": 16,
+    "execution-not-completed": 2151,
+    "hold-input-contract-validation": 537,
+    "source-validation-input-range-review": 12,
+    "coverage-gap": 16,
+    "hold-needs-independent-evidence": 5,
+    "analyzer-tolerance-review-near-zero-residual": 1,
+    "source-sentinel-or-protection-not-defect-proof": 126,
+    "solver-trial-not-source-model-verdict": 1
+  },
+  "omc_version": "OpenModelica 1.27.1~2-g6db4671"
+}

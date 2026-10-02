@@ -1,0 +1,155 @@
+{
+  "date": "2026-10-01",
+  "sources": [
+    {
+      "request": {
+        "repository_full_name": "lbl-srg/modelica-buildings",
+        "path": "Buildings/Controls/OBC/CDL/Reals/LimitSlewRate.mo",
+        "end_line": 35
+      },
+      "data": {
+        "content": "within Buildings.Controls.OBC.CDL.Reals;\nblock LimitSlewRate \"Limit the increase or decrease rate of input\"\n  parameter Real raisingSlewRate(\n    min=Constants.small,\n    unit=\"1/s\")\n    \"Speed with which to increase the output\";\n  parameter Real fallingSlewRate(\n    max=-Constants.small,\n    unit=\"1/s\")=-raisingSlewRate\n    \"Speed with which to decrease the output\";\n  parameter Real Td(\n    final quantity=\"Time\",\n    final unit=\"s\",\n    min=Constants.eps)=raisingSlewRate*10\n    \"Derivative time constant\";\n  parameter Boolean enable=true\n    \"Set to false to disable rate limiter\";\n  Buildings.Controls.OBC.CDL.Interfaces.RealInput u\n    \"Input signal to be rate of change limited\"\n    annotation (Placement(transformation(extent={{-140,-20},{-100,20}})));\n  Buildings.Controls.OBC.CDL.Interfaces.RealOutput y\n    \"Rate of change limited output signal\"\n    annotation (Placement(transformation(extent={{100,-20},{140,20}})));\n\nprotected\n  Real thr=(u-y)/Td\n    \"Approximation to derivative between input and output\";\n\ninitial equation\n  assert(raisingSlewRate > 0,\n    \"raisingSlewRate must be larger than zero.\");\n  assert(fallingSlewRate < 0,\n    \"fallingSlewRate must be less than zero.\");\n\n  y=u;",
+        "encoding": "utf-8",
+        "sha": "71c32642588c453fdc57d9d832b738456043dca5",
+        "display_url": "https://github.com/lbl-srg/modelica-buildings/blob/master/Buildings/Controls/OBC/CDL/Reals/LimitSlewRate.mo",
+        "display_title": "LimitSlewRate.mo"
+      }
+    },
+    {
+      "request": {
+        "repository_full_name": "lbl-srg/modelica-buildings",
+        "path": "Buildings/Controls/OBC/CDL/Reals/Ramp.mo",
+        "end_line": 30
+      },
+      "data": {
+        "content": "within Buildings.Controls.OBC.CDL.Reals;\nblock Ramp \"Limit the changing rate of the input\"\n\n  parameter Real raisingSlewRate(\n    min=Constants.small,\n    unit=\"1/s\")\n    \"Maximum speed with which to increase the output\";\n  parameter Real fallingSlewRate(\n    max=-Constants.small,\n    unit=\"1/s\")=-raisingSlewRate\n    \"Maximum speed with which to decrease the output\";\n  parameter Real Td(\n    final quantity=\"Time\",\n    final unit=\"s\",\n    min=Constants.eps)=raisingSlewRate*0.001\n    \"Derivative time constant\";\n\n  Buildings.Controls.OBC.CDL.Interfaces.RealInput u\n    \"Input that is being rate limited\"\n    annotation (Placement(transformation(extent={{-140,-20},{-100,20}})));\n  Buildings.Controls.OBC.CDL.Interfaces.BooleanInput active\n    \"Set to true to enable rate limiter\"\n    annotation (Placement(transformation(extent={{-140,-100},{-100,-60}}),\n        iconTransformation(extent={{-140,-100},{-100,-60}})));\n  Buildings.Controls.OBC.CDL.Interfaces.RealOutput y\n    \"Rate limited output if active is true, else output is equal to input\"\n    annotation (Placement(transformation(extent={{100,-20},{140,20}})));\n\nprotected\n  Real thr=(u-y)/Td",
+        "encoding": "utf-8",
+        "sha": "dfae38a351ead9c55150188339df915b30c2ed9c",
+        "display_url": "https://github.com/lbl-srg/modelica-buildings/blob/master/Buildings/Controls/OBC/CDL/Reals/Ramp.mo",
+        "display_title": "Ramp.mo"
+      }
+    },
+    {
+      "request": {
+        "repository_full_name": "casella/ThermoPower",
+        "path": "ThermoPower/Test.mo",
+        "start_line": 11332,
+        "end_line": 11355
+      },
+      "data": {
+        "content": "    model SecondaryController\n      parameter SI.PerUnit droop = 0.05 \"Droop\";\n      parameter SI.Power Pnom \"Overall system nominal active power\";\n      parameter SI.Time Ts \"Settling time of frequency\";\n      parameter ThermoPower.Choices.Init.Options initOpt=system.initOpt\n        \"Initialization option\" annotation (Dialog(tab=\"Initialization\"));\n      parameter SI.Power powerOffset_start = 0 \"Start value of power offset\" annotation (Dialog(tab=\"Initialization\"));\n      final parameter SI.Frequency f0 = system.fnom \"Nominal frequency\";\n      final parameter SI.AngularFrequency mu = 5*Ts*Pnom/(f0*droop) \"Integral controller gain\";\n      outer System system;\n\n      Modelica.Blocks.Interfaces.RealInput frequency \"Measured frequency in Hz\" annotation (Placement(\n            transformation(extent={{-120,-20},{-80,20}}, rotation=0),\n            iconTransformation(extent={{-120,-20},{-80,20}})));\n      Modelica.Blocks.Interfaces.RealOutput powerOffset(start = powerOffset_start)\n         \"Power offset to the plant controllers\" annotation (Placement(\n            transformation(extent={{100,0},{120,20}},   rotation=0),\n            iconTransformation(extent={{80,-20},{120,20}})));\n\n    equation\n      der(powerOffset) = 5*Pnom/(Ts*droop)*(frequency-f0)/f0;\n    initial equation\n      if initOpt == ThermoPower.Choices.Init.Options.noInit then\n        // do nothing",
+        "encoding": "utf-8",
+        "sha": "7c1d382ff1e07151a0a997e9d616603984c9af02",
+        "display_url": "https://github.com/casella/ThermoPower/blob/master/ThermoPower/Test.mo",
+        "display_title": "Test.mo"
+      }
+    },
+    {
+      "request": {
+        "repository_full_name": "ibpsa/modelica-ibpsa",
+        "path": "IBPSA/Controls/OBC/CDL/Reals/LimitSlewRate.mo",
+        "end_line": 23
+      },
+      "data": {
+        "content": "within IBPSA.Controls.OBC.CDL.Reals;\nblock LimitSlewRate \"Limit the increase or decrease rate of input\"\n  parameter Real raisingSlewRate(\n    min=Constants.small,\n    unit=\"1/s\")\n    \"Speed with which to increase the output\";\n  parameter Real fallingSlewRate(\n    max=-Constants.small,\n    unit=\"1/s\")=-raisingSlewRate\n    \"Speed with which to decrease the output\";\n  parameter Real Td(\n    final quantity=\"Time\",\n    final unit=\"s\",\n    min=Constants.eps)=raisingSlewRate*10\n    \"Derivative time constant\";\n  parameter Boolean enable=true\n    \"Set to false to disable rate limiter\";\n  IBPSA.Controls.OBC.CDL.Interfaces.RealInput u\n    \"Input signal to be rate of change limited\"\n    annotation (Placement(transformation(extent={{-140,-20},{-100,20}})));\n  IBPSA.Controls.OBC.CDL.Interfaces.RealOutput y\n    \"Rate of change limited output signal\"\n    annotation (Placement(transformation(extent={{100,-20},{140,20}})));",
+        "encoding": "utf-8",
+        "sha": "1e845bea7e86ddb6ac703c14840210126c4fb029",
+        "display_url": "https://github.com/ibpsa/modelica-ibpsa/blob/master/IBPSA/Controls/OBC/CDL/Reals/LimitSlewRate.mo",
+        "display_title": "LimitSlewRate.mo"
+      }
+    },
+    {
+      "request": {
+        "repository_full_name": "lbl-srg/modelica-buildings",
+        "path": "Buildings/Controls/OBC/CDL/Psychrometrics/Validation/DewPoint_TDryBulPhi.mo",
+        "end_line": 18
+      },
+      "data": {
+        "content": "within Buildings.Controls.OBC.CDL.Psychrometrics.Validation;\nmodel DewPoint_TDryBulPhi\n  \"Model to test the dew point temperature computation\"\n  Buildings.Controls.OBC.CDL.Psychrometrics.DewPoint_TDryBulPhi dewBulPhi\n    \"Model for dew point temperature\"\n    annotation (Placement(transformation(extent={{20,30},{40,50}})));\n  Buildings.Controls.OBC.CDL.Psychrometrics.DewPoint_TDryBulPhi dewBulPhi1\n    \"Model for dew point temperature\"\n    annotation (Placement(transformation(extent={{20,-50},{40,-30}})));\n  Buildings.Controls.OBC.CDL.Reals.Sources.Ramp phi(\n    duration=1,\n    height=1,\n    offset=0.001)\n    \"Relative humidity\"\n    annotation (Placement(transformation(extent={{-60,10},{-40,30}})));\n  Buildings.Controls.OBC.CDL.Reals.Sources.Constant TDryBul(\n    k=273.15+29.4)\n    \"Dry bulb temperature\"",
+        "encoding": "utf-8",
+        "sha": "7633cd177c2cc3a906f8110c7290a9be619cde62",
+        "display_url": "https://github.com/lbl-srg/modelica-buildings/blob/master/Buildings/Controls/OBC/CDL/Psychrometrics/Validation/DewPoint_TDryBulPhi.mo",
+        "display_title": "DewPoint_TDryBulPhi.mo"
+      }
+    },
+    {
+      "request": {
+        "repository_full_name": "lbl-srg/modelica-buildings",
+        "path": "Buildings/Controls/OBC/CDL/Psychrometrics/Validation/SpecificEnthalpy_TDryBulPhi.mo",
+        "end_line": 18
+      },
+      "data": {
+        "content": "within Buildings.Controls.OBC.CDL.Psychrometrics.Validation;\nmodel SpecificEnthalpy_TDryBulPhi\n  \"Model to test the specific enthalpy computation\"\n  Buildings.Controls.OBC.CDL.Psychrometrics.SpecificEnthalpy_TDryBulPhi hBulPhi\n    \"Model for specific enthalpy computation\"\n    annotation (Placement(transformation(extent={{-10,-10},{10,10}})));\n  Buildings.Controls.OBC.CDL.Reals.Sources.Ramp phi(\n    duration=1,\n    height=1,\n    offset=0.001)\n    \"Relative humidity\"\n    annotation (Placement(transformation(extent={{-60,-40},{-40,-20}})));\n  Buildings.Controls.OBC.CDL.Reals.Sources.Constant TDryBul(\n    k=273.15+29.4)\n    \"Dry bulb temperature\"\n    annotation (Placement(transformation(extent={{-64,24},{-44,44}})));\n\nequation",
+        "encoding": "utf-8",
+        "sha": "b5c613096b7bc1f2982564b1b4077826031fe9b7",
+        "display_url": "https://github.com/lbl-srg/modelica-buildings/blob/master/Buildings/Controls/OBC/CDL/Psychrometrics/Validation/SpecificEnthalpy_TDryBulPhi.mo",
+        "display_title": "SpecificEnthalpy_TDryBulPhi.mo"
+      }
+    },
+    {
+      "request": {
+        "repository_full_name": "lbl-srg/modelica-buildings",
+        "path": "Buildings/Controls/OBC/CDL/Psychrometrics/DewPoint_TDryBulPhi.mo",
+        "end_line": 18
+      },
+      "data": {
+        "content": "within Buildings.Controls.OBC.CDL.Psychrometrics;\nblock DewPoint_TDryBulPhi\n  \"Block to compute the dew point temperature based on relative humidity\"\n  Buildings.Controls.OBC.CDL.Interfaces.RealInput TDryBul(\n    final quantity=\"ThermodynamicTemperature\",\n    final unit=\"K\",\n    final min=100)\n    \"Dry bulb temperature\"\n    annotation (Placement(transformation(extent={{-140,40},{-100,80}})));\n  Buildings.Controls.OBC.CDL.Interfaces.RealInput phi(\n    final min=0,\n    final max=1,\n    unit=\"1\")\n    \"Relative air humidity\"\n    annotation (Placement(transformation(extent={{-140,-80},{-100,-40}})));\n  Buildings.Controls.OBC.CDL.Interfaces.RealOutput TDewPoi(\n    final quantity=\"ThermodynamicTemperature\",\n    final unit=\"K\",",
+        "encoding": "utf-8",
+        "sha": "7185dfb91a92b9bb0171b7a8e97e31b020f4cb91",
+        "display_url": "https://github.com/lbl-srg/modelica-buildings/blob/master/Buildings/Controls/OBC/CDL/Psychrometrics/DewPoint_TDryBulPhi.mo",
+        "display_title": "DewPoint_TDryBulPhi.mo"
+      }
+    }
+  ],
+  "searches": [
+    {
+      "query": "repo:lbl-srg/modelica-buildings \"LimitSlewRate\"",
+      "results": [
+        {
+          "url": "https://github.com/lbl-srg/modelica-buildings/issues/4317",
+          "title": "Update CDL.Reals.Ramp documentation",
+          "body": "This issue is to update the `CDL.Reals.Ramp` documentation, to highlight its similarity and difference with the block `CDL.Reals.LimitSlewRate`."
+        },
+        {
+          "url": "https://github.com/lbl-srg/modelica-buildings/issues/2865",
+          "title": "Modify CDL blocks based on ASHRAE 231P discussion",
+          "body": "This issue is to update/add existing/new blocks in `Buildings.Controls.OBC.CDL` package, based on the discussion in ASHRAE 231P project.\r\n\r\n\r\n1. Existing blocks to be updated:\r\n    - [x] `CDL.Continuous.Add` and `CDL.Integers.Add`: do not have a gain factor for inputs, only add two input values \r\n\r\n2. Existing blocks to be renamed:\r\n    - [x] change `CDL.Continuous.Division` to `CDL.Continuous.Divide`\r\n    - [x] change `CDL.Continuous.Gain` to `CDL.Continuous.MultiplyByParameter`\r\n    - [x] change `CDL.Continuous.MovingMean` to `CDL.Continuous.MovingAverage`\r\n    - [x] change `CDL.Continuous.Product` to `CDL.Continuous.Multiply`\r\n    - [x] change `CDL.Integers.Product` to `CDL.Integers.Multiply`\r\n    - [x] change `CDL.Continuous.SlewRateLimiter` to `CDL.Continuous.LimitSlewRate`\r\n\r\n3. New blocks to be added:\r\n    - [x] `CDL.Continuous.Acos`\r\n    - [x] `CDL.Continuous.Asin`\r\n    - [x] `CDL.Continuous.Subtract`\r\n    - [x] `CDL.Integers.Subtract`\r\n\r\n4. Move existing blocks:\r\n    - [x] move `CDL.Continuous.Feedback` to folder `Buildings.Obsolete.Controls.OBC.CDL.Continuous`\r\n    - [x] move the old `CDL.Continuous.Add` and `CDL.Integers.Add` to folder `Buildings.Obsolete.Controls.OBC.CDL.Continuous` and `Buildings.Obsolete.Controls.OBC.CDL.Integers`"
+        }
+      ]
+    },
+    {
+      "query": "repo:ibpsa/modelica-ibpsa \"raisingSlewRate\"",
+      "results": []
+    },
+    {
+      "query": "repo:casella/ThermoPower \"SecondaryController\"",
+      "results": []
+    },
+    {
+      "query": "repo:lbl-srg/modelica-buildings \"DewPoint_TDryBulPhi\"",
+      "results": [
+        {
+          "url": "https://github.com/lbl-srg/modelica-buildings/issues/2139",
+          "title": "Refactor Buildings.Controls.OBC.CDL.Psychrometrics",
+          "body": "The blocks\r\n`Buildings.Controls.OBC.CDL.Psychrometrics.TDewPoi_TDryBulPhi`\r\n`Buildings.Controls.OBC.CDL.Psychrometrics.TWetBul_TDryBulPhi`\r\ntake as an input `p`, which is not used. This can be removed.\r\n\r\nThe block\r\n`Buildings.Controls.OBC.CDL.Psychrometrics.h_TDryBulPhi`\r\ntakes as an input p, this should be removed and instead an parameter `pAtm = 101325` should be used, with annotation `tab=Advanced`.\r\n\r\nTo distinguish them from the blocks with the same name in `Buildings.Utilities`, we may want to move them to `Obsolete` and rename them to `DewPoint_TDryBulPhi`, `WetBulb_TDryBulPhi` and `SpecificEnthalpy_TDryBulPhi`."
+        }
+      ]
+    },
+    {
+      "query": "repo:lbl-srg/modelica-buildings \"raisingSlewRate\" \"unit\"",
+      "results": []
+    },
+    {
+      "query": "repo:ibpsa/modelica-ibpsa \"Td\" \"unit\"",
+      "results": []
+    },
+    {
+      "query": "repo:casella/ThermoPower \"mu\" \"unit\"",
+      "results": []
+    },
+    {
+      "query": "repo:lbl-srg/modelica-buildings \"humidity\" \"1.001\"",
+      "results": []
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+[
+  {
+    "library": "buildings",
+    "returncode": 0,
+    "output": "true\ntrue\ntrue\ntrue\n\"Warning: This version of ModelicaServices does not appear to be patched for use with OpenModelica, consider using a version distributed by OpenModelica instead to avoid compatibility issues.\nNotification: Automatically loaded package Modelica 4.1.0 due to uses annotation from ModelicaServices.\nNotification: Automatically loaded package Complex 4.1.0 due to uses annotation from Modelica.\n\"\ntrue\n\"\"\ntrue\n\"\"\ntrue\n\"\"\ntrue\n\"\"\nMODEL: ReviewLimit\n\n{\"/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/ReviewLimit\", \"ReviewLimit_init.xml\"}\n\"\"\nMODEL: ReviewRamp\n\n{\"/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/ReviewRamp\", \"ReviewRamp_init.xml\"}\n\"\"\nMODEL: Buildings.HeatTransfer.Windows.BaseClasses.Validation.HeatCapacityConstantShade\n\n{\"/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/Buildings.HeatTransfer.Windows.BaseClasses.Validation.HeatCapacityConstantShade\", \"Buildings.HeatTransfer.Windows.BaseClasses.Validation.HeatCapacityConstantShade_init.xml\"}\n\"\"\n",
+    "script": "/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/build.mos"
+  },
+  {
+    "library": "thermopower",
+    "returncode": 0,
+    "output": "true\ntrue\ntrue\ntrue\n\"Warning: This version of ModelicaServices does not appear to be patched for use with OpenModelica, consider using a version distributed by OpenModelica instead to avoid compatibility issues.\nNotification: Automatically loaded package Modelica 3.2.3 due to uses annotation from ModelicaServices.\nNotification: Automatically loaded package Complex 4.1.0 due to uses annotation from Modelica.\n\"\ntrue\n\"\"\ntrue\n\"\"\ntrue\n\"\"\ntrue\n\"\"\nMODEL: ReviewController\n\n{\"/data/mrumoca/rumoca/target/external-reporting-review-20261001/thermopower/ReviewController\", \"ReviewController_init.xml\"}\n\"\"\n",
+    "script": "/data/mrumoca/rumoca/target/external-reporting-review-20261001/thermopower/build.mos"
+  }
+]

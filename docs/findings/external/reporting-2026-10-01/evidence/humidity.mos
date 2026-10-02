@@ -1,0 +1,14 @@
+setCommandLineOptions("--unitChecking");
+setEnvironmentVar("CC","gcc");
+setEnvironmentVar("CXX","g++");
+loadFile("/data/mrumoca/rumoca/target/msl/ModelicaStandardLibrary-4.1.0/ModelicaServices 4.1.0/package.mo"); getErrorString();
+loadFile("/data/mrumoca/rumoca/target/msl/ModelicaStandardLibrary-4.1.0/Complex.mo"); getErrorString();
+loadFile("/data/mrumoca/rumoca/target/msl/ModelicaStandardLibrary-4.1.0/Modelica 4.1.0/package.mo"); getErrorString();
+loadFile("/data/mrumoca/eval/_repos/buildings/Buildings/package.mo"); getErrorString();
+loadFile("/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/Review.mo"); getErrorString();
+print("MODEL: Buildings.Controls.OBC.CDL.Psychrometrics.Validation.DewPoint_TDryBulPhi\n");
+simulate(Buildings.Controls.OBC.CDL.Psychrometrics.Validation.DewPoint_TDryBulPhi, stopTime=1, numberOfIntervals=100, outputFormat="csv", fileNamePrefix="DewPoint_TDryBulPhi");
+getErrorString();
+print("MODEL: Buildings.Controls.OBC.CDL.Psychrometrics.Validation.SpecificEnthalpy_TDryBulPhi\n");
+simulate(Buildings.Controls.OBC.CDL.Psychrometrics.Validation.SpecificEnthalpy_TDryBulPhi, stopTime=1, numberOfIntervals=100, outputFormat="csv", fileNamePrefix="SpecificEnthalpy_TDryBulPhi");
+getErrorString();

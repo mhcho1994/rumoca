@@ -1,0 +1,14 @@
+[
+  {
+    "library": "buildings",
+    "returncode": 0,
+    "output": "true\ntrue\ntrue\ntrue\n\"Warning: The flag '-d=frontEndUnitCheck' is deprecated. Please use '--unitChecking' instead.\nWarning: This version of ModelicaServices does not appear to be patched for use with OpenModelica, consider using a version distributed by OpenModelica instead to avoid compatibility issues.\nNotification: Automatically loaded package Modelica 4.1.0 due to uses annotation from ModelicaServices.\nNotification: Automatically loaded package Complex 4.1.0 due to uses annotation from Modelica.\n\"\ntrue\n\"\"\ntrue\n\"\"\ntrue\n\"\"\ntrue\n\"\"\nMODEL: ReviewLimit\n\n\"Check of ReviewLimit completed successfully.\nClass ReviewLimit has 3 equation(s) and 3 variable(s).\n1 of these are trivial equation(s).\"\n\"\"\nMODEL: ReviewRamp\n\n\"Check of ReviewRamp completed successfully.\nClass ReviewRamp has 5 equation(s) and 5 variable(s).\n2 of these are trivial equation(s).\"\n\"\"\nMODEL: Buildings.HeatTransfer.Windows.BaseClasses.Validation.HeatCapacityConstantShade\n\n\"Check of Buildings.HeatTransfer.Windows.BaseClasses.Validation.HeatCapacityConstantShade completed successfully.\nClass Buildings.HeatTransfer.Windows.BaseClasses.Validation.HeatCapacityConstantShade has 88 equation(s) and 88 variable(s).\n68 of these are trivial equation(s).\"\n\"\"\n",
+    "script": "/data/mrumoca/rumoca/target/external-reporting-review-20261001/buildings/check.mos"
+  },
+  {
+    "library": "thermopower",
+    "returncode": 0,
+    "output": "true\ntrue\ntrue\ntrue\n\"Warning: The flag '-d=frontEndUnitCheck' is deprecated. Please use '--unitChecking' instead.\nWarning: This version of ModelicaServices does not appear to be patched for use with OpenModelica, consider using a version distributed by OpenModelica instead to avoid compatibility issues.\nNotification: Automatically loaded package Modelica 3.2.3 due to uses annotation from ModelicaServices.\nNotification: Automatically loaded package Complex 4.1.0 due to uses annotation from Modelica.\n\"\ntrue\n\"\"\ntrue\n\"\"\ntrue\n\"\"\ntrue\n\"\"\nMODEL: ReviewController\n\n\"Check of ReviewController completed successfully.\nClass ReviewController has 2 equation(s) and 2 variable(s).\n1 of these are trivial equation(s).\"\n\"\"\n",
+    "script": "/data/mrumoca/rumoca/target/external-reporting-review-20261001/thermopower/check.mos"
+  }
+]
