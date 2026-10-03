@@ -16,6 +16,7 @@ mod call_collection;
 mod callable_scope_identity;
 mod constructor_signature;
 mod deferred_members;
+mod function_arguments;
 mod function_context;
 mod function_derivatives;
 mod function_metadata;
@@ -49,6 +50,7 @@ use constructor_signature::{
     convert_constructor_signature, inherit_operator_constructor_defaults,
     normalize_function_local_references,
 };
+pub(crate) use function_arguments::specialize_function_arguments;
 use function_context::{
     collect_exposed_package_constant_aliases, collect_function_context,
     collect_lexical_constant_aliases, extend_imports_if_absent, function_initial_import_map,
@@ -309,7 +311,7 @@ fn retain_constructor_record_type(
         .collect::<Result<Vec<_>, FlattenError>>()?;
 
     if let Some(existing) = flat.record_types.get(&record) {
-        if existing.fields != fields {
+        if !same_record_layout(&existing.fields, &fields) {
             return Err(FlattenError::missing_resolved_class_metadata(
                 function.name.as_str(),
                 "one exact record layout for the constructor declaration",
@@ -326,6 +328,24 @@ fn retain_constructor_record_type(
         },
     );
     Ok(())
+}
+
+/// Two layouts of one record declaration agree when their fields agree and
+/// every axis either has one extent or is still symbolic (`<= 0`) in one of
+/// them: a later collection may see an extent a materialized constructor
+/// already settled.
+fn same_record_layout(existing: &[flat::RecordField], collected: &[flat::RecordField]) -> bool {
+    existing.len() == collected.len()
+        && existing.iter().zip(collected).all(|(existing, collected)| {
+            existing.name == collected.name
+                && existing.def_id == collected.def_id
+                && existing.dims.len() == collected.dims.len()
+                && existing
+                    .dims
+                    .iter()
+                    .zip(&collected.dims)
+                    .all(|(a, b)| a == b || *a <= 0 || *b <= 0)
+        })
 }
 
 fn refine_existing_function_nonreplaceability(
@@ -574,9 +594,10 @@ fn request_proves_transitive_non_replaceability(
                 .parts()
                 .iter()
                 .all(|part| !part.ident.contains('.'))
-            && class_index.proves_transitively_non_replaceable_path(
+            && (class_index.proves_transitively_non_replaceable_path(
                 reference.parts().iter().map(|part| part.def_id),
-            )
+            ) || class_index
+                .proves_selected_function_path(reference.parts().iter().map(|part| part.def_id)))
     })
 }
 
@@ -1106,6 +1127,14 @@ fn convert_function<'tree>(
     let mut func = rumoca_core::Function::new(qualified_name, span);
     func.def_id = class_def.def_id;
     let mut context = collect_function_context(tree, class_index, class_def, member_cache);
+    // MLS 3.7 §12.2: at most one algorithm section, own or inherited.
+    if context.algorithms.len() > 1 {
+        return Err(FlattenError::MultipleFunctionBodies {
+            name: qualified_name.to_string(),
+            sections: context.algorithms.len(),
+            span,
+        });
+    }
     // MLS §7.3: a function body is converted from the class tree rather than
     // instantiated, so the member tails Resolve deferred across replaceable
     // class edges are proved here before lowering demands exact identity.

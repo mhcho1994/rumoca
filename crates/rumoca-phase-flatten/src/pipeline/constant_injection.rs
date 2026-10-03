@@ -2,11 +2,13 @@ use super::*;
 use crate::record_constant_arrays::try_extract_record_array_constructor_constant;
 use crate::source_spans::required_location_span;
 
+mod assertion_levels;
 mod component_binding_values;
 mod context;
 mod function_resolution;
 mod structural_asserts;
 
+pub(crate) use assertion_levels::{predefined_assertion_levels, settle_assertion_levels};
 pub(crate) use component_binding_values::collect_component_binding_values;
 pub(crate) use context::{ConstantOccurrenceId, Context};
 pub(crate) use function_resolution::resolve_function_name;
@@ -481,7 +483,7 @@ pub(crate) fn extract_constants_from_class(class_def: &ClassDef, ctx: &mut Conte
                     })
             });
             if let Some(value) = value {
-                ctx.constant_values_by_def_id.insert(def_id, value);
+                ctx.record_constant_value(name, def_id, value);
             }
         }
     }

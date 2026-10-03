@@ -5,6 +5,32 @@ use super::param_binding::ParamBinding;
 use super::*;
 
 impl Context {
+    /// Record one extracted constant under its declaration identity and under
+    /// the package scope that exposes it (SPEC_0040 FLAT-C02).
+    pub(crate) fn record_constant_value(
+        &mut self,
+        qualified_name: &str,
+        def_id: rumoca_core::DefId,
+        value: rumoca_core::Expression,
+    ) {
+        if let Some(scope) = crate::path_utils::enclosing_scope(qualified_name) {
+            self.constant_values_by_scope
+                .insert((scope.to_string(), def_id), value.clone());
+        }
+        self.constant_values_by_declaration
+            .entry(def_id)
+            .and_modify(|agreed| {
+                if agreed
+                    .as_ref()
+                    .is_some_and(|agreed| !agreed.semantically_eq_ignoring_spans(&value))
+                {
+                    *agreed = None;
+                }
+            })
+            .or_insert_with(|| Some(value.clone()));
+        self.constant_values_by_def_id.insert(def_id, value);
+    }
+
     /// Try to evaluate integer parameters in one pass.
     ///
     /// Uses full context including enums to handle conditional bindings like:
@@ -91,9 +117,10 @@ impl Context {
                         return Some(((*name).to_string(), val));
                     }
 
-                    param_evaluator
-                        .eval_integer(binding, Some(name))
-                        .map(|val| ((*name).to_string(), val))
+                    modification_first(*binding_from_modification, name, |scope| {
+                        param_evaluator.eval_integer(binding, scope)
+                    })
+                    .map(|val| ((*name).to_string(), val))
                 },
             )
             .collect();
@@ -141,11 +168,19 @@ impl Context {
         });
         let new_vals: Vec<(String, bool)> = params
             .iter()
-            .filter_map(|ParamBinding { name, binding, .. }| {
-                param_evaluator
-                    .eval_boolean(binding, Some(name))
+            .filter_map(
+                |ParamBinding {
+                     name,
+                     binding,
+                     binding_from_modification,
+                     ..
+                 }| {
+                    modification_first(*binding_from_modification, name, |scope| {
+                        param_evaluator.eval_boolean(binding, scope)
+                    })
                     .map(|v| ((*name).to_string(), v))
-            })
+                },
+            )
             .collect();
 
         let mut progress = false;
@@ -171,14 +206,25 @@ impl Context {
         });
         let new_vals: Vec<(String, f64)> = params
             .iter()
-            .filter_map(|ParamBinding { name, binding, .. }| {
-                if let Some(val) = param_evaluator.eval_real(binding, Some(name)) {
-                    return Some(((*name).to_string(), val));
-                }
-                // Try user-defined function evaluation for function call bindings
-                self.try_eval_real_func_call(name, binding)
-                    .map(|val| ((*name).to_string(), val))
-            })
+            .filter_map(
+                |ParamBinding {
+                     name,
+                     binding,
+                     binding_from_modification,
+                     ..
+                 }| {
+                    if let Some(val) =
+                        modification_first(*binding_from_modification, name, |scope| {
+                            param_evaluator.eval_real(binding, scope)
+                        })
+                    {
+                        return Some(((*name).to_string(), val));
+                    }
+                    // Try user-defined function evaluation for function call bindings
+                    self.try_eval_real_func_call(name, binding)
+                        .map(|val| ((*name).to_string(), val))
+                },
+            )
             .collect();
 
         let mut progress = false;
@@ -303,4 +349,25 @@ fn modifier_source_scope(name: &str) -> Option<String> {
     let component_scope = variable_path.parent()?;
     let source_scope = component_scope.parent()?;
     Some(source_scope.to_flat_string())
+}
+
+/// Evaluate a binding in the scope its names were qualified in.
+///
+/// Flatten qualifies a modification binding from the scope the modifier is
+/// written in (MLS 3.7 §7.2.4), so its names are complete flat names: a
+/// lookup from the modified component's own scope would let that component
+/// shadow them, as in `tank(s = s)`, where the binding reads the enclosing
+/// `s` and never `tank.s` itself. A modification binding is therefore read
+/// from the root first; a declaration binding, and a modification binding
+/// whose names do not resolve there, keep the scoped lookup from the
+/// variable's component.
+fn modification_first<T>(
+    binding_from_modification: bool,
+    name: &str,
+    mut evaluate: impl FnMut(Option<&str>) -> Option<T>,
+) -> Option<T> {
+    binding_from_modification
+        .then(|| evaluate(None))
+        .flatten()
+        .or_else(|| evaluate(Some(name)))
 }

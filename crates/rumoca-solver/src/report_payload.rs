@@ -160,6 +160,7 @@ mod tests {
             data: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
             n_states: 1,
             termination: None,
+            diagnostics: Vec::new(),
             variable_meta: vec![SimVariableMeta {
                 name: "x".to_string(),
                 role: "state".to_string(),
@@ -236,6 +237,7 @@ mod tests {
                 calls: 40,
                 fallback_calls: 10,
                 fallbacks: [0, 0, 10, 0, 0, 0],
+                ..crate::ProjectionFallbackCounts::default()
             },
         );
         report.sites.insert(

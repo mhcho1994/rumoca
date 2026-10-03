@@ -523,6 +523,7 @@ impl<'dae> DaeView<'dae> {
                     scalar_view: structure.scalar_view,
                     scalar_rows: structure.scalar_rows,
                 }),
+            observed: entry.observed,
             provenance: entry.provenance,
         })
     }
@@ -1029,6 +1030,7 @@ pub enum FunctionStatementView<'dae> {
     Assertion {
         condition: ExprId<'dae>,
         message: ExprId<'dae>,
+        level: AssertionLevel,
         provenance: DaeProvenance,
     },
     For {
@@ -1094,10 +1096,12 @@ impl<'dae> FunctionStatementView<'dae> {
             FunctionStatementWire::Assertion {
                 condition,
                 message,
+                level,
                 provenance,
             } => Self::Assertion {
                 condition: ExprId::from_raw(*condition),
                 message: ExprId::from_raw(*message),
+                level: *level,
                 provenance: *provenance,
             },
             FunctionStatementWire::For {

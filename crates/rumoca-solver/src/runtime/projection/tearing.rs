@@ -41,7 +41,9 @@ use super::{
     TornBlock, implicit_selected_jacobian_v_rows,
 };
 
-use rumoca_eval_solve::projection_policy::{TORN_BACKTRACK_STEPS, TORN_OUTER_MAX_ITERS};
+use rumoca_eval_solve::projection_policy::{
+    TORN_BACKTRACK_STEPS, TORN_OUTER_MAX_ITERS, TORN_SUFFICIENT_DECREASE,
+};
 
 /// Attempt the torn solve of one coupled block.
 ///
@@ -445,8 +447,9 @@ fn tangent_reduced_jacobian(
 }
 
 /// Backtracking line search along the reduced Newton direction. Accepts the
-/// first step that reaches tolerance or strictly reduces the scaled residual
-/// norm, returning the residual at the accepted point.
+/// first step that reaches tolerance or removes `TORN_SUFFICIENT_DECREASE *
+/// alpha` of the scaled residual norm, returning the residual at the accepted
+/// point. Each halving is counted at the projection site.
 fn line_search<M: ImplicitProjectionModel>(
     model: &M,
     y: &mut [f64],
@@ -469,6 +472,7 @@ fn line_search<M: ImplicitProjectionModel>(
             return Ok(Some(residual));
         }
         step.alpha *= 0.5;
+        crate::runtime::fallbacks::note_torn_step_halving();
     }
     step.base.restore(tearing, y);
     Ok(None)
@@ -567,7 +571,8 @@ fn line_search_step<M: ImplicitProjectionModel>(
     }
     let norm = scaled_residual_norm(&residual, step.row_scales);
     let accepted = norm.is_finite()
-        && (scaled_residual_converged(&residual, step.row_scales, step.tol) || norm < step.before);
+        && (scaled_residual_converged(&residual, step.row_scales, step.tol)
+            || norm <= (1.0 - TORN_SUFFICIENT_DECREASE * step.alpha) * step.before);
     Ok(accepted.then_some(residual))
 }
 

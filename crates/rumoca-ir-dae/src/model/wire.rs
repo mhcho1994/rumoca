@@ -1610,13 +1610,17 @@ fn reconstruct_events<'dae>(
             action.provenance,
         )?;
         let id = dae.events(|events| match action.kind {
-            EventActionKindWire::Assert { message, level } => events.assert_with_level(
+            EventActionKindWire::Assert { message } => events.assert(
                 trigger,
                 guard,
                 mapped(&ids.expressions, message, "expression", action.provenance)?,
-                level
-                    .map(|level| mapped(&ids.expressions, level, "expression", action.provenance))
-                    .transpose()?,
+                action.provenance,
+            ),
+            EventActionKindWire::Warning { message, condition } => events.warning(
+                trigger,
+                guard,
+                mapped(&ids.expressions, condition, "expression", action.provenance)?,
+                mapped(&ids.expressions, message, "expression", action.provenance)?,
                 action.provenance,
             ),
             EventActionKindWire::Terminate { message } => events.terminate(
@@ -1690,6 +1694,9 @@ fn replay_discrete_value_owner<'dae>(
         Ok(())
     };
     match owner.structure {
+        Some(_) if owner.observed => Err(DaeConstructionError::InvalidObservedDiscreteOwner {
+            span: owner.provenance.span(),
+        }),
         Some(structure) => topology.structured_owner(
             owner.provenance,
             mapped(&ids.domains, structure.domain, "domain", owner.provenance)?,
@@ -1697,6 +1704,7 @@ fn replay_discrete_value_owner<'dae>(
             targets,
             replay,
         ),
+        None if owner.observed => topology.observed_owner(owner.provenance, targets, replay),
         None => topology.owner(owner.provenance, targets, replay),
     }
 }

@@ -1,3 +1,5 @@
+mod alias_orientation;
+
 use super::*;
 use std::borrow::Cow;
 
@@ -8,6 +10,10 @@ pub(in crate::construction) enum EquationPartition<'flat> {
         target: &'flat VarName,
     },
     DiscreteValue(DiscreteValueAssignmentPlan<'flat>),
+    /// An array equation `{a1, ..., an} = e` whose left side lists scalar
+    /// discrete-valued variables: the element equations `ai = e[i]` (MLS 3.7
+    /// §10.6.1), each defining its own variable.
+    DiscreteElements(Vec<DiscreteValueAssignmentPlan<'flat>>),
     ConsumedDiscreteValue,
     /// An MLS §12.4.3 multi-result equation `(a, b, ...) = f(...)` with at
     /// least one discrete receiver. Each receiver is defined by its own result
@@ -114,6 +120,9 @@ pub(in crate::construction) fn equation_partition<'flat>(
     }
     if let Some(plan) = discrete_connection_assignment(flat, equation, roles, connection_ranks)? {
         return Ok(EquationPartition::DiscreteValue(plan));
+    }
+    if let Some(plans) = discrete_element_assignments(flat, &equation.residual, roles) {
+        return Ok(EquationPartition::DiscreteElements(plans));
     }
     if let Some(plan) = discrete_value_assignment(&equation.residual, roles, equation.span)? {
         return Ok(EquationPartition::DiscreteValue(plan));
@@ -337,6 +346,7 @@ pub(super) fn aggregate_discrete_connections(
         }
     }
     debug_assert!(groups.is_empty(), "every group names a Flat variable");
+    alias_orientation::reversed_alias_owners(flat, roles, connection_ranks, &mut result)?;
     Ok(result)
 }
 
@@ -621,6 +631,27 @@ pub(super) fn discrete_connection_ranks(
         .map(|producer| (producer, 0usize))
         .collect::<HashMap<_, _>>();
     let mut frontier = ranks.keys().cloned().collect::<Vec<_>>();
+    spread_connection_ranks(&mut ranks, frontier.clone(), &neighbors);
+    // A connection set no producer reaches is fed by a plain alias `a = b`
+    // whose written side already has its own definition (a binding
+    // modification, as `CompositeStepState.suspend = subgraphStatePort.suspend`
+    // of `Modelica.StateGraph`): the alias defines `b`, so `b` produces the
+    // set (see `alias_orientation`).
+    frontier = alias_orientation::alias_fed_connection_sources(flat, roles, &ranks, &neighbors);
+    for source in &frontier {
+        ranks.insert(source.clone(), 0);
+    }
+    spread_connection_ranks(&mut ranks, frontier, &neighbors);
+    ranks
+}
+
+/// Breadth-first connection distance from `frontier` to every coordinate its
+/// connection sets reach that has no rank yet.
+fn spread_connection_ranks(
+    ranks: &mut HashMap<VarName, usize>,
+    mut frontier: Vec<VarName>,
+    neighbors: &HashMap<VarName, Vec<VarName>>,
+) {
     let mut cursor = 0usize;
     while let Some(current) = frontier.get(cursor).cloned() {
         cursor += 1;
@@ -633,7 +664,6 @@ pub(super) fn discrete_connection_ranks(
             frontier.push(neighbor.clone());
         }
     }
-    ranks
 }
 
 /// Turn an element connection into a whole-coordinate definition only when
@@ -842,6 +872,95 @@ fn assignment_side_mentions_discrete_value(
     }
 }
 
+/// Whether `body` is `{a1, ..., an} - e` over unsubscripted discrete-valued
+/// variables: an array equation whose element equations each define one `ai`.
+pub(in crate::construction) fn discrete_element_array_body(
+    body: &Expression,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> bool {
+    let Expression::Binary {
+        op: OpBinary::Sub,
+        lhs,
+        ..
+    } = body
+    else {
+        return false;
+    };
+    let Expression::Array { elements, .. } = lhs.as_ref() else {
+        return false;
+    };
+    !elements.is_empty()
+        && elements.iter().all(|element| {
+            matches!(
+                element,
+                Expression::VarRef { name, subscripts, .. }
+                    if subscripts.is_empty()
+                        && matches!(roles.get(name.var_name()), Some(PlannedRole::DiscreteValue))
+            )
+        })
+}
+
+/// The element equations of `{a1, ..., an} = e` when every `ai` is an
+/// unsubscripted scalar discrete-valued variable (MLS 3.7 §10.6.1: an array
+/// equation is its element equations; the component-array slice
+/// `split.set = fill(inPort.set, n)` of `Modelica.StateGraph.Parallel` flattens
+/// to this form).
+fn discrete_element_assignments<'flat>(
+    flat: &'flat flat::Model,
+    residual: &'flat Expression,
+    roles: &HashMap<VarName, PlannedRole>,
+) -> Option<Vec<DiscreteValueAssignmentPlan<'flat>>> {
+    let Expression::Binary {
+        op: OpBinary::Sub,
+        lhs,
+        rhs,
+        span,
+    } = residual
+    else {
+        return None;
+    };
+    let Expression::Array { elements, .. } = lhs.as_ref() else {
+        return None;
+    };
+    let targets = elements
+        .iter()
+        .map(|element| match element {
+            Expression::VarRef {
+                name, subscripts, ..
+            } if subscripts.is_empty()
+                && matches!(roles.get(name.var_name()), Some(PlannedRole::DiscreteValue))
+                && flat
+                    .variables
+                    .get(name.var_name())
+                    .is_some_and(|variable| variable.dims.is_empty()) =>
+            {
+                Some(name.var_name())
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if targets.is_empty() {
+        return None;
+    }
+    Some(
+        targets
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, target)| DiscreteValueAssignmentPlan {
+                target,
+                value: Cow::Owned(Expression::Index {
+                    base: rhs.clone(),
+                    subscripts: vec![rumoca_core::Subscript::index(ordinal as i64 + 1, *span)],
+                    span: *span,
+                }),
+                generated: true,
+                scalar_count: None,
+                ordered_scalar_self_dependencies: false,
+            })
+            .collect(),
+    )
+}
+
 fn invalid_discrete_lhs(span: Span) -> ToDaeError {
     ToDaeError::discrete_solved_form_violation(
         "a discrete-valued equation must have one unsubscripted resolved coordinate as its left-hand side",
@@ -901,8 +1020,16 @@ pub(super) fn defined_discrete_targets(
     roles: &HashMap<VarName, PlannedRole>,
     connection_ranks: &HashMap<VarName, usize>,
     aggregate_connections: &AggregateDiscreteConnections,
+    record_equations: &HashMap<usize, RecordEquationPlan>,
 ) -> Result<HashSet<VarName>, ToDaeError> {
     let mut targets = event_targets(flat);
+    for plan in record_equations.values() {
+        targets.extend(
+            plan.field_systems(roles)
+                .filter(|(_, system)| *system != RecordFieldSystem::Continuous)
+                .map(|(field, _)| field.target.clone()),
+        );
+    }
     targets.extend(algorithm_targets(flat).into_iter().filter(|target| {
         matches!(
             roles.get(target),
@@ -924,6 +1051,9 @@ pub(super) fn defined_discrete_targets(
             }
             EquationPartition::DiscreteValue(plan) => {
                 targets.insert(plan.target.clone());
+            }
+            EquationPartition::DiscreteElements(plans) => {
+                targets.extend(plans.into_iter().map(|plan| plan.target.clone()));
             }
             EquationPartition::MultiOutput { receivers, .. } => {
                 targets.extend(

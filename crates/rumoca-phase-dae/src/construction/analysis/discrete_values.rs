@@ -1,3 +1,5 @@
+use super::discrete_time_definitions::{DefinitionTime, discrete_definition_time};
+use super::observed_reads::LazyModelReads;
 use super::*;
 use std::collections::BTreeSet;
 
@@ -6,6 +8,9 @@ pub(in crate::construction) struct DiscreteValueTopologyPlan {
     ordered_owners: Vec<Vec<VarName>>,
     order_by_target: HashMap<VarName, TargetOrder>,
     held_targets: Vec<HeldTargetPlan>,
+    /// Per ordered owner: every target is an unread observation whose
+    /// definition is not a discrete-time expression.
+    observed_owners: Vec<bool>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -31,6 +36,11 @@ impl DiscreteValueTopologyPlan {
 
     pub(in crate::construction) fn held_targets(&self) -> &[HeldTargetPlan] {
         &self.held_targets
+    }
+
+    /// Whether ordered owner `owner` defines only unread observations.
+    pub(in crate::construction) fn owner_is_observed(&self, owner: usize) -> bool {
+        self.observed_owners.get(owner).copied().unwrap_or(false)
     }
 
     pub(in crate::construction) fn matches_owner_targets(
@@ -82,25 +92,77 @@ pub(super) fn analyze_discrete_value_topology(
     roles: &HashMap<VarName, PlannedRole>,
     connection_ranks: &HashMap<VarName, usize>,
     aggregate_connections: &AggregateDiscreteConnections,
+    record_equations: &HashMap<usize, RecordEquationPlan>,
 ) -> Result<DiscreteValueTopologyPlan, ToDaeError> {
     let mut owners = Vec::new();
-    collect_binding_owners(flat, roles, &mut owners)?;
+    let reads = LazyModelReads::new(flat);
+    let mut observed = HashSet::new();
+    collect_binding_owners(flat, roles, &reads, &mut observed, &mut owners)?;
+    collect_record_equation_owners(flat, roles, record_equations, &mut owners);
     collect_equation_owners(
         flat,
         roles,
         connection_ranks,
         aggregate_connections,
+        &reads,
+        &mut observed,
         &mut owners,
     )?;
     collect_algorithm_owners(flat, roles, &mut owners)?;
     collect_when_owners(flat, roles, &mut owners)?;
     let held_targets = add_held_owners(flat, roles, &mut owners);
-    order_owners(owners, held_targets)
+    order_owners(owners, held_targets, &observed)
+}
+
+/// One owner per record equation with discrete-valued fields: the fields are
+/// assigned together from the equation's right side, in row order.
+fn collect_record_equation_owners(
+    flat: &flat::Model,
+    roles: &HashMap<VarName, PlannedRole>,
+    record_equations: &HashMap<usize, RecordEquationPlan>,
+    owners: &mut Vec<SourceOwner>,
+) {
+    let mut rows = record_equations.keys().copied().collect::<Vec<_>>();
+    rows.sort_unstable();
+    for row in rows {
+        let equation = &flat.equations[row];
+        let Expression::Binary { rhs, .. } = &equation.residual else {
+            continue;
+        };
+        let plan = &record_equations[&row];
+        let mut dependencies = current_discrete_dependencies(rhs, roles);
+        // A record-to-record equation reads its source fields by coordinate.
+        dependencies.extend(plan.fields.iter().filter_map(|field| match &field.value {
+            RecordEquationFieldValue::Coordinate(source)
+                if matches!(roles.get(source), Some(PlannedRole::DiscreteValue)) =>
+            {
+                Some(source.clone())
+            }
+            _ => None,
+        }));
+        let targets = plan
+            .discrete_value_targets(roles)
+            .map(|target| SourceTarget {
+                name: target.clone(),
+                dependencies: dependencies.clone(),
+                span: equation.span,
+                ordered_scalar_self_dependencies: false,
+            })
+            .collect::<Vec<_>>();
+        if !targets.is_empty() {
+            owners.push(SourceOwner {
+                targets,
+                span: equation.span,
+            });
+        }
+    }
 }
 
 fn collect_binding_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
+    reads: &LazyModelReads<'_>,
+    observed: &mut HashSet<VarName>,
     owners: &mut Vec<SourceOwner>,
 ) -> Result<(), ToDaeError> {
     for (name, variable) in &flat.variables {
@@ -109,6 +171,18 @@ fn collect_binding_owners(
         };
         if !matches!(roles[name], PlannedRole::DiscreteValue) {
             continue;
+        }
+        if discrete_definition_time(
+            flat,
+            roles,
+            reads,
+            &[name],
+            binding,
+            None,
+            expression_span(binding)?,
+        )? == DefinitionTime::Observed
+        {
+            observed.insert(name.clone());
         }
         owners.push(SourceOwner {
             targets: vec![SourceTarget {
@@ -128,10 +202,12 @@ fn collect_equation_owners(
     roles: &HashMap<VarName, PlannedRole>,
     connection_ranks: &HashMap<VarName, usize>,
     aggregate_connections: &AggregateDiscreteConnections,
+    reads: &LazyModelReads<'_>,
+    observed: &mut HashSet<VarName>,
     owners: &mut Vec<SourceOwner>,
 ) -> Result<(), ToDaeError> {
     for (row, equation) in flat.equations.iter().enumerate() {
-        let plan = match equation_partition(
+        let plans = match equation_partition(
             flat,
             row,
             equation,
@@ -139,22 +215,57 @@ fn collect_equation_owners(
             connection_ranks,
             aggregate_connections,
         )? {
-            EquationPartition::DiscreteValue(plan) => plan,
+            EquationPartition::DiscreteValue(plan) => vec![plan],
+            EquationPartition::DiscreteElements(plans) => plans,
             EquationPartition::MultiOutput { receivers, call } => {
+                let targets = receivers
+                    .iter()
+                    .copied()
+                    .filter(|receiver| {
+                        matches!(roles.get(*receiver), Some(PlannedRole::DiscreteValue))
+                    })
+                    .collect::<Vec<_>>();
+                if !targets.is_empty()
+                    && discrete_definition_time(
+                        flat,
+                        roles,
+                        reads,
+                        &targets,
+                        call,
+                        Some(row),
+                        equation.span,
+                    )? == DefinitionTime::Observed
+                {
+                    observed.extend(targets.into_iter().cloned());
+                }
                 push_multi_output_owner(equation, call, &receivers, roles, owners);
                 continue;
             }
             _ => continue,
         };
-        owners.push(SourceOwner {
-            targets: vec![SourceTarget {
-                name: plan.target.clone(),
-                dependencies: current_discrete_dependencies(plan.value.as_ref(), roles),
+        for plan in plans {
+            if discrete_definition_time(
+                flat,
+                roles,
+                reads,
+                &[plan.target],
+                plan.value.as_ref(),
+                Some(row),
+                equation.span,
+            )? == DefinitionTime::Observed
+            {
+                observed.insert(plan.target.clone());
+            }
+            owners.push(SourceOwner {
+                targets: vec![SourceTarget {
+                    name: plan.target.clone(),
+                    dependencies: current_discrete_dependencies(plan.value.as_ref(), roles),
+                    span: equation.span,
+                    ordered_scalar_self_dependencies: plan.ordered_scalar_self_dependencies,
+                }],
                 span: equation.span,
-                ordered_scalar_self_dependencies: plan.ordered_scalar_self_dependencies,
-            }],
-            span: equation.span,
-        });
+            });
+        }
     }
     Ok(())
 }
@@ -238,12 +349,123 @@ fn collect_algorithm_owners(
                 })
             })
             .collect::<Result<Vec<_>, ToDaeError>>()?;
-        owners.push(SourceOwner {
-            targets,
-            span: algorithm.span,
-        });
+        if event_algorithm && owns_targets_separately(&algorithm.statements, &targets) {
+            owners.extend(targets.into_iter().map(|target| SourceOwner {
+                targets: vec![target],
+                span: algorithm.span,
+            }));
+        } else {
+            owners.push(SourceOwner {
+                targets,
+                span: algorithm.span,
+            });
+        }
     }
     Ok(())
+}
+
+/// Whether the discrete-valued targets of one event algorithm own their
+/// values one target at a time.
+///
+/// Every target's B.1c branches already carry its own values (statements
+/// read each other through their SSA values, not through the variables), so
+/// the targets own themselves separately whenever their current-value reads
+/// order them acyclically and no condition reads a value a `when` body
+/// writes (that value is resolved by event iteration within one owner, as in
+/// the equation form). Separate owners let simultaneously active statements
+/// that write disjoint targets each define their own (MLS 3.7 §11.1.2), and
+/// let a `when` condition that reads a target see it issued before the
+/// guarded targets. One owner, whose first active branch defines every
+/// target, remains only for targets whose reads are cyclic.
+fn owns_targets_separately(
+    statements: &[rumoca_core::Statement],
+    targets: &[SourceTarget],
+) -> bool {
+    let names = targets
+        .iter()
+        .map(|target| target.name.clone())
+        .collect::<HashSet<_>>();
+    let mut condition_reads = Vec::new();
+    let mut body_writes = HashSet::new();
+    collect_when_condition_reads(statements, &mut condition_reads, &mut body_writes, false);
+    let read_targets = condition_reads
+        .iter()
+        .filter(|name| names.contains(*name))
+        .collect::<Vec<_>>();
+    if read_targets.iter().any(|name| body_writes.contains(*name)) {
+        return false;
+    }
+    targets_order_acyclically(targets, &names)
+}
+
+fn collect_when_condition_reads(
+    statements: &[rumoca_core::Statement],
+    reads: &mut Vec<VarName>,
+    body_writes: &mut HashSet<VarName>,
+    in_when: bool,
+) {
+    for statement in statements {
+        match statement {
+            rumoca_core::Statement::Assignment { comp, .. } if in_when => {
+                body_writes.insert(
+                    rumoca_core::component_ref_to_base_reference(comp)
+                        .var_name()
+                        .clone(),
+                );
+            }
+            rumoca_core::Statement::FunctionCall { outputs, .. } if in_when => {
+                body_writes.extend(outputs.iter().flatten().map(|output| output.to_var_name()));
+            }
+            rumoca_core::Statement::When { blocks, .. } => {
+                for block in blocks {
+                    block.cond.collect_var_refs(reads);
+                    collect_when_condition_reads(&block.stmts, reads, body_writes, true);
+                }
+            }
+            rumoca_core::Statement::If {
+                cond_blocks,
+                else_block,
+                ..
+            } => {
+                for block in cond_blocks {
+                    collect_when_condition_reads(&block.stmts, reads, body_writes, in_when);
+                }
+                if let Some(block) = else_block {
+                    collect_when_condition_reads(block, reads, body_writes, in_when);
+                }
+            }
+            rumoca_core::Statement::For { equations, .. } => {
+                collect_when_condition_reads(equations, reads, body_writes, in_when);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether the current-value reads among one algorithm's targets admit an order.
+fn targets_order_acyclically(targets: &[SourceTarget], names: &HashSet<VarName>) -> bool {
+    let mut remaining = targets
+        .iter()
+        .map(|target| {
+            let reads = target
+                .dependencies
+                .iter()
+                .filter(|dependency| *dependency != &target.name && names.contains(*dependency))
+                .cloned()
+                .collect::<HashSet<_>>();
+            (target.name.clone(), reads)
+        })
+        .collect::<Vec<_>>();
+    while !remaining.is_empty() {
+        let Some(ready) = remaining.iter().position(|(_, reads)| reads.is_empty()) else {
+            return false;
+        };
+        let (issued, _) = remaining.swap_remove(ready);
+        for (_, reads) in &mut remaining {
+            reads.remove(&issued);
+        }
+    }
+    true
 }
 
 /// Prove whether a model-algorithm target reads its entry value before an SSA
@@ -430,6 +652,7 @@ fn add_held_owners(
 fn order_owners(
     mut owners: Vec<SourceOwner>,
     held_targets: Vec<HeldTargetPlan>,
+    observed: &HashSet<VarName>,
 ) -> Result<DiscreteValueTopologyPlan, ToDaeError> {
     let mut owner_by_target = HashMap::new();
     for (owner_index, owner) in owners.iter().enumerate() {
@@ -488,6 +711,15 @@ fn order_owners(
         ));
     }
 
+    let observed_owners = order
+        .iter()
+        .map(|&index| {
+            owners[index]
+                .targets
+                .iter()
+                .all(|target| observed.contains(&target.name))
+        })
+        .collect();
     let ordered_owners = order
         .into_iter()
         .map(|index| {
@@ -513,6 +745,7 @@ fn order_owners(
         ordered_owners,
         order_by_target,
         held_targets,
+        observed_owners,
     })
 }
 

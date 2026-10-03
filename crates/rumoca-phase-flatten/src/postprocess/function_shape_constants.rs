@@ -11,6 +11,7 @@ use crate::{Context, FlattenError};
 pub(super) fn materialize_function_shape_constants(
     function: &mut rumoca_core::Function,
     ctx: &Context,
+    exposures: &[String],
 ) -> Result<(), FlattenError> {
     let local_def_ids = function
         .inputs
@@ -21,6 +22,7 @@ pub(super) fn materialize_function_shape_constants(
         .collect();
     let mut materializer = FunctionShapeConstantMaterializer {
         ctx,
+        exposures,
         local_def_ids,
         expansion_stack: Vec::new(),
     };
@@ -59,6 +61,9 @@ pub(super) fn materialize_function_shape_constants(
 
 struct FunctionShapeConstantMaterializer<'a> {
     ctx: &'a Context,
+    /// The packages that expose the function (see `function_exposures`): a
+    /// constant they give their own value takes that value.
+    exposures: &'a [String],
     local_def_ids: FxHashSet<DefId>,
     expansion_stack: Vec<DefId>,
 }
@@ -67,12 +72,15 @@ impl FunctionShapeConstantMaterializer<'_> {
     fn materialize_subscript(&mut self, subscript: &mut Subscript) -> Result<(), FlattenError> {
         if let Subscript::Expr { expr, span } = subscript {
             let rewritten = self.rewrite_expression(expr)?;
-            if let Expression::Literal {
-                value: rumoca_core::Literal::Integer(value),
-                span,
-            } = rewritten
+            // A shape whose materialized constants fold to one Integer (for
+            // example `size({"water", "air"}, 1)`) is that concrete extent.
+            if let Ok(rumoca_eval_flat::constant::Value::Integer(value)) =
+                rumoca_eval_flat::constant::eval_expr(
+                    &rewritten,
+                    &rumoca_eval_flat::constant::EvalContext::new(),
+                )
             {
-                *subscript = Subscript::Index { value, span };
+                *subscript = Subscript::Index { value, span: *span };
             } else {
                 **expr = rewritten;
                 debug_assert_eq!(expr.span(), Some(*span));
@@ -86,11 +94,29 @@ impl FunctionShapeConstantMaterializer<'_> {
         target: DefId,
         rendered_name: &str,
         span: Span,
-    ) -> Result<Expression, FlattenError> {
+    ) -> Result<Option<Expression>, FlattenError> {
+        if let Some(value) = super::function_exposures::exposed_constant_value(
+            self.ctx,
+            self.exposures,
+            target,
+            rendered_name,
+            span,
+        )? {
+            return Ok(Some(value.clone()));
+        }
+        // Without an exposing package that gives it a value, a declaration two
+        // packages give different values has no single value here: its shape
+        // stays symbolic rather than taking one package's value.
+        match self.ctx.constant_values_by_declaration.get(&target) {
+            Some(Some(value)) => return Ok(Some(value.clone())),
+            Some(None) => return Ok(None),
+            None => {}
+        }
         self.ctx
             .constant_values_by_def_id
             .get(&target)
             .cloned()
+            .map(Some)
             .ok_or_else(|| FlattenError::UnresolvedFlatReference {
                 name: rendered_name.to_owned(),
                 span,
@@ -147,7 +173,13 @@ impl FallibleExpressionRewriter for FunctionShapeConstantMaterializer<'_> {
             return Err(self.cycle_error(target, name.as_str(), span));
         }
 
-        let replacement = self.replacement_for(target, name.as_str(), span)?;
+        let Some(replacement) = self.replacement_for(target, name.as_str(), span)? else {
+            return Ok(Expression::VarRef {
+                name: name.clone(),
+                subscripts: rewritten_subscripts,
+                span,
+            });
+        };
         self.expansion_stack.push(target);
         let materialized = self.rewrite_expression(&replacement);
         let popped = self
@@ -206,8 +238,10 @@ mod tests {
 
         let mut left = function_with_shape("Left.makeState", left_id, left_span);
         let mut right = function_with_shape("Right.makeState", right_id, right_span);
-        materialize_function_shape_constants(&mut left, &ctx).expect("left shape materializes");
-        materialize_function_shape_constants(&mut right, &ctx).expect("right shape materializes");
+        materialize_function_shape_constants(&mut left, &ctx, &[])
+            .expect("left shape materializes");
+        materialize_function_shape_constants(&mut right, &ctx, &[])
+            .expect("right shape materializes");
 
         assert_shape(&left, 4, left_span);
         assert_shape(&right, 9, right_span);

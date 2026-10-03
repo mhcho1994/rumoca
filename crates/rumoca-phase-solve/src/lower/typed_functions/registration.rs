@@ -259,12 +259,17 @@ fn assertion_layout<'dae>(
             };
             direct_message_values.push((value, slots.len()));
             message_values.push((value, result_leaf_count + slots.len()));
-            slots.push(AssertionSlot::MessageValue(value_type));
+            let predicate = slots.len() - index;
+            slots.push(AssertionSlot::MessageValue {
+                value_type,
+                predicate,
+            });
         }
         registered.push(RegisteredAssertion {
             predicate_output: result_leaf_count + index,
             message: assertion.message,
             message_values: message_values.into_boxed_slice(),
+            level: assertion.level,
             provenance: assertion.provenance,
         });
     }
@@ -286,6 +291,7 @@ fn assertion_layout<'dae>(
                     .iter()
                     .map(|&(value, output)| (value, shift(output)))
                     .collect(),
+                level: assertion.level,
                 provenance: assertion.provenance,
             }
         }));

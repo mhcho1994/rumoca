@@ -56,6 +56,10 @@ pub enum DaeConstructionError {
         "event-generating relation in a structured equation requires a compact structured event owner"
     )]
     UnsupportedStructuredEvent { span: Span },
+    #[error(
+        "an assertion level must name a predefined `AssertionLevel` literal; another evaluable level expression has no checked lowering"
+    )]
+    UnsupportedAssertionLevel { span: Span },
     #[error("clock-domain analysis did not construct the required exact clock owner")]
     MissingClockDomainOwner { span: Span },
     #[error("{arena} exceeded its u32 identity capacity at {attempted_index}")]
@@ -253,6 +257,12 @@ pub enum DaeConstructionError {
     IncompleteModelEventTransaction { span: Span },
     #[error("an unconditional B.1c owner must contain exactly one `always` branch")]
     InvalidDiscreteBranchSet { span: Span },
+    #[error("an observed B.1c owner must be unstructured and contain exactly one `always` branch")]
+    InvalidObservedDiscreteOwner { span: Span },
+    #[error(
+        "separate algorithm statements write different targets of one B.1c owner, so their simultaneous activation has no checked owner"
+    )]
+    UnorderedSimultaneousStatements { span: Span },
     #[error(
         "B.1c target identity {target} reads not-yet-issued current discrete value {dependency}"
     )]
@@ -337,6 +347,7 @@ impl DaeConstructionError {
             | Self::InvalidClockedOperand { span, .. }
             | Self::InvalidExpressionForm { span }
             | Self::UnsupportedStructuredEvent { span }
+            | Self::UnsupportedAssertionLevel { span }
             | Self::MissingClockDomainOwner { span }
             | Self::CapacityExceeded { span, .. }
             | Self::UnknownId { span, .. }
@@ -390,6 +401,8 @@ impl DaeConstructionError {
             | Self::UndeclaredModelEventTarget { span, .. }
             | Self::IncompleteModelEventTransaction { span }
             | Self::InvalidDiscreteBranchSet { span }
+            | Self::InvalidObservedDiscreteOwner { span }
+            | Self::UnorderedSimultaneousStatements { span }
             | Self::UnissuedDiscreteDependency { span, .. }
             | Self::InvalidExternalSymbol { span, .. }
             | Self::InvalidExternalLinkage { span }

@@ -67,7 +67,10 @@ mod refresh_projection;
 mod relation_memory;
 mod seed_linearization;
 mod sensitivity;
+mod singular_mode;
 mod support;
+mod tangent_evaluators;
+mod warnings;
 use discrete_rows::PreparedStructuredDiscreteRows;
 pub use discrete_rows::SeededConditionMemory;
 #[cfg(test)]
@@ -96,6 +99,7 @@ use support::{
     validate_finite_runtime_output, validate_runtime_output_len, visible_value_index_error,
     zero_runtime_values,
 };
+use tangent_evaluators::{colored_tangent_evaluators, torn_tangent_evaluators};
 
 /// Backend-neutral callable produced from one checked Solve-IR expression
 /// block. Native execution adapters implement this contract; the runtime
@@ -473,6 +477,8 @@ pub struct SolveRuntime {
     failed_visible_rows: RefCell<BTreeSet<usize>>,
     compiled_event_action_rows: RefCell<FxHashMap<usize, Vec<CompiledDiscreteSpecialization>>>,
     failed_event_action_rows: RefCell<BTreeSet<usize>>,
+    /// Warning-level assertion sites reported so far (MLS §8.3.7).
+    warning_log: RefCell<warnings::WarningLog>,
     compiled_assignment_schedules: RefCell<
         FxHashMap<solve::RefreshSequenceId, Option<Rc<dyn CompiledSolveAssignmentSchedule>>>,
     >,
@@ -1005,6 +1011,7 @@ impl SolveRuntime {
             failed_visible_rows: RefCell::new(BTreeSet::new()),
             compiled_event_action_rows: RefCell::new(FxHashMap::default()),
             failed_event_action_rows: RefCell::new(BTreeSet::new()),
+            warning_log: RefCell::new(warnings::WarningLog::default()),
             compiled_assignment_schedules: RefCell::new(FxHashMap::default()),
             interpreted_assignment_schedules:
                 interpreted_schedules::InterpretedSchedules::construct(model)?,
@@ -1948,51 +1955,3 @@ fn validate_derivative_output_len(
 
 #[cfg(test)]
 mod tests;
-
-/// The tangent evaluator of each projection block's tearing over the
-/// solver-Y JVP rows `jvp`, aligned with `plan.blocks`.
-fn torn_tangent_evaluators(
-    plan: &solve::AlgebraicProjectionPlan,
-    jvp: &solve::ScalarProgramBlock,
-    compiled: bool,
-) -> Rc<[Option<rumoca_eval_solve::TornTangentEvaluator>]> {
-    // One-direction plans all read the same JVP rows; prepare them once.
-    let mut shared = None;
-    plan.blocks
-        .iter()
-        .map(|block| {
-            let tearing = block.tearing.as_ref()?;
-            // A backend-compiled JVP answers each direction natively, faster
-            // than the interpreted lane widening and with the same values.
-            let plan = if compiled {
-                solve::TornTangentPlan::derive_directional(tearing, jvp)
-            } else {
-                solve::TornTangentPlan::derive(tearing, jvp)
-            }
-            .ok()?;
-            rumoca_eval_solve::TornTangentEvaluator::sharing_directions(plan, jvp, &mut shared).ok()
-        })
-        .collect()
-}
-
-/// The colored tangent evaluator of each projection block's issued Jacobian
-/// application, aligned with `plan.blocks` and their structures.
-fn colored_tangent_evaluators(
-    plan: &solve::AlgebraicProjectionPlan,
-    structures: &solve::ContinuousStructuralArtifacts,
-) -> Rc<[Option<rumoca_eval_solve::ColoredTangentEvaluator>]> {
-    plan.blocks
-        .iter()
-        .zip(structures.algebraic_projection())
-        .map(|(block, structure)| {
-            if !rumoca_eval_solve::projection_policy::jacobian_sources().colored_lanes {
-                return None;
-            }
-            let application = structure.jacobian_application().filter(|application| {
-                application.rows() == block.rows && application.y_indices() == block.y_indices
-            })?;
-            let plan = solve::ColoredTangentPlan::derive(application).ok()?;
-            Some(rumoca_eval_solve::ColoredTangentEvaluator::new(plan))
-        })
-        .collect()
-}

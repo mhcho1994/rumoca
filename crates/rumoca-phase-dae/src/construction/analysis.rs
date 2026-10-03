@@ -2,6 +2,7 @@ mod clocks;
 mod comprehensions;
 mod delays;
 mod derived_parameters;
+mod discrete_time_definitions;
 mod discrete_values;
 mod equation_partitions;
 mod event_conditions;
@@ -17,6 +18,7 @@ mod function_definitions;
 mod function_externals;
 mod function_impurity;
 mod function_loops;
+mod function_native_lapack;
 mod function_ranges;
 mod function_record_assemblies;
 mod function_reductions;
@@ -32,7 +34,9 @@ mod model_algorithms;
 mod model_expression_owners;
 mod model_roles;
 mod multi_output_equations;
+mod observed_reads;
 mod record_array_fields;
+mod record_equation_elements;
 mod record_equations;
 mod sample_aliases;
 mod source_balance;
@@ -60,8 +64,8 @@ pub(super) use discrete_values::DiscreteValueTopologyPlan;
 use discrete_values::analyze_discrete_value_topology;
 pub(super) use equation_partitions::{
     AggregateDiscreteConnections, DiscreteValueAssignmentPlan, EquationPartition,
-    discrete_value_assignment, equation_partition, structured_discrete_assignments,
-    structured_discrete_element_assignments,
+    discrete_element_array_body, discrete_value_assignment, equation_partition,
+    structured_discrete_assignments, structured_discrete_element_assignments,
 };
 use equation_partitions::{
     aggregate_discrete_connections, defined_discrete_targets, discrete_connection_ranks,
@@ -120,7 +124,8 @@ use history_operators::analyze_history_operators;
 pub(super) use initial_algorithms::InitialDiscreteValue;
 use initial_algorithms::{
     InitialAlgorithmAnalysis, analyze_initial_algorithms, assertion_call,
-    claim_initial_discrete_equations, reject_unsupported_initial_algorithm_statements,
+    claim_initial_discrete_equations, claimed_initial_families,
+    reject_unsupported_initial_algorithm_statements,
 };
 use loop_compaction::compact_function_loops;
 use model_algorithm_calls::analyze_event_function_calls;
@@ -142,11 +147,16 @@ pub(super) use record_array_fields::{RecordArrayFieldPlan, RecordArrayFieldPlans
 use record_array_fields::{
     analyze_record_array_fields, validate_record_array_field_runtime_coordinates,
 };
+pub(super) use record_equations::RecordFieldSystem;
 use record_equations::analyze_record_equations;
 use sample_aliases::analyze_sample_aliases;
 use source_balance::{SourceBalanceInput, source_balance};
-pub(super) use structured_families::materialized_discrete_real_family;
-use structured_families::validate_structured_families;
+use structured_families::{
+    PartitionFamilies, record_equality_families, validate_structured_families,
+};
+pub(super) use structured_families::{
+    materialized_discrete_real_family, materialized_discrete_value_rows,
+};
 use unexecuted_branches::{check_function_assignment_shapes, check_unexecuted_branches};
 use when_chains::validate_when_chains;
 
@@ -159,9 +169,15 @@ pub(super) struct Analysis {
     pub(super) balance: BalanceDetail,
     pub(super) continuous_family_rows: HashSet<usize>,
     pub(super) initialization_family_rows: HashSet<usize>,
+    /// Families that are a second view of whole-record equality rows, which keep
+    /// their record-equation owners.
+    pub(super) record_equality_families: HashSet<usize>,
+    pub(super) initial_record_equality_families: HashSet<usize>,
     /// Scalar initial-equation rows represented by typed initial discrete-value
     /// definitions rather than numeric initialization residuals.
     pub(super) initial_discrete_equation_rows: HashSet<usize>,
+    /// Initialization families whose rows are all such definitions.
+    pub(super) initial_discrete_families: HashSet<usize>,
     pub(super) initial_parameter_equations:
         Vec<initial_parameter_equations::InitialParameterEquation>,
     pub(super) sample_lattices: Vec<(Span, PeriodicClockSchedule)>,
@@ -224,6 +240,38 @@ struct SourceBalanceAnalysis {
     assigned_discrete_targets: HashSet<VarName>,
 }
 
+/// MLS §12.4.4 definedness assertions of a function's top-level sequence.
+///
+/// "It is an error to use or return an uninitialized variable": a value a
+/// top-level conditional defines on some paths only is joined with a dead
+/// operand on the other paths, and each top-level use of it, or its return
+/// as an output, is preceded by a call-scoped assertion that the executed
+/// path defined it. Indices are positions in the top-level statement
+/// sequence, the same positions construction lowers.
+#[derive(Default)]
+pub(super) struct FunctionDefinednessPlan {
+    /// Path-partial values asserted defined before the statement (or the
+    /// assembly group it leads) at this index runs.
+    pub(super) asserted_reads: HashMap<usize, Vec<VarName>>,
+    /// Targets the conditional at this index leaves path-partial.
+    pub(super) partial_joins: HashMap<usize, Vec<PartialJoinPlan>>,
+    /// Path-partial outputs asserted defined when the function returns.
+    pub(super) returned: Vec<VarName>,
+}
+
+/// One target a top-level conditional leaves path-partial.
+pub(super) struct PartialJoinPlan {
+    pub(super) target: VarName,
+    /// The target was already path-partial before the conditional, so the
+    /// paths that do not write it keep its earlier definedness predicate.
+    pub(super) was_partial: bool,
+    /// The typed value the join takes on paths that never write the target.
+    /// MLS §12.4.4 makes every use of it there an error owned by the
+    /// definedness assertion, so the seed is never observed; a literal
+    /// keeps the dead operand from evaluating any other path's computation.
+    pub(super) seed: FunctionValueSeed,
+}
+
 pub(super) enum FunctionPlan {
     Statements {
         /// The source statements the plans were built from. Exact tensor-native
@@ -236,6 +284,7 @@ pub(super) enum FunctionPlan {
         /// certificate proves total, and values with a zero extent, which have
         /// no element to write (MLS §12.4.4).
         entry_seeds: Vec<(VarName, FunctionValueSeed)>,
+        definedness: FunctionDefinednessPlan,
     },
     GuardedReturn {
         branches: Vec<Vec<FunctionStatementPlan>>,
@@ -246,6 +295,13 @@ pub(super) enum FunctionPlan {
         initial: Vec<FunctionStatementPlan>,
         result: VarName,
         reduction: FunctionIntegerReduction,
+    },
+    /// LAPACK `dgesv` with one right-hand side, owned as a checked linear
+    /// solve (see `function_native_lapack`).
+    NativeLinearSolve {
+        matrix: VarName,
+        solution: VarName,
+        info: VarName,
     },
     /// MLS §12.9 external interface; the function has no Modelica body.
     External(ExternalFunctionPlan),
@@ -542,7 +598,7 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         FunctionShapeAnalysis::analyze_model(flat, &constants, Some(&evaluable))?;
     let record_array_fields = Arc::clone(function_shapes.record_array_fields());
     let function_plans = validate_functions(flat, &function_shapes)?;
-    let record_equations = analyze_record_equation_sets(flat)?;
+    let record_equations = analyze_record_equation_sets(flat, function_shapes.model_values())?;
     let expression_support = analyze_expression_support(flat, &constants)?;
     let clocks = analyze_clocks(flat, &constants)?;
     let ModelRoles {
@@ -564,17 +620,17 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
     let history_operators = analyze_history_operators(flat, &roles)?;
     let multi_output_equations =
         analyze_multi_output_equation_sets(flat, &expression_roles, &states, &function_shapes)?;
-    let (continuous_family_rows, initialization_family_rows) =
-        validate_expressions_and_structured_rows(ExpressionValidationInput {
-            flat,
-            roles: &roles,
-            expression_roles: &expression_roles,
-            states: &states,
-            record_array_fields: &record_array_fields,
-            values: function_shapes.model_values(),
-            multi_output_equations: &multi_output_equations.continuous,
-            initial_multi_output_equations: &multi_output_equations.initialization,
-        })?;
+    let family_rows = validate_expressions_and_structured_rows(ExpressionValidationInput {
+        flat,
+        roles: &roles,
+        expression_roles: &expression_roles,
+        states: &states,
+        record_array_fields: &record_array_fields,
+        values: function_shapes.model_values(),
+        multi_output_equations: &multi_output_equations.continuous,
+        initial_multi_output_equations: &multi_output_equations.initialization,
+        record_equations: &record_equations,
+    })?;
     let (mut sample_lattices, model_algorithm_plans) = analyze_event_algorithms(
         flat,
         &roles,
@@ -584,7 +640,7 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         &function_shapes,
     )?;
     let (discrete_connection_ranks, aggregate_discrete_connections, discrete_value_topology) =
-        analyze_discrete_connections(flat, &roles)?;
+        analyze_discrete_connections(flat, &roles, &record_equations.continuous)?;
     let initial = analyze_initial_owners(
         flat,
         &roles,
@@ -624,8 +680,11 @@ pub(super) fn analyze(flat: &flat::Model) -> Result<Analysis, ToDaeError> {
         history_operators,
         roles,
         balance: balance.detail,
-        continuous_family_rows,
-        initialization_family_rows,
+        continuous_family_rows: family_rows.continuous,
+        initialization_family_rows: family_rows.initialization,
+        record_equality_families: family_rows.continuous_record_families,
+        initial_record_equality_families: family_rows.initialization_record_families,
+        initial_discrete_families: claimed_initial_families(flat, &initial.discrete_equation_rows),
         initial_discrete_equation_rows: initial.discrete_equation_rows,
         initial_parameter_equations: initial.parameter_equations,
         sample_lattices,
@@ -673,6 +732,7 @@ struct ExpressionValidationInput<'a> {
     values: &'a ShapeEnvironment,
     multi_output_equations: &'a HashMap<usize, MultiOutputEquationPlan>,
     initial_multi_output_equations: &'a HashMap<usize, MultiOutputEquationPlan>,
+    record_equations: &'a RecordEquationSets,
 }
 
 struct ExpressionSupportPlans {
@@ -695,24 +755,55 @@ struct RecordEquationSets {
     initialization: HashMap<usize, RecordEquationPlan>,
 }
 
-fn analyze_record_equation_sets(flat: &flat::Model) -> Result<RecordEquationSets, ToDaeError> {
+fn analyze_record_equation_sets(
+    flat: &flat::Model,
+    values: &ShapeEnvironment,
+) -> Result<RecordEquationSets, ToDaeError> {
     Ok(RecordEquationSets {
-        continuous: analyze_record_equations(flat, &flat.equations)?,
-        initialization: analyze_record_equations(flat, &flat.initial_equations)?,
+        continuous: analyze_record_equations(flat, &flat.equations, values)?,
+        initialization: analyze_record_equations(flat, &flat.initial_equations, values)?,
     })
+}
+
+/// Rows whose residual is not lowered as written: a multi-output call
+/// equation, or a whole-record equality whose leaf owners all equate field
+/// coordinates. Their plans proved the operands' exact identities, so the
+/// written residual is not validated as an expression.
+fn plan_owned_rows(
+    multi_output: &HashMap<usize, MultiOutputEquationPlan>,
+    records: &HashMap<usize, RecordEquationPlan>,
+) -> HashSet<usize> {
+    multi_output
+        .keys()
+        .copied()
+        .chain(records.iter().filter_map(|(row, plan)| {
+            plan.fields
+                .iter()
+                .all(|field| matches!(field.value, RecordEquationFieldValue::Coordinate(_)))
+                .then_some(*row)
+        }))
+        .collect()
 }
 
 fn validate_expressions_and_structured_rows(
     input: ExpressionValidationInput<'_>,
-) -> Result<(HashSet<usize>, HashSet<usize>), ToDaeError> {
+) -> Result<StructuredFamilyRows, ToDaeError> {
+    let continuous_owned = plan_owned_rows(
+        input.multi_output_equations,
+        &input.record_equations.continuous,
+    );
+    let initialization_owned = plan_owned_rows(
+        input.initial_multi_output_equations,
+        &input.record_equations.initialization,
+    );
     validate_model_expressions(
         input.flat,
         input.expression_roles,
         input.states,
         input.record_array_fields,
         input.values,
-        input.multi_output_equations,
-        input.initial_multi_output_equations,
+        &continuous_owned,
+        &initialization_owned,
     )?;
     analyze_structured_family_rows(
         input.flat,
@@ -721,6 +812,7 @@ fn validate_expressions_and_structured_rows(
         input.states,
         input.record_array_fields,
         input.values,
+        input.record_equations,
     )
 }
 
@@ -766,6 +858,13 @@ fn validate_runtime_coordinates(
     validate_record_array_field_runtime_coordinates(flat, record_array_fields, roles)
 }
 
+struct StructuredFamilyRows {
+    continuous: HashSet<usize>,
+    initialization: HashSet<usize>,
+    continuous_record_families: HashSet<usize>,
+    initialization_record_families: HashSet<usize>,
+}
+
 fn analyze_structured_family_rows(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
@@ -773,10 +872,19 @@ fn analyze_structured_family_rows(
     states: &HashSet<VarName>,
     record_array_fields: &RecordArrayFieldPlans,
     values: &ShapeEnvironment,
-) -> Result<(HashSet<usize>, HashSet<usize>), ToDaeError> {
+    records: &RecordEquationSets,
+) -> Result<StructuredFamilyRows, ToDaeError> {
+    let continuous_record_families =
+        record_equality_families(&flat.structured_equations, &records.continuous);
+    let initialization_record_families =
+        record_equality_families(&flat.initial_structured_equations, &records.initialization);
     let continuous = validate_structured_families(
-        &flat.structured_equations,
-        flat.equations.len(),
+        PartitionFamilies {
+            families: &flat.structured_equations,
+            equations: &flat.equations,
+            initialization: false,
+            excluded: &continuous_record_families,
+        },
         roles,
         expression_roles,
         states,
@@ -784,15 +892,24 @@ fn analyze_structured_family_rows(
         values,
     )?;
     let initialization = validate_structured_families(
-        &flat.initial_structured_equations,
-        flat.initial_equations.len(),
+        PartitionFamilies {
+            families: &flat.initial_structured_equations,
+            equations: &flat.initial_equations,
+            initialization: true,
+            excluded: &initialization_record_families,
+        },
         roles,
         expression_roles,
         states,
         record_array_fields,
         values,
     )?;
-    Ok((continuous, initialization))
+    Ok(StructuredFamilyRows {
+        continuous,
+        initialization,
+        continuous_record_families,
+        initialization_record_families,
+    })
 }
 
 fn analyze_expression_event_ownership(
@@ -901,6 +1018,7 @@ fn validate_source_model(flat: &flat::Model) -> Result<(), ToDaeError> {
 fn analyze_discrete_connections(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
+    record_equations: &HashMap<usize, RecordEquationPlan>,
 ) -> Result<
     (
         HashMap<VarName, usize>,
@@ -911,7 +1029,8 @@ fn analyze_discrete_connections(
 > {
     let ranks = discrete_connection_ranks(flat, roles);
     let aggregates = aggregate_discrete_connections(flat, roles, &ranks)?;
-    let topology = analyze_discrete_value_topology(flat, roles, &ranks, &aggregates)?;
+    let topology =
+        analyze_discrete_value_topology(flat, roles, &ranks, &aggregates, record_equations)?;
     Ok((ranks, aggregates, topology))
 }
 
@@ -1056,8 +1175,8 @@ fn validate_model_expressions(
     states: &HashSet<VarName>,
     record_array_fields: &RecordArrayFieldPlans,
     model_values: &ShapeEnvironment,
-    multi_output_equations: &HashMap<usize, MultiOutputEquationPlan>,
-    initial_multi_output_equations: &HashMap<usize, MultiOutputEquationPlan>,
+    owned_rows: &HashSet<usize>,
+    initial_owned_rows: &HashSet<usize>,
 ) -> Result<(), ToDaeError> {
     for variable in flat.variables.values() {
         for expression in variable_attribute_expressions(variable) {
@@ -1078,7 +1197,7 @@ fn validate_model_expressions(
         }
     }
     for (row, equation) in flat.equations.iter().enumerate() {
-        if multi_output_equations.contains_key(&row) {
+        if owned_rows.contains(&row) {
             continue;
         }
         let expression = &equation.residual;
@@ -1092,7 +1211,7 @@ fn validate_model_expressions(
         validate_known_function_calls(expression, flat)?;
     }
     for (row, equation) in flat.initial_equations.iter().enumerate() {
-        if initial_multi_output_equations.contains_key(&row) {
+        if initial_owned_rows.contains(&row) {
             continue;
         }
         let expression = &equation.residual;
@@ -1157,8 +1276,13 @@ fn analyze_source_balance(
         connection_ranks,
         aggregate_connections,
     } = input;
-    let assigned_discrete_targets =
-        defined_discrete_targets(flat, roles, connection_ranks, aggregate_connections)?;
+    let assigned_discrete_targets = defined_discrete_targets(
+        flat,
+        roles,
+        connection_ranks,
+        aggregate_connections,
+        record_equations,
+    )?;
     let mut non_runtime_rows = clock_equation_rows.clone();
     non_runtime_rows.extend(derived_parameter_rows);
     let detail = source_balance(SourceBalanceInput {

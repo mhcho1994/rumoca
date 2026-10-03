@@ -135,6 +135,8 @@ pub(super) enum FunctionStatementInput {
     Assertion {
         condition: u32,
         message: u32,
+        #[serde(default)]
+        level: crate::AssertionLevel,
         #[serde(deserialize_with = "deserialize_provenance")]
         provenance: DaeProvenance,
     },
@@ -260,6 +262,7 @@ pub(super) struct DiscreteValueOwnerWire<Targets = Vec<u32>> {
     pub(super) targets: Targets,
     pub(super) branches: Vec<DiscreteValueBranchWire>,
     pub(super) structure: Option<StructuredDiscreteValueWire>,
+    pub(super) observed: bool,
     #[serde(deserialize_with = "deserialize_provenance")]
     pub(super) provenance: DaeProvenance,
 }
@@ -338,6 +341,7 @@ pub(super) fn discrete_value_owner_output(
                         domain: structure.domain,
                         scalar_view: structure.scalar_view,
                     }),
+                observed: owner.observed,
                 provenance: owner.provenance,
             }
         })
@@ -424,7 +428,8 @@ pub(super) struct TimeEventEntryWire {
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum EventActionKindWire {
-    Assert { message: u32, level: Option<u32> },
+    Assert { message: u32 },
+    Warning { message: u32, condition: u32 },
     Terminate { message: u32 },
     Reinitialize { state: u32, value: u32 },
 }

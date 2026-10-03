@@ -1007,13 +1007,9 @@ pub(crate) fn finalize_flat_model(
     normalize_record_array_field_access_bindings(flat);
     drop_invalid_field_access_bindings(flat);
     propagate_unexpanded_record_array_dims(flat, overlay);
-    let assertion_error_literal =
-        tree.scope_tree
-            .predefined_member(&rumoca_core::ComponentPath::from_parts([
-                "AssertionLevel",
-                "error",
-            ]));
-    constant_injection::fold_structural_initial_asserts(flat, ctx, assertion_error_literal)?;
+    let assertion_levels = constant_injection::predefined_assertion_levels(tree);
+    constant_injection::settle_assertion_levels(flat, assertion_levels);
+    constant_injection::fold_structural_initial_asserts(flat, ctx, assertion_levels.error)?;
     flat.oc_break_edge_scalar_count = vcg::compute_break_edge_scalar_count(
         &flatten_graph.vcg_data.branches,
         &flatten_graph.optional_edges,
@@ -1060,6 +1056,7 @@ pub(crate) fn finalize_flat_model(
     // source signatures. Record-field bindings belong to the constructor and
     // must not be copied onto the scalar ABI parameters created below.
     functions::materialize_flat_function_call_args(flat)?;
+    functions::specialize_function_arguments(flat)?;
     // Record parameter signatures and every call site must change together.
     // Run this only after the rewrite fixed point: earlier lowering allowed a
     // later rewrite to reintroduce source-shaped record arguments against an

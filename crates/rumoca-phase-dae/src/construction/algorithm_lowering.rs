@@ -30,7 +30,7 @@ struct AlgorithmOwner<'dae> {
 impl<'dae> AlgorithmOwner<'dae> {
     /// The activation every statement beneath this owner executes under.
     ///
-    /// MLS §11.1 runs the statements of an algorithm section that are not
+    /// MLS §11.1.2 runs the statements of an algorithm section that are not
     /// inside a `when` every time the section runs, so a statement written
     /// outside every branch does not lack an activation — its activation is
     /// `true`. Reading it through this one accessor is what keeps the discrete
@@ -61,6 +61,7 @@ fn unconditional_algorithm_activation<'dae>(
         )?,
         always: true,
         parent_activation: None,
+        statement: None,
     })
 }
 
@@ -71,10 +72,6 @@ pub(super) struct ModelAlgorithmsRequest<'scope, 'shape, 'dae> {
     pub(super) topology: &'scope DiscreteValueTopologyPlan,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "exhaustive ModelAlgorithmPlan lowering keeps every checked plan variant visible"
-)]
 pub(super) fn lower_algorithms<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     discrete_values: &mut DiscreteValueStaging<'dae>,
@@ -85,124 +82,174 @@ pub(super) fn lower_algorithms<'dae>(
     // consumer is allowed to precede its producer in Flat order; the unique
     // clock owner is an analysis fact, not an artifact of lowering order.
     for (algorithm, plan) in request.flat.algorithms.iter().zip(request.plans) {
-        let environment = match plan {
-            ModelAlgorithmPlan::Event {
-                tensor_loops,
-                function_calls,
-            } => AlgorithmEnvironment {
-                tensor_loops: Some(tensor_loops),
-                function_calls: Some(function_calls),
-                ..request.environment
-            },
-            _ => request.environment,
-        };
-        preclaim_algorithm_clock_targets(construction, environment, &algorithm.statements, None)?;
+        preclaim_algorithm_plan(construction, request.environment, algorithm, plan)?;
     }
     for (algorithm, plan) in request.flat.algorithms.iter().zip(request.plans) {
-        let owner_provenance =
-            dae::DaeProvenance::generated(dae::DaeGeneration::AlgorithmEquation, algorithm.span)?;
-        let discrete_owner = discrete_values.owner(
-            owner_provenance,
-            model_algorithm_targets(request.flat, algorithm),
-            request.environment.coordinates,
-            request.topology,
-        )?;
-        let mut lowering = ModelAlgorithmLowering {
-            construction,
-            discrete_values,
-            discrete_owner,
-            coordinates: request.environment.coordinates,
-            functions: request.environment.functions,
-        };
-        match plan {
-            ModelAlgorithmPlan::Assertions { assertions } => {
-                super::lower_assertions(
-                    lowering.construction,
-                    lowering.coordinates,
-                    lowering.functions,
-                    request.environment.sample_lattices,
-                    assertions,
-                )?;
+        lower_algorithm_plan(construction, discrete_values, &request, algorithm, plan)?;
+    }
+    Ok(())
+}
+
+fn preclaim_algorithm_plan<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    environment: AlgorithmEnvironment<'_, '_, 'dae>,
+    algorithm: &flat::Algorithm,
+    plan: &ModelAlgorithmPlan,
+) -> Result<(), dae::DaeConstructionError> {
+    let environment = match plan {
+        ModelAlgorithmPlan::Sections { sections } => {
+            for (section, plan) in sections {
+                preclaim_algorithm_plan(construction, environment, section, plan)?;
             }
-            ModelAlgorithmPlan::Declarative { target } => {
-                lower_declarative_model_algorithm(&mut lowering, algorithm, target)?;
-            }
-            ModelAlgorithmPlan::TotalArrayDefinition {
+            return Ok(());
+        }
+        ModelAlgorithmPlan::Event {
+            tensor_loops,
+            function_calls,
+        } => AlgorithmEnvironment {
+            tensor_loops: Some(tensor_loops),
+            function_calls: Some(function_calls),
+            ..environment
+        },
+        _ => environment,
+    };
+    preclaim_algorithm_clock_targets(construction, environment, &algorithm.statements, None)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "exhaustive ModelAlgorithmPlan lowering keeps every checked plan variant visible"
+)]
+fn lower_algorithm_plan<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    discrete_values: &mut DiscreteValueStaging<'dae>,
+    request: &ModelAlgorithmsRequest<'_, '_, 'dae>,
+    algorithm: &flat::Algorithm,
+    plan: &ModelAlgorithmPlan,
+) -> Result<(), dae::DaeConstructionError> {
+    if let ModelAlgorithmPlan::Sections { sections } = plan {
+        for (section, plan) in sections {
+            lower_algorithm_plan(construction, discrete_values, request, section, plan)?;
+        }
+        return Ok(());
+    }
+    let owner_provenance =
+        dae::DaeProvenance::generated(dae::DaeGeneration::AlgorithmEquation, algorithm.span)?;
+    let discrete_owner = discrete_values.owner(
+        owner_provenance,
+        model_algorithm_targets(request.flat, algorithm),
+        request.environment.coordinates,
+        request.topology,
+    )?;
+    let mut lowering = ModelAlgorithmLowering {
+        construction,
+        discrete_values,
+        discrete_owner,
+        coordinates: request.environment.coordinates,
+        functions: request.environment.functions,
+    };
+    match plan {
+        ModelAlgorithmPlan::Sections { .. } => {
+            unreachable!("sections are lowered one section at a time above")
+        }
+        ModelAlgorithmPlan::Assertions { assertions } => {
+            super::lower_assertions(
+                lowering.construction,
+                lowering.coordinates,
+                lowering.functions,
+                request.environment.sample_lattices,
+                assertions,
+            )?;
+        }
+        ModelAlgorithmPlan::Declarative { target } => {
+            lower_declarative_model_algorithm(&mut lowering, algorithm, target)?;
+        }
+        ModelAlgorithmPlan::TotalArrayDefinition {
+            target,
+            domain,
+            binder_spans,
+        } => {
+            lower_total_array_model_algorithm(
+                &mut lowering,
+                algorithm,
                 target,
                 domain,
                 binder_spans,
-            } => {
-                lower_total_array_model_algorithm(
-                    &mut lowering,
-                    algorithm,
-                    target,
-                    domain,
-                    binder_spans,
-                )?;
-            }
-            ModelAlgorithmPlan::SeparatedArraySum {
+            )?;
+        }
+        ModelAlgorithmPlan::SeparatedArraySum {
+            array_target,
+            scalar_target,
+            domain,
+            binder_spans,
+        } => {
+            lower_separated_array_sum_model_algorithm(
+                &mut lowering,
+                algorithm,
                 array_target,
                 scalar_target,
                 domain,
                 binder_spans,
-            } => {
-                lower_separated_array_sum_model_algorithm(
-                    &mut lowering,
-                    algorithm,
-                    array_target,
-                    scalar_target,
-                    domain,
-                    binder_spans,
-                )?;
+            )?;
+        }
+        ModelAlgorithmPlan::Event {
+            tensor_loops,
+            function_calls,
+        } => {
+            let targets = model_algorithm_targets(request.flat, algorithm);
+            let mut values = seed_event_algorithm_values(
+                lowering.construction,
+                request.environment.coordinates,
+                targets.iter().cloned(),
+                algorithm.span,
+            )?;
+            let transaction_steps = RefCell::new(Vec::new());
+            let environment = AlgorithmEnvironment {
+                tensor_loops: Some(tensor_loops),
+                function_calls: Some(function_calls),
+                transaction_steps: Some(&transaction_steps),
+                ..request.environment
+            };
+            let unconditional =
+                unconditional_algorithm_activation(lowering.construction, algorithm.span)?;
+            lower_algorithm_statements(
+                lowering.construction,
+                lowering.discrete_values,
+                environment,
+                AlgorithmOwner {
+                    discrete_owner,
+                    parent: None,
+                    unconditional,
+                    span: algorithm.span,
+                },
+                &mut values,
+                &algorithm.statements,
+            )?;
+            if targets.is_empty() {
+                debug_assert!(transaction_steps.borrow().is_empty());
+                return Ok(());
             }
-            ModelAlgorithmPlan::Event {
-                tensor_loops,
-                function_calls,
-            } => {
-                let targets = model_algorithm_targets(request.flat, algorithm);
-                let mut values = seed_event_algorithm_values(
-                    lowering.construction,
-                    request.environment.coordinates,
-                    targets.iter().cloned(),
-                    algorithm.span,
-                )?;
-                let transaction_steps = RefCell::new(Vec::new());
-                let environment = AlgorithmEnvironment {
-                    tensor_loops: Some(tensor_loops),
-                    function_calls: Some(function_calls),
-                    transaction_steps: Some(&transaction_steps),
-                    ..request.environment
-                };
-                let unconditional =
-                    unconditional_algorithm_activation(lowering.construction, algorithm.span)?;
-                lower_algorithm_statements(
-                    lowering.construction,
-                    lowering.discrete_values,
-                    environment,
-                    AlgorithmOwner {
-                        discrete_owner,
-                        parent: None,
-                        unconditional,
-                        span: algorithm.span,
-                    },
-                    &mut values,
-                    &algorithm.statements,
-                )?;
-                if targets.is_empty() {
-                    debug_assert!(transaction_steps.borrow().is_empty());
-                    continue;
-                }
-                let transaction_targets = targets
-                    .into_iter()
-                    .map(|target| model_event_target(request.environment.coordinates[&target]));
-                lowering.construction.model_events(|events| {
-                    events.transaction(
-                        transaction_targets,
-                        transaction_steps.into_inner(),
-                        owner_provenance,
-                    )
-                })?;
+            // A model-event transaction is the atomic owner of a clocked
+            // section (MLS §16.5). An unclocked section is owned by the B.1c
+            // owners and discrete `Real` equations its statements already
+            // issued (MLS §11.1.2, Appendix B), so it has no transaction.
+            if !transaction_steps
+                .borrow()
+                .iter()
+                .any(|step| step.clock().is_some())
+            {
+                return Ok(());
             }
+            let transaction_targets = targets
+                .into_iter()
+                .map(|target| model_event_target(request.environment.coordinates[&target]));
+            lowering.construction.model_events(|events| {
+                events.transaction(
+                    transaction_targets,
+                    transaction_steps.into_inner(),
+                    owner_provenance,
+                )
+            })?;
         }
     }
     Ok(())
@@ -571,6 +618,34 @@ fn lower_algorithm_assertion<'dae>(
     level: Option<&Expression>,
     span: Span,
 ) -> Result<(), dae::DaeConstructionError> {
+    let activation = owner.activation();
+    let provenance = dae::DaeProvenance::source(span)?;
+    if settled_assertion_level(level, span)? == dae::AssertionLevel::Warning {
+        let holds = lower_expression(
+            construction,
+            environment.coordinates,
+            environment.functions,
+            condition,
+            None,
+        )?;
+        let message = lower_expression(
+            construction,
+            environment.coordinates,
+            environment.functions,
+            message,
+            None,
+        )?;
+        construction.events(|events| {
+            events.warning(
+                activation.trigger,
+                activation.condition,
+                holds,
+                message,
+                provenance,
+            )
+        })?;
+        return Ok(());
+    }
     let (condition, _) = lower_condition(
         construction,
         environment.coordinates,
@@ -579,7 +654,6 @@ fn lower_algorithm_assertion<'dae>(
         condition,
     )?;
     let failed = negate_condition(construction, condition, span)?;
-    let activation = owner.activation();
     // An unconditional activation contributes nothing to conjoin: the failure
     // condition alone is the action guard.
     let action_guard = if activation.always {
@@ -595,16 +669,7 @@ fn lower_algorithm_assertion<'dae>(
         message,
         None,
     )?;
-    let level = lower_optional_expression(
-        construction,
-        environment.coordinates,
-        environment.functions,
-        level,
-    )?;
-    let provenance = dae::DaeProvenance::source(span)?;
-    construction.events(|events| {
-        events.assert_with_level(trigger, action_guard, message, level, provenance)
-    })?;
+    construction.events(|events| events.assert(trigger, action_guard, message, provenance))?;
     Ok(())
 }
 
@@ -896,7 +961,11 @@ fn algorithm_if_guard<'dae>(
             owner_clock: parent.owner_clock.or(owner_clock),
             branch_provenance,
             always: false,
-            parent_activation: Some((parent.trigger, parent.condition)),
+            parent_activation: Some(ParentActivation::When {
+                trigger: parent.trigger,
+                guard: parent.condition,
+            }),
+            statement: parent.statement,
         }),
         None => Ok(EventGuard {
             trigger: available,
@@ -904,7 +973,8 @@ fn algorithm_if_guard<'dae>(
             owner_clock,
             branch_provenance,
             always: false,
-            parent_activation: None,
+            parent_activation: Some(ParentActivation::Section),
+            statement: Some(span),
         }),
     }
 }
@@ -991,7 +1061,11 @@ fn lower_algorithm_when<'dae>(
                         .expect("analysis proves algorithm condition provenance"),
                 )?,
                 always: false,
-                parent_activation: Some((parent.trigger, parent.condition)),
+                parent_activation: Some(ParentActivation::When {
+                    trigger: parent.trigger,
+                    guard: parent.condition,
+                }),
+                statement: parent.statement,
             },
             None => EventGuard {
                 trigger: available,
@@ -1004,7 +1078,8 @@ fn lower_algorithm_when<'dae>(
                         .expect("analysis proves algorithm condition provenance"),
                 )?,
                 always: false,
-                parent_activation: None,
+                parent_activation: Some(ParentActivation::Section),
+                statement: Some(span),
             },
         };
         guarded_blocks.push((block, guard));
