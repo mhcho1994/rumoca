@@ -180,23 +180,42 @@ impl CompiledJacobianV {
         &self,
         application: &rumoca_ir_solve::ProjectionJacobianApplication,
     ) -> Result<CompiledProjectionJacobian, CompileError> {
-        if !self
-            .source
-            .shares_program_owner(application.canonical_source())
-        {
-            return Err(CompileError::Input(
-                "projection application belongs to a different scalar-program owner".into(),
-            ));
+        let mut prepared = self.prepare_projections(&[application])?;
+        Ok(prepared.remove(0))
+    }
+
+    /// Retain exact colored applications of this compiled source owner, all
+    /// compiled into its one projection module and finalized together.
+    pub fn prepare_projections(
+        &self,
+        applications: &[&rumoca_ir_solve::ProjectionJacobianApplication],
+    ) -> Result<Vec<CompiledProjectionJacobian>, CompileError> {
+        if applications.is_empty() {
+            return Ok(Vec::new());
         }
-        let jit = if self.source.shares_program_owner(application.source()) {
-            self.jit.clone()
-        } else {
-            Rc::new(self.jit.compile_projection_rows(
-                application.source().programs(),
-                application.block_index(),
-            )?)
-        };
-        CompiledProjectionJacobian::new(jit, application.clone(), &self.projections)
+        let prepared = applications
+            .iter()
+            .map(|application| {
+                if !self
+                    .source
+                    .shares_program_owner(application.canonical_source())
+                {
+                    return Err(CompileError::Input(
+                        "projection application belongs to a different scalar-program owner".into(),
+                    ));
+                }
+                let jit = if self.source.shares_program_owner(application.source()) {
+                    self.jit.clone()
+                } else {
+                    Rc::new(self.jit.compile_projection_rows(
+                        application.source().programs(),
+                        application.block_index(),
+                    )?)
+                };
+                Ok((jit, (*application).clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        CompiledProjectionJacobian::new_all(prepared, &self.projections)
     }
     /// Execute one existing program once, retaining all local outputs.
     pub fn call_program_outputs(
@@ -208,6 +227,19 @@ impl CompiledJacobianV {
     ) -> Result<(), CompileError> {
         self.jit
             .call_program_outputs(program, inputs, external_tables, out)
+    }
+
+    /// Output `offset` of each program at `coordinates`, in order, into `out`:
+    /// what [`Self::call_program_output`] returns one call at a time.
+    pub fn call_program_outputs_at(
+        &self,
+        coordinates: &[(usize, usize)],
+        inputs: rumoca_eval_solve::JacobianEvalInputs<'_>,
+        external_tables: &[ExternalTableData],
+        out: &mut [f64],
+    ) -> Result<(), CompileError> {
+        self.jit
+            .call_program_outputs_at(coordinates, inputs, external_tables, out)
     }
 
     /// Execute one output of one compiled program, using the prepared scalar
@@ -369,6 +401,20 @@ impl CompiledExpressionRows {
     ) -> Result<bool, CompileError> {
         self.jit
             .call_program_outputs(program, y, p, t, external_tables, out)
+    }
+
+    /// Output `offset` of each program at `coordinates`, in order, into `out`:
+    /// what [`Self::call_program_output`] returns one call at a time. `false`
+    /// declines before any execution exactly when those calls would decline.
+    pub fn call_program_outputs_at(
+        &self,
+        coordinates: &[(usize, usize)],
+        inputs: (&[f64], &[f64], f64),
+        external_tables: &[ExternalTableData],
+        out: &mut [f64],
+    ) -> Result<bool, CompileError> {
+        self.jit
+            .call_program_outputs_at(coordinates, inputs, external_tables, out)
     }
 
     /// Execute a complete source program and select its local output offset.

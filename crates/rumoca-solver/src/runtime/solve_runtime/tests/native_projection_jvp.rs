@@ -156,3 +156,95 @@ fn selected_projection_uses_the_jvp_program_mapping_and_aggregate_output_offset(
         assert_eq!(native.calls.get(), 1);
     }
 }
+
+#[test]
+fn default_outputs_at_coordinates_call_each_program_output_in_order() {
+    let jacobian = SelectedJacobian {
+        calls: Cell::new(0),
+        fail: false,
+        coordinate: (3, 0),
+    };
+    let seed = [0.0, 5.0];
+    let inputs = solve_eval::JacobianEvalInputs {
+        y: &[],
+        p: &[],
+        t: 0.0,
+        seed: &seed,
+    };
+    let mut out = [0.0; 2];
+    assert!(
+        jacobian
+            .call_program_outputs_at(&[(3, 0), (3, 0)], inputs, &[], &mut out)
+            .unwrap()
+    );
+    assert_eq!((out, jacobian.calls.get()), ([5.0, 5.0], 2));
+    let failing = SelectedJacobian {
+        calls: Cell::new(0),
+        fail: true,
+        coordinate: (3, 0),
+    };
+    assert!(
+        failing
+            .call_program_outputs_at(&[(3, 0)], inputs, &[], &mut out)
+            .is_err()
+    );
+
+    struct Declining;
+    impl CompiledSolveExpression for Declining {
+        fn call(
+            &self,
+            _y: &[f64],
+            _p: &[f64],
+            _t: f64,
+            _external_tables: &[rumoca_core::ExternalTableData],
+            _out: &mut [f64],
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    impl CompiledSolveJacobianExpression for Declining {
+        fn call(
+            &self,
+            _y: &[f64],
+            _p: &[f64],
+            _t: f64,
+            _seed: &[f64],
+            _external_tables: &[rumoca_core::ExternalTableData],
+            _out: &mut [f64],
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    // Without selected entries every optional call declines.
+    let expression: &dyn CompiledSolveExpression = &Declining;
+    let jacobian: &dyn CompiledSolveJacobianExpression = &Declining;
+    let mut all = Vec::new();
+    assert!(
+        !expression
+            .call_program_outputs_at(&[(0, 0)], (&[], &[], 0.0), &[], &mut out)
+            .unwrap()
+    );
+    assert!(
+        !expression
+            .call_program_outputs(0, &[], &[], 0.0, &[], &mut all)
+            .unwrap()
+    );
+    assert!(
+        !jacobian
+            .call_program_outputs(0, inputs, &[], &mut all)
+            .unwrap()
+    );
+    assert_eq!(
+        jacobian
+            .call_program_output((0, 0), &[], &[], 0.0, &seed, &[])
+            .unwrap(),
+        None
+    );
+    assert!(
+        !jacobian
+            .call_program_outputs_at(&[(0, 0)], inputs, &[], &mut out)
+            .unwrap()
+    );
+    expression.call(&[], &[], 0.0, &[], &mut out).unwrap();
+    jacobian.call(&[], &[], 0.0, &seed, &[], &mut out).unwrap();
+}

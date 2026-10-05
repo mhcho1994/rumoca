@@ -14,6 +14,8 @@ use rumoca_ir_dae as dae;
 use super::constraints::DifferentiationFacts;
 
 pub(super) use linear_map::derive_state_blocks;
+#[cfg(test)]
+pub(super) use linear_map::relevance_report;
 pub(super) use reconstruction::{
     AuxiliaryExpression, AuxiliaryFunctions, create_functions, create_source_functions,
 };
@@ -133,10 +135,11 @@ pub(super) fn derive_blocks(
         };
         collect_equation(view, equation.residual(), &mut candidates);
     }
+    let mut sources = linear_map::MaterializedSources::new(view, facts);
     let mut blocks = vec![None; view.variable_count()];
     for (variable, candidate) in candidates {
         if candidate.rows.len() != candidate.extent as usize
-            || facts.can_materialize_value(view, candidate.variable_expression)
+            || sources.can_materialize(candidate.variable_expression)
         {
             continue;
         }
@@ -145,10 +148,8 @@ pub(super) fn derive_blocks(
                 .rows
                 .iter()
                 .try_fold(Vec::new(), |mut states, row| {
-                    states.extend(
-                        facts.materialized_state_anchors(view, row.coefficient.expression)?,
-                    );
-                    states.extend(facts.materialized_state_anchors(view, row.rhs.expression)?);
+                    states.extend(sources.value_anchors(row.coefficient.expression)?.iter());
+                    states.extend(sources.value_anchors(row.rhs.expression)?.iter());
                     Some(states)
                 })
         else {
@@ -163,8 +164,8 @@ pub(super) fn derive_blocks(
             state_anchors: state_anchors.into_boxed_slice(),
         }));
     }
-    linear_map::derive_maps(view, facts, &mut blocks);
-    scalar_system::derive_systems(view, facts, &mut blocks);
+    linear_map::derive_maps(&mut sources, &mut blocks);
+    scalar_system::derive_systems(&mut sources, &mut blocks);
     blocks
 }
 

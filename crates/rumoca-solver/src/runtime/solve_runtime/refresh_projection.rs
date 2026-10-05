@@ -531,6 +531,15 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
             .map_err(Into::into)
     }
 
+    fn eval_implicit_residual_rows(
+        &self,
+        rows: &[usize],
+        point: (&[f64], &[f64], f64),
+        out: &mut [f64],
+    ) -> Result<bool, RuntimeSolveError> {
+        self.runtime.eval_compiled_residual_rows(rows, point, out)
+    }
+
     fn eval_implicit_residual_row(
         &self,
         row_idx: usize,
@@ -803,6 +812,16 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
     ) -> Option<&std::cell::RefCell<crate::runtime::projection::SparseNewtonCache>> {
         let index = self.block_indices.get(block_index).copied()?;
         self.runtime.algebraic_newton_caches.get(index)
+    }
+
+    fn implicit_row_static_gradient_parameters(&self, row_idx: usize) -> Option<&[usize]> {
+        let (program_idx, _) = self
+            .runtime
+            .implicit_scalar_rhs
+            .row_output_position(row_idx)?;
+        self.runtime
+            .implicit_scalar_rhs
+            .parameter_static_y_gradient_params(program_idx)
     }
 
     fn solve_algebraic_newton_delta(

@@ -45,6 +45,18 @@ impl rumoca_solver::CompiledSolveExpression for CraneliftExpression {
             .map_err(|error| error.to_string())
     }
 
+    fn call_program_outputs_at(
+        &self,
+        coordinates: &[(usize, usize)],
+        inputs: (&[f64], &[f64], f64),
+        external_tables: &[rumoca_core::ExternalTableData],
+        out: &mut [f64],
+    ) -> Result<bool, String> {
+        self.0
+            .call_program_outputs_at(coordinates, inputs, external_tables, out)
+            .map_err(|error| error.to_string())
+    }
+
     fn call(
         &self,
         y: &[f64],
@@ -60,13 +72,18 @@ impl rumoca_solver::CompiledSolveExpression for CraneliftExpression {
 }
 
 impl rumoca_solver::CompiledSolveJacobianExpression for CraneliftJacobianExpression {
-    fn prepare_projection(
+    fn prepare_projections(
         &self,
-        application: &rumoca_ir_solve::ProjectionJacobianApplication,
-    ) -> Result<Option<Rc<dyn rumoca_solver::CompiledSolveProjectionJacobian>>, String> {
+        applications: &[&rumoca_ir_solve::ProjectionJacobianApplication],
+    ) -> Result<Vec<Option<Rc<dyn rumoca_solver::CompiledSolveProjectionJacobian>>>, String> {
         self.0
-            .prepare_projection(application)
-            .map(|compiled| Some(Rc::new(CraneliftProjectionJacobian(compiled)) as Rc<_>))
+            .prepare_projections(applications)
+            .map(|compiled| {
+                compiled
+                    .into_iter()
+                    .map(|compiled| Some(Rc::new(CraneliftProjectionJacobian(compiled)) as Rc<_>))
+                    .collect()
+            })
             .map_err(|error| error.to_string())
     }
     fn call_program_outputs(
@@ -94,6 +111,19 @@ impl rumoca_solver::CompiledSolveJacobianExpression for CraneliftJacobianExpress
         self.0
             .call_program_output(coordinate, y, p, t, seed, external_tables)
             .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    fn call_program_outputs_at(
+        &self,
+        coordinates: &[(usize, usize)],
+        inputs: rumoca_eval_solve::JacobianEvalInputs<'_>,
+        external_tables: &[rumoca_core::ExternalTableData],
+        out: &mut [f64],
+    ) -> Result<bool, String> {
+        self.0
+            .call_program_outputs_at(coordinates, inputs, external_tables, out)
+            .map(|()| true)
             .map_err(|error| error.to_string())
     }
 

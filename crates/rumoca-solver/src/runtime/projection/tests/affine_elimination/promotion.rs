@@ -26,13 +26,23 @@ fn torn_delta(
     model: &CyclicAffine,
     matrix: &DMatrix<f64>,
 ) -> (Option<DVector<f64>>, Option<usize>) {
+    torn_delta_from(model, matrix, &BlockJacobian::dense(matrix.clone()))
+}
+
+/// [`torn_delta`] with `jacobian` holding `matrix` in a storage of its own.
+fn torn_delta_from(
+    model: &CyclicAffine,
+    matrix: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
+) -> (Option<DVector<f64>>, Option<usize>) {
     let layout = model.structures.algebraic_projection()[0]
         .affine_elimination()
         .unwrap();
     let residual = -(matrix * expected());
     let delta = scaled_newton_delta_with_tearing(
         ScaledNewtonSystem {
-            jacobian: matrix,
+            revision: None,
+            jacobian,
             residual: residual.as_slice(),
             row_scales: &row_scales(),
             variable_scales: &variable_scales(),
@@ -51,7 +61,8 @@ fn full_delta(model: &CyclicAffine, matrix: &DMatrix<f64>) -> DVector<f64> {
         .unwrap();
     let residual = -(matrix * expected());
     scaled_newton_delta(ScaledNewtonSystem {
-        jacobian: matrix,
+        revision: None,
+        jacobian: &BlockJacobian::dense(matrix.clone()),
         residual: residual.as_slice(),
         row_scales: &row_scales(),
         variable_scales: &variable_scales(),
@@ -169,7 +180,8 @@ fn a_singular_nonfinite_or_rectangular_system_still_declines() {
     let residual = vec![0.0; DIMENSION];
     let delta = scaled_newton_delta_with_tearing(
         ScaledNewtonSystem {
-            jacobian: &rectangular,
+            revision: None,
+            jacobian: &BlockJacobian::dense(rectangular.clone()),
             residual: &residual,
             row_scales: &[1.0; DIMENSION],
             variable_scales: &[1.0; DIMENSION - 1],
@@ -274,3 +286,100 @@ fn a_reduction_without_promotion_keeps_its_bits() {
 
 const UNPROMOTED_CYCLE_PIN: u64 = 10_087_628_548_452_685_031;
 const UNPROMOTED_SCALED_CYCLE_PIN: u64 = 12_940_558_722_059_867_671;
+
+/// Conditioning only the entries whose source value or scales changed gives
+/// the bits a fresh cache gives, across a sequence of one-entry changes and a
+/// repeated matrix.
+#[test]
+fn incremental_conditioning_matches_a_fresh_cache() {
+    let (model, _) = cycle_with_diagonal(&[]);
+    let steps: [&[(usize, f64)]; 5] = [
+        &[(4, 3.5)],
+        &[(4, 3.5), (9, -0.75)],
+        &[(4, 3.5), (9, -0.75)],
+        &[(9, -0.75), (7, 0.0)],
+        &[],
+    ];
+    for pivots in steps {
+        let (fresh_model, matrix) = cycle_with_diagonal(pivots);
+        let reused = torn_delta(&model, &matrix);
+        let fresh = torn_delta(&fresh_model, &matrix);
+        assert_eq!(reused.1, fresh.1);
+        assert_eq!(
+            reused.0.as_ref().map(fingerprint),
+            fresh.0.as_ref().map(fingerprint),
+            "pivots {pivots:?}"
+        );
+    }
+}
+
+/// A source stored in the block pattern's compact layout is read by slot and
+/// gives the bits a dense source gives.
+#[test]
+fn compact_and_dense_sources_condition_the_same_bits() {
+    let steps: [&[(usize, f64)]; 3] = [&[], &[(7, 0.0)], &[(4, 3.5), (9, -0.75)]];
+    let (compact_model, _) = cycle_with_diagonal(&[]);
+    for pivots in steps {
+        let (dense_model, matrix) = cycle_with_diagonal(pivots);
+        let structure = &compact_model.structures.algebraic_projection()[0];
+        let mut compact = BlockJacobian::compact(structure.compact_layout());
+        for row in 0..DIMENSION {
+            structure.pattern().visit_row_columns(row, &mut |column| {
+                compact[(row, column)] = matrix[(row, column)]
+            });
+        }
+        let dense = torn_delta(&dense_model, &matrix);
+        let read = torn_delta_from(&compact_model, &matrix, &compact);
+        assert_eq!(read.1, dense.1);
+        assert_eq!(
+            read.0.as_ref().map(fingerprint),
+            dense.0.as_ref().map(fingerprint),
+            "pivots {pivots:?}"
+        );
+    }
+}
+
+/// The torn delta toward `expected` through `residual_matrix`, factored from
+/// `jacobian_matrix` under `revision`.
+fn delta_under(
+    model: &CyclicAffine,
+    (jacobian_matrix, residual_matrix): (&DMatrix<f64>, &DMatrix<f64>),
+    revision: Option<u64>,
+) -> u64 {
+    let layout = model.structures.algebraic_projection()[0]
+        .affine_elimination()
+        .unwrap();
+    let residual = -(residual_matrix * expected());
+    let delta = scaled_newton_delta_with_tearing(
+        ScaledNewtonSystem {
+            revision,
+            jacobian: &BlockJacobian::dense(jacobian_matrix.clone()),
+            residual: residual.as_slice(),
+            row_scales: &row_scales(),
+            variable_scales: &variable_scales(),
+            structure: Some(layout.pattern()),
+            tolerance: 1e-10,
+        },
+        &mut model.cache.borrow_mut(),
+        layout,
+    );
+    fingerprint(&delta.expect("the torn system is regular"))
+}
+
+/// A revision names the Jacobian and scales: a solve under the revision the
+/// cache last conditioned reuses that conditioning and factor without reading
+/// the source again, and any other revision conditions the source afresh.
+#[test]
+fn a_held_revision_reuses_its_factor_and_a_new_one_reconditions() {
+    let (model, original) = cycle_with_diagonal(&[]);
+    let (fresh_model, changed) = cycle_with_diagonal(&[(4, 3.5)]);
+    let held = Some(u64::MAX - 1);
+    let factored = delta_under(&model, (&original, &changed), held);
+    assert_eq!(delta_under(&model, (&changed, &changed), held), factored);
+    let renamed = delta_under(&model, (&changed, &changed), Some(u64::MAX));
+    assert_eq!(
+        renamed,
+        delta_under(&fresh_model, (&changed, &changed), None)
+    );
+    assert_ne!(renamed, factored);
+}

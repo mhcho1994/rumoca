@@ -11,7 +11,7 @@ use faer::{
         linalg::lu::{LuRef, NumericLu, SymbolicLu, factorize_symbolic_lu},
     },
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 use rumoca_ir_solve::StructuralPattern;
 
 use super::scaling::valid_variable_scale;
@@ -21,25 +21,32 @@ pub(crate) struct SparseNewtonCache {
     system: Option<PreparedSparseSystem>,
     torn: torn::TornNewtonCache,
     dense: dense::DenseNewtonFactor,
-    /// The block Jacobian of the last affine solve, zero outside the block's
-    /// structural pattern, kept so the next solve refills only its pattern.
-    affine_jacobian: Option<DMatrix<f64>>,
+    /// The origin linearization of the last affine solve, its Jacobian zero
+    /// outside the block's structural pattern, kept so the next solve reuses
+    /// it under the same certified parameter snapshot or refills only its
+    /// pattern.
+    affine_linearization: Option<super::affine::AffineLinearization>,
 }
 
 impl SparseNewtonCache {
-    pub(crate) fn take_affine_jacobian(&mut self) -> Option<DMatrix<f64>> {
-        self.affine_jacobian.take()
+    pub(crate) fn take_affine_linearization(
+        &mut self,
+    ) -> Option<super::affine::AffineLinearization> {
+        self.affine_linearization.take()
     }
 
-    pub(crate) fn retain_affine_jacobian(&mut self, jacobian: DMatrix<f64>) {
-        self.affine_jacobian = Some(jacobian);
+    pub(crate) fn retain_affine_linearization(
+        &mut self,
+        linearization: super::affine::AffineLinearization,
+    ) {
+        self.affine_linearization = Some(linearization);
     }
 
     /// Dense scaled Newton solve reusing this block's factorization while
     /// its Jacobian and scales are bitwise unchanged.
     pub(super) fn solve_dense_scaled(
         &mut self,
-        source: &DMatrix<f64>,
+        source: &super::BlockJacobian,
         rhs: &DVector<f64>,
         scales: (&[f64], &[f64]),
         tolerance: f64,
@@ -56,14 +63,14 @@ impl SparseNewtonCache {
 
     pub(super) fn solve_torn_scaled(
         &mut self,
-        source: &DMatrix<f64>,
+        source: &super::BlockJacobian,
         rhs: &DVector<f64>,
-        row_scales: &[f64],
-        variable_scales: &[f64],
+        scales: (&[f64], &[f64]),
         layout: &rumoca_ir_solve::AffineEliminationLayout,
+        revision: Option<u64>,
     ) -> Option<DVector<f64>> {
         self.torn
-            .solve_scaled(source, rhs, row_scales, variable_scales, layout)
+            .solve_scaled(source, rhs, scales, layout, revision)
     }
 
     /// Size of the current ready torn reduced system: issued plus promoted
@@ -75,7 +82,7 @@ impl SparseNewtonCache {
 
     pub(super) fn solve_scaled(
         &mut self,
-        source: &DMatrix<f64>,
+        source: &super::BlockJacobian,
         rhs: &DVector<f64>,
         row_scales: &[f64],
         variable_scales: &[f64],
@@ -152,7 +159,7 @@ impl PreparedSparseSystem {
 
     fn solve_scaled(
         &mut self,
-        source: &DMatrix<f64>,
+        source: &super::BlockJacobian,
         rhs: &DVector<f64>,
         row_scales: &[f64],
         variable_scales: &[f64],

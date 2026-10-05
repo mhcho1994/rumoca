@@ -1,4 +1,5 @@
 mod affine;
+mod block_jacobian;
 mod branch_continuity;
 mod homotopy;
 mod initial;
@@ -22,6 +23,7 @@ use rumoca_ir_solve as solve;
 
 use super::fallbacks::ProjectionFallback;
 use super::solve_ops::RuntimeSolveError;
+pub(crate) use block_jacobian::BlockJacobian;
 use initial_diagnostics::initial_projection_error;
 pub(crate) use scaling::scaled_newton_delta_with_tearing;
 use scaling::{
@@ -168,6 +170,18 @@ pub(crate) trait ImplicitProjectionModel {
         Ok(None)
     }
 
+    /// The implicit residuals of `rows`, in order, into `out`: exactly the
+    /// values [`Self::eval_implicit_residual_row`] yields row by row. `false`
+    /// leaves the rows to that per-row evaluation.
+    fn eval_implicit_residual_rows(
+        &self,
+        _rows: &[usize],
+        _point: (&[f64], &[f64], f64),
+        _out: &mut [f64],
+    ) -> Result<bool, RuntimeSolveError> {
+        Ok(false)
+    }
+
     /// Evaluate a constructor-issued residual output selection once per source
     /// program. A decline must precede execution and leave `out` unchanged.
     fn eval_implicit_residual_outputs(
@@ -278,6 +292,14 @@ pub(crate) trait ImplicitProjectionModel {
         &self,
         _block_index: usize,
     ) -> Option<&std::cell::RefCell<SparseNewtonCache>> {
+        None
+    }
+
+    /// The exact parameter slots that key implicit residual `row_idx`'s
+    /// certified solver-Y gradient (SPEC_0043 parameter-static gradient), or
+    /// `None` when the gradient is not certified invariant under solver-Y and
+    /// time.
+    fn implicit_row_static_gradient_parameters(&self, _row_idx: usize) -> Option<&[usize]> {
         None
     }
 
@@ -938,6 +960,7 @@ fn project_algebraic_residual_block<M: ImplicitProjectionModel>(
     let delta = model.solve_algebraic_newton_delta(
         block_index,
         ScaledNewtonSystem {
+            revision: None,
             jacobian: &jacobian,
             residual: &residual,
             row_scales: &row_scales,
@@ -951,7 +974,9 @@ fn project_algebraic_residual_block<M: ImplicitProjectionModel>(
             model.projection_site(block_index),
             ProjectionFallback::JacobianDeclined,
         );
-        if !residual_converged && nudge_singular_zero_seed(y, block, &jacobian, &variable_scales) {
+        if !residual_converged
+            && nudge_singular_zero_seed(y, block, &jacobian.as_dense(), &variable_scales)
+        {
             return Ok(ProjectionBlockUpdate {
                 changed: true,
                 settled: false,
@@ -991,7 +1016,7 @@ fn project_algebraic_residual_block<M: ImplicitProjectionModel>(
     // regular iterate instead of reporting a false non-convergence.
     if !update.changed
         && !residual_converged
-        && nudge_singular_zero_seed(y, block, &jacobian, &variable_scales)
+        && nudge_singular_zero_seed(y, block, &jacobian.as_dense(), &variable_scales)
     {
         return Ok(ProjectionBlockUpdate {
             changed: true,
@@ -1442,7 +1467,11 @@ fn implicit_selected_residuals<M: ImplicitProjectionModel + ?Sized>(
     rows: &[usize],
     context: &str,
 ) -> Result<Vec<f64>, RuntimeSolveError> {
-    let mut selected = Vec::with_capacity(rows.len());
+    let mut selected = vec![0.0; rows.len()];
+    if model.eval_implicit_residual_rows(rows, (y, p, t), &mut selected)? {
+        return Ok(selected);
+    }
+    selected.clear();
     for row in rows {
         let Some(value) = model.eval_implicit_residual_row(*row, y, p, t)? else {
             let mut residual = vec![0.0; y.len()];

@@ -17,8 +17,8 @@ use rumoca_eval_solve::tensor_policy::{LinearSolveKernel, select_linear_solve_ke
 use rumoca_ir_solve as solve;
 
 use super::{
-    AlgebraicProjectionModel, ImplicitProjectionModel, RuntimeSolveError, SparseNewtonCache,
-    algebraic_block_jacobian, initial_block_jacobian, y_index_for_slot,
+    AlgebraicProjectionModel, BlockJacobian, ImplicitProjectionModel, RuntimeSolveError,
+    SparseNewtonCache, algebraic_block_jacobian, initial_block_jacobian, y_index_for_slot,
 };
 
 pub(super) fn scaled_residual_converged(residual: &[f64], scales: &[f64], tol: f64) -> bool {
@@ -104,7 +104,7 @@ pub(super) fn algebraic_block_scales<M: ImplicitProjectionModel + ?Sized>(
     model: &M,
     y: &[f64],
     block: &solve::AlgebraicProjectionBlock,
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
     structure: Option<&solve::StructuralPattern>,
 ) -> (Vec<f64>, Vec<f64>) {
     let variable_scales = block
@@ -130,7 +130,7 @@ fn initial_block_scales<M: AlgebraicProjectionModel + ?Sized>(
     model: &M,
     y: &[f64],
     block: &solve::AlgebraicProjectionBlock,
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
     structure: Option<&solve::StructuralPattern>,
 ) -> (Vec<f64>, Vec<f64>) {
     let variable_scales = block
@@ -166,57 +166,17 @@ pub(super) fn initial_block_fallback_scales<M: AlgebraicProjectionModel + ?Sized
 }
 
 pub(super) fn jacobian_row_scales(
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
     variable_scales: &[f64],
     fallback_scales: &[f64],
     structure: Option<&solve::StructuralPattern>,
 ) -> Vec<f64> {
-    if let Some(pattern) = structure.filter(|pattern| {
-        pattern.rows() as usize == jacobian.nrows()
-            && pattern.columns() as usize == jacobian.ncols()
-    }) {
-        return sparse_jacobian_row_scales(jacobian, variable_scales, fallback_scales, pattern);
-    }
     (0..jacobian.nrows())
         .map(|row| {
-            let derivative_scale = (0..jacobian.ncols()).fold(0.0_f64, |scale, column| {
-                let contribution =
-                    jacobian[(row, column)].abs() * valid_variable_scale(variable_scales[column]);
-                if contribution.is_finite() {
-                    scale.max(contribution)
-                } else {
-                    scale
-                }
-            });
-            if derivative_scale > 0.0 {
-                derivative_scale
-            } else {
-                fallback_scales.get(row).copied().unwrap_or(1.0)
-            }
+            let fallback = fallback_scales.get(row).copied().unwrap_or(1.0);
+            jacobian_row_scale(jacobian, row, variable_scales, fallback, structure)
         })
         .collect()
-}
-
-fn sparse_jacobian_row_scales(
-    jacobian: &DMatrix<f64>,
-    variable_scales: &[f64],
-    fallback_scales: &[f64],
-    pattern: &solve::StructuralPattern,
-) -> Vec<f64> {
-    let mut scales = vec![0.0_f64; jacobian.nrows()];
-    for (row, scale) in scales.iter_mut().enumerate() {
-        pattern.visit_row_columns(row, &mut |column| {
-            let contribution =
-                jacobian[(row, column)].abs() * valid_variable_scale(variable_scales[column]);
-            if contribution.is_finite() {
-                *scale = scale.max(contribution);
-            }
-        });
-        if *scale == 0.0 {
-            *scale = fallback_scales.get(row).copied().unwrap_or(1.0);
-        }
-    }
-    scales
 }
 
 pub(super) fn algebraic_plan_row_scales<M: ImplicitProjectionModel>(
@@ -290,12 +250,16 @@ pub(super) fn initial_residual_scales<M: AlgebraicProjectionModel>(
 /// Jacobian was formed with is not a Newton step for this block.
 #[derive(Clone, Copy)]
 pub(crate) struct ScaledNewtonSystem<'a> {
-    pub(crate) jacobian: &'a DMatrix<f64>,
+    pub(crate) jacobian: &'a BlockJacobian,
     pub(crate) residual: &'a [f64],
     pub(crate) row_scales: &'a [f64],
     pub(crate) variable_scales: &'a [f64],
     pub(crate) structure: Option<&'a solve::StructuralPattern>,
     pub(crate) tolerance: f64,
+    /// A name for the Jacobian and both scale vectors together: two systems
+    /// with the same revision hold bitwise the same three, so a factorization
+    /// of one serves the other. `None` names nothing.
+    pub(crate) revision: Option<u64>,
 }
 
 pub(crate) fn scaled_newton_delta(system: ScaledNewtonSystem<'_>) -> Option<DVector<f64>> {
@@ -326,9 +290,9 @@ pub(crate) fn scaled_newton_delta_with_tearing(
     let delta = cache.solve_torn_scaled(
         system.jacobian,
         &rhs,
-        system.row_scales,
-        system.variable_scales,
+        (system.row_scales, system.variable_scales),
         layout,
+        system.revision,
     )?;
     Some(unscale_newton_delta(&delta, system.variable_scales))
 }
@@ -355,6 +319,7 @@ fn scaled_newton_delta_impl(
         variable_scales,
         structure,
         tolerance,
+        revision: _,
     } = system;
     if jacobian.nrows() != residual.len()
         || jacobian.nrows() != row_scales.len()
@@ -414,7 +379,7 @@ fn solve_square_newton_system(matrix: &DMatrix<f64>, rhs: &DVector<f64>) -> Opti
 }
 
 pub(super) fn scaled_jacobian(
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
     row_scales: &[f64],
     variable_scales: &[f64],
 ) -> DMatrix<f64> {
@@ -436,7 +401,7 @@ fn unscale_newton_delta(scaled_delta: &DVector<f64>, variable_scales: &[f64]) ->
 }
 
 fn sparse_scaled_newton_delta(
-    matrix: &DMatrix<f64>,
+    matrix: &BlockJacobian,
     rhs: &DVector<f64>,
     row_scales: &[f64],
     variable_scales: &[f64],
@@ -517,7 +482,7 @@ fn sparse_triplets(
 /// Whether each row's scale at `variable_scales` comes from a nonzero finite
 /// contribution rather than its fallback.
 pub(super) fn jacobian_row_derived(
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
     variable_scales: &[f64],
     structure: Option<&solve::StructuralPattern>,
 ) -> Vec<bool> {
@@ -527,62 +492,72 @@ pub(super) fn jacobian_row_derived(
 }
 
 pub(super) fn jacobian_row_magnitudes(
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
     structure: Option<&solve::StructuralPattern>,
 ) -> Vec<f64> {
-    let pattern = structure.filter(|pattern| {
-        pattern.rows() as usize == jacobian.nrows()
-            && pattern.columns() as usize == jacobian.ncols()
-    });
     (0..jacobian.nrows())
-        .map(|row| {
-            let mut magnitude = 0.0_f64;
-            let mut visit = |column: usize| {
-                let value = jacobian[(row, column)].abs();
-                if value.is_finite() {
-                    magnitude = magnitude.max(value);
-                }
-            };
-            match pattern {
-                Some(pattern) => pattern.visit_row_columns(row, &mut visit),
-                None => (0..jacobian.ncols()).for_each(visit),
-            }
-            magnitude
-        })
+        .map(|row| jacobian_row_magnitude(jacobian, row, structure))
         .collect()
 }
 
-/// One row's scale exactly as [`jacobian_row_scales`] forms it.
-fn jacobian_row_scale(
-    jacobian: &DMatrix<f64>,
+/// One row of [`jacobian_row_magnitudes`].
+pub(super) fn jacobian_row_magnitude(
+    jacobian: &BlockJacobian,
+    row: usize,
+    structure: Option<&solve::StructuralPattern>,
+) -> f64 {
+    let mut magnitude = 0.0_f64;
+    jacobian.visit_row(
+        row,
+        matching_pattern(jacobian, structure),
+        &mut |_, value| {
+            let value = value.abs();
+            if value.is_finite() {
+                magnitude = magnitude.max(value);
+            }
+        },
+    );
+    magnitude
+}
+
+/// `structure` when it is shaped like `jacobian`.
+fn matching_pattern<'a>(
+    jacobian: &BlockJacobian,
+    structure: Option<&'a solve::StructuralPattern>,
+) -> Option<&'a solve::StructuralPattern> {
+    structure.filter(|pattern| {
+        pattern.rows() as usize == jacobian.nrows()
+            && pattern.columns() as usize == jacobian.ncols()
+    })
+}
+
+/// One row's scale: its largest finite contribution `|J[row, column]| *
+/// scale(column)`, or `fallback` when none is positive.
+pub(super) fn jacobian_row_scale(
+    jacobian: &BlockJacobian,
     row: usize,
     variable_scales: &[f64],
     fallback: f64,
     structure: Option<&solve::StructuralPattern>,
 ) -> f64 {
-    let pattern = structure.filter(|pattern| {
-        pattern.rows() as usize == jacobian.nrows()
-            && pattern.columns() as usize == jacobian.ncols()
-    });
     let mut scale = 0.0_f64;
-    let mut visit = |column: usize| {
-        let contribution =
-            jacobian[(row, column)].abs() * valid_variable_scale(variable_scales[column]);
-        if contribution.is_finite() {
-            scale = scale.max(contribution);
-        }
-    };
-    match pattern {
-        Some(pattern) => pattern.visit_row_columns(row, &mut visit),
-        None => (0..jacobian.ncols()).for_each(visit),
-    }
+    jacobian.visit_row(
+        row,
+        matching_pattern(jacobian, structure),
+        &mut |column, value| {
+            let contribution = value.abs() * valid_variable_scale(variable_scales[column]);
+            if contribution.is_finite() {
+                scale = scale.max(contribution);
+            }
+        },
+    );
     if scale > 0.0 { scale } else { fallback }
 }
 
 /// A fixed block Jacobian with the row scales it had at the arithmetic
 /// origin, where every block unknown is zero.
 pub(super) struct OriginRowScales<'a> {
-    pub(super) jacobian: &'a DMatrix<f64>,
+    pub(super) jacobian: &'a BlockJacobian,
     pub(super) structure: Option<&'a solve::StructuralPattern>,
     /// [`algebraic_block_scales`] at the origin.
     pub(super) scales: &'a [f64],

@@ -57,7 +57,8 @@ fn future_dependency_guards_recheck_raw_coefficients_before_cached_solve() {
         let residual = -(&matrix * &expected);
         let delta = scaled_newton_delta_with_tearing(
             ScaledNewtonSystem {
-                jacobian: &matrix,
+                revision: None,
+                jacobian: &BlockJacobian::dense(matrix.clone()),
                 residual: residual.as_slice(),
                 row_scales: &row_scales,
                 variable_scales: &[1.0; DIMENSION],
@@ -132,7 +133,8 @@ fn cached_reduction_tracks_coefficients_scaling_rhs_and_rejected_factors() {
             .collect();
         let delta = scaled_newton_delta_with_tearing(
             ScaledNewtonSystem {
-                jacobian: &matrix,
+                revision: None,
+                jacobian: &BlockJacobian::dense(matrix.clone()),
                 residual: residual.as_slice(),
                 row_scales: &row_scales,
                 variable_scales: &variable_scales,
