@@ -16,11 +16,12 @@ use reference_boundary::{ReferenceBoundaryMigration, validate_reference_boundary
 const MSL_QUALITY_BASELINE_ASSET_URL: &str = "https://github.com/CogniPilot/rumoca/releases/download/msl-quality-baseline/msl_quality_baseline.json";
 const MSL_QUALITY_BASELINE_FALLBACK_REL: &str =
     "crates/rumoca-test-msl/tests/msl_tests/msl_quality_baseline.json";
-const MSL_QUALITY_GATE_VERSION: u64 = 11;
-const PREVIOUS_REFERENCE_BOUNDARY_VERSION: u64 = 10;
-/// A reviewed boundary two versions behind the checked-in one.
-const SUPERSEDED_REFERENCE_BOUNDARY_VERSION: u64 = 9;
-/// The version of the promoted release asset, three reviewed boundaries behind.
+const MSL_QUALITY_GATE_VERSION: u64 = 13;
+/// The reviewed boundary just behind the checked-in one.
+const PREVIOUS_REFERENCE_BOUNDARY_VERSION: u64 = 12;
+/// The version of the promoted release asset, the oldest reviewed boundary a
+/// promoted source may carry; every reviewed boundary from it up to
+/// [`PREVIOUS_REFERENCE_BOUNDARY_VERSION`] resolves to its checked-in migration.
 const PROMOTED_REFERENCE_BOUNDARY_VERSION: u64 = 8;
 const PARTIAL_MIGRATION_TO_QUALITY_GATE_VERSION: u64 = 4;
 const PREVIOUS_MSL_QUALITY_GATE_VERSION: u64 = 3;
@@ -907,10 +908,8 @@ fn load_baseline_header_for_source(
                 baseline.quality_gate_version,
                 PREVIOUS_MSL_QUALITY_GATE_VERSION
                     | PARTIAL_MIGRATION_TO_QUALITY_GATE_VERSION
-                    | PREVIOUS_REFERENCE_BOUNDARY_VERSION
-                    | SUPERSEDED_REFERENCE_BOUNDARY_VERSION
                     | PROMOTED_REFERENCE_BOUNDARY_VERSION
-                    | BRIDGED_PROMOTED_QUALITY_GATE_VERSION
+                    ..=PREVIOUS_REFERENCE_BOUNDARY_VERSION | BRIDGED_PROMOTED_QUALITY_GATE_VERSION
             ));
     ensure!(
         version_supported,

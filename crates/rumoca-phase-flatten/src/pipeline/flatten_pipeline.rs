@@ -994,10 +994,7 @@ pub(crate) fn finalize_flat_model(
         flatten_graph,
     )?;
 
-    seed_flat_functions_from_context(ctx, flat);
-    functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
-    rewrite_function_extends_aliases_in_flat_functions(flat, tree, class_index)?;
-    functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
+    collect_flat_functions(ctx, flat, overlay, tree, class_index, model_name)?;
     mark_record_constructor_calls(flat, tree);
     // Attach callable identity before the rewrite fixed point so rewritten
     // calls retain the exact collected target.
@@ -1057,6 +1054,7 @@ pub(crate) fn finalize_flat_model(
     // must not be copied onto the scalar ABI parameters created below.
     functions::materialize_flat_function_call_args(flat)?;
     functions::specialize_function_arguments(flat)?;
+    functions::thread_foreign_state(flat)?;
     // Record parameter signatures and every call site must change together.
     // Run this only after the rewrite fixed point: earlier lowering allowed a
     // later rewrite to reintroduce source-shaped record arguments against an
@@ -1074,7 +1072,7 @@ pub(crate) fn finalize_flat_model(
     inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
     substitute_known_constants_in_flat(flat, ctx)?;
     resolve_nested_constructor_field_access_bindings(flat);
-    crate::postprocess::fold_invariant_scalar_bindings(flat);
+    crate::postprocess::fold_invariant_bindings(flat, &ctx.resource_roots);
     functions::prune_unreachable_functions(flat);
     functions::validate_flat_function_bindings(flat)?;
     ctx.refresh_enum_parameter_lookup(flat);
@@ -1090,6 +1088,34 @@ pub(crate) fn finalize_flat_model(
     })?;
 
     Ok(())
+}
+
+/// Collect the functions the model calls, resolving MLS §14 operator-record
+/// operators first. Operator functions called from collected bodies may
+/// themselves apply overloaded operators, so resolution and collection
+/// alternate until collection adds no function.
+fn collect_flat_functions(
+    ctx: &Context,
+    flat: &mut flat::Model,
+    overlay: &ast::InstanceOverlay,
+    tree: &ast::ClassTree,
+    class_index: &ast::ClassDefIndex<'_>,
+    model_name: &str,
+) -> Result<(), FlattenError> {
+    crate::operator_records::resolve_operator_overloads(flat, class_index)?;
+    seed_flat_functions_from_context(ctx, flat);
+    functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
+    rewrite_function_extends_aliases_in_flat_functions(flat, tree, class_index)?;
+    // Collection only adds functions declared in the class tree, so the
+    // alternation reaches a fixed point.
+    loop {
+        let collected = flat.functions.len();
+        crate::operator_records::resolve_operator_overloads(flat, class_index)?;
+        functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
+        if flat.functions.len() == collected {
+            return Ok(());
+        }
+    }
 }
 
 fn finalize_flat_connections(

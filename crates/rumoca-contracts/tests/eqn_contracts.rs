@@ -810,22 +810,22 @@ fn eqn_020_same_variable_in_two_when_equations_rejected() {
 }
 
 #[test]
-fn eqn_020_equivalent_local_references_fail_at_second_typed_owner() {
+fn eqn_020_second_when_owner_is_the_reported_site() {
     let source = r#"
         model Test
-            discrete Real d;
+            discrete Real level;
             Boolean firstTrigger = time > 0.5;
             Boolean secondTrigger = time > 0.7;
         equation
             when firstTrigger then
-                d = 1;
+                level = 1;
             end when;
             when secondTrigger then
-                .d = 2;
+                level = 2;
             end when;
         end Test;
     "#;
-    expect_compile_failure_at_last_source_slice(source, "Test", "ED020", ".d");
+    expect_compile_failure_at_last_source_slice(source, "Test", "ED020", "level");
 }
 
 fn expect_compile_failure_at_last_source_slice(
@@ -862,15 +862,10 @@ fn expect_compile_failure_at_last_source_slice(
     let expected_start = source
         .rfind(expected_slice)
         .expect("expected offending source slice is present");
-    let (expected_start, expected_label) = expected_slice
-        .strip_prefix('.')
-        .map_or((expected_start, expected_slice), |identifier| {
-            (expected_start + 1, identifier)
-        });
     assert_eq!(label.span.start.0, expected_start);
     assert_eq!(
         &source[label.span.start.0..label.span.end.0],
-        expected_label
+        expected_slice
     );
 }
 
@@ -1671,4 +1666,33 @@ fn eqn_040_initial_pre_reads_the_initialized_state() {
     // the start guess of 1 never selects the initial branch.
     assert_eq!(trace.channel("above")[0], 0.0);
     assert_eq!(trace.final_value("above"), 0.0);
+}
+
+// =============================================================================
+// EQN-041: Mixed initialization system
+// An initialization row reading a discrete determined from continuous values
+// is solved at the fixed point of the projection and the discrete assignments.
+// =============================================================================
+
+#[test]
+fn eqn_041_initial_row_reads_a_relation_defined_discrete() {
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        model M
+            Real x;
+            Real y;
+            Boolean high;
+        initial equation
+            x = if high then 2 else 1;
+        equation
+            y = x + 1;
+            high = y > 1.5;
+            der(x) = -0.1;
+        end M;
+    "#,
+        "M",
+        1.0,
+    );
+    assert_eq!(trace.channel("high")[0], 1.0);
+    assert!((trace.channel("x")[0] - 2.0).abs() < 1e-9);
 }

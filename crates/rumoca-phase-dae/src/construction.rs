@@ -22,10 +22,12 @@ mod initial_parameter_values;
 mod model_algorithm;
 mod model_events;
 mod multi_output_equations;
+mod native_lapack;
 mod native_tables;
 mod ordinary_equations;
 mod record_equation;
 mod structured_body;
+mod terminal_print;
 #[cfg(test)]
 mod tests;
 mod variable_construction;
@@ -52,29 +54,32 @@ use algorithm::{
 use algorithm_lowering::{AlgorithmEnvironment, ModelAlgorithmsRequest, lower_algorithms};
 use analysis::{
     AggregateDiscreteConnections, Analysis, ClockPlan, ComprehensionKey, ComprehensionPlans,
-    DelayPlan, DerivedParameterPlan, DiscreteValueAssignmentPlan, DiscreteValueTopologyPlan,
-    DynamicTimeEventOperand, EquationPartition, ExpressionEventPlan, ExpressionEventPlans,
-    ExternalArgumentPlan, ExternalFunctionPlan, FunctionArrayAssemblyPlan, FunctionAssignmentPlan,
-    FunctionDefinednessPlan, FunctionIntegerReduction, FunctionLoopLowering, FunctionPlan,
-    FunctionRecordAssemblyPlan, FunctionRecordCallAssemblyPlan, FunctionRecordFieldAssembly,
-    FunctionRecordFieldAssemblyPlan, FunctionStatementPlan, FunctionValueSeed,
-    HistoryOperatorPlans, ModelAlgorithmPlan, ModelEventFunctionCallPlan,
+    DelayPlan, DerivedParameterPlan, DiscreteConnectionRanks, DiscreteValueAssignmentPlan,
+    DiscreteValueTopologyPlan, DynamicTimeEventOperand, EquationPartition, ExpressionEventPlan,
+    ExpressionEventPlans, ExternalArgumentPlan, ExternalFunctionPlan, FunctionArrayAssemblyPlan,
+    FunctionAssignmentPlan, FunctionDefinednessPlan, FunctionIntegerReduction,
+    FunctionLoopLowering, FunctionPlan, FunctionRecordAssemblyPlan, FunctionRecordCallAssemblyPlan,
+    FunctionRecordFieldAssembly, FunctionRecordFieldAssemblyPlan, FunctionStatementPlan,
+    FunctionValueSeed, HistoryOperatorPlans, ModelAlgorithmPlan, ModelEventFunctionCallPlan,
     ModelEventFunctionOutputPlan, ModelEventTensorLoopPlan, MultiOutputEquationPlan,
-    PartialJoinPlan, PlannedRole, RecordArrayFieldPlan, RecordArrayFieldPlans,
+    NativeLapackPlan, PartialJoinPlan, PlannedRole, RecordArrayFieldPlan, RecordArrayFieldPlans,
     RecordEquationFieldPlan, RecordEquationFieldValue, RecordEquationPlan, RuntimeVariableRole,
     SemiLinearRules, StructuredSource, WhenBranchKey, analyze, assigned_function_targets,
-    branch_never_completes, discrete_value_assignment, effective_function_scalar_type,
-    effective_variable_scalar_type, empty_array_bound_to_declaration, equation_partition,
-    flattened_function_loop_source, function_assertion, function_record_field_name,
-    inferred_clock_transfer, is_event_condition, is_inferred_clock_condition,
-    is_whole_clock_coordinate, materialized_discrete_real_family, materialized_discrete_value_rows,
-    model_algorithm_targets, record_field_projections, selected_conditional_statements,
-    specialized_comprehension_plan, structured_assignment_names,
-    when_conditional_selects_clock_structure,
+    branch_never_completes, collect_algorithm_writes, discrete_value_assignment,
+    effective_function_scalar_type, effective_variable_scalar_type,
+    empty_array_bound_to_declaration, equation_partition, flattened_function_loop_source,
+    function_assertion, function_record_field_name, inferred_clock_transfer, is_event_condition,
+    is_inferred_clock_condition, is_whole_clock_coordinate, materialized_discrete_real_family,
+    materialized_discrete_value_rows, model_algorithm_targets, names_overlap,
+    record_field_projections, selected_conditional_statements, specialized_comprehension_plan,
+    structured_assignment_names, when_conditional_selects_clock_structure,
 };
 use clock_operator_hosts::clock_operator_hosts;
 use clocks::{LoweredClocks, lower_clocked_value_owners, lower_clocks};
-use conditions::{combine_conditions, condition_owner_clock, lower_condition, negate_condition};
+use conditions::{
+    chain_owner_clock, combine_conditions, condition_owner_clock, lower_condition,
+    negate_condition, unowned_tick_activation,
+};
 use discrete_values::{DiscreteValueOwnerHandle, DiscreteValueStaging};
 use enumeration_conversion::{
     enumeration_conversion, enumeration_range_ordinals, enumeration_range_type,
@@ -120,6 +125,7 @@ use model_algorithm::{
 };
 use model_events::{WhenChainsRequest, always_condition, lower_when_assignment, lower_when_chains};
 use multi_output_equations::{MultiOutputDiscreteOwners, lower_multi_output_equation};
+use native_lapack::lower_native_lapack;
 use ordinary_equations::{OrdinaryEquationRow, lower_ordinary_equation};
 use record_equation::lower_record_equation;
 use structured_body::{lower_structured_body, normalize_conditional_residual};
@@ -242,6 +248,8 @@ struct ReservedVariable<'flat, 'dae> {
 }
 
 pub(crate) fn construct(flat: &flat::Model, source_map: SourceMap) -> Result<dae::Dae, ToDaeError> {
+    let unrolled = analysis::unroll_carrying_algorithm_loops(flat)?;
+    let flat = unrolled.as_ref();
     let analysis = analyze(flat)?.with_semi_linear_rules(flat);
     if !flat.is_partial && !analysis.balance.is_balanced() {
         return Err(ToDaeError::unbalanced_from_detail(analysis.balance));
@@ -260,7 +268,8 @@ pub(crate) fn construct(flat: &flat::Model, source_map: SourceMap) -> Result<dae
 pub(crate) fn construction_evidence(
     flat: &flat::Model,
 ) -> Result<(BalanceDetail, Vec<analysis::StructuralSelection>), ToDaeError> {
-    analyze(flat).map(|analysis| (analysis.balance, analysis.structural_selections))
+    let unrolled = analysis::unroll_carrying_algorithm_loops(flat)?;
+    analyze(unrolled.as_ref()).map(|analysis| (analysis.balance, analysis.structural_selections))
 }
 
 fn build_checked<'dae>(
@@ -817,7 +826,7 @@ struct StructuredEquationEnvironment<'scope, 'dae> {
     flat: &'scope flat::Model,
     roles: &'scope HashMap<VarName, PlannedRole>,
     topology: &'scope DiscreteValueTopologyPlan,
-    connection_ranks: &'scope HashMap<VarName, usize>,
+    connection_ranks: &'scope DiscreteConnectionRanks,
     aggregate_connections: &'scope AggregateDiscreteConnections,
     clocked_owners: &'scope HashMap<usize, ClockPlan>,
     clocks: &'scope LoweredClocks<'dae>,
@@ -1280,7 +1289,7 @@ struct EquationRows<'scope, 'dae> {
     records: &'scope HashMap<usize, RecordEquationPlan>,
     multi_output: &'scope HashMap<usize, MultiOutputEquationPlan>,
     roles: &'scope HashMap<VarName, PlannedRole>,
-    connection_ranks: &'scope HashMap<VarName, usize>,
+    connection_ranks: &'scope DiscreteConnectionRanks,
     aggregate_connections: &'scope AggregateDiscreteConnections,
     topology: &'scope DiscreteValueTopologyPlan,
     clocked_owners: &'scope HashMap<usize, ClockPlan>,

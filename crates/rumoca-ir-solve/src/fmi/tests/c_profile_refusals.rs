@@ -141,6 +141,17 @@ fn event_edge_actions_are_refused() {
 }
 
 #[test]
+fn sample_tick_pulse_buffers_are_refused() {
+    assert_refused(
+        "the C profile cannot release sample() tick pulses after an event",
+        |model| {
+            static_partition(model);
+            one_discrete_row(model, DiscreteRowRole::PulseConditionMemory);
+        },
+    );
+}
+
+#[test]
 fn clocked_previous_history_is_refused() {
     assert_refused(
         "the C profile cannot execute clocked previous() history",
@@ -182,6 +193,7 @@ fn a_projection_plan_without_residual_rows_is_refused() {
         |model| {
             let mut initialization = model.problem.initialization.clone().into_input();
             initialization.projection_plan = crate::InitializationProjectionPlan {
+                iterates_discretes: false,
                 blocks: vec![crate::InitializationProjectionBlock::default()],
             };
             model.problem.initialization =
@@ -318,5 +330,19 @@ fn a_parameter_read_only_inside_a_nested_program_stays_settable() {
         )),
         "parameter",
         "a conditional arm read keeps the parameter settable"
+    );
+}
+
+#[test]
+fn a_projection_holding_discretes_is_refused() {
+    assert_refused(
+        "C initialization cannot alternate the projection with held discretes",
+        |model| {
+            let mut initialization = model.problem.initialization.clone().into_input();
+            initialization.projection_plan.iterates_discretes = true;
+            model.problem.initialization =
+                crate::InitializationSolveSystem::construct(initialization)
+                    .expect("the flag does not change the checked shape");
+        },
     );
 }

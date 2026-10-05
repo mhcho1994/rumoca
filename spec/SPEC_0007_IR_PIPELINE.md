@@ -125,12 +125,12 @@ generate simulation code.
 | Rule | Why |
 |---|---|
 | Instantiation and flattening are separate logical phases | Instantiate modifications/overlay → typecheck → traverse overlay, expand connections, produce `flat::Model` |
-| Scalar binding specialization follows [FLAT-C01](SPEC_0040_IR_STAGE_CONTRACT_CATALOG.md#0-flat-stage-contract-catalog-spec_0007-stage-2) | Preserves parameter dependencies |
+| Binding specialization follows [FLAT-C01](SPEC_0040_IR_STAGE_CONTRACT_CATALOG.md#0-flat-stage-contract-catalog-spec_0007-stage-2) | Preserves parameter dependencies |
 | Arrays stay symbolic through Flat and DAE | Backends requesting scalar form call scalarization in structural/solver layers with shape metadata, not via display-string parsing |
 | Function algorithms remain structured; conditional joins retain checked shared-branch correlation | Downstream projections preserve call cardinality without reconstructing control flow |
 | A function-algorithm `assert` is a flow action, not an ordinary call or a value expression | A value-proven function specialization may erase the statement only when its exact specialization environment proves the condition `true`. An unsettled condition may lower only through the call-specialized guarded root/action schedule in SOLVE-C25; a proven-false or otherwise unrepresentable schedule is typed-rejected. It is never discarded or lowered as a multi-result call. |
 | Model algorithms lower to DAE only when they fit the declarative subset | Unsupported forms fail explicitly with `ED013` |
-| Initial algorithms support sequential scalar assignments and `if` conditionals targeting `fixed=false` parameters or discrete coordinates. Initial equations `m = value` / `pre(m) = value` produce the same discrete initial-value owner. Assertions retain enclosing branch conditions. | Discrete initial definitions prove scalar type, settled reads (discrete-valued targets may read continuous coordinates, SPEC_0043 §4), and unique ownership; Solve seeds current and `pre` storage. Calculated parameters read only parameters/constants; reads of `fixed=false` parameters are re-applied after the projection. Algebraic/state/output/input algorithm targets, `when`, and non-`assert` call statements retain `ED013`. |
+| Initial algorithms support sequential scalar assignments and `if` conditionals targeting `fixed=false` parameters or discrete coordinates. Initial equations `m = value` / `pre(m) = value` produce the same discrete initial-value owner. Assertions retain enclosing branch conditions. | Discrete initial definitions prove scalar type, settled reads (a definition may read continuous coordinates, SPEC_0043 §4), and unique ownership; Solve seeds current and `pre` storage. Calculated parameters read only parameters/constants; reads of `fixed=false` parameters are re-applied after the projection. Algebraic/state/output/input algorithm targets, `when`, and non-`assert` call statements retain `ED013`. |
 | Post-resolution declaration identity is keyed by `DefId`, not strings | Hashing rendered names, `VarName`, flat names, cached display strings, rendered `ComponentPath`, or rendered `ComponentReference` after resolution is a phase-boundary bug. Carry `DefId` for declarations and structured instance identity where one declaration has multiple instantiated meanings. |
 | Flat `TypeId` is the resolved effective type of that concrete instance | Two instances originating from one `DefId` may have different effective types after redeclare or modification. DAE type catalogs key by this identity and retain `DefId` only as declaration provenance. |
 | Semantic phases do not recover name hierarchy by tokenizing flattened strings | The AST, `QualifiedName`, `ComponentReference`, `DefId`, scope tree, and phase metadata carry name structure. Textual path parsing is allowed only at source/protocol/config/display boundaries while structured IR replaces it. |
@@ -188,7 +188,7 @@ Only private current-version wire records derive `Deserialize`. Decoding
 constructs checked children and then the checked root; derived counts and
 indexes are recomputed rather than accepted as wire inputs.
 
-**Contract:** rows `DAE-C01`–`DAE-C21` in
+**Contract:** rows `DAE-C01`–`DAE-C31` in
 [SPEC_0040 §1](SPEC_0040_IR_STAGE_CONTRACT_CATALOG.md#1-dae-stage-contract-catalog-spec_0007-stage-3).
 
 Non-Real `fixed=false` initialization definitions have checked owners distinct

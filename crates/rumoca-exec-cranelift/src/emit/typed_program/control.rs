@@ -206,6 +206,7 @@ impl ProgramLowerer<'_, '_> {
             tape,
             layout: &layout,
             functions: self.functions,
+            recursive_calls: self.recursive_calls,
             flags: self.flags,
         };
         nested.lower(region.body())
@@ -223,6 +224,18 @@ impl ProgramLowerer<'_, '_> {
                 context,
             )
         })
+    }
+
+    /// Copy registers, in order, into one fresh contiguous tape.
+    pub(super) fn packed_tape(
+        &mut self,
+        registers: &[solve::SolveRegisterId],
+        context: &str,
+    ) -> Result<Value, CompileError> {
+        let cells = self.register_cell_count(registers, context)?;
+        let tape = create_tape(self.builder, self.pointer_type, cells)?;
+        self.pack_registers(registers, tape)?;
+        Ok(tape)
     }
 
     fn pack_registers(

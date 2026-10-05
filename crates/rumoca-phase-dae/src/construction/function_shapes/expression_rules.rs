@@ -38,7 +38,16 @@ pub(in crate::construction) fn call_free_target_shape(
     apply_subscripts(declared, &target.subs, values).ok()
 }
 
-pub(super) type FunctionResultShape<'scope> = dyn FnMut(&rumoca_core::Reference, &[Expression], bool, Span) -> Result<ValueShape, ToDaeError>
+/// The result shape of one call, with its arguments shaped in `scope`: the
+/// environment of the call site, which inside an MLS §10.4.1 comprehension
+/// binds the comprehension indices.
+pub(super) type FunctionResultShape<'scope> = dyn FnMut(
+        &rumoca_core::Reference,
+        &[Expression],
+        bool,
+        &ShapeEnvironment,
+        Span,
+    ) -> Result<ValueShape, ToDaeError>
     + 'scope;
 
 fn reference_shape(
@@ -110,7 +119,7 @@ pub(super) fn expression_shape(
             args,
             is_constructor,
             ..
-        } => function_result(name, args, *is_constructor, span),
+        } => function_result(name, args, *is_constructor, values, span),
         Expression::If {
             branches,
             else_branch,
@@ -398,19 +407,27 @@ fn range_expression_shape(
     values: &ShapeEnvironment,
     span: Span,
 ) -> Result<ValueShape, ToDaeError> {
-    let start = evaluate_shape_integer(start, values)?;
     let step = step
         .map(|step| evaluate_shape_integer(step, values))
         .transpose()?
         .unwrap_or(1);
-    let end = evaluate_shape_integer(end, values)?;
-    Ok(vec![range_cardinality(start, step, end, span)?])
+    let bounds = evaluate_shape_integer(start, values)
+        .and_then(|start| Ok((start, evaluate_shape_integer(end, values)?)));
+    match bounds {
+        Ok((start, end)) => Ok(vec![range_cardinality(start, step, end, span)?]),
+        // MLS §10.4.1: the element count depends only on `end - start` and the
+        // step, so bounds sharing an unproven term still have an exact extent.
+        Err(error) => super::integer_bounds::exact_range_distance(start, end, values)
+            .map(|distance| Ok(vec![range_cardinality(0, step, distance, span)?]))
+            .unwrap_or(Err(error)),
+    }
 }
 
 pub(super) fn reject_shape_call(
     name: &rumoca_core::Reference,
     _arguments: &[Expression],
     _is_constructor: bool,
+    _scope: &ShapeEnvironment,
     span: Span,
 ) -> Result<ValueShape, ToDaeError> {
     Err(ToDaeError::unsupported_flat(

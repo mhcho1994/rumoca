@@ -386,6 +386,11 @@ fn causal_coefficient_unproven(coefficient: &CausalCoefficient) -> bool {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct InitializationProjectionPlan {
     pub blocks: Vec<InitializationProjectionBlock>,
+    /// Whether a planned row reads a discrete coordinate the projection holds
+    /// at its current value. The runtime then alternates the projection with
+    /// the discrete assignments until the discrete values stop changing, the
+    /// fixed point of the MLS §8.6 mixed initialization system.
+    pub iterates_discretes: bool,
 }
 
 impl InitializationProjectionPlan {
@@ -1150,6 +1155,11 @@ pub enum SolveEventActionKind {
     /// reported and never aborts the run, creates an event, or influences
     /// step control. It owns no root program.
     Warning,
+    /// A model message (MLS 3.7 §12.9 `ModelicaInternal_print` to the
+    /// terminal): each settled event at which the action condition is true
+    /// reports the message once. It never aborts the run, creates an event,
+    /// or influences step control, and owns no root program.
+    Print,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1219,6 +1229,24 @@ pub enum DiscreteRowRole {
     EventAction,
     /// Runtime memory for detecting a condition edge.
     ConditionMemory,
+    /// Condition memory whose condition reads a periodic clock activation
+    /// lane (`clocks.activation_parameter_indices`).
+    ///
+    /// MLS §3.7.5 makes `sample(start, interval)` true only at its tick
+    /// instants, so the left limit a later instant reads is the condition with
+    /// every activation lane cleared. A runtime re-evaluates these rows with
+    /// the lanes at zero once an event has converged, and seeds them that way
+    /// at initialization; inside the tick's own event iteration they follow
+    /// the current value like any other buffer.
+    PulseConditionMemory,
+}
+
+impl DiscreteRowRole {
+    /// Whether this row is the edge buffer of a condition, of either kind.
+    #[must_use]
+    pub const fn is_condition_memory(self) -> bool {
+        matches!(self, Self::ConditionMemory | Self::PulseConditionMemory)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

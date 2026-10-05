@@ -46,6 +46,7 @@ mod expressions;
 mod formal_derivatives;
 mod function_derivatives;
 mod functions;
+mod inert_states;
 mod initial_pins;
 mod inline_calls;
 mod loop_guards;
@@ -55,6 +56,7 @@ mod parameter_conditionals;
 mod reconstruction;
 mod runtime_quotients;
 mod semantic_owners;
+mod smooth_order;
 mod sortability;
 mod source;
 mod temporal;
@@ -99,6 +101,7 @@ pub use self::formal_derivatives::{
     FormalStageEquation, FormalStateCandidate, FormalStateCandidateView, FormalStateCoordinate,
     ReducedSelectionChart, StateSelection, construct_formal_derivatives,
 };
+pub use self::inert_states::demote_inert_states;
 pub use self::initial_pins::{InitialValuePin, InitialValueRole, PinTerm};
 pub use self::inline_calls::{inline_annotated_calls, inline_formal_calls};
 pub use self::observation::{

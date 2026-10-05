@@ -9,9 +9,12 @@ mod indexed_values;
 mod model_calls;
 mod model_coordinates;
 pub(in crate::lower) mod model_events;
+mod native;
+mod recursive_groups;
 mod regions;
 mod registration;
 mod tensor;
+mod total_conditionals;
 
 use assertions::{assertion_conditions, assertion_is_map_independent, nested_calls};
 use model_coordinates::ModelCoordinateKey;
@@ -38,7 +41,8 @@ use rumoca_ir_solve as solve;
 /// Registration happens at the DAE expression boundary, before a consumer can
 /// emit a projection. It never scans, hashes, or reconstructs an already
 /// lowered scalar program. Nested owners are issued before their caller, so
-/// the resulting table is finite and topological by construction.
+/// the resulting table is finite and topological by construction, except
+/// that the members of one SOLVE-C62 recursive group are issued together.
 pub(crate) struct PureCallRegistry<'dae> {
     table: solve::SolvePureCallTableBuilder,
     identities: CallRegistration<'dae>,
@@ -103,10 +107,18 @@ pub(super) fn lower_exact_call<'dae>(
     Ok(table.finish())
 }
 
+/// One issued pure-call owner together with its checked call site.
 #[derive(Clone)]
 pub(crate) struct RegisteredCall<'dae> {
-    pub(crate) owner: solve::SolvePureCallOwnerId,
+    pub(crate) callee: CalleeInterface<'dae>,
     pub(crate) site: solve::SolvePureCallSite,
+}
+
+/// The owner interface a caller body lowers a call against. A SOLVE-C62
+/// recursive group member has it before the group, and so its site, exists.
+#[derive(Clone)]
+pub(crate) struct CalleeInterface<'dae> {
+    pub(crate) owner: solve::SolvePureCallOwnerId,
     pub(crate) result_ranges: Box<[Range<usize>]>,
     pub(crate) result_leaf_count: usize,
     /// Every call-scoped assertion output after the result leaves, in owner
@@ -114,6 +126,9 @@ pub(crate) struct RegisteredCall<'dae> {
     /// each nested call's complete slot tuple.
     pub(crate) assertion_slots: std::sync::Arc<[AssertionSlot]>,
     pub(crate) assertions: Box<[RegisteredAssertion<'dae>]>,
+    /// Whether an invocation can enter a SOLVE-C62 recursive group, whose
+    /// body no caller may expand in place.
+    pub(crate) recursive: bool,
 }
 
 /// One call-scoped assertion output of a pure-call owner.
@@ -298,6 +313,8 @@ struct CallRegistration<'dae> {
     reserved: Option<solve::SolvePureCallIdentity>,
     next: u64,
     calls: HashMap<dae::ExprId<'dae>, RegisteredCall<'dae>>,
+    /// Functions whose call SCC was already examined for a SOLVE-C62 group.
+    examined_functions: std::collections::HashSet<dae::FunctionId<'dae>>,
 }
 
 impl CallRegistration<'_> {
@@ -306,6 +323,7 @@ impl CallRegistration<'_> {
             reserved,
             next: 1,
             calls: HashMap::new(),
+            examined_functions: std::collections::HashSet::new(),
         }
     }
 
@@ -372,6 +390,17 @@ fn arithmetic_profile() -> solve::SolveArithmeticProfile {
     )
 }
 
+/// Whether a value is text: a `String` scalar or array (MLS §4.9.4).
+///
+/// Text carries no numeric value, so it occupies no leaf of a pure-call
+/// interface; a record such as `IdealGases.Common.DataRecord` passes its
+/// numeric fields and leaves its `name` out. Every numeric consumer of a value
+/// demands a register, so a body or call site that computes with a text value
+/// is refused at construction rather than handed an empty one.
+pub(crate) fn is_text_value(value_type: &dae::ValueType) -> bool {
+    !value_type.is_record() && value_type.scalar_type() == dae::ScalarType::String
+}
+
 /// Typed leaves one DAE value type occupies in a pure-call interface.
 ///
 /// A leaf holds scalars, so a value type holds exactly as many leaves as it
@@ -389,7 +418,7 @@ fn lower_value_type_leaves<'dae>(
     let value_type = view
         .value_type(id)
         .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-    if value_type.dimensions().contains(&0) {
+    if value_type.dimensions().contains(&0) || is_text_value(value_type) {
         return Ok(Vec::new());
     }
     if !value_type.is_record() {
@@ -523,7 +552,7 @@ struct ExpressionLowerer<'builder, 'program, 'dae> {
     fold_parameters: HashMap<(dae::FunctionFoldId<'dae>, u32), LoweredValue<'program, 'dae>>,
     fold_values: HashMap<dae::FunctionFoldId<'dae>, Vec<LoweredValue<'program, 'dae>>>,
     binders: HashMap<(u32, u32), solve::ProgramRegister<'program>>,
-    callees: HashMap<dae::ExprId<'dae>, RegisteredCall<'dae>>,
+    callees: HashMap<dae::ExprId<'dae>, CalleeInterface<'dae>>,
     predicate_ranges: HashMap<dae::ExprId<'dae>, Range<usize>>,
     cache: HashMap<dae::ExprId<'dae>, LoweredValue<'program, 'dae>>,
     call_values: HashMap<dae::ExprId<'dae>, Vec<solve::ProgramRegister<'program>>>,
@@ -532,6 +561,9 @@ struct ExpressionLowerer<'builder, 'program, 'dae> {
     assertion_slots: std::sync::Arc<[AssertionSlot]>,
     next_direct_assertion: usize,
     direct_assertion_count: usize,
+    /// Whether each expression evaluates without failure or effect (see
+    /// `total_conditionals`).
+    totality: HashMap<dae::ExprId<'dae>, bool>,
 }
 
 impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
@@ -756,6 +788,9 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
     ) -> Result<LoweredValue<'program, 'dae>, solve::SolveProgramConstructionError> {
         if operands.len() < 3 || operands.len().is_multiple_of(2) {
             return Err(solve::SolveProgramConstructionError::InvalidRegion { provenance });
+        }
+        if let Some(value) = self.total_conditional(value_type, operands, provenance)? {
+            return Ok(value);
         }
         let condition = self.expression(operands[0])?.only_register(provenance)?;
         let pending = self.pending_predicates(operands[1..].iter().copied());
@@ -1347,6 +1382,14 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             let (_, field_type) = self.view.record_field(value_type, ordinal).ok_or(
                 solve::SolveProgramConstructionError::InvalidCallInterface { provenance: at },
             )?;
+            if is_text_value(
+                self.view
+                    .value_type(field_type)
+                    .ok_or(solve::SolveProgramConstructionError::WireMismatch)?,
+            ) {
+                // A text field occupies no leaf, so its value is not lowered.
+                continue;
+            }
             let field = self.expression(argument)?;
             leaves.extend(self.coerce_value(field, field_type, at)?.leaves);
         }
@@ -1753,6 +1796,15 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         }
         let mut lowered = Vec::new();
         for (argument, target) in arguments.iter().zip(parameter_types.iter()) {
+            if is_text_value(
+                self.view
+                    .value_type(target)
+                    .ok_or(solve::SolveProgramConstructionError::WireMismatch)?,
+            ) {
+                // A text input occupies no leaf (a decomposed record's `name`
+                // field, for example), so its argument is not lowered.
+                continue;
+            }
             let value = self.expression(argument)?;
             lowered.extend(self.coerce_value(value, target, at)?.leaves);
         }

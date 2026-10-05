@@ -1543,6 +1543,57 @@ fn func_040_function_name_and_partial_application_arguments() {
 }
 
 // =============================================================================
+// FUNC-043: Recursive functions (MLS §12.2)
+// =============================================================================
+
+const FUNC_043_SOURCE: &str = r#"
+    package R
+        function fib
+            input Integer n;
+            output Real y;
+        algorithm
+            y := if n < 2 then n else fib(n - 1) + fib(n - 2);
+        end fib;
+        function isEven
+            input Integer n;
+            output Boolean even;
+        algorithm
+            even := if n == 0 then true else isOdd(n - 1);
+        end isEven;
+        function isOdd
+            input Integer n;
+            output Boolean odd;
+        algorithm
+            odd := if n == 0 then false else isEven(n - 1);
+        end isOdd;
+        model M
+            parameter Integer n = 10;
+            parameter Real f = fib(n);
+            parameter Boolean even = isEven(n);
+            Real x(start = 0, fixed = true);
+        equation
+            der(x) = if even then f else -f;
+        end M;
+    end R;
+"#;
+
+#[test]
+fn func_043_recursive_and_mutually_recursive_calls() {
+    let trace = rumoca_contracts::test_support::simulate_model(FUNC_043_SOURCE, "R.M", 1.0);
+    // fib(10) = 55 and 10 is even.
+    assert!((trace.final_value("x") - 55.0).abs() < 1e-9);
+}
+
+#[test]
+fn func_043_recursion_beyond_the_profile_depth_limit_fails() {
+    let source = FUNC_043_SOURCE
+        .replace("parameter Integer n = 10;", "parameter Integer n = 100;")
+        .replace("parameter Real f = fib(n);", "parameter Real f = 1;");
+    let error = rumoca_contracts::test_support::simulate_model_failure(&source, "R.M", 1.0);
+    assert!(error.contains("depth limit"), "{error}");
+}
+
+// =============================================================================
 // FUNC-026: Vectorization non-replaceable (MLS §12.4.6, §6.3.1, §7.3)
 // =============================================================================
 
@@ -1592,4 +1643,79 @@ fn func_026_vectorized_call_through_selected_replaceable_package_accepted() {
 #[test]
 fn func_026_vectorized_call_of_unselected_callee_rejected() {
     expect_failure_in_phase_with_code(FUNC_026_SOURCE, "V.Unselected", FailedPhase::ToDae, "ED008");
+}
+
+// =============================================================================
+// FUNC-041: Element definedness through comprehensions (MLS §12.4.4, §10.4.2)
+// =============================================================================
+
+#[test]
+fn func_041_comprehension_reads_of_defined_columns_accepted() {
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        model ColumnFill
+            function vandermondeSum
+                input Real u[:];
+                input Integer n;
+                output Real s;
+            protected
+                Real V[size(u, 1), n + 1];
+            algorithm
+                V[:, n + 1] := ones(size(u, 1));
+                for j in n:-1:1 loop
+                    V[:, j] := {u[i] * V[i, j + 1] for i in 1:size(u, 1)};
+                end for;
+                s := sum(V);
+            end vandermondeSum;
+            Real x = time + 2;
+            Real y = vandermondeSum({x, 2 * x}, 2);
+        end ColumnFill;
+    "#,
+        "ColumnFill",
+        1.0,
+    );
+    // Rows [u^2, u, 1] for u = 3 and u = 6.
+    assert!((trace.final_value("y") - 56.0).abs() < 1e-9);
+}
+
+// =============================================================================
+// FUNC-042: Text in pure-call interfaces (MLS §4.9.4, §12.4)
+// =============================================================================
+
+#[test]
+fn func_042_record_with_text_field_passed_to_calls() {
+    let trace = rumoca_contracts::test_support::simulate_model(
+        r#"
+        package NamedData
+            record DataRecord
+                String name;
+                Real R_s;
+                Real a[2];
+            end DataRecord;
+            constant DataRecord H2O(name = "H2O", R_s = 461.5, a = {1, 2});
+            function cp_T
+                input DataRecord d;
+                input Real T;
+                output Real cp;
+            algorithm
+                cp := d.R_s * (d.a[1] + d.a[2] * T);
+            end cp_T;
+            function cp
+                input Real T;
+                output Real y;
+            algorithm
+                y := cp_T(H2O, T);
+            end cp;
+            model M
+                Real T = 1 + time;
+                Real nested = cp(T);
+                Real direct = cp_T(H2O, T);
+            end M;
+        end NamedData;
+    "#,
+        "NamedData.M",
+        1.0,
+    );
+    assert!((trace.final_value("nested") - 461.5 * 5.0).abs() < 1e-9);
+    assert!((trace.final_value("direct") - 461.5 * 5.0).abs() < 1e-9);
 }

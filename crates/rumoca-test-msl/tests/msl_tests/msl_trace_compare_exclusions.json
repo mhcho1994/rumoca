@@ -175,6 +175,20 @@
       "retired_by": "event_instant_alignment"
     },
     {
+      "model_name": "Modelica.Electrical.Digital.Examples.Counter",
+      "kind": "reference_failure",
+      "reason": "The default OMC reference (stopTime=100, 500 output intervals) reports a state event at t=0.4 on all eight integer(delay(xr, delayTime)) crossings of the flip-flop transport delays, although every delay source has been constant since t=0.001 and the next input change is the clock edge at t=0.5. From that event every flip-flop output is 'X' to the end. The OMC result depends on the output grid, not on the model: the same OMC executable with stopTime=10, 20, or 50, or with stopTime=100 and 1000 or 5000 output intervals, counts exactly as Counter3 and as this counter with n=3 do. The Rumoca trace agrees with the 1000- and 5000-interval OMC runs on every shared channel. This is a reference-generation failure, not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "OMC a96aa1a-cmake LOG_EVENTS at the default grid: state event at time=0.4 on the 8 integer(delay(Counter.FF[i].RS{1,2}.TD1.xr, delayTime)) crossings, with no input change in (0.001, 0.5)",
+          "default OMC reference: Counter.q[1..4] are 'X' (ordinal 2) from t=0.4 to t=100",
+          "OMC stopTime=100 with numberOfIntervals=1000 or 5000, and stopTime=10, 20, or 50: Counter.q[4] rises at t=8.5 and toggles every 8 s (16.5, 24.5, ..., 96.5)",
+          "Rumoca vs OMC stopTime=100 numberOfIntervals=5000: 196 of 196 shared channels identical at every output sample outside 2e-3 s of an event instant; the same against 1000 intervals; measured at 3c9ef1b6d and repeated with the same result at 3431a71f7, after the delay-history change 870a83575"
+        ],
+        "artifact": "msl:Modelica.Electrical.Digital.Examples.Counter"
+      }
+    },
+    {
       "model_name": "Modelica.Electrical.Machines.Examples.DCMachines.DCPM_CurrentControlled",
       "kind": "comparator_limitation",
       "reason": "At the 0.1 s current-command step, OMC records the pre-event PID error at t=0.1 and the post-event value at t=0.1000000001100014, while Rumoca records the post-event value at t=0.1. The seven minor channels are PID error aliases of this event-side phase shift; all 200 other channels are strict-high and the post-event response agrees, so raw pointwise interpolation at the discontinuity is non-identifying.",
@@ -346,6 +360,35 @@
       "retired_by": "event_instant_alignment"
     },
     {
+      "model_name": "Modelica.Electrical.QuasiStatic.Polyphase.Examples.BalancingStar",
+      "kind": "comparator_limitation",
+      "reason": "The only non-high channel is currentSensor0.arg_i, the angle of the neutral current. The load is balanced by design: the phase currents 10 A at 120 deg, 10/sqrt(3) A at -90 deg and 10/sqrt(3) A at -30 deg sum to exactly zero, so the neutral phasor is zero and its angle is undefined. Both traces carry only floating-point residue of magnitude 4e-15 A on that phasor, and atan2 of that residue gives -2.678 rad in Rumoca and -2.761 rad in OMC. Its real and imaginary channels agree.",
+      "evidence": {
+        "facts": [
+          "1213/0/1 channels",
+          "currentSensor0.i magnitude: at most 3.97e-15 A in Rumoca and 4.78e-15 A in OMC over t in [0, 1]",
+          "currentSensor0.arg_i: -2.678 rad in Rumoca and -2.761 rad in OMC, constant",
+          "currentSensor0.i.re and currentSensor0.i.im are high"
+        ]
+      },
+      "retired_by": "angle_branch_aware_comparison"
+    },
+    {
+      "model_name": "Modelica.Electrical.QuasiStatic.SinglePhase.Examples.Rectifier",
+      "kind": "comparator_limitation",
+      "reason": "Every non-high channel is an angle of the quasi-static source current or a function of it, and every difference is the sign of a zero. Until the load ramp starts at t = 0.1 the QS current phasor is exactly zero in both traces, and atan2 of a zero phasor returns 0, pi or -pi according to the signs of its zeros, so resistorQS.arg_i, currentSensorQS.arg_i and iQS.phi are -pi in Rumoca and 0 in OMC, and voltageQS.arg_i is 0 against -pi with voltageQS.pf = cos(arg_v - arg_i) 1 against -1. After t = 0.1 the load is resistive, the current's imaginary part is exactly zero, and voltageQS.arg_i lies on the branch cut: pi in Rumoca and -pi in OMC, the same angle. Every other angle sample agrees.",
+      "evidence": {
+        "facts": [
+          "231/0/5 channels",
+          "resistorQS.i and voltageQS.i are exactly 0 for t <= 0.1 in both traces",
+          "resistorQS.arg_i, currentSensorQS.arg_i, iQS.phi: -pi against 0 for t <= 0.1, 0 against 0 after",
+          "voltageQS.arg_i: 0 against -pi for t <= 0.1, pi against -pi after; voltageQS.pf: 1 against -1 for t <= 0.1, -1 against -1 after",
+          "no other channel differs; every current, voltage and power channel is high"
+        ]
+      },
+      "retired_by": "angle_branch_aware_comparison"
+    },
+    {
       "model_name": "Modelica.Fluid.Examples.AST_BatchPlant.Test.TwoTanks",
       "kind": "comparator_limitation",
       "reason": "The 11 non-high channels are all aliases of tank1's temperature and enthalpy (74 of 85 channels high, tank2 and every flow and level channel high). Tank1 only drains through its bottom port into the pipe, so its exact temperature is the constant 323.15 K; OMC's whole reference spread on these channels (6.37e-6 K) is its own integration residue, since the same OMC model at tolerance 1e-10 differs from its 1e-6 trace by exactly that 6.37e-6 K. Normalizing against that spread makes pointwise comparison non-identifying: Rumoca's 1e-6 drift of 2.4e-4 K is 7.4e-7 of the level, inside the experiment's relative tolerance, and at rtol = atol = 1e-10 Rumoca agrees with the 1e-10 OMC trace to 4.7e-9 K on these channels while both remain near-flat (drifts 6.9e-9 and 2.2e-9 K), so the channel stays degenerate at every tolerance.",
@@ -387,6 +430,219 @@
       }
     },
     {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_DOL",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 stator and rotor-cage converters (V_m.im structurally zero, V_m.re alternating with the phase current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these two angles.",
+      "evidence": {
+        "facts": [
+          "1217/6/2 channels (high/minor/deviating)",
+          "deviating: aimcM.stator and aimcM.rotorCage electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns both channels the literal 0.0; the OMC traces of their V_m.re are negative at 7445 and 7180 of 15004 samples",
+          "Rumoca arg_V_m equals atan2(V_m.im, V_m.re) at every sample, of magnitude pi where V_m.re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_DOL"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_Initialize",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (V_m.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "746/6/2 channels (high/minor/deviating)",
+          "deviating: aimc.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, aimc.rotorCage.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 7517, 9623 of 15004 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_Initialize"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_Inverter",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (V_m.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "755/0/2 channels (high/minor/deviating)",
+          "deviating: aimc.rotorCage.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, aimc.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 8147, 6793 of 15006 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_Inverter"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_Steinmetz",
+      "kind": "reference_failure",
+      "reason": "Two deviating channels are the ComplexMath.arg channels of the orientation-0 stator and rotor-cage converters, which OMC folds to 0 (atan2(0, x) is pi for a negative real part). The third is idealCloser.v. Before the closer switches at t = 0.1 s the motor side is fed only through the open switch's 1e-5 S leakage, so the motor terminal potential is an ill-conditioned observable of about 3e-4 V; after closing the channel is Ron*i with a p95-p05 range of only 0.026 V, so the open-interval integration residue dominates the normalized error. Neither tool resolves that residue at its default tolerance: against OMC at 1e-10 the default OMC trace itself deviates on idealCloser.v, and default-tolerance Rumoca is noisier there than default OMC (a mean deviation from OMC at 1e-10 on t in [0, 0.1] of 0.33 V against 0.13 V). At 1e-10 Rumoca agrees with OMC at 1e-10 on idealCloser.v (1.3e-3 V), so the channel is an ill-conditioned observable both tools resolve only at tight tolerance. This is a reference limitation, not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "772/0/3 channels (high/minor/deviating); deviating: aimc.stator and aimc.rotorCage electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, idealCloser.v (bounded L1 0.60)",
+          "OMC generated code assigns both arg_V_m channels the literal 0.0; the OMC traces of their V_m.re are negative at 5101 and 3754 of 10006 samples",
+          "same comparator, default OMC trace against OMC at tolerance 1e-10: idealCloser.v deviates (bounded L1 0.33)",
+          "on t in [0, 0.1] the mean |idealCloser.n.v| is 2.8e-4 V in OMC at 1e-10; the mean deviation from it is 0.13 V for default OMC, 0.33 V for default Rumoca and 1.3e-3 V for Rumoca at 1e-10",
+          "Rumoca at 1e-10 against OMC at 1e-10: 773/0/2, only the two arg_V_m channels deviate"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_Steinmetz"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_YD",
+      "kind": "reference_failure",
+      "reason": "Two deviating channels are the ComplexMath.arg channels of the orientation-0 stator and rotor-cage converters, which OMC folds to 0 (atan2(0, x) is pi for a negative real part). Fourteen are the stator zero-sequence voltage and the star-point potentials that equal it, and six are the closer voltages before it switches, when the motor is fed only through the open switches' 1e-5 S leakage. The default OMC reference does not resolve these observables: its zero-sequence voltage makes a 2.1 V excursion that OMC at 1e-10 does not reproduce, and against OMC at 1e-10 the default OMC trace itself deviates on exactly these twenty channels. Rumoca at 1e-10 agrees with OMC at 1e-10 on all of them within the minor band. This is a reference limitation, not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "903/0/22 channels (high/minor/deviating): 2 arg_V_m, aimc.stator.zeroInductor.v0 and v[1..3], switchYD.star and switchYD.idealOpener node potentials (14 zero-sequence channels in all), idealCloser.v[1..3] and idealCloser.idealClosingSwitch[1..3].v",
+          "OMC generated code assigns both arg_V_m channels the literal 0.0; the OMC traces of their V_m.re are negative at 12399 and 12854 of 25006 samples",
+          "maximum |aimc.stator.zeroInductor.v0|: default OMC 2.1 V (t in [0.1, 0.17]), OMC at 1e-10 5.7e-5 V, default Rumoca 7.6e-9 V",
+          "same comparator, default OMC trace against OMC at tolerance 1e-10: 21 deviating channels, the 20 non-angle channels above plus der(aimc.stator.zeroInductor.i0)",
+          "Rumoca at 1e-10 against OMC at 1e-10: 909/14/2, only the two arg_V_m channels deviate"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_YD"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_withLosses",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 stator and rotor-cage converters (V_m.im structurally zero, V_m.re alternating with the phase current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these two angles.",
+      "evidence": {
+        "facts": [
+          "798/5/2 channels (high/minor/deviating)",
+          "deviating: aimc.stator and aimc.rotorCage electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns both channels the literal 0.0; the OMC traces of their V_m.re are negative at 25005 and 50003 of 50004 samples",
+          "Rumoca arg_V_m equals atan2(V_m.im, V_m.re) at every sample, of magnitude pi where V_m.re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMC_withLosses"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMS_Start",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 stator and rotor converters (V_m.im structurally zero, V_m.re alternating with the phase current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these two angles.",
+      "evidence": {
+        "facts": [
+          "1584/20/2 channels (high/minor/deviating)",
+          "deviating: aimsM.stator and aimsM.rotor electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns both channels the literal 0.0; the OMC traces of their V_m.re are negative at 7422 and 7910 of 15006 samples",
+          "Rumoca arg_V_m equals atan2(V_m.im, V_m.re) at every sample, of magnitude pi where V_m.re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.InductionMachines.IMS_Start"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMEE_DOL",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (V_m.im and Phi.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "960/0/6 channels (high/minor/deviating)",
+          "deviating: smee.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, smee.rotorCage.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, smee.excitation.arg_V_m, smee.excitation.stray.arg_V_m, smee.excitation.stray.arg_Phi, smee.excitation.electroMagneticConverter.arg_V_m",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 14966, 12029, 2652, 2652, 2652, 2652 of 30008 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMEE_DOL"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMEE_Generator",
+      "kind": "reference_failure",
+      "reason": "Two deviating channels are the ComplexMath.arg channels of the orientation-0 stator and rotor-cage converters, which OMC folds to 0 (atan2(0, x) is pi for a negative real part). The others are near-constant rotor-cage magnitudes: the damper-cage loss power with its six aliases, the rotor RMS current, and the rotor-cage |V_m|. After start-up the loss power is the 0.2926069 W constant of the converged reference, and the default OMC reference carries an integration error of a mean 5.6e-4 W on it, comparable to the 9.7e-4 W p95-p05 range the comparator normalizes by. Default-tolerance Rumoca is noisier on it than default OMC (a mean difference from OMC at 1e-10 of 1.2e-3 W against 5.6e-4 W), and at 1e-10 Rumoca agrees with OMC at 1e-10 within 1.6e-7 W, so these are ill-conditioned observables both tools resolve only at tight tolerance. The default reference is not accurate enough to identify them pointwise; this is not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "1316/1/14 channels (high/minor/deviating)",
+          "OMC generated code assigns smeeM.stator and smeeM.rotorCage electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m the literal 0.0",
+          "remaining deviations: smeeM.rotorCage.lossPower and its aliases, smeeM.irRMS, smeeM.rotorCage.iRMS, and the rotor-cage abs_V_m channels, each with a p95-p05 range below 0.2 percent of its magnitude",
+          "against OMC at 1e-10 on t in [1, 30]: default OMC loss power mean difference 5.6e-4 W, default Rumoca 1.2e-3 W, Rumoca at 1e-10 maximum 1.6e-7 W",
+          "rotorCage.i[1] against OMC at 1e-10: Rumoca at 1e-10 maximum difference 3.5e-6 A"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMEE_Generator"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMEE_Rectifier",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (V_m.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "866/0/2 channels (high/minor/deviating)",
+          "deviating: smee.rotorCage.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, smee.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 7373, 6744 of 13450 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMEE_Rectifier"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMPM_Braking",
+      "kind": "reference_failure",
+      "reason": "One deviating channel is the ComplexMath.arg channel of the orientation-0 stator converter, which OMC folds to 0 (atan2(0, x) is pi for a negative real part). The other five are the stator zero-sequence voltage and its aliases. The star point is grounded through R = 1e6 Ohm, so the zero-sequence voltage amplifies the integration error of a near-zero zero-sequence current by about 3e6, as in the Electrical.Machines SMPM_Braking row. Established, with the same comparator: the default OMC trace deviates from OMC at 1e-10 on these five channels (and der(smpm.stator.zeroInductor.i0)); OMC at 1e-12 is minor against OMC at 1e-10 on them (0.12); Rumoca at 1e-10 is minor against OMC at 1e-10 on them, with only arg_V_m deviating. Not established: Rumoca at 1e-10 against OMC at 1e-12 still scores 0.45 on the zero-sequence channels, so no trace is shown converged on them and no Rumoca accuracy is claimed for them at any tolerance. This is a conditioned-observable reference limitation, not strict-high credit.",
+      "evidence": {
+        "facts": [
+          "745/0/6 channels (high/minor/deviating): smpm.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, smpm.stator.zeroInductor.v0 and v[1..3], voltageQuasiRMSSensor.ToSpacePhasor1.zero",
+          "OMC generated code assigns the arg_V_m channel the literal 0.0; the OMC trace of its V_m.re is negative at 4744 of 8300 samples",
+          "same comparator, default OMC trace against OMC at tolerance 1e-10: the five zero-sequence channels and der(smpm.stator.zeroInductor.i0) deviate (bounded L1 0.94)",
+          "OMC at 1e-12 against OMC at 1e-10: those channels minor (0.12); Rumoca at 1e-10 against OMC at 1e-10: 745/5/1, only arg_V_m deviates; Rumoca at 1e-10 against OMC at 1e-12: zero-sequence channels 0.45"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMPM_Braking"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMPM_CurrentSource",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (V_m.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "754/0/1 channels (high/minor/deviating)",
+          "deviating: smpm.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 10328 of 20002 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMPM_CurrentSource"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMPM_Inverter",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (V_m.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "1272/0/2 channels (high/minor/deviating)",
+          "deviating: smpmM.rotorCage.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, smpmM.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 8614, 6873 of 15006 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMPM_Inverter"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMPM_VoltageSource",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (V_m.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "837/0/1 channels (high/minor/deviating)",
+          "deviating: smpm.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 10497 of 20002 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMPM_VoltageSource"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMR_Inverter",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (V_m.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "1218/0/2 channels (high/minor/deviating)",
+          "deviating: smrM.rotorCage.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m, smrM.stator.electroMagneticConverter.singlePhaseElectroMagneticConverter[1].arg_V_m",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 9137, 6787 of 15006 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.BasicMachines.SynchronousMachines.SMR_Inverter"
+      }
+    },
+    {
       "model_name": "Modelica.Magnetic.FundamentalWave.Examples.Components.EddyCurrentLosses",
       "kind": "reference_failure",
       "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channel of the phase-1 converter (orientation 0, V_m.im structurally zero, V_m.re alternating with the current) is the constant 0, while atan2 is pi for a negative real part. The only non-high channels are these two angles; 678 of 680 are high.",
@@ -398,6 +654,20 @@
         ],
         "commit": "6313cdbe3",
         "artifact": "docs/dev-guide/src/tooling/electrical-coverage.md"
+      }
+    },
+    {
+      "model_name": "Modelica.Magnetic.FundamentalWave.Examples.Components.PolyphaseInductance",
+      "kind": "reference_failure",
+      "reason": "OMC folds atan2(0, x) to 0 whatever the sign of x, so its ComplexMath.arg channels of the orientation-0 phasors (Phi.im and V_m.im structurally zero, the real part changing sign with the winding current) are the constant 0, while atan2 is pi for a negative real part. The only deviating channels are these angles.",
+      "evidence": {
+        "facts": [
+          "574/0/5 channels (high/minor/deviating)",
+          "deviating: reluctance_s[1].arg_Phi, reluctance_s[1].arg_V_m, converter_s[1].arg_V_m, converter_m.singlePhaseElectroMagneticConverter[1].arg_V_m, converter_s[1].arg_Phi",
+          "OMC generated code assigns each deviating channel the literal 0.0; the OMC traces of the matching real parts are negative at 5000, 5000, 5000, 5000, 5001 of 10002 samples",
+          "Rumoca's angle equals atan2(im, re) of its own trace at every sample, up to the sign of a zero imaginary part, so it has magnitude pi where re < 0"
+        ],
+        "artifact": "msl:Modelica.Magnetic.FundamentalWave.Examples.Components.PolyphaseInductance"
       }
     },
     {
@@ -413,6 +683,20 @@
         "commit": "6313cdbe3",
         "artifact": "docs/dev-guide/src/tooling/electrical-coverage.md"
       }
+    },
+    {
+      "model_name": "Modelica.Magnetic.QuasiStatic.FluxTubes.Examples.BasicExamples.QuadraticCoreAirgap",
+      "kind": "comparator_limitation",
+      "reason": "Every non-high channel is the arg_* angle of a phasor that is exactly zero until the source ramp reaches the leg at t = 0.0124: atan2 of a zero phasor returns 0, pi or -pi according to the signs of its zeros (Rumoca (-0, -0) gives -pi, OMC records 0). From then on both traces agree. The angle of a zero phasor is undefined, so pointwise angle comparison is not identifying there.",
+      "evidence": {
+        "facts": [
+          "315/0/4 channels",
+          "leftLeg.arg_B, leftLeg.arg_Phi, rightLeg.arg_Phi and leakage.arg_Phi are -pi or pi against 0 while the phasor is exactly zero, t < 0.0124",
+          "the real and imaginary parts of every phasor, and every non-angle channel, are high"
+        ],
+        "commit": "69948c060"
+      },
+      "retired_by": "angle_branch_aware_comparison"
     },
     {
       "model_name": "Modelica.Magnetic.QuasiStatic.FluxTubes.Examples.FixedShapes.CuboidSections",
@@ -508,6 +792,20 @@
           "100.0 percent of each deviating channel error mass lies inside the zero-flow window; maximum deviation outside it 2.3e-3 K",
           "every state agrees within 1.5e-3 K over 2 s"
         ]
+      }
+    },
+    {
+      "model_name": "Modelica.Thermal.FluidHeatFlow.Examples.TestOpenTank",
+      "kind": "model_issue",
+      "reason": "The CombiTimeTable holds the pump volume flow at exactly zero during t in [0, 0.5] s and [1, 1.5] s. At exactly zero flow the semiLinear port enthalpies of the tank-pump-ambient chain are underdetermined (MLS 3.7.4.5): Rule 1 selects the chain head sa, but which end is sa depends on the sign chosen for the flow variable of a connection, so the value is a tool choice. Rumoca holds the tank end (313.15 K, then 303.15 K after refilling) and OMC the ambient end (293.15 K). Every deviating channel is such a zero-flow enthalpy observable, while level, tank temperature, and every flow channel are high; pointwise comparison of the zero-flow observables is non-identifying.",
+      "evidence": {
+        "facts": [
+          "23 high, 0 minor, 10 deviation, 0 severe of 33 channels; deviating: openTank.flowPort.h, openTank.T_port, ambient.flowPort.h, ambient.T_port, volumeFlow.T, volumeFlow.T_a, volumeFlow.T_b, volumeFlow.T_q, volumeFlow.flowPort_a.h, volumeFlow.flowPort_b.h",
+          "V_flow is exactly 0 on t in [0, 0.5] and [1, 1.5] s in both traces",
+          "99.5 percent of each deviating channel's error mass lies inside the zero-flow windows; the remainder is the table-step interpolation at t = 0.5, 0.75, 1.0 shared by the high-band flow channels",
+          "openTank.T at t = 1.5: rumoca 303.1500000, OMC 303.1499999990; level 0.5 vs 0.4999999999999925"
+        ],
+        "artifact": "msl:Modelica.Thermal.FluidHeatFlow.Examples.TestOpenTank"
       }
     }
   ]

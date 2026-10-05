@@ -1,6 +1,7 @@
 mod derivatives;
 mod expression_rules;
 mod integer_bounds;
+mod specialization_schedule;
 #[cfg(test)]
 mod tests;
 mod value_relevance;
@@ -41,11 +42,13 @@ pub(super) type ValueShape = Vec<u32>;
 /// key repeats. The report states the bound it exceeded rather than claiming a
 /// proof that no fixed point exists, because this analysis does not decide that.
 ///
-/// **Owner.** `ShapeAnalyzer::ensure_specialization`, the only place a
-/// certificate is minted.
+/// **Owner.** `ShapeAnalyzer::ensure_specialization` in `specialization_schedule`,
+/// the only place a certificate is minted; it walks a chain this bound admits
+/// without growing the native stack with the chain.
 ///
 /// **Evidence.** `function_shapes/tests/value_proven_shapes.rs`:
-/// `value_recursion_without_a_fixed_point_is_bounded` (rejected),
+/// `value_recursion_without_a_fixed_point_is_bounded` (rejected, and on a
+/// 256 KiB stack in `value_recursion_bound_is_reported_on_a_small_stack`),
 /// `scalar_valued_recursion_reuses_one_specialization` and
 /// `converging_value_keyed_recursion_terminates` (accepted).
 const SPECIALIZATION_DEPTH_LIMIT: usize = 256;
@@ -115,6 +118,11 @@ pub(super) struct ShapeEnvironment {
     /// `integer(...)` floor conversion, `mod`/`div`, enumeration ordinals — instead of
     /// a second rule set written for shapes alone.
     values: EvalContext,
+    /// The model's functions, which an extent may call (MLS §12.2: a
+    /// dimension of a function local is any Integer expression of the inputs,
+    /// such as `numberOfSymmetricBaseSystems(m)`). Shared by the model scope
+    /// and every specialization cloned from it.
+    functions: Option<Arc<EvalContext>>,
     /// Statically-known array extents per flat name, in dimension order.
     ///
     /// This is the shape proof's `shapes` restated as the `Integer` extents MLS
@@ -166,6 +174,7 @@ impl ShapeEnvironment {
             enumeration_type_declarations: Arc::default(),
             record_array_fields: None,
             values: EvalContext::with_capacity(capacity, 0, 0),
+            functions: None,
             dimension_extents: HashMap::with_capacity(capacity),
             specialized: false,
             attribute_scope: false,
@@ -290,6 +299,7 @@ impl ShapeEnvironment {
     fn shape_aware_values(&self) -> ShapeAwareValues<'_> {
         ShapeAwareValues {
             values: &self.values,
+            functions: self.functions.as_deref(),
             dimension_extents: &self.dimension_extents,
         }
     }
@@ -488,6 +498,7 @@ pub(in crate::construction) fn proven_conditional_branch(
 /// bounds through the value context directly and keep `size` symbolic.
 struct ShapeAwareValues<'a> {
     values: &'a EvalContext,
+    functions: Option<&'a EvalContext>,
     dimension_extents: &'a HashMap<VarName, Vec<i64>>,
 }
 
@@ -501,7 +512,9 @@ impl EvalEnvironment for ShapeAwareValues<'_> {
     }
 
     fn get_function(&self, name: &str) -> Option<&rumoca_core::Function> {
-        self.values.get_function(name)
+        self.values
+            .get_function(name)
+            .or_else(|| self.functions?.get_function(name))
     }
 
     fn get_array_dimensions(&self, name: &str) -> Option<&[i64]> {
@@ -616,6 +629,7 @@ impl FunctionShapeAnalysis {
     ) -> Result<Self, ToDaeError> {
         let record_array_fields = Arc::new(analysis::analyze_record_array_field_plans(flat)?);
         let mut model_values = concrete_model_shapes(flat, constants)?;
+        model_values.functions = Some(Arc::new(function_table(constants)));
         model_values.evaluable = evaluable.map(|evaluable| Arc::new(evaluable.clone()));
         model_values.record_array_fields = Some(record_array_fields);
         let constructor_instances = flat
@@ -670,6 +684,9 @@ impl FunctionShapeAnalysis {
                 structural_selections: HashSet::new(),
             },
             active_specializations: Vec::new(),
+            chain_depths: Vec::new(),
+            pending_bodies: Vec::new(),
+            inline_base: 0,
         };
         analyzer.discover_model_calls()?;
         analyzer.discover_derivative_calls()?;
@@ -862,6 +879,7 @@ impl FunctionShapeAnalysis {
         let mut resolve = |name: &rumoca_core::Reference,
                            arguments: &[Expression],
                            is_constructor: bool,
+                           values: &ShapeEnvironment,
                            span: Span| {
             if is_constructor {
                 return self.constructor_expression_shape(name, span);
@@ -925,6 +943,7 @@ impl FunctionShapeAnalysis {
 
 struct DiscoveryCheckpoint {
     certificates: usize,
+    pending_bodies: usize,
     call_keys: HashSet<FunctionSpecializationKey>,
     constructor_keys: HashSet<FunctionSpecializationKey>,
 }
@@ -933,6 +952,12 @@ struct ShapeAnalyzer<'flat> {
     flat: &'flat flat::Model,
     analysis: FunctionShapeAnalysis,
     active_specializations: Vec<usize>,
+    /// Length of the value-keyed call chain that minted each specialization.
+    chain_depths: Vec<usize>,
+    /// Specializations whose bodies wait for their walk root to drain them.
+    pending_bodies: Vec<specialization_schedule::PendingBody>,
+    /// `active_specializations` length where the current depth-first walk began.
+    inline_base: usize,
 }
 
 impl ShapeAnalyzer<'_> {
@@ -1020,6 +1045,28 @@ impl ShapeAnalyzer<'_> {
         {
             return self.discover_conditional_calls(branches, else_branch, *span, values);
         }
+        // MLS §10.4.1: the comprehension body and filter are evaluated in the
+        // scope its indices open, so their calls are shaped with each index
+        // bound as a scalar; the index ranges are read outside that scope.
+        if let Expression::ArrayComprehension {
+            expr,
+            indices,
+            filter,
+            ..
+        } = expression
+        {
+            for index in indices {
+                self.discover_calls(&index.range, values)?;
+            }
+            let mut scoped = values.clone();
+            for index in indices {
+                scoped.insert(VarName::new(&index.name), Vec::new());
+            }
+            if let Some(filter) = filter {
+                self.discover_calls(filter, &scoped)?;
+            }
+            return self.discover_calls(expr, &scoped);
+        }
         for child in expression_children(expression) {
             self.discover_calls(child, values)?;
         }
@@ -1049,7 +1096,8 @@ impl ShapeAnalyzer<'_> {
                 .iter()
                 .flat_map(|(condition, value)| [condition, value])
                 .chain(std::iter::once(else_branch))
-                .try_for_each(|arm| self.discover_calls(arm, values));
+                .try_for_each(|arm| self.discover_calls(arm, values))
+                .and_then(|()| self.drain_pending_bodies(checkpoint.pending_bodies));
             // A certified callee must also have a representable body.
             let representable = every_arm.is_ok()
                 && self.analysis.certificates[checkpoint.certificates..]
@@ -1106,6 +1154,7 @@ impl ShapeAnalyzer<'_> {
         let mut resolve = |name: &rumoca_core::Reference,
                            arguments: &[Expression],
                            is_constructor: bool,
+                           values: &ShapeEnvironment,
                            span: Span| {
             if is_constructor {
                 return self.discover_constructor(name, arguments, span, values);
@@ -1328,57 +1377,6 @@ impl ShapeAnalyzer<'_> {
         Ok(Vec::new())
     }
 
-    fn ensure_specialization(
-        &mut self,
-        key: FunctionSpecializationKey,
-        call_span: Span,
-    ) -> Result<usize, ToDaeError> {
-        let caller = self.active_specializations.last().copied();
-        if let Some(index) = self.analysis.certificate_by_key.get(&key).copied() {
-            self.record_dependency(caller, index);
-            return Ok(index);
-        }
-        if self.active_specializations.len() >= SPECIALIZATION_DEPTH_LIMIT {
-            return Err(ToDaeError::unsupported_flat(
-                "function shape specialization",
-                format!(
-                    "`{}` needs more than {SPECIALIZATION_DEPTH_LIMIT} nested value-proven \
-                     specializations, which is the bound this analysis admits; no activation in \
-                     the chain repeated an earlier proven argument",
-                    key.function
-                ),
-                call_span,
-            ));
-        }
-        let function =
-            self.flat.functions.get(&key.function).ok_or_else(|| {
-                ToDaeError::unresolved_reference(key.function.as_str(), call_span)
-            })?;
-        let certificate = resolve_certificate(
-            self.flat,
-            function,
-            key.clone(),
-            call_span,
-            &self.analysis.model_values,
-        )?;
-        let index = self.analysis.certificates.len();
-        self.analysis.certificate_by_key.insert(key, index);
-        self.analysis.certificates.push(certificate);
-        self.analysis.dependencies.push(Vec::new());
-        self.record_dependency(caller, index);
-
-        let values = self.analysis.certificates[index].values.clone();
-        self.active_specializations.push(index);
-        let result = (|| {
-            self.discover_parameter_defaults(function, &values)?;
-            self.discover_statements(&function.body, &values)
-        })();
-        let completed = self.active_specializations.pop();
-        debug_assert_eq!(completed, Some(index));
-        result?;
-        Ok(index)
-    }
-
     fn discover_parameter_defaults(
         &mut self,
         function: &rumoca_core::Function,
@@ -1399,6 +1397,7 @@ impl ShapeAnalyzer<'_> {
     fn checkpoint(&self) -> DiscoveryCheckpoint {
         DiscoveryCheckpoint {
             certificates: self.analysis.certificates.len(),
+            pending_bodies: self.pending_bodies.len(),
             call_keys: self.analysis.call_certificates.keys().cloned().collect(),
             constructor_keys: self
                 .analysis
@@ -1412,6 +1411,8 @@ impl ShapeAnalyzer<'_> {
     fn restore(&mut self, checkpoint: DiscoveryCheckpoint) {
         let count = checkpoint.certificates;
         self.analysis.certificates.truncate(count);
+        self.chain_depths.truncate(count);
+        self.pending_bodies.truncate(checkpoint.pending_bodies);
         self.analysis.dependencies.truncate(count);
         for dependencies in &mut self.analysis.dependencies {
             dependencies.retain(|&dependency| dependency < count);
@@ -1835,6 +1836,13 @@ fn reject_function_partial_application(
 /// INST-007). Reading it here is what makes `Real y[m]` provable for a model
 /// that declares `parameter Integer m = 3`: the extent is a parameter
 /// expression in the sense MLS §12.2 admits, and its value is already known.
+/// The function definitions of `constants`, without its parameter values.
+fn function_table(constants: &EvalContext) -> EvalContext {
+    let mut table = EvalContext::with_capacity(0, 0, constants.functions.len());
+    table.functions.clone_from(&constants.functions);
+    table
+}
+
 fn concrete_model_shapes(
     flat: &flat::Model,
     constants: &EvalContext,
@@ -2436,5 +2444,5 @@ fn checked_shape_arithmetic(
     })
 }
 
-// SPEC_0021 file-size exception: this file is 2237 lines, over the 2000-line
+// SPEC_0021 file-size exception: this file is 2448 lines, over the 2000-line
 // action threshold; split plan: extract the FunctionSpecializationKey construction and the per-shape provenance derivation into sibling modules under function_shapes/.

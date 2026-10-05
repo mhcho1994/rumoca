@@ -1636,3 +1636,108 @@ fn identity_absent_read_in_identity_carrying_function_fails_closed() {
         Err(EvalError::CircularDependency { .. })
     ));
 }
+
+/// `fullName = ModelicaInternal_fullPathName(name)` (SPEC_0040 FLAT-C06).
+fn full_path_name_function() -> Function {
+    let mut func = Function::new("Files.fullPathName", test_span());
+    func.pure = false;
+    func.purity_declared = true;
+    let string = rumoca_core::TypeId::new(4);
+    func.inputs.push(function_param("name", "String", string));
+    func.outputs
+        .push(function_param("fullName", "String", string));
+    func.external = Some(rumoca_core::ExternalFunction {
+        language: "C".to_string(),
+        function_name: Some("ModelicaInternal_fullPathName".to_string()),
+        output_name: Some("fullName".to_string()),
+        args: vec![var_ref("name")],
+        annotations: Vec::new(),
+    });
+    func
+}
+
+/// An environment of a translation that evaluates parameter bindings.
+struct TranslationEnvironment {
+    values: EvalContext,
+    resources: crate::translation_reads::ResourceRoots,
+}
+
+impl EvalEnvironment for TranslationEnvironment {
+    fn get_value(&self, name: &str) -> Option<std::borrow::Cow<'_, Value>> {
+        self.values.get_value(name)
+    }
+
+    fn get_enum(&self, name: &str) -> Option<&(String, String)> {
+        self.values.get_enum(name)
+    }
+
+    fn get_function(&self, name: &str) -> Option<&Function> {
+        self.values.get_function(name)
+    }
+
+    fn get_array_dimensions(&self, name: &str) -> Option<&[i64]> {
+        self.values.get_array_dimensions(name)
+    }
+
+    fn deferred_parameter(&self, name: &str) -> Option<crate::constant::DeferredParameterSource> {
+        self.values.deferred_parameter(name)
+    }
+
+    fn translation_resources(&self) -> Option<&crate::translation_reads::ResourceRoots> {
+        Some(&self.resources)
+    }
+}
+
+#[test]
+fn a_cataloged_reader_runs_only_in_a_translation_environment() {
+    let func = full_path_name_function();
+    let name = || vec![Value::String("/".to_string())];
+    let outside = eval_function(
+        &func,
+        name(),
+        &EvalContext::new(),
+        &EvalLimits::default(),
+        0,
+        test_span(),
+    );
+    assert!(
+        matches!(outside, Err(EvalError::NotConstant { .. })),
+        "an evaluation outside translation leaves the call unevaluated: {outside:?}"
+    );
+    let translation = TranslationEnvironment {
+        values: EvalContext::new(),
+        resources: crate::translation_reads::ResourceRoots::new(),
+    };
+    // Apart from its resource roots, the translation environment reads the
+    // inventories of its evaluation context.
+    let context: &dyn EvalEnvironment = &translation.values;
+    let environment: &dyn EvalEnvironment = &translation;
+    assert_eq!(environment.get_value("x"), context.get_value("x"));
+    assert_eq!(environment.get_enum("x"), context.get_enum("x"));
+    assert!(environment.get_function("f").is_none() && context.get_function("f").is_none());
+    assert_eq!(
+        environment.get_array_dimensions("x"),
+        context.get_array_dimensions("x")
+    );
+    assert!(environment.deferred_parameter("x").is_none());
+    assert!(context.translation_resources().is_none());
+    let value = eval_function(
+        &func,
+        name(),
+        &translation,
+        &EvalLimits::default(),
+        0,
+        test_span(),
+    )
+    .expect("the reader runs at translation");
+    // The root resolves to `/` on Unix and to the current drive root (`D:/`) on
+    // Windows, never to a verbatim `//?/` path.
+    let Value::String(root) = value else {
+        panic!("fullPathName yields a string");
+    };
+    if cfg!(windows) {
+        assert!(root.len() == 3 && root.ends_with(":/"), "{root}");
+    } else {
+        assert_eq!(root, "/");
+    }
+}

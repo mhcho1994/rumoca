@@ -1342,6 +1342,12 @@ impl SolveRuntime {
         self.delay_runtime.reset();
     }
 
+    /// Record the accepted delay sources as the left limit of an event at
+    /// `time`, the accepted coordinate Event Mode is entered at.
+    pub fn hold_delay_history_at_event_entry(&self, time: f64) {
+        self.delay_runtime.hold_accepted_history_to(time);
+    }
+
     pub(crate) fn snapshot(&self) -> SolveRuntimeSnapshot {
         SolveRuntimeSnapshot {
             evaluator: self.runtime_state.snapshot(),
@@ -1384,6 +1390,24 @@ impl SolveRuntime {
         self.delay_runtime
             .refresh(time, solver_y, params, self.row_eval_context())
             .map_err(Into::into)
+    }
+
+    /// Refresh every delayed value: from its source while the initialization
+    /// problem settles, from the committed history afterwards; `true` when one
+    /// moved beyond `tol`, the same change test every other settle step uses.
+    fn refresh_initial_delay_identity(
+        &self,
+        time: f64,
+        solver_y: &[f64],
+        params: &mut [f64],
+        tol: f64,
+    ) -> Result<bool, RuntimeSolveError> {
+        if !self.has_delay_channels() {
+            return Ok(false);
+        }
+        let before = params.to_vec();
+        self.refresh_delay_values(time, solver_y, params)?;
+        Ok(crate::runtime_values_changed(&before, params, tol))
     }
 
     pub fn commit_delay_history(

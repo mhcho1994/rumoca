@@ -669,6 +669,9 @@ impl<'dae> Projection<'_, 'dae> {
             }
             return Ok(());
         }
+        if self.has_native_body(function) || self.is_active_function(function) {
+            return self.native_body_arguments(&arguments);
+        }
         let dependency = FunctionResultDependency {
             function: function.index(),
             output,
@@ -676,6 +679,37 @@ impl<'dae> Projection<'_, 'dae> {
             scalar: scalar_index,
         };
         self.project_function_result(dependency, function, arguments, span)
+    }
+
+    /// Whether `function` is already being projected on this walk, so the call
+    /// is recursive (MLS §12.2). A pure result is determined by its arguments,
+    /// so the recursive call reads at most every argument scalar; that bound
+    /// is sound without unrolling a recursion whose depth is a runtime value.
+    fn is_active_function(&self, function: dae::FunctionId<'dae>) -> bool {
+        self.function_frames
+            .iter()
+            .any(|frame| frame.function() == function)
+    }
+
+    /// A SPEC_0040 DAE-C30 native body, or a recursive call, reads its
+    /// inputs, which are closed over the call's arguments; every scalar of
+    /// every argument is read.
+    fn native_body_arguments(
+        &mut self,
+        arguments: &[dae::ExprId<'dae>],
+    ) -> Result<(), ProjectionError> {
+        for argument in arguments {
+            (0..self.scalar_count(*argument))
+                .try_for_each(|scalar| self.expression(*argument, scalar))?;
+        }
+        Ok(())
+    }
+
+    fn has_native_body(&self, function: dae::FunctionId<'dae>) -> bool {
+        self.view
+            .function(function)
+            .and_then(|definition| definition.external())
+            .is_some_and(|external| external.native_body().is_some())
     }
 
     fn is_native_table_call(&self, function: dae::FunctionId<'dae>) -> bool {
@@ -700,6 +734,9 @@ impl<'dae> Projection<'_, 'dae> {
             return Err(ProjectionError::FunctionRecursion { span });
         }
         let arguments = arguments.iter().collect::<Vec<_>>();
+        if self.is_active_function(function) {
+            return self.native_body_arguments(&arguments);
+        }
         let dependency = FunctionResultDependency {
             function: function.index(),
             output,

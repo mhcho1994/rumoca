@@ -436,9 +436,15 @@ pub(super) fn builtin_result<'dae>(
     }
     expect_numeric(first.scalar_type(), at)?;
     match builtin {
-        PureBuiltin::Abs | PureBuiltin::Sign => {
+        PureBuiltin::Abs => {
             expect_arity(arguments, 1, at)?;
             Ok(first)
+        }
+        // MLS 3.7 §3.7.1: `sign(v)` "expands into noEvent(if v > 0 then 1 else
+        // if v < 0 then -1 else 0)", an Integer expression for either operand type.
+        PureBuiltin::Sign => {
+            expect_arity(arguments, 1, at)?;
+            Ok(ValueType::array(ScalarType::Integer, first.dimensions()))
         }
         PureBuiltin::Sqrt
         | PureBuiltin::Floor
@@ -601,7 +607,9 @@ fn shaped_builtin_result(
     at: DaeProvenance,
 ) -> Result<ValueType, DaeConstructionError> {
     let (scalar, extents) = match builtin {
-        PureBuiltin::Zeros | PureBuiltin::Ones => (ScalarType::Real, arguments),
+        // MLS 3.7 §10.3.3: `zeros` and `ones` are Integer arrays; a Real
+        // context converts them like any Integer expression.
+        PureBuiltin::Zeros | PureBuiltin::Ones => (ScalarType::Integer, arguments),
         PureBuiltin::Fill if arguments.len() >= 2 && first.is_scalar() => {
             (first.scalar_type(), &arguments[1..])
         }

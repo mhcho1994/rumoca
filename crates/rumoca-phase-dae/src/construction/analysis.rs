@@ -9,6 +9,7 @@ mod event_conditions;
 mod expression_events;
 mod expression_semi_linear;
 mod expression_validation;
+mod fixed_loops;
 mod folded_guards;
 pub use folded_guards::StructuralSelection;
 mod function_array_assemblies;
@@ -19,6 +20,7 @@ mod function_externals;
 mod function_impurity;
 mod function_loops;
 mod function_native_lapack;
+pub(super) use function_native_lapack::NativeLapackPlan;
 mod function_ranges;
 mod function_record_assemblies;
 mod function_reductions;
@@ -29,6 +31,7 @@ mod initial_algorithms;
 mod initial_parameter_equations;
 mod loop_compaction;
 mod model_algorithm_calls;
+mod model_algorithm_loops;
 mod model_algorithm_statements;
 mod model_algorithms;
 mod model_expression_owners;
@@ -62,6 +65,7 @@ pub(super) use derived_parameters::DerivedParameterPlan;
 use derived_parameters::analyze_derived_parameters;
 pub(super) use discrete_values::DiscreteValueTopologyPlan;
 use discrete_values::analyze_discrete_value_topology;
+pub(super) use equation_partitions::DiscreteConnectionRanks;
 pub(super) use equation_partitions::{
     AggregateDiscreteConnections, DiscreteValueAssignmentPlan, EquationPartition,
     discrete_element_array_body, discrete_value_assignment, equation_partition,
@@ -87,6 +91,7 @@ use expression_validation::{
     validate_specialized_subscripts, validate_subscripts_scoped, validate_when_expression,
     when_body_context,
 };
+use fixed_loops::{IndexBinding, fixed_range, range_values};
 use function_array_assemblies::coalesce_function_array_assemblies;
 pub(super) use function_bodies::function_assertion;
 pub(super) use function_bodies::validate_function_certificate;
@@ -124,13 +129,15 @@ use history_operators::analyze_history_operators;
 pub(super) use initial_algorithms::InitialDiscreteValue;
 use initial_algorithms::{
     InitialAlgorithmAnalysis, analyze_initial_algorithms, assertion_call,
-    claim_initial_discrete_equations, claimed_initial_families,
-    reject_unsupported_initial_algorithm_statements,
+    claim_initial_discrete_equations, claimed_initial_families, conjunction, guard_condition,
+    negate, reject_unsupported_initial_algorithm_statements,
 };
 use loop_compaction::compact_function_loops;
 use model_algorithm_calls::analyze_event_function_calls;
 pub(super) use model_algorithm_calls::{ModelEventFunctionCallPlan, ModelEventFunctionOutputPlan};
+pub(super) use model_algorithm_loops::unroll_carrying_algorithm_loops;
 use model_algorithm_statements::validate_model_algorithm;
+pub(super) use model_algorithm_statements::{collect_algorithm_writes, names_overlap};
 use model_algorithms::analyze_model_algorithm;
 pub(super) use model_algorithms::{ModelAlgorithmPlan, ModelEventTensorLoopPlan};
 pub(super) use model_algorithms::{
@@ -226,7 +233,7 @@ pub(super) struct Analysis {
     /// Initial MLS §12.4.3 tuple equations lowered by result ordinal.
     pub(super) initial_multi_output_equations: HashMap<usize, MultiOutputEquationPlan>,
     pub(super) discrete_value_topology: DiscreteValueTopologyPlan,
-    pub(super) discrete_connection_ranks: HashMap<VarName, usize>,
+    pub(super) discrete_connection_ranks: DiscreteConnectionRanks,
     pub(super) aggregate_discrete_connections: AggregateDiscreteConnections,
     pub(super) assigned_discrete_targets: HashSet<VarName>,
     /// MLS §3.7.4.5 Rule 1 / Rule 2 replacement residuals, keyed by the model
@@ -296,13 +303,9 @@ pub(super) enum FunctionPlan {
         result: VarName,
         reduction: FunctionIntegerReduction,
     },
-    /// LAPACK `dgesv` with one right-hand side, owned as a checked linear
-    /// solve (see `function_native_lapack`).
-    NativeLinearSolve {
-        matrix: VarName,
-        solution: VarName,
-        info: VarName,
-    },
+    /// A LAPACK driver whose foreign body the DAE defines (see
+    /// `function_native_lapack`).
+    NativeLapack(NativeLapackPlan),
     /// MLS §12.9 external interface; the function has no Modelica body.
     External(ExternalFunctionPlan),
 }
@@ -916,7 +919,7 @@ fn analyze_expression_event_ownership(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
     constants: &EvalContext,
-    connection_ranks: &HashMap<VarName, usize>,
+    connection_ranks: &DiscreteConnectionRanks,
     aggregate_connections: &AggregateDiscreteConnections,
 ) -> Result<
     (
@@ -1021,7 +1024,7 @@ fn analyze_discrete_connections(
     record_equations: &HashMap<usize, RecordEquationPlan>,
 ) -> Result<
     (
-        HashMap<VarName, usize>,
+        DiscreteConnectionRanks,
         AggregateDiscreteConnections,
         DiscreteValueTopologyPlan,
     ),
@@ -1112,6 +1115,7 @@ fn analyze_model_algorithms(
         .map(|algorithm| {
             validate_model_algorithm(
                 algorithm,
+                flat,
                 expression_roles,
                 states,
                 function_shapes.model_values(),
@@ -1259,7 +1263,7 @@ struct SourceBalanceAnalysisInput<'scope> {
     derived_parameter_rows: &'scope HashSet<usize>,
     record_equations: &'scope HashMap<usize, RecordEquationPlan>,
     multi_output_equations: &'scope HashMap<usize, MultiOutputEquationPlan>,
-    connection_ranks: &'scope HashMap<VarName, usize>,
+    connection_ranks: &'scope DiscreteConnectionRanks,
     aggregate_connections: &'scope AggregateDiscreteConnections,
 }
 
