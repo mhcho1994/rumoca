@@ -60,7 +60,16 @@ On pull requests, CI also generates
 publishes it as a sticky PR comment. The comment embeds the package pass-rate,
 MLS contract coverage, and OMC trace-accuracy markdown tables so reviewers can
 inspect the MSL gate without downloading artifacts first. Its top summary also
-shows deltas against the resolved MSL quality baseline. Forked pull requests
+shows deltas against the resolved MSL quality baseline.
+
+The **Simulation Outcomes** table under the summary splits the completed
+simulations (`Simulated`) into verified (strict-high against OMC), excepted (a
+typed trace exception, counted by kind), and unclassified (the soundness roster),
+and states how many compiled models did not complete a simulation. The split
+comes from the band table and must sum to the completed count; the comment says
+so when it does not. `Simulated` always counts completed runs and never a parity
+rate; strict-high parity is the `High` column. Every table defines its columns
+in a legend directly under it, rendered from the same column list as the header. Forked pull requests
 receive the uploaded artifacts from the read-only CI run, then a separate
 `workflow_run` publisher comments from the artifact using repository write
 permissions.
@@ -316,13 +325,12 @@ so only matching results are timed:
   per model, x = scalar equations, y = compile seconds, rumoca vs OMC) rendered
   with the same embedded uPlot backend as `plot-compare`. Open it in a browser.
 
-The plot is rendered two ways from that one JSON:
+Speed is reported in two places:
 
 - **Local**: `omc-simulation-reference` writes `msl_speed_scaling.html` (uPlot).
-- **PR comment**: `cargo xtask repo msl pr-comment` reads the JSON and renders the table
-  plus a mermaid `xychart`. GitHub cannot execute JS, so the PR plot is mermaid,
-  not the uPlot viewer — and it is produced only by `pr-comment`, not on every
-  OMC run.
+- **PR comment**: `cargo xtask repo msl pr-comment` renders the **Speed vs OMC**
+  section from the run's results, OMC reference, and band table: totals, time to
+  runnable (JIT vs C toolchain), and simulation, each by system size.
 
 ### Fast local subset
 
