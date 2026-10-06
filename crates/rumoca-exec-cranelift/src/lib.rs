@@ -5,7 +5,13 @@
 //! Cranelift is a programmatic JIT API rather than a textual-code target, and
 //! it must not own Modelica semantics, DAE lowering, or structural rewrites.
 
+mod compute_block;
 mod emit;
+
+pub use compute_block::{
+    CompiledComputeExpression, CompiledComputeJacobian, compile_expression_compute_block,
+    compile_jacobian_compute_block,
+};
 
 use rumoca_core::ExternalTableData;
 use rumoca_ir_solve::{LinearOp, ScalarProgramBlock};
