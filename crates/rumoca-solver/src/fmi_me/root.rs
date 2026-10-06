@@ -24,6 +24,8 @@
 //! the policy, the application, the root-search types, and the scan capability
 //! host-private with no unchecked constructor.
 
+use rumoca_ir_solve::fmi::{RootBracket, RootLocationPlan};
+
 use super::{
     integrator::{MeAcceptedStep, MeContinuousPoint, MeStepProposal, accepted_step_roundoff},
     session::{MeSessionError, try_copied, try_filled},
@@ -63,9 +65,9 @@ impl IndicatorDomain {
 pub(super) struct MeRootSearchPolicy {
     scan_resolution: f64,
     location_tolerance: f64,
-    /// Bisection steps a bracket may take, from the component's
-    /// `RootLocationPlan` (SPEC_0044 ME-EVENT-004).
-    refinement_iteration_cap: usize,
+    /// The component's refinement method and budget (SPEC_0044
+    /// ME-EVENT-004).
+    root_location: RootLocationPlan,
     state_abs_tolerance: f64,
     state_rel_tolerance: f64,
     nominals: Vec<f64>,
@@ -84,7 +86,7 @@ impl MeRootSearchPolicy {
         state_rel_tolerance: f64,
         nominals: Vec<f64>,
         state_count: usize,
-        refinement_iteration_cap: usize,
+        root_location: RootLocationPlan,
     ) -> Result<Self, MeSessionError> {
         if nominals.len() != state_count {
             return Err(MeSessionError::Options {
@@ -120,7 +122,7 @@ impl MeRootSearchPolicy {
         Ok(Self {
             scan_resolution,
             location_tolerance,
-            refinement_iteration_cap,
+            root_location,
             state_abs_tolerance,
             state_rel_tolerance,
             nominals,
@@ -169,7 +171,7 @@ impl MeRootSearchPolicy {
             self.state_rel_tolerance,
             nominals,
             state_count,
-            self.refinement_iteration_cap,
+            self.root_location,
         )
     }
 
@@ -619,14 +621,9 @@ fn domains_changed(before: &[f64], after: &[f64]) -> bool {
         .any(|(before, after)| IndicatorDomain::of(*before) != IndicatorDomain::of(*after))
 }
 
-/// The refined bracket one indicator's domain change was localized to.
-struct RefinedBracket {
-    left_time: f64,
-    application_time: f64,
-}
-
 /// Refine every changed indicator inside the first bracket and apply the
-/// earliest domain change observable at the checked policy resolution.
+/// earliest domain change observable at the checked policy resolution,
+/// together with every change inside the plan's tolerance window.
 ///
 /// The winning indicator's own refined left coordinate is retained:
 /// event-left evidence is never moved back to the coarse bracket's lower point,
@@ -650,53 +647,89 @@ fn refine_bracket<T: RootScanTarget>(
                 .to_owned(),
         });
     }
-    let winner = refine_earliest(target, policy, lower, upper, &changed)?;
-
-    let mut states = try_filled(width, 0.0, "root refinement sample")?;
-    let mut indicators = Vec::new();
-
-    let left_states = if winner.left_time.to_bits() == lower.time.to_bits() {
-        try_copied(&lower.states, "refined left states")?
+    let bracket = refine_earliest(target, policy, lower, upper, &changed)?;
+    let left_time = bracket.low();
+    let (left_states, left_indicators) = if left_time.to_bits() == lower.time.to_bits() {
+        (
+            try_copied(&lower.states, "refined left states")?,
+            try_copied(&lower.indicators, "refined left indicators")?,
+        )
     } else {
-        target.sample_states(winner.left_time, &mut states)?;
-        try_copied(&states, "refined left states")?
+        sample_point(target, policy, lower, left_time)?
     };
-    let left_indicators = if winner.left_time.to_bits() == lower.time.to_bits() {
-        try_copied(&lower.indicators, "refined left indicators")?
-    } else {
-        target.indicators_at(winner.left_time, &left_states, &mut indicators)?;
-        require_indicator_width(lower.indicators.len(), &indicators)?;
-        try_copied(&indicators, "refined left indicators")?
-    };
-
-    let application_states = if winner.application_time.to_bits() == upper.time.to_bits() {
-        try_copied(&upper.states, "application states")?
-    } else {
-        target.sample_states(winner.application_time, &mut states)?;
-        try_copied(&states, "application states")?
-    };
-    target.indicators_at(
-        winner.application_time,
-        &application_states,
-        &mut indicators,
-    )?;
-    require_indicator_width(lower.indicators.len(), &indicators)?;
-    let application_indicators = try_copied(&indicators, "application indicators")?;
-
-    let left = MeContinuousPoint::new(winner.left_time, left_states, width)?;
-    let application = MeContinuousPoint::new(winner.application_time, application_states, width)?;
+    let (application_time, application_states, application_indicators) =
+        window_application(target, policy, lower, upper, &changed, &bracket)?;
+    let left = MeContinuousPoint::new(left_time, left_states, width)?;
+    let application = MeContinuousPoint::new(application_time, application_states, width)?;
     MeRootApplication::new(left, application, left_indicators, application_indicators)
 }
 
-/// Bisect toward the least coordinate at which any `changed` indicator has
-/// left its domain at `lower`.
+/// The states and checked indicators of the continuous extension at
+/// `coordinate`.
+fn sample_point<T: RootScanTarget>(
+    target: &mut T,
+    policy: &MeRootSearchPolicy,
+    lower: &ScanSample,
+    coordinate: f64,
+) -> Result<(Vec<f64>, Vec<f64>), MeSessionError> {
+    let mut states = try_filled(policy.state_count(), 0.0, "root application sample")?;
+    let mut indicators = Vec::new();
+    target.sample_states(coordinate, &mut states)?;
+    target.indicators_at(coordinate, &states, &mut indicators)?;
+    require_indicator_width(lower.indicators.len(), &indicators)?;
+    Ok((states, indicators))
+}
+
+/// The application coordinate of a located bracket under the plan's
+/// `ToleranceWindow` tie-break, with its states and indicators.
 ///
-/// Every changed indicator is bisected on the same dyadic subdivision of the
-/// bracket, so each indicator alone would end in the dyadic cell holding its
-/// own crossing, and the least of those cells is the one holding the earliest
-/// crossing. One evaluation decides every changed indicator at once, so that
-/// cell is found by a single bisection whose midpoint moves left whenever any
-/// changed indicator has already entered its new domain.
+/// The window end applies every domain change within one location tolerance
+/// after the located left limit, and lies within one tolerance after the
+/// earliest crossing. It is used when a changed indicator stands in its new
+/// domain there; otherwise the earliest one left and returned inside the
+/// window, and the located high end, where it had entered, applies.
+fn window_application<T: RootScanTarget>(
+    target: &mut T,
+    policy: &MeRootSearchPolicy,
+    lower: &ScanSample,
+    upper: &ScanSample,
+    changed: &[usize],
+    bracket: &RootBracket,
+) -> Result<(f64, Vec<f64>, Vec<f64>), MeSessionError> {
+    let at = |target: &mut T, coordinate: f64| {
+        if coordinate.to_bits() == upper.time.to_bits() {
+            Ok((
+                try_copied(&upper.states, "application states")?,
+                try_copied(&upper.indicators, "application indicators")?,
+            ))
+        } else {
+            sample_point(target, policy, lower, coordinate)
+        }
+    };
+    let window = bracket.application_window(upper.time);
+    if window > bracket.high() {
+        let (states, indicators) = at(target, window)?;
+        let entered = changed.iter().any(|&index| {
+            IndicatorDomain::of(indicators[index]) != IndicatorDomain::of(lower.indicators[index])
+        });
+        if entered {
+            return Ok((window, states, indicators));
+        }
+    }
+    let (states, indicators) = at(target, bracket.high())?;
+    Ok((bracket.high(), states, indicators))
+}
+
+/// Narrow the bracket toward the least coordinate at which any `changed`
+/// indicator has left its domain at `lower`, by the component's refinement
+/// method ([`RootBracket`]).
+///
+/// One evaluation decides every changed indicator at once: the bracket's high
+/// end moves whenever any of them has already entered its new domain, so with
+/// one crossing per indicator the located bracket holds the earliest one. The
+/// trial point is the least Illinois secant crossing over the indicators that
+/// have entered at the high end, which only affects how fast the bracket
+/// narrows, never which side of a crossing an end lies on.
 ///
 /// Exhausting the host-owned iteration budget without attaining the checked
 /// location tolerance is the typed `RootApplicationUnavailable` failure
@@ -707,50 +740,57 @@ fn refine_earliest<T: RootScanTarget>(
     lower: &ScanSample,
     upper: &ScanSample,
     changed: &[usize],
-) -> Result<RefinedBracket, MeSessionError> {
+) -> Result<RootBracket, MeSessionError> {
     let width = policy.state_count();
-    let mut low = lower.time;
-    let mut high = upper.time;
-    let mut states = try_filled(width, 0.0, "root bisection sample")?;
+    let mut bracket =
+        policy
+            .root_location
+            .open_bracket(lower.time, upper.time, policy.location_tolerance());
+    let mut states = try_filled(width, 0.0, "root refinement sample")?;
     let mut indicators = Vec::new();
-    // A bisection to the location tolerance over a bracket that is already at
-    // most one scan resolution wide terminates in a bounded, host-owned count.
-    for _ in 0..policy.refinement_iteration_cap {
+    let mut at_low = try_copied(&lower.indicators, "refinement low indicators")?;
+    let mut at_high = try_copied(&upper.indicators, "refinement high indicators")?;
+    let entered = |values: &[f64], index: usize| {
+        IndicatorDomain::of(values[index]) != IndicatorDomain::of(lower.indicators[index])
+    };
+    for _ in 0..policy.root_location.refinement_iteration_cap() {
         target.check_budget()?;
-        if high - low <= policy.location_tolerance() {
-            return Ok(RefinedBracket {
-                left_time: low,
-                application_time: high,
-            });
+        if bracket.is_located() {
+            return Ok(bracket);
         }
-        let middle = low + 0.5 * (high - low);
-        if middle <= low || middle >= high {
-            // Adjacent representable coordinates: no tighter bracket exists,
-            // and the location tolerance is attained as far as f64 allows.
-            return Ok(RefinedBracket {
-                left_time: low,
-                application_time: high,
-            });
-        }
-        target.sample_states(middle, &mut states)?;
-        target.indicators_at(middle, &states, &mut indicators)?;
+        let least = changed
+            .iter()
+            .filter(|&&index| entered(&at_high, index))
+            .map(|&index| bracket.crossing_fraction(at_low[index], at_high[index]))
+            .fold(1.0, f64::min);
+        // No representable coordinate strictly inside: the location tolerance
+        // is attained as far as f64 allows.
+        let Some(trial) = bracket.trial(least) else {
+            return Ok(bracket);
+        };
+        target.sample_states(trial, &mut states)?;
+        target.indicators_at(trial, &states, &mut indicators)?;
         require_indicator_width(lower.indicators.len(), &indicators)?;
-        let entered = changed.iter().any(|&index| {
-            IndicatorDomain::of(indicators[index]) != IndicatorDomain::of(lower.indicators[index])
-        });
-        if entered {
-            high = middle;
+        let any_entered = changed.iter().any(|&index| entered(&indicators, index));
+        bracket.narrow(trial, any_entered);
+        if any_entered {
+            at_high.copy_from_slice(&indicators);
         } else {
-            low = middle;
+            at_low.copy_from_slice(&indicators);
         }
     }
+    if bracket.is_located() {
+        return Ok(bracket);
+    }
     Err(MeSessionError::RootApplicationUnavailable {
-        time: high,
+        time: bracket.high(),
         reason: format!(
             "indicators {changed:?} were not localized to {} within {} \
-             refinements; the bracket is still [{low}, {high}]",
+             refinements; the bracket is still [{}, {}]",
             policy.location_tolerance(),
-            policy.refinement_iteration_cap
+            policy.root_location.refinement_iteration_cap(),
+            bracket.low(),
+            bracket.high()
         ),
     })
 }
@@ -766,19 +806,31 @@ mod tests {
     use super::*;
 
     fn policy() -> MeRootSearchPolicy {
-        MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![1.0], 1, 128)
-            .expect("fixture policy is checked")
+        MeRootSearchPolicy::new(
+            0.1,
+            1.0e-9,
+            1.0e-8,
+            1.0e-6,
+            vec![1.0],
+            1,
+            RootLocationPlan::STANDARD,
+        )
+        .expect("fixture policy is checked")
     }
 
     fn point(time: f64, state: f64) -> MeContinuousPoint {
         MeContinuousPoint::new(time, vec![state], 1).expect("fixture point is checked")
     }
 
-    /// `x(t) = t - 0.25`, one indicator `x - offset` per offset (by default
-    /// the state itself).
+    /// `x(t) = t - 0.25`, one indicator per offset (by default the state
+    /// itself).
     struct LinearCrossing {
         indicator_calls: usize,
         offsets: Vec<f64>,
+        /// Each indicator is `slope * d + curvature * d * d` for
+        /// `d = x - offset`.
+        slope: f64,
+        curvature: f64,
     }
 
     impl LinearCrossing {
@@ -790,6 +842,8 @@ mod tests {
             Self {
                 indicator_calls: 0,
                 offsets,
+                slope: 1.0,
+                curvature: 0.0,
             }
         }
     }
@@ -808,7 +862,10 @@ mod tests {
         ) -> Result<(), MeSessionError> {
             self.indicator_calls += 1;
             indicators.clear();
-            indicators.extend(self.offsets.iter().map(|offset| states[0] - offset));
+            indicators.extend(self.offsets.iter().map(|offset| {
+                let distance = states[0] - offset;
+                self.slope * distance + self.curvature * distance * distance
+            }));
             Ok(())
         }
 
@@ -842,14 +899,53 @@ mod tests {
 
     #[test]
     fn the_policy_rejects_a_non_positive_or_incomplete_nominal_vector() {
-        assert!(MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![0.0], 1, 128).is_err());
         assert!(
-            MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![f64::INFINITY], 1, 128)
-                .is_err()
+            MeRootSearchPolicy::new(
+                0.1,
+                1.0e-9,
+                1.0e-8,
+                1.0e-6,
+                vec![0.0],
+                1,
+                RootLocationPlan::STANDARD
+            )
+            .is_err()
         );
-        assert!(MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, Vec::new(), 1, 128).is_err());
         assert!(
-            MeRootSearchPolicy::new(0.1, 1.0e-9, 1.0e-8, 1.0e-6, vec![1.0, 1.0], 1, 128).is_err()
+            MeRootSearchPolicy::new(
+                0.1,
+                1.0e-9,
+                1.0e-8,
+                1.0e-6,
+                vec![f64::INFINITY],
+                1,
+                RootLocationPlan::STANDARD
+            )
+            .is_err()
+        );
+        assert!(
+            MeRootSearchPolicy::new(
+                0.1,
+                1.0e-9,
+                1.0e-8,
+                1.0e-6,
+                Vec::new(),
+                1,
+                RootLocationPlan::STANDARD
+            )
+            .is_err()
+        );
+        assert!(
+            MeRootSearchPolicy::new(
+                0.1,
+                1.0e-9,
+                1.0e-8,
+                1.0e-6,
+                vec![1.0, 1.0],
+                1,
+                RootLocationPlan::STANDARD
+            )
+            .is_err()
         );
     }
 
@@ -865,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_changes_share_one_bisection_of_the_earliest_crossing() {
+    fn simultaneous_changes_share_one_refinement_of_the_earliest_crossing() {
         let mut alone = LinearCrossing::new();
         let single = scan(&mut alone, &point(0.0, -0.25), &point(1.0, 0.75), &[-0.25])
             .expect("the scan succeeds")
@@ -903,12 +999,172 @@ mod tests {
             .expect("a crossing exists inside the interval");
         let left = application.left().time();
         let applied = application.application().time();
-        assert!(applied - left <= policy().location_tolerance());
+        // The application is the window end: one tolerance after the left
+        // limit, rounded to the nearest coordinate.
+        assert!(applied - left <= policy().location_tolerance() + f64::EPSILON * applied);
         assert!(
             left > 0.2,
             "the coarse bracket lower point 0.2 must not become the event-left evidence, got \
              {left}"
         );
+    }
+
+    /// A smooth curved indicator is located in a few refreshes; bisection of
+    /// the same bracket to the same tolerance takes
+    /// `ceil(log2(0.1 / 1e-9)) = 27`.
+    #[test]
+    fn a_smooth_crossing_is_located_in_far_fewer_refreshes_than_bisection() {
+        let mut target = LinearCrossing::new();
+        target.curvature = 3.0;
+        let application = scan(&mut target, &point(0.0, -0.25), &point(1.0, 0.75), &[-0.25])
+            .expect("the scan succeeds")
+            .expect("a crossing exists inside the interval");
+        assert!(application.left().time() <= 0.25 && 0.25 <= application.application().time());
+        let applied = application.application().time();
+        assert!(applied - application.left().time() <= 1.0e-9 + f64::EPSILON * applied);
+        // Three scan samples up to the bracket [0.2, 0.3], then the
+        // refinement, then the refined left and application coordinates.
+        let refreshes = target.indicator_calls - 3 - 2;
+        assert!(refreshes <= 8, "{refreshes} refinement refreshes");
+    }
+
+    /// An indicator that reaches zero exactly on a scan coordinate is applied
+    /// there, as bisection applies it.
+    #[test]
+    fn a_crossing_on_the_scan_coordinate_is_applied_there() {
+        let grid = ScanGrid::new(0.0, 1.0, 0.1).expect("a representable grid");
+        let mut coordinate = 0.0;
+        for step in 1..=3 {
+            coordinate = grid
+                .coordinate(step, coordinate)
+                .expect("a representable coordinate");
+        }
+        // A decreasing indicator that is exactly zero, the non-positive
+        // domain, at the third scan coordinate.
+        let offset = coordinate - 0.25;
+        let mut target = LinearCrossing::with_offsets(vec![offset]);
+        target.slope = -1.0;
+        let application = scan(
+            &mut target,
+            &point(0.0, -0.25),
+            &point(1.0, 0.75),
+            &[0.25 + offset],
+        )
+        .expect("the scan succeeds")
+        .expect("a crossing exists inside the interval");
+        assert_eq!(
+            application.application().time().to_bits(),
+            coordinate.to_bits()
+        );
+    }
+
+    /// The scan sample of `target` at `time`.
+    fn sample(target: &mut LinearCrossing, time: f64) -> ScanSample {
+        let mut states = vec![0.0];
+        let mut indicators = Vec::new();
+        target.sample_states(time, &mut states).expect("a sample");
+        target
+            .indicators_at(time, &states, &mut indicators)
+            .expect("indicators");
+        ScanSample {
+            time,
+            states,
+            indicators,
+        }
+    }
+
+    /// Apply the located bracket `[low, high]` of the scan bracket
+    /// `[0.2, 0.3]` under the tolerance window; returns the application
+    /// coordinate and its indicators.
+    fn apply(target: &mut LinearCrossing, low: f64, high: f64) -> (f64, Vec<f64>) {
+        let policy = policy();
+        let lower = sample(target, 0.2);
+        let upper = sample(target, 0.3);
+        let changed = (0..lower.indicators.len())
+            .filter(|&k| {
+                IndicatorDomain::of(lower.indicators[k]) != IndicatorDomain::of(upper.indicators[k])
+            })
+            .collect::<Vec<_>>();
+        let bracket =
+            RootLocationPlan::STANDARD.open_bracket(low, high, policy.location_tolerance());
+        assert!(bracket.is_located());
+        let (time, _, indicators) =
+            window_application(target, &policy, &lower, &upper, &changed, &bracket)
+                .expect("the window applies");
+        (time, indicators)
+    }
+
+    /// Two indicators crossing within the tolerance window apply together,
+    /// whether the located bracket sits tight against the earliest crossing
+    /// (an Illinois-shaped bracket) or spans the tolerance around it (a
+    /// bisection-shaped one).
+    #[test]
+    fn changes_within_the_tolerance_window_apply_together() {
+        let tolerance = policy().location_tolerance();
+        for (low, high) in [
+            (0.25 - 0.01 * tolerance, 0.25 + 0.001 * tolerance),
+            (0.25 - 0.1 * tolerance, 0.25 + 0.4 * tolerance),
+        ] {
+            // The second crossing lies past either high end, inside the window.
+            let mut target = LinearCrossing::with_offsets(vec![0.0, 0.6 * tolerance]);
+            let (time, indicators) = apply(&mut target, low, high);
+            assert!(time - low <= tolerance + f64::EPSILON * time);
+            assert!(
+                indicators.iter().all(|&value| value > 0.0),
+                "both changes apply at {time}: {indicators:?} for [{low}, {high}]"
+            );
+        }
+    }
+
+    /// A change beyond the window stays its own event: the earliest crossing
+    /// applies at the window end without it.
+    #[test]
+    fn a_change_beyond_the_tolerance_window_stays_separate() {
+        let tolerance = policy().location_tolerance();
+        let low = 0.25 - 0.5 * tolerance;
+        let mut target = LinearCrossing::with_offsets(vec![0.0, 1.5 * tolerance]);
+        let (time, indicators) = apply(&mut target, low, 0.25 + 0.2 * tolerance);
+        assert_eq!(time.to_bits(), (low + tolerance).to_bits());
+        assert!(
+            indicators[0] > 0.0 && indicators[1] <= 0.0,
+            "{indicators:?}"
+        );
+    }
+
+    /// An earliest crossing that returns inside the window applies at the
+    /// located high end, where it had entered.
+    #[test]
+    fn a_change_that_returns_inside_the_window_applies_at_the_high_end() {
+        let tolerance = policy().location_tolerance();
+        // Positive only in (0.25, 0.25 + tolerance / 2).
+        let mut target = LinearCrossing::new();
+        target.slope = 0.5 * tolerance;
+        target.curvature = -1.0;
+        let high = 0.25 + 0.1 * tolerance;
+        let (time, indicators) = apply(&mut target, 0.25 - 0.01 * tolerance, high);
+        assert_eq!(time.to_bits(), high.to_bits());
+        assert!(indicators[0] > 0.0);
+    }
+
+    /// Two indicators crossing 0.7 of a tolerance apart, as the
+    /// thyristor firing conditions of a rectifier bridge do, are located and
+    /// applied as one event.
+    #[test]
+    fn nearly_simultaneous_crossings_are_one_event() {
+        let tolerance = policy().location_tolerance();
+        let mut target = LinearCrossing::with_offsets(vec![0.0, 0.7 * tolerance]);
+        let retained = [-0.25, -0.25 - 0.7 * tolerance];
+        let application = scan(
+            &mut target,
+            &point(0.0, -0.25),
+            &point(1.0, 0.75),
+            &retained,
+        )
+        .expect("the scan succeeds")
+        .expect("a crossing exists inside the interval");
+        let applied = application.application().time();
+        assert!(applied >= 0.25 + 0.7 * tolerance, "{applied}");
+        assert!(applied - application.left().time() <= tolerance + f64::EPSILON * applied);
     }
 
     #[test]
