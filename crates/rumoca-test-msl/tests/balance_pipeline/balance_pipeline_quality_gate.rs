@@ -12,6 +12,7 @@ mod soundness_roster;
 mod status;
 #[cfg(test)]
 mod tests;
+mod timing_margin;
 
 use super::*;
 use cache::*;
@@ -26,6 +27,7 @@ use runtime_cohort::*;
 use schema_migrations::*;
 use soundness_roster::*;
 use status::*;
+use timing_margin::*;
 
 // =============================================================================
 // MSL quality gate (compile/balance strict + simulation tolerant gate)
@@ -83,7 +85,7 @@ pub(super) const OMC_PARITY_THREADS_DEFAULT: usize = 1;
 /// boundary without changing any baseline floor. Earlier reference-convergence
 /// and conditioned-observable boundaries and version 4's source-static partial
 /// roster remain pinned.
-pub(super) const MSL_QUALITY_GATE_VERSION: u32 = 13;
+pub(super) const MSL_QUALITY_GATE_VERSION: u32 = 14;
 pub(super) const MSL_QUALITY_RUN_SCOPE_FULL: &str = "full";
 pub(super) const MSL_QUALITY_RUN_SCOPE_PARTIAL: &str = "partial";
 pub(super) const MSL_QUALITY_BASELINE_FILE_REL: &str = "tests/msl_tests/msl_quality_baseline.json";
@@ -327,6 +329,11 @@ pub(super) struct MslQualityBaseline {
     /// not disappear while another entered, so the baseline owns the roster.
     #[serde(default, skip_serializing_if = "IndexSet::is_empty")]
     certified_strict_high_models: IndexSet<String>,
+    /// Strict-high completions whose evidence run used more than the
+    /// certification timing margin of a phase budget: reported, not certified,
+    /// and left out of every ratcheted count (SPEC_0050).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    timing_margin_models: IndexMap<String, TimingMarginEntry>,
     /// Models that simulated without strict-high parity and without a typed
     /// trace exception. The target is empty; the gate fails when a current
     /// model is outside this roster, so it only shrinks (SPEC_0033).
@@ -1070,6 +1077,7 @@ pub(super) fn current_msl_quality_baseline(
                 .then(|| parity.runtime_model_ratios.keys().cloned().collect())
         }),
         certified_strict_high_models: IndexSet::new(),
+        timing_margin_models: IndexMap::new(),
         unexcepted_non_high_models: IndexSet::new(),
         trace_exceptions_sha256: None,
         evidence_provenance: None,
@@ -1223,13 +1231,24 @@ pub(super) fn write_current_msl_quality_snapshot(
             );
         }
         if let Some(cohort) = measurement.cohort() {
-            let certified = cohort
+            let strict_high = cohort
                 .table
                 .rows
                 .iter()
                 .filter(|row| row.band == BandLabel::High)
-                .map(|row| row.model_name.clone())
+                .map(|row| row.model_name.as_str());
+            let timing_margin =
+                timing_margin_models(summary, strict_high.clone(), PhaseBudgets::configured());
+            let certified = strict_high
+                .filter(|model| !timing_margin.contains_key(*model))
+                .map(str::to_string)
                 .collect::<IndexSet<_>>();
+            root.insert(
+                "timing_margin_models".to_string(),
+                serde_json::to_value(timing_margin).map_err(|error| {
+                    io::Error::other(format!("failed to serialize timing-margin roster: {error}"))
+                })?,
+            );
             root.insert(
                 "certified_strict_high_models".to_string(),
                 serde_json::to_value(certified).map_err(|error| {
@@ -1533,12 +1552,14 @@ pub(super) fn sim_completion_report_notes(
 ) -> Vec<String> {
     let mut notes = Vec::new();
     let allowed_drop = stage_count_allowed_drop(gate_input.sim_target_models);
-    if stage_count_regressed(gate_input.sim_ok, baseline.sim_ok, allowed_drop) {
+    let sim_floor = certified_floor(baseline, baseline.sim_ok);
+    let ic_floor = certified_floor(baseline, baseline.ic_ok);
+    if stage_count_regressed(gate_input.sim_ok, sim_floor, allowed_drop) {
         push_stage_count_regression_reason_with_drop(
             &mut notes,
             "IC",
             gate_input.ic_ok,
-            baseline.ic_ok,
+            ic_floor,
             gate_input.sim_target_models,
             allowed_drop,
         );
@@ -1547,7 +1568,7 @@ pub(super) fn sim_completion_report_notes(
         &mut notes,
         "Sim",
         gate_input.sim_ok,
-        baseline.sim_ok,
+        sim_floor,
         gate_input.sim_target_models,
     );
     notes
@@ -1716,7 +1737,7 @@ pub(super) fn push_trace_regression_reasons(
             reasons,
             "Trace strict-high",
             current_trace.agreement_high,
-            baseline_trace.agreement_high,
+            certified_floor(baseline, baseline_trace.agreement_high),
             baseline.sim_target_models,
         );
         let current_classified = trace_classified_models(current_trace);
@@ -1725,7 +1746,7 @@ pub(super) fn push_trace_regression_reasons(
             reasons,
             "Trace classified",
             current_classified,
-            baseline_classified,
+            certified_floor(baseline, baseline_classified),
             baseline.sim_target_models,
         );
 
@@ -1737,13 +1758,13 @@ pub(super) fn push_trace_regression_reasons(
                 reasons,
                 "Trace no severe",
                 current_no_severe,
-                baseline_no_severe,
+                certified_floor(baseline, baseline_no_severe),
                 baseline.sim_target_models,
             );
         }
 
         let current_accounted = trace_accounted_models(current_trace);
-        let baseline_accounted = trace_accounted_models(baseline_trace);
+        let baseline_accounted = certified_floor(baseline, trace_accounted_models(baseline_trace));
         if current_accounted + TRACE_MODELS_COMPARED_ALLOWED_DROP < baseline_accounted {
             reasons.push(format!(
                 "trace model accounting regressed: current={} < baseline={} (allowed_drop={})",

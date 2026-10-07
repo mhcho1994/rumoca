@@ -493,6 +493,7 @@ fn checked_variable_meta<'dae>(
         fixed: variable.fixed_uniform(),
         description: variable.description().map(str::to_string),
         state_coordinate: None,
+        phasor: None,
     }
 }
 
