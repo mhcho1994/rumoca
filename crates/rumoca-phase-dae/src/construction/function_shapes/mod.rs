@@ -1542,7 +1542,8 @@ fn concrete_model_shapes(
     flat: &flat::Model,
     constants: &EvalContext,
 ) -> Result<ShapeEnvironment, ToDaeError> {
-    let mut values = ShapeEnvironment::with_capacity(flat.variables.len());
+    let mut values =
+        ShapeEnvironment::with_capacity(flat.variables.len() + flat.record_instances.len());
     values.enumeration_type_declarations = Arc::new(
         flat.type_ids_by_def_id
             .iter()
@@ -1561,6 +1562,13 @@ fn concrete_model_shapes(
             }
             _ => values.insert(name.clone(), shape),
         }
+    }
+    // MLS §10.4/§12.2: structural field projections also read the shape of
+    // their record-valued base. Its declared axes live on the retained
+    // container, not on a primitive coordinate (including empty records).
+    for (name, record) in &flat.record_instances {
+        let shape = concrete_dimensions(&record.dims, record.source_span, "model record")?;
+        values.insert(name.clone(), shape);
     }
     values.insert(VarName::new("time"), Vec::new());
     // MLS §4.8.5.2: an enumeration literal's semantic identity is its ordinal,
