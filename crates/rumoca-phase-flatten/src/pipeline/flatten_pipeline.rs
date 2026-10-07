@@ -1079,6 +1079,9 @@ pub(crate) fn finalize_flat_model(
     // later rewrite to reintroduce source-shaped record arguments against an
     // already decomposed signature.
     functions::lower_record_function_params(flat)?;
+    // Record ABI lowering introduces field projections at call sites. Resolve
+    // those through the same occurrence owner as source-written projections.
+    collapse_index_refs_to_known_varrefs(flat);
     // Recheck the decomposed ABI and materialize defaults of any scalar calls
     // introduced by record projection.
     functions::materialize_flat_function_call_args(flat)?;

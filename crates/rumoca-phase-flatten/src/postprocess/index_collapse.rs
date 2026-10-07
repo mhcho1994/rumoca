@@ -15,6 +15,8 @@
 use super::*;
 use rumoca_core::{ExpressionRewriter, StatementRewriter};
 
+mod aggregate_projection;
+
 pub(crate) fn collapse_index_refs_to_known_varrefs(flat: &mut flat::Model) {
     let known_flat_vars = KnownFlatVars::build(flat);
 
@@ -180,6 +182,9 @@ struct KnownFlatVars {
     by_occurrence: rustc_hash::FxHashMap<rumoca_core::InstanceId, rumoca_core::Reference>,
     /// Scalarized record containers keyed by the exact occurrence they hold.
     records_by_occurrence: rustc_hash::FxHashMap<rumoca_core::InstanceId, rumoca_core::Reference>,
+    /// Fields of typed zero-length record vectors, which contribute no elements
+    /// when their containing vector is concatenated (MLS §10.7).
+    empty_record_fields: rustc_hash::FxHashSet<(rumoca_core::InstanceId, rumoca_core::DefId)>,
     /// Exact containment graph the reference paths are resolved against.
     occurrences: occurrence_graph::OccurrenceGraph,
     /// Compile-time integer values of `constant`/`parameter` variables, used to
@@ -246,6 +251,22 @@ impl KnownFlatVars {
             record_instances,
             by_occurrence,
             records_by_occurrence,
+            empty_record_fields: flat
+                .record_instances
+                .values()
+                .filter(|record| record.dims == [0])
+                .flat_map(|record| {
+                    flat.record_types
+                        .get(&record.type_def_id)
+                        .into_iter()
+                        .flat_map(move |layout| {
+                            layout
+                                .fields
+                                .iter()
+                                .map(move |field| (record.instance_id, field.def_id))
+                        })
+                })
+                .collect(),
             occurrences: occurrence_graph::OccurrenceGraph::build(flat),
             integer_values,
             integer_values_by_occurrence,
@@ -372,10 +393,10 @@ impl KnownFlatVars {
     /// rewrite of a rendered path.
     ///
     /// Accepted: a projection whose every element resolves to a flat variable
-    /// or scalarized record container this model owns. Rejected as `None`: an
-    /// element the walk cannot resolve, or a projection with nothing selected
-    /// past the array — `arr` alone names the component array itself, not a
-    /// member of it. A rejected projection is left exactly as written so the
+    /// or scalarized record container this model owns. An empty member path
+    /// selects the record elements themselves (MLS §§10.1, 12.4). Model arrays
+    /// still have no value owner and are rejected by `cursor_expression`.
+    /// A rejected projection is left exactly as written so the
     /// DAE phase reports it against its source span instead of this pass
     /// substituting a guess.
     fn expand_projection_elements(
@@ -384,9 +405,6 @@ impl KnownFlatVars {
         members: &[(rumoca_core::DefId, Vec<i64>)],
         span: rumoca_core::Span,
     ) -> Option<rumoca_core::Expression> {
-        if members.is_empty() {
-            return None;
-        }
         let element_cursors = self.occurrences.pending_elements(cursor)?;
         let mut elements = Vec::with_capacity(element_cursors.len());
         for mut element in element_cursors {
@@ -490,6 +508,46 @@ struct CollapseIndexRewriter<'a> {
     known_flat_vars: &'a KnownFlatVars,
 }
 
+impl CollapseIndexRewriter<'_> {
+    fn rewrite_field_access(
+        &mut self,
+        base: &rumoca_core::Expression,
+        field: &str,
+        field_def_id: rumoca_core::DefId,
+        span: rumoca_core::Span,
+    ) -> rumoca_core::Expression {
+        if let Some(collapsed) =
+            self.known_flat_vars
+                .field_occurrence_expression(base, field_def_id, span)
+        {
+            return collapsed;
+        }
+        let base = self.rewrite_expression(base);
+        if let Some(projected) =
+            aggregate_projection::project(&base, field, field_def_id, span, self.known_flat_vars)
+        {
+            return self.rewrite_expression(&projected);
+        }
+        if let Some(collapsed) =
+            self.known_flat_vars
+                .field_occurrence_expression(&base, field_def_id, span)
+        {
+            return collapsed;
+        }
+        if let Some(collapsed) =
+            collapse_field_access_to_known_var(&base, field, span, self.known_flat_vars)
+        {
+            return collapsed;
+        }
+        rumoca_core::Expression::FieldAccess {
+            base: Box::new(base),
+            field: field.to_owned(),
+            field_def_id,
+            span,
+        }
+    }
+}
+
 impl ExpressionRewriter for CollapseIndexRewriter<'_> {
     fn rewrite_expression(&mut self, expr: &rumoca_core::Expression) -> rumoca_core::Expression {
         if let rumoca_core::Expression::VarRef {
@@ -525,24 +583,7 @@ impl ExpressionRewriter for CollapseIndexRewriter<'_> {
             span,
         } = expr
         {
-            let base = self.rewrite_expression(base);
-            if let Some(collapsed) =
-                self.known_flat_vars
-                    .field_occurrence_expression(&base, *field_def_id, *span)
-            {
-                return collapsed;
-            }
-            if let Some(collapsed) =
-                collapse_field_access_to_known_var(&base, field, *span, self.known_flat_vars)
-            {
-                return collapsed;
-            }
-            return rumoca_core::Expression::FieldAccess {
-                base: Box::new(base),
-                field: field.clone(),
-                field_def_id: *field_def_id,
-                span: *span,
-            };
+            return self.rewrite_field_access(base, field, *field_def_id, *span);
         }
         if let rumoca_core::Expression::Index {
             base,
@@ -550,6 +591,12 @@ impl ExpressionRewriter for CollapseIndexRewriter<'_> {
             span,
         } = expr
         {
+            if let Some(collapsed) = self
+                .known_flat_vars
+                .indexed_occurrence_expression(base, subscripts, *span)
+            {
+                return collapsed;
+            }
             let base = self.rewrite_expression(base);
             let subscripts = self.rewrite_subscripts(subscripts);
             if let Some(collapsed) =

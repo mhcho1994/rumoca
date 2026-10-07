@@ -665,6 +665,13 @@ fn analyze_expression_support(
         // plans (CDL `ExtractSignal`: `assert(andTrue({... for i in 1:n}))`).
         comprehensions: analyze_comprehensions(
             all_model_expressions(flat)
+                // SPEC_0032 §1: compact templates are authoritative; their
+                // nested MLS §10.4.1 reductions retain unrolled-loop binders
+                // and therefore need plans distinct from materialized rows.
+                .chain(structured_template_expressions(&flat.structured_equations))
+                .chain(structured_template_expressions(
+                    &flat.initial_structured_equations,
+                ))
                 .chain(assertion_expressions(flat))
                 .chain(when_chain_expressions(flat)),
             constants,
