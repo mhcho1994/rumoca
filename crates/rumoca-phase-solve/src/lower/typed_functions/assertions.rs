@@ -1,6 +1,9 @@
 //! Function-assertion discovery over checked DAE statement owners.
 
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use rumoca_ir_dae as dae;
 use rumoca_ir_solve as solve;
@@ -33,11 +36,27 @@ pub(super) struct FunctionAssertion<'dae> {
     pub(super) provenance: dae::DaeProvenance,
 }
 
+/// The source loop body and its interval in the call's predicate interface.
+/// Indexing before demand lowering keeps an early fold projection from
+/// assigning its assertions to an unrelated statement's output slots.
+#[derive(Clone)]
+pub(super) struct FoldBody<'dae> {
+    pub(super) statements: dae::FunctionStatements<'dae>,
+    pub(super) assertions: Range<usize>,
+    pub(super) conditions: Vec<dae::ExprId<'dae>>,
+}
+
+#[derive(Default)]
+pub(super) struct FunctionAssertions<'dae> {
+    pub(super) conditions: Vec<FunctionAssertion<'dae>>,
+    pub(super) loops: HashMap<dae::FunctionFoldId<'dae>, FoldBody<'dae>>,
+}
+
 pub(super) fn assertion_conditions<'dae>(
     view: dae::DaeView<'dae>,
     function: dae::FunctionView<'dae>,
-) -> Result<Vec<FunctionAssertion<'dae>>, solve::SolveProgramConstructionError> {
-    let mut assertions = Vec::new();
+) -> Result<FunctionAssertions<'dae>, solve::SolveProgramConstructionError> {
+    let mut assertions = FunctionAssertions::default();
     collect_assertion_conditions(view, function.statements(), &mut assertions)?;
     Ok(assertions)
 }
@@ -45,7 +64,7 @@ pub(super) fn assertion_conditions<'dae>(
 fn collect_assertion_conditions<'dae>(
     view: dae::DaeView<'dae>,
     statements: dae::FunctionStatements<'dae>,
-    assertions: &mut Vec<FunctionAssertion<'dae>>,
+    assertions: &mut FunctionAssertions<'dae>,
 ) -> Result<(), solve::SolveProgramConstructionError> {
     for statement in statements {
         match statement {
@@ -55,7 +74,7 @@ fn collect_assertion_conditions<'dae>(
                 condition,
                 message,
                 provenance,
-            } => assertions.push(FunctionAssertion {
+            } => assertions.conditions.push(FunctionAssertion {
                 condition,
                 message,
                 provenance,
@@ -65,7 +84,21 @@ fn collect_assertion_conditions<'dae>(
             } => {
                 view.function_fold(fold)
                     .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-                collect_assertion_conditions(view, statements, assertions)?;
+                let start = assertions.conditions.len();
+                collect_assertion_conditions(view, statements.clone(), assertions)?;
+                let range = start..assertions.conditions.len();
+                let conditions = assertions.conditions[range.clone()]
+                    .iter()
+                    .map(|assertion| assertion.condition)
+                    .collect();
+                assertions.loops.insert(
+                    fold,
+                    FoldBody {
+                        statements,
+                        assertions: range,
+                        conditions,
+                    },
+                );
             }
         }
     }
@@ -110,4 +143,54 @@ pub(super) fn assertion_is_map_independent<'dae>(
         }
     });
     independent
+}
+
+impl<'dae> super::ExpressionLowerer<'_, '_, 'dae> {
+    /// Demand assertions in the same iteration environment as numeric updates.
+    /// Assignments are resolved by exact SSA identity, so a shared local is
+    /// computed once and reads before/after a redefinition stay distinct.
+    pub(super) fn iteration_assertions(
+        &mut self,
+        statements: dae::FunctionStatements<'dae>,
+    ) -> Result<(), solve::SolveProgramConstructionError> {
+        for statement in statements {
+            match statement {
+                dae::FunctionStatementView::Assertion {
+                    condition,
+                    provenance,
+                    ..
+                } => {
+                    let predicate = self
+                        .expression(condition)?
+                        .only_register(provenance.span())?;
+                    self.record_assertion_predicate(predicate, provenance.span())?;
+                }
+                dae::FunctionStatementView::For {
+                    fold, provenance, ..
+                } => {
+                    self.iteration_nested_assertions(fold, provenance.span())?;
+                }
+                dae::FunctionStatementView::Assignment { .. }
+                | dae::FunctionStatementView::AssignmentGroup { .. } => {}
+            }
+        }
+        Ok(())
+    }
+    fn iteration_nested_assertions(
+        &mut self,
+        fold: dae::FunctionFoldId<'dae>,
+        provenance: rumoca_core::Span,
+    ) -> Result<(), solve::SolveProgramConstructionError> {
+        let range = self
+            .fold_bodies
+            .get(&fold)
+            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
+            .assertions
+            .clone();
+        if !range.is_empty() {
+            self.function_fold(fold, provenance)?;
+        }
+        self.next_direct_assertion = range.end;
+        Ok(())
+    }
 }

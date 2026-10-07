@@ -453,6 +453,7 @@ struct ExpressionLowerer<'builder, 'program, 'dae> {
     function_values: HashMap<dae::FunctionDefinitionId<'dae>, LoweredValue<'program, 'dae>>,
     /// Exact DAE assignment-group membership for demand-ordered definitions.
     conditional_groups: HashMap<dae::FunctionDefinitionId<'dae>, ConditionalDefinitionGroup<'dae>>,
+    fold_bodies: HashMap<dae::FunctionFoldId<'dae>, assertions::FoldBody<'dae>>,
     fold_parameters: HashMap<(dae::FunctionFoldId<'dae>, u32), LoweredValue<'program, 'dae>>,
     fold_values: HashMap<dae::FunctionFoldId<'dae>, Vec<LoweredValue<'program, 'dae>>>,
     binders: HashMap<(u32, u32), solve::ProgramRegister<'program>>,
@@ -536,10 +537,14 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                     self.conditional_assignment(definitions, conditional)?;
                 }
                 dae::FunctionStatementView::For {
-                    fold,
-                    statements,
-                    provenance,
+                    fold, provenance, ..
                 } => {
+                    let assertion_end = self
+                        .fold_bodies
+                        .get(&fold)
+                        .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
+                        .assertions
+                        .end;
                     let values = self.function_fold(fold, provenance.span())?;
                     let fold = self
                         .view
@@ -550,7 +555,6 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                             provenance: provenance.span(),
                         });
                     }
-                    let domain = fold.domain();
                     // The loop's exit value of each carried target belongs to
                     // the output definition the fold issued, not to the
                     // in-body definitions that produced it.
@@ -560,7 +564,7 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                             .map(|definition| definition.id())
                             .zip(values),
                     );
-                    self.loop_assertions(statements, &mut vec![domain], provenance.span())?;
+                    self.next_direct_assertion = assertion_end;
                 }
             }
         }
@@ -668,6 +672,7 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             callees: self.callees.clone(),
             predicate_ranges: self.predicate_ranges.clone(),
             conditional_groups: self.conditional_groups.clone(),
+            fold_bodies: self.fold_bodies.clone(),
             predicate_count: self.predicate_values.len(),
             direct_assertion_count: self.direct_assertion_count,
         };
@@ -721,6 +726,7 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             callees: self.callees.clone(),
             predicate_ranges: self.predicate_ranges.clone(),
             conditional_groups: self.conditional_groups.clone(),
+            fold_bodies: self.fold_bodies.clone(),
             predicate_count: self.predicate_values.len(),
             direct_assertion_count: self.direct_assertion_count,
         };
@@ -908,6 +914,7 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             callees: self.callees.clone(),
             predicate_ranges: self.predicate_ranges.clone(),
             conditional_groups: self.conditional_groups.clone(),
+            fold_bodies: self.fold_bodies.clone(),
             predicate_count: self.predicate_values.len(),
             direct_assertion_count: self.direct_assertion_count,
         };
@@ -1349,6 +1356,7 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                 callees: self.callees.clone(),
                 predicate_ranges: self.predicate_ranges.clone(),
                 conditional_groups: self.conditional_groups.clone(),
+                fold_bodies: self.fold_bodies.clone(),
                 predicate_count: self.predicate_values.len(),
                 direct_assertion_count: self.direct_assertion_count,
             };

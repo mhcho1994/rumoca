@@ -1016,7 +1016,7 @@ fn function_fold_stays_one_compact_typed_owner() {
             .iter()
             .filter(|operation| matches!(operation.operation(), solve::SolveOperation::Map { .. }))
             .count(),
-        1
+        0
     );
     let output = rumoca_eval_solve::eval_pure_call(&table, owner.id(), &[]).unwrap();
     assert_eq!(output[0].elements(), [solve::SolveValueKind::Integer(6)]);

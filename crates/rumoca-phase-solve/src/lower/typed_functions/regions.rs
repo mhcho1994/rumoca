@@ -42,6 +42,7 @@ pub(super) struct RegionContext<'dae> {
     pub(super) predicate_ranges: HashMap<dae::ExprId<'dae>, Range<usize>>,
     pub(super) conditional_groups:
         HashMap<dae::FunctionDefinitionId<'dae>, ConditionalDefinitionGroup<'dae>>,
+    pub(super) fold_bodies: HashMap<dae::FunctionFoldId<'dae>, super::assertions::FoldBody<'dae>>,
     pub(super) predicate_count: usize,
     pub(super) direct_assertion_count: usize,
 }
@@ -226,6 +227,7 @@ pub(super) fn load_region_lowerer<'builder, 'program, 'dae>(
         conditional_groups: context.conditional_groups.clone(),
         fold_parameters,
         fold_values: HashMap::new(),
+        fold_bodies: context.fold_bodies.clone(),
         binders,
         callees: context.callees.clone(),
         predicate_ranges: context.predicate_ranges.clone(),

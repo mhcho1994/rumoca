@@ -14,7 +14,9 @@ use rumoca_ir_dae as dae;
 use rumoca_ir_solve as solve;
 
 use super::{
-    EnvironmentLayout, ExpressionLowerer, LoweredValue, RegionContext, load_region_lowerer,
+    EnvironmentLayout, ExpressionLowerer, LoweredValue, RegionContext,
+    assertions::{FoldBody, assertion_is_map_independent},
+    load_region_lowerer,
 };
 
 /// One fold's checked transition record.
@@ -44,6 +46,8 @@ struct FoldIteration<'a, 'dae> {
     environment: &'a EnvironmentLayout<'dae>,
     context: &'a RegionContext<'dae>,
     carried_layout: &'a CarriedLayout<'dae>,
+    body: &'a FoldBody<'dae>,
+    predicates: &'a [usize],
     provenance: rumoca_core::Span,
 }
 
@@ -56,17 +60,43 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         if let Some(values) = self.fold_values.get(&fold) {
             return Ok(values.clone());
         }
-        let Some(transition) = checked_transition(self.view, fold, provenance)? else {
+        let transition = checked_transition(self.view, fold, provenance)?;
+        let body = self
+            .fold_bodies
+            .get(&fold)
+            .cloned()
+            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
+        let roots = transition
+            .update_expressions
+            .iter()
+            .copied()
+            .chain(body.conditions.iter().copied())
+            .collect::<Vec<_>>();
+        let pending = self.pending_predicates(roots.iter().copied());
+        if transition.initial_definitions.is_empty()
+            && pending.is_empty()
+            && body
+                .conditions
+                .iter()
+                .all(|condition| assertion_is_map_independent(self.view, *condition))
+        {
+            let next = self.next_direct_assertion;
+            self.next_direct_assertion = body.assertions.start;
+            self.loop_assertions(body.statements, &mut vec![transition.domain], provenance)?;
+            self.next_direct_assertion = next;
             self.fold_values.insert(fold, Vec::new());
             return Ok(Vec::new());
-        };
-        if !self
-            .pending_predicates(transition.update_expressions.iter().copied())
-            .is_empty()
-        {
-            return Err(solve::SolveProgramConstructionError::InvalidCallInterface { provenance });
         }
-        let (initial_flat, carried_layout) = self.carried_entry_values(&transition, provenance)?;
+        let (mut initial_flat, carried_layout) =
+            self.carried_entry_values(&transition, provenance)?;
+        let predicates = body.assertions.clone().chain(pending).collect::<Vec<_>>();
+        let value_leaf_count = initial_flat.len();
+        for _ in &predicates {
+            initial_flat.push(
+                self.builder
+                    .constant(solve::SolveValue::boolean(true), provenance)?,
+            );
+        }
         let domain = self
             .view
             .domain(transition.domain)
@@ -81,16 +111,14 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             .view
             .function_scope(fold.function(), Some(fold))
             .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-        let (captures, environment) = self.capture_environment_for_fold(
-            transition.update_expressions.iter().copied(),
-            fold,
-            scope,
-        )?;
+        let (captures, environment) =
+            self.capture_environment_for_fold(roots.iter().copied(), fold, scope)?;
         let context = RegionContext {
             view: self.view,
             callees: self.callees.clone(),
             predicate_ranges: self.predicate_ranges.clone(),
             conditional_groups: self.conditional_groups.clone(),
+            fold_bodies: self.fold_bodies.clone(),
             predicate_count: self.predicate_values.len(),
             direct_assertion_count: self.direct_assertion_count,
         };
@@ -100,6 +128,8 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             environment: &environment,
             context: &context,
             carried_layout: &carried_layout,
+            body: &body,
+            predicates: &predicates,
             provenance,
         };
         let destinations = self.builder.fold(
@@ -111,6 +141,9 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                 iteration.lower(builder, carried, captures, binders, outputs)
             },
         )?;
+        for (slot, predicate) in predicates.iter().zip(&destinations[value_leaf_count..]) {
+            self.predicate_values[*slot] = Some(*predicate);
+        }
         let values = carried_layout
             .iter()
             .map(|(_, value_type, range)| LoweredValue {
@@ -156,15 +189,13 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
     }
 }
 
-/// Check one DAE fold record into a transition, or report it vacuous.
-///
-/// `Ok(None)` is the loop that carries nothing: it has no entry value, no
-/// update, and no target, so it publishes no value and needs no region.
+/// Check the numeric transition, including a loop with only assertions.
+/// Such a loop can still carry predicates even when its value tuple is empty.
 fn checked_transition<'dae>(
     view: dae::DaeView<'dae>,
     fold: dae::FunctionFoldId<'dae>,
     provenance: rumoca_core::Span,
-) -> Result<Option<FoldTransition<'dae>>, solve::SolveProgramConstructionError> {
+) -> Result<FoldTransition<'dae>, solve::SolveProgramConstructionError> {
     let fold_view = view
         .function_fold(fold)
         .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
@@ -187,11 +218,7 @@ fn checked_transition<'dae>(
         .iter()
         .map(|definition| definition.id())
         .collect::<Vec<_>>();
-    if initial_definitions.is_empty() && update_expressions.is_empty() && carried_targets.is_empty()
-    {
-        return Ok(None);
-    }
-    if initial_definitions.is_empty() || initial_definitions.len() != update_expressions.len() {
+    if initial_definitions.len() != update_expressions.len() {
         return Err(solve::SolveProgramConstructionError::InvalidFold { provenance });
     }
     if carried_targets.len() != initial_definitions.len()
@@ -206,13 +233,13 @@ fn checked_transition<'dae>(
             return Err(solve::SolveProgramConstructionError::InvalidFold { provenance });
         }
     }
-    Ok(Some(FoldTransition {
+    Ok(FoldTransition {
         initial_definitions,
         update_expressions,
         parameter_definitions,
         update_definitions,
         domain: fold_view.domain(),
-    }))
+    })
 }
 
 impl<'dae> FoldIteration<'_, 'dae> {
@@ -234,7 +261,10 @@ impl<'dae> FoldIteration<'_, 'dae> {
         )?;
         self.seed_carried_values(&mut lowerer, carried)?;
         self.seed_binders(&mut lowerer, binders)?;
-        let updated = self.lower_updates(&mut lowerer)?;
+        let mut updated = self.lower_updates(&mut lowerer)?;
+        lowerer.next_direct_assertion = self.body.assertions.start;
+        lowerer.iteration_assertions(self.body.statements.clone())?;
+        self.accumulate_predicates(&mut lowerer, &carried[updated.len()..], &mut updated)?;
         if updated.len() != outputs.len() {
             return Err(solve::SolveProgramConstructionError::InvalidCallOutput {
                 provenance: self.provenance,
@@ -242,6 +272,39 @@ impl<'dae> FoldIteration<'_, 'dae> {
         }
         for (output, value) in outputs.iter().zip(updated) {
             lowerer.builder.store(*output, value, self.provenance)?;
+        }
+        Ok(())
+    }
+
+    /// Each source predicate owns a Boolean fold lane. A failure in an early
+    /// iteration cannot be overwritten by a later successful iteration, and
+    /// an empty domain returns the initial `true` without evaluating the body.
+    fn accumulate_predicates<'program>(
+        &self,
+        lowerer: &mut ExpressionLowerer<'_, 'program, 'dae>,
+        carried: &[solve::ProgramSlot<'program>],
+        updated: &mut Vec<solve::ProgramRegister<'program>>,
+    ) -> Result<(), solve::SolveProgramConstructionError> {
+        for (slot, carried) in self.predicates.iter().zip(carried) {
+            let previous = lowerer.builder.load(*carried, self.provenance)?;
+            let predicate = match lowerer.predicate_values[*slot] {
+                Some(predicate) => predicate,
+                // An unselected conditional call contributes no failure.
+                None if *slot >= lowerer.direct_assertion_count => lowerer
+                    .builder
+                    .constant(solve::SolveValue::boolean(true), self.provenance)?,
+                None => {
+                    return Err(solve::SolveProgramConstructionError::InvalidCallOutput {
+                        provenance: self.provenance,
+                    });
+                }
+            };
+            updated.push(lowerer.builder.binary(
+                solve::SolveBinaryOperator::And,
+                previous,
+                predicate,
+                self.provenance,
+            )?);
         }
         Ok(())
     }

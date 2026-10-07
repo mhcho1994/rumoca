@@ -58,7 +58,8 @@ fn register_call_body<'dae>(
             provenance: call_node.provenance().span(),
         });
     }
-    let assertions = assertion_conditions(view, function)?;
+    let inventory = assertion_conditions(view, function)?;
+    let assertions = inventory.conditions;
     let conditional_groups = conditional_definition_groups(function.statements())?;
     let nested_call_ids = nested_calls(view, function, &assertions);
     let mut callees = HashMap::new();
@@ -176,6 +177,7 @@ fn register_call_body<'dae>(
                 parameters,
                 function_values: HashMap::new(),
                 conditional_groups,
+                fold_bodies: inventory.loops,
                 fold_parameters: HashMap::new(),
                 fold_values: HashMap::new(),
                 binders: HashMap::new(),

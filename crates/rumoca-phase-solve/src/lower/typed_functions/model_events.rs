@@ -297,6 +297,7 @@ impl<'dae> PureCallRegistry<'dae> {
                     conditional_groups: HashMap::new(),
                     fold_parameters: HashMap::new(),
                     fold_values: HashMap::new(),
+                    fold_bodies: HashMap::new(),
                     binders: HashMap::new(),
                     callees,
                     predicate_ranges,
@@ -576,6 +577,7 @@ fn activated_assignment_group<'program, 'dae>(
         callees: lowerer.callees.clone(),
         predicate_ranges: lowerer.predicate_ranges.clone(),
         conditional_groups: lowerer.conditional_groups.clone(),
+        fold_bodies: lowerer.fold_bodies.clone(),
         predicate_count: lowerer.predicate_values.len(),
         direct_assertion_count: lowerer.direct_assertion_count,
     };
