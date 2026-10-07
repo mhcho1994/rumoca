@@ -514,9 +514,16 @@ where
             match statement {
                 dae::FunctionStatementView::Assignment { .. }
                 | dae::FunctionStatementView::AssignmentGroup { .. } => {}
+                // A warning-level assertion never aborts an evaluation and has
+                // no influence on any value (MLS §8.3.7).
+                dae::FunctionStatementView::Assertion {
+                    level: dae::AssertionLevel::Warning,
+                    ..
+                } => {}
                 dae::FunctionStatementView::Assertion {
                     condition,
                     message: _,
+                    level: dae::AssertionLevel::Error,
                     provenance,
                 } => self.function_assertion(condition, provenance.span())?,
                 dae::FunctionStatementView::For {
@@ -725,12 +732,7 @@ where
         expression: dae::ExprId<'dae>,
     ) -> Result<Vec<f64>, NumericEvaluationError> {
         let mut values = self.expression(expression)?;
-        // A scalar applies to every element, including to none: `Xi[nXi]`
-        // with `nXi = 0` and a scalar `nominal` has nothing to apply it to,
-        // which is not a shape error.
-        if values.len() == 1 && variable.scalar_count() != 1 {
-            values.resize(variable.scalar_count(), values[0]);
-        }
+        variable.broadcast_values(&mut values);
         if values.len() != variable.scalar_count() {
             return Err(failure(
                 NumericEvaluationErrorKind::ShapeMismatch,
@@ -1104,6 +1106,13 @@ where
             dae::PureBuiltin::NoEvent => {}
             dae::PureBuiltin::Homotopy => {}
             dae::PureBuiltin::Vector => {}
+            dae::PureBuiltin::LinearSolve => {
+                return Err(failure(
+                    NumericEvaluationErrorKind::UnsupportedOperation,
+                    "linear solve requires the Solve tensor execution kernel",
+                    span,
+                ));
+            }
             dae::PureBuiltin::Transpose => values = transpose_values(&values, result_dimensions),
             B::Diagonal | B::OuterProduct | B::Skew => {
                 values = self.matrix_product(builtin, arguments, values)?;
@@ -1610,7 +1619,7 @@ fn literal_value(literal: &dae::DaeLiteral, span: Span) -> Result<f64, NumericEv
     }
 }
 
-fn binary(operator: dae::BinaryOperator, lhs: f64, rhs: f64) -> f64 {
+pub(crate) fn binary(operator: dae::BinaryOperator, lhs: f64, rhs: f64) -> f64 {
     match operator {
         dae::BinaryOperator::Add | dae::BinaryOperator::ElementwiseAdd => lhs + rhs,
         dae::BinaryOperator::Subtract | dae::BinaryOperator::ElementwiseSubtract => lhs - rhs,

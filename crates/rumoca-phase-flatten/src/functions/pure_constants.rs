@@ -20,7 +20,7 @@ pub(crate) fn check_settled_binding_bounds(model: &flat::Model) -> Result<(), Fl
     // value immutable. Every fixed parameter must be non-tunable first.
     let fixed_parameters_frozen = model.variables.values().all(|variable| {
         !matches!(variable.variability, Variability::Parameter(_))
-            || variable.fixed == Some(false)
+            || variable.fixed_uniform() == Some(false)
             || variable.evaluate
     });
     // A frozen parameter can depend on a later frozen parameter. Only insert
@@ -32,7 +32,7 @@ pub(crate) fn check_settled_binding_bounds(model: &flat::Model) -> Result<(), Fl
                 || (matches!(variable.variability, Variability::Parameter(_))
                     && fixed_parameters_frozen
                     && variable.evaluate))
-                || variable.fixed == Some(false)
+                || variable.fixed_uniform() == Some(false)
                 || context.parameters.contains_key(name.as_str())
             {
                 continue;

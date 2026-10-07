@@ -1,17 +1,5 @@
-//! `SessionConfig::fold_parameter_declaration_bindings` — keep a derived
-//! parameter's binding as written.
-//!
-//! By default `parameter Real d = k * 10` with `k = 2` reaches Flat as
-//! `d = 20`. That is the value a solver wants, but it erases the fact that `d`
-//! is derived from `k`, and no later phase can recover it: the arithmetic has
-//! already been carried out. An analysis that asks "which knob does the user
-//! turn to reach this denominator" needs the chain, so the fold is optional.
-//!
-//! What the option must *not* do is change the model. MLS §18.3 structural
-//! parameters decide array extents and branch selection, and Integer/Boolean/
-//! String parameters seed those decisions for nested components, so both are
-//! resolved either way. These tests pin that split: the Real chain survives,
-//! the shape does not move.
+//! Parameter binding folding must preserve main's tunable dependencies.
+//! Structural evaluation still determines identical model shapes.
 
 use rumoca_compile::compile::{Session, SessionConfig};
 
@@ -46,7 +34,7 @@ end Derived;
 ";
 
 #[test]
-fn folding_on_replaces_a_derived_real_binding_with_its_value() {
+fn folding_on_preserves_a_tunable_parameter_dependency() {
     let mut session = session(true);
     session
         .add_document("derived.mo", DERIVED)
@@ -55,8 +43,8 @@ fn folding_on_replaces_a_derived_real_binding_with_its_value() {
 
     let binding = binding_of(&compiled.flat, "d");
     assert!(
-        !binding.contains('k'),
-        "default folding should have consumed the reference to `k`, got {binding}"
+        binding.contains('k'),
+        "folding must preserve the settable reference to `k`, got {binding}"
     );
 }
 
@@ -146,9 +134,9 @@ fn folding_off_still_resolves_structural_and_discrete_parameters() {
         "unfolding a Real binding must not change the equation count"
     );
 
-    // And the Real parameter is the one thing that does differ.
+    // Ordinary Real bindings retain their dependencies in both modes.
     assert!(binding_of(&unfolded.flat, "gain").contains("base"));
-    assert!(!binding_of(&folded.flat, "gain").contains("base"));
+    assert!(binding_of(&folded.flat, "gain").contains("base"));
 }
 
 #[test]

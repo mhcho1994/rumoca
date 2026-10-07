@@ -39,6 +39,7 @@
 mod array_expansion;
 mod attributes;
 mod component_loop;
+mod component_redeclarations;
 mod conditional_components;
 mod connection_subscript_constants;
 mod connections;
@@ -46,6 +47,8 @@ mod dims;
 mod entry;
 mod errors;
 mod evaluate_annotation;
+#[cfg(test)]
+mod final_modifier_tests;
 mod inheritance;
 mod inner_outer;
 mod instance_sections;
@@ -89,14 +92,15 @@ use conditional_components::{ConditionScope, mark_disabled_component_if_needed};
 use dims::{
     qualify_shape_subscripts_imports, resolve_component_dimensions, resolve_type_alias_dimensions,
 };
-use evaluate_annotation::has_evaluate_annotation;
+use evaluate_annotation::evaluate_annotation;
 #[cfg(test)]
 pub(crate) use inner_outer::inner_visible_to_outer;
 pub(crate) use inner_outer::{
     SyntheticInnerError, handle_inner_outer, preregister_class_inners, retry_with_synthetic_inners,
 };
 use instance_sections::{
-    algorithms_to_instance, equations_to_instance_cloned, equations_to_instance_without_connections,
+    algorithms_to_instance, equations_to_instance_cloned,
+    equations_to_instance_without_connections, parameter_branch_selections,
 };
 use mod_env::{
     PopulateModEnvInput, RecordBindingProjection, populate_modification_environment,
@@ -143,7 +147,7 @@ pub use templates::{ClassTemplate, ClassTemplateCache};
 pub struct ExtractedAttributes {
     pub start: Option<ast::Expression>,
     pub start_is_explicit: bool,
-    pub fixed: Option<bool>,
+    pub fixed: Option<Vec<bool>>,
     pub min: Option<ast::Expression>,
     pub max: Option<ast::Expression>,
     pub nominal: Option<ast::Expression>,
@@ -259,6 +263,7 @@ struct ScopeFrame {
     /// annotation(Evaluate = true), so everything instantiated beneath it is
     /// evaluated during translation, record members included.
     evaluate: bool,
+    is_final: bool,
     causality: Option<rumoca_core::Causality>,
     flow: bool,
     stream: bool,
@@ -270,6 +275,7 @@ struct ScopeFrame {
 struct ScopeFrameInput<'a> {
     variability: &'a rumoca_core::Variability,
     evaluate: bool,
+    is_final: bool,
     causality: &'a rumoca_core::Causality,
     flow: bool,
     stream: bool,
@@ -300,6 +306,7 @@ impl ScopeFrame {
         Self {
             variability,
             evaluate: input.evaluate,
+            is_final: input.is_final,
             causality,
             flow: input.flow,
             stream: input.stream,
@@ -326,6 +333,8 @@ pub struct InstantiateContext {
     next_instance_id: u32,
     /// Modification environment for the current scope.
     mod_env: ast::ModificationEnvironment,
+    component_redeclarations: component_redeclarations::ComponentRedeclarations,
+    has_unapplied_redeclare: bool,
     /// Inner declarations visible in the current scope (MLS §5.4).
     /// Maps component name to inner declaration info.
     /// Stack-based: each entry contains the inner declarations at that scope level.
@@ -412,6 +421,8 @@ impl InstantiateContext {
             context_path_def_ids: Vec::new(),
             next_instance_id: 0,
             mod_env: ast::ModificationEnvironment::new(),
+            component_redeclarations: component_redeclarations::ComponentRedeclarations::default(),
+            has_unapplied_redeclare: false,
             inner_scopes: vec![IndexMap::default()],
             missing_inners: Vec::new(),
             scope_frames: vec![ScopeFrame::default()],
@@ -663,6 +674,10 @@ impl InstantiateContext {
         self.scope_frames.iter().any(|frame| frame.evaluate)
     }
 
+    fn inherited_final(&self) -> bool {
+        self.scope_frames.iter().any(|frame| frame.is_final)
+    }
+
     /// Push inherited scope metadata for nested class instantiation.
     /// MLS §4.4.2.1: Record fields inherit variability
     /// MLS §4.4.2.2: Record fields inherit causality
@@ -901,6 +916,8 @@ impl Default for InstantiateContext {
 }
 
 /// Instantiate a class and all its components.
+// SPEC_0021: Exception - class instantiation entry point runs ordered owner passes.
+#[allow(clippy::too_many_lines)]
 fn instantiate_class(
     tree: &ast::ClassTree,
     class: &ast::ClassDef,
@@ -920,7 +937,10 @@ fn instantiate_class(
         // reuse it for all 100 instances, only applying per-instance modifications.
         let template = get_or_compute_template(tree, class, &mut ctx.template_cache)?;
         // Borrow cached template structures directly to avoid per-instance deep clones.
-        let effective_components = &template.effective_components;
+        let effective_components = ctx
+            .component_redeclarations
+            .apply(&template.effective_components);
+        let effective_components = effective_components.as_ref();
         let all_equations = &template.effective_equations;
         // MLS §7.3: Build type override map for replaceable type redeclarations.
         // When a record type like ThermodynamicState is redeclared in the enclosing
@@ -1018,7 +1038,7 @@ fn instantiate_class(
         // instance-dependent member set, so Resolve deferred its tail. The
         // component occurrences of this class instance were just materialized,
         // so their selected types now prove those members exactly.
-        let selected_component_types = selected_component_types_of_class(overlay, instance_id);
+        let selected_component_types = SelectedComponentTypes::of_scope(overlay, instance_id);
         let sections = class_instance_sections(
             tree,
             ctx,
@@ -1042,6 +1062,7 @@ fn instantiate_class(
             initial_algorithms: sections.initial_algorithms,
             connections,
             resolved_imports,
+            parameter_branch_selections: sections.parameter_branch_selections,
         };
         overlay.add_class(class_data);
 
@@ -1057,30 +1078,10 @@ fn instantiate_class(
 /// Instance-tree sections converted from one class template.
 struct ClassSections {
     equations: Vec<ast::InstanceEquation>,
+    parameter_branch_selections: Vec<ast::InstanceBranchSelection>,
     initial_equations: Vec<ast::InstanceEquation>,
     algorithms: Vec<Vec<ast::InstanceStatement>>,
     initial_algorithms: Vec<Vec<ast::InstanceStatement>>,
-}
-
-/// Selected class of every component occurrence directly owned by `class_id`,
-/// keyed by the component's declaration identity.
-///
-/// A replaceable component declaration keeps its own `DefId` across a
-/// redeclaration, so this maps the declaration Resolve recorded on a reference
-/// root onto the class instantiation actually selected for it (MLS §7.3).
-fn selected_component_types_of_class(
-    overlay: &ast::InstanceOverlay,
-    class_id: rumoca_core::InstanceId,
-) -> SelectedComponentTypes {
-    overlay
-        .components
-        .values()
-        .filter(|component| component.owner_class_id == Some(class_id))
-        .filter_map(|component| {
-            let declaration = component.component_ref.as_ref()?.target_def_id();
-            Some((declaration, component.type_def_id?))
-        })
-        .collect()
 }
 
 /// Convert a class template's equation and algorithm sections to instance form.
@@ -1090,7 +1091,7 @@ fn class_instance_sections(
     template: &templates::ClassTemplate,
     qualified_name: &ast::QualifiedName,
     type_overrides: &TypeOverrideMap,
-    selected_component_types: &SelectedComponentTypes,
+    selected_component_types: &SelectedComponentTypes<'_>,
 ) -> InstantiateResult<ClassSections> {
     let source_map = &tree.source_map;
     let eval_ctx = InstantiateEvalCtx {
@@ -1101,6 +1102,20 @@ fn class_instance_sections(
     };
     // Convert regular equations in one pass without intermediate equation vectors.
     let mut sections = ClassSections {
+        parameter_branch_selections: parameter_branch_selections(
+            &template.effective_equations,
+            qualified_name,
+            source_map,
+            Some(&eval_ctx),
+        )?
+        .into_iter()
+        .chain(parameter_branch_selections(
+            &template.initial_equations,
+            qualified_name,
+            source_map,
+            Some(&eval_ctx),
+        )?)
+        .collect(),
         equations: equations_to_instance_without_connections(
             ctx,
             &template.effective_equations,
@@ -1135,7 +1150,7 @@ fn class_instance_sections(
 fn resolve_dynamic_section_targets(
     tree: &ast::ClassTree,
     type_overrides: &TypeOverrideMap,
-    selected_component_types: &SelectedComponentTypes,
+    selected_component_types: &SelectedComponentTypes<'_>,
     sections: &mut ClassSections,
 ) -> InstantiateResult<()> {
     for equation in sections
@@ -1191,29 +1206,11 @@ struct InstanceDataBuild<'a> {
     is_primitive: bool,
     is_discrete_type: bool,
     evaluate: bool,
+    is_final: bool,
     source_map: &'a rumoca_core::SourceMap,
     ctx: &'a InstantiateContext,
     comp: &'a ast::Component,
     class_def: Option<&'a ast::ClassDef>,
-}
-
-/// True when this declaration carries a redeclare modifier of its own
-/// (`Holder h(redeclare C a[2])`, MLS §7.3).
-///
-/// The parser records one redeclare flag per source modifier, which settles the
-/// direct form. The redeclaration may also sit deeper inside an ordinary
-/// modifier — `Wrap w(h(redeclare C a[2]))` modifies `w.h` and redeclares
-/// `w.h.a` — so the modifier subtrees are searched as well. Only the redeclared
-/// type is ever propagated, so either shape leaves everything instantiated
-/// beneath this declaration carrying unproven dimensions.
-fn declaration_carries_redeclare_modifier(comp: &ast::Component) -> bool {
-    comp.source_modification_redeclare_flags
-        .iter()
-        .any(|is_redeclare| *is_redeclare)
-        || comp
-            .source_modifications
-            .iter()
-            .any(traversal_adapter::expression_contains_redeclare)
 }
 
 fn build_instance_data(
@@ -1242,6 +1239,18 @@ fn build_instance_data(
                 component_span,
             ))
         })?;
+    let evaluate = args.evaluate
+        || (args.ctx.options.freeze_parameters
+            && matches!(
+                args.effective_variability,
+                rumoca_core::Variability::Parameter(_)
+            )
+            && args
+                .attrs
+                .fixed
+                .as_ref()
+                .is_none_or(|values| values.iter().all(|value| *value))
+            && evaluate_annotation(args.comp) != Some(false));
     let instance_data = ast::InstanceData {
         instance_id: args.instance_id,
         owner_class_id: args.owner_class_id,
@@ -1260,13 +1269,8 @@ fn build_instance_data(
         declaration_source_scope: args.declaration_source_scope,
         class_overrides: args.class_overrides,
         has_forwarding_class_redeclare: args.has_forwarding_class_redeclare,
-        // MLS §7.3 redeclarations reach a component from two directions: an
-        // `extends` modification (recorded on the merged declaration by
-        // `merge_extends`) or a redeclare modifier on this very declaration
-        // (`Holder h(redeclare C a[2])`). Only the redeclared type is consumed
-        // either way, so both must be recorded.
-        had_redeclare: args.comp.redeclared_by_modification
-            || declaration_carries_redeclare_modifier(args.comp),
+        has_unapplied_redeclare: args.ctx.has_unapplied_redeclare
+            || component_redeclarations::has_unapplied_redeclare(args.comp),
         // Type prefixes (MLS §4.4.2, SPEC_0022 §3.19-3.20)
         variability: args.effective_variability.clone(),
         causality: args.causality.clone(),
@@ -1291,14 +1295,9 @@ fn build_instance_data(
         is_primitive: args.is_primitive,
         is_discrete_type: args.is_discrete_type,
         from_expandable_connector: args.ctx.is_in_expandable_connector(),
-        evaluate: args.evaluate
-            || (args.ctx.options.freeze_parameters
-                && matches!(
-                    args.effective_variability,
-                    rumoca_core::Variability::Parameter(_)
-                )
-                && args.attrs.fixed != Some(false)),
-        is_final: args.comp.is_final,
+        evaluate,
+        evaluate_refused: evaluate_annotation(args.comp) == Some(false),
+        is_final: args.is_final,
         is_overconstrained: args.ctx.is_in_overconstrained(),
         is_protected: args.comp.is_protected || args.ctx.is_in_protected(),
         is_connector_type: args
@@ -1429,13 +1428,11 @@ fn instantiate_component(
     let instance_id = overlay.alloc_id();
     let qualified_name = ctx.current_path();
     handle_inner_outer(tree, comp, ctx, overlay, &qualified_name, &type_name)?;
-    let TypeInfo {
-        class_def,
-        is_primitive,
-        is_discrete: is_discrete_type,
-    } = validated_component_type_info(tree, comp, ctx, &qualified_name, &type_name)?;
+    let type_info = validated_component_type_info(tree, comp, ctx, &qualified_name, &type_name)?;
+    validate_final_type_attribute_overrides(tree, type_info.class_def, comp, ctx.mod_env())?;
     let ComponentBindingInfo {
         mut attrs,
+        type_attribute_shapes,
         binding,
         binding_source,
         binding_source_scope,
@@ -1447,16 +1444,15 @@ fn instantiate_component(
         ctx,
         scope.effective_components,
         scope.type_overrides,
-        is_discrete_type,
+        &type_info,
         scope.imports.attributes,
     )?;
+    let TypeInfo {
+        class_def,
+        is_primitive,
+        is_discrete: is_discrete_type,
+    } = type_info;
     let (flow, stream) = component_flow_stream(comp, ctx);
-    validate_final_type_attribute_overrides(tree, class_def, comp, ctx.mod_env())?;
-    merge_type_hierarchy_string_attributes(tree, class_def, &mut attrs);
-    // MLS §4.8: a type's attribute modifications are part of the variable's
-    // type. `type Mass = Real(min=0)` bounds every `SI.Mass`, and only the
-    // string attributes were being inherited.
-    merge_type_hierarchy_numeric_attributes(tree, class_def, &mut attrs);
     let (dims, dims_expr) = resolve_component_shape(
         tree,
         comp,
@@ -1466,6 +1462,7 @@ fn instantiate_component(
         scope.effective_components,
         scope.imports.qualification,
     )?;
+    broadcast_type_attribute_values(&type_attribute_shapes, &dims, &mut attrs);
     let type_id = component_type_id(tree, &type_name, class_def, is_primitive);
     let declaration_source_scope = component_declaration_source_scope(ctx, comp);
     let binding_scope_for_record_expansion = binding_scope_for_record_expansion(
@@ -1474,9 +1471,17 @@ fn instantiate_component(
         binding_source_scope.as_ref(),
     );
     let causality = resolve_component_causality(comp, class_def, ctx.inherited_causality());
-    let effective_variability = resolve_effective_variability(comp, ctx.inherited_variability());
+    let is_final = comp.is_final
+        || ctx.inherited_final()
+        || ctx
+            .mod_env()
+            .get(&ast::QualifiedName::from_ident(&comp.name))
+            .is_some_and(|modifier| modifier.final_);
+    // MLS §18.6: an explicit `Evaluate = false` outranks `final` and any
+    // enclosing `Evaluate = true`.
     let evaluate =
-        has_evaluate_annotation(comp, &effective_variability) || ctx.inherited_evaluate();
+        evaluate_annotation(comp).unwrap_or_else(|| is_final || ctx.inherited_evaluate());
+    let effective_variability = resolve_effective_variability(comp, ctx.inherited_variability());
     let (class_overrides, has_forwarding_class_redeclare, nested_type_overrides) =
         resolve_component_nested_type_overrides(
             tree,
@@ -1515,6 +1520,7 @@ fn instantiate_component(
             is_primitive,
             is_discrete_type,
             evaluate,
+            is_final,
             source_map: &tree.source_map,
             ctx,
             comp,
@@ -1545,6 +1551,8 @@ fn instantiate_component(
             comp,
             class_def,
             is_primitive,
+            is_final,
+            evaluate,
             effective_variability: &effective_variability,
             causality: &causality,
             flow,
@@ -1616,6 +1624,7 @@ fn resolve_component_shape(
 
 struct ComponentBindingInfo {
     attrs: ExtractedAttributes,
+    type_attribute_shapes: TypeAttributeShapes,
     binding: Option<ast::Expression>,
     binding_source: Option<ast::Expression>,
     binding_source_scope: Option<ast::QualifiedName>,
@@ -1636,9 +1645,10 @@ fn prepare_component_binding_info(
     ctx: &mut InstantiateContext,
     effective_components: &IndexMap<String, ast::Component>,
     type_overrides: &TypeOverrideMap,
-    is_discrete_type: bool,
+    type_info: &TypeInfo<'_>,
     imports: &[(String, String)],
 ) -> InstantiateResult<ComponentBindingInfo> {
+    let is_discrete_type = type_info.is_discrete;
     let eval_ctx = InstantiateEvalCtx {
         tree,
         mod_env: ctx.mod_env(),
@@ -1659,6 +1669,17 @@ fn prepare_component_binding_info(
         imports,
         &enclosing_instance_path(ctx),
     )?;
+    let type_attribute_shapes = if type_info.is_primitive {
+        let merge = TypeAttributeMerge {
+            ctx,
+            comp,
+            class_def: type_info.class_def,
+            eval_ctx: &eval_ctx,
+        };
+        merge_type_hierarchy_attributes(&merge, &mut attrs)?
+    } else {
+        TypeAttributeShapes::default()
+    };
     // Sibling component occurrences of this class are still being materialized,
     // so only class-alias selections can be proved for declaration-side
     // expressions here. A member that stays unproven keeps its absent identity
@@ -1698,6 +1719,9 @@ fn prepare_component_binding_info(
             effective_components,
             tree,
         )?;
+        if resolved_binding != *declaration_binding {
+            binding_source.get_or_insert_with(|| declaration_binding.clone());
+        }
         if start_from_declaration_binding {
             attrs.start = Some(resolved_binding.clone());
         }
@@ -1705,6 +1729,7 @@ fn prepare_component_binding_info(
     }
     Ok(ComponentBindingInfo {
         attrs,
+        type_attribute_shapes,
         binding,
         binding_source,
         binding_source_scope,
@@ -1737,6 +1762,8 @@ struct NestedComponentRequest<'a> {
     comp: &'a ast::Component,
     class_def: Option<&'a ast::ClassDef>,
     is_primitive: bool,
+    is_final: bool,
+    evaluate: bool,
     effective_variability: &'a rumoca_core::Variability,
     causality: &'a rumoca_core::Causality,
     flow: bool,
@@ -1772,6 +1799,8 @@ fn instantiate_nested_component_if_needed(
             instance_id: request.instance_id,
             nested_class,
             comp: request.comp,
+            is_final: request.is_final,
+            evaluate: request.evaluate,
             effective_variability: request.effective_variability,
             causality: request.causality,
             flow: request.flow,
@@ -1815,6 +1844,8 @@ struct NestedInstantiationInput<'a> {
     instance_id: rumoca_core::InstanceId,
     nested_class: &'a ast::ClassDef,
     comp: &'a ast::Component,
+    is_final: bool,
+    evaluate: bool,
     effective_variability: &'a rumoca_core::Variability,
     causality: &'a rumoca_core::Causality,
     flow: bool,
@@ -1839,6 +1870,8 @@ fn instantiate_nested_class(
         instance_id,
         nested_class,
         comp,
+        is_final,
+        evaluate,
         effective_variability,
         causality,
         flow,
@@ -1858,6 +1891,15 @@ fn instantiate_nested_class(
     // to this component's instantiation. Parent-scope entries with names that coincidentally
     // match nested class component names must NOT leak through (e.g., parent has parameter `T`
     // and nested HeatPort connector also has field `T`).
+    let component_redeclarations =
+        component_redeclarations::ComponentRedeclarations::from_component(
+            tree,
+            comp,
+            nested_class,
+            effective_components,
+            ctx,
+            modifier_imports,
+        )?;
     let mod_env_snapshot = ctx.mod_env().active.clone();
     let shifted_parent_keys = collect_shifted_parent_mod_keys(comp, &mod_env_snapshot);
     let targeted_keys = collect_targeted_mod_keys(comp, &mod_env_snapshot);
@@ -1911,10 +1953,10 @@ fn instantiate_nested_class(
 
     let eq_size = inheritance::equality_constraint_output_size(nested_class);
 
-    let evaluate = has_evaluate_annotation(comp, effective_variability) || ctx.inherited_evaluate();
     ctx.push_scope_frame(ScopeFrameInput {
         variability: effective_variability,
         evaluate,
+        is_final,
         causality,
         flow,
         stream,
@@ -1928,7 +1970,13 @@ fn instantiate_nested_class(
         ctx.active_package_constant_aliases.push(alias.clone());
     }
     ctx.active_type_overrides.push(type_overrides.clone());
+    let parent_redeclarations =
+        std::mem::replace(&mut ctx.component_redeclarations, component_redeclarations);
+    let parent_unapplied = ctx.has_unapplied_redeclare;
+    ctx.has_unapplied_redeclare |= component_redeclarations::has_unapplied_redeclare(comp);
     let result = instantiate_class(tree, nested_class, Some(instance_id), None, ctx, overlay);
+    ctx.has_unapplied_redeclare = parent_unapplied;
+    ctx.component_redeclarations = parent_redeclarations;
     ctx.active_type_overrides.pop();
     if active_package_alias.is_some() {
         ctx.active_package_constant_aliases.pop();
@@ -1965,7 +2013,7 @@ mod tests;
 fn array_constructor_shape(expression: &ast::Expression) -> Option<Vec<usize>> {
     let ast::Expression::Array {
         elements,
-        is_matrix: false,
+        kind: rumoca_core::ArrayConstructor::Array,
         ..
     } = expression
     else {

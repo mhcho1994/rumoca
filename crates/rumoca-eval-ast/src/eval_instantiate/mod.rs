@@ -17,6 +17,7 @@ use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 
 mod array_indices;
+mod boolean_attribute;
 mod class_lookup;
 mod component_params;
 mod enum_literal;
@@ -27,6 +28,7 @@ mod scoped_condition;
 mod size_eval;
 
 pub use array_indices::{ArrayIndexTuples, array_index_tuples, generate_array_indices};
+pub use boolean_attribute::{eval_boolean_attribute_values, try_eval_uniform_boolean_attribute};
 use class_lookup::{resolve_class_constant_binding, resolve_component_ref_from_record_defaults};
 pub(super) use component_params::{
     component_expr_for_structural_eval, component_ref_to_dotted_no_subscripts,
@@ -41,10 +43,11 @@ pub use component_params::{
 pub use function_eval::{evaluate_array_dimensions, try_eval_integer_shape_expr};
 use scoped_condition::eval_scoped_string_condition_with_depth;
 
-/// Maximum recursion depth for condition evaluation (prevents stack overflow)
-const MAX_CONDITION_DEPTH: usize = 10;
-
-/// Maximum recursion depth for expression evaluation.
+/// Maximum combined recursion depth for instantiation-time evaluation.
+///
+/// Integer, Boolean, enumeration, and condition evaluators recurse into one
+/// another and share one depth count, so they share one bound: a condition
+/// reached from an array dimension continues the dimension's depth.
 const MAX_EXPR_EVAL_DEPTH: usize = 20;
 
 /// Context for instantiation-phase AST expression evaluation.
@@ -198,7 +201,7 @@ fn evaluate_component_condition_with_depth(
     ) -> IndexMap<String, ast::Component>,
     depth: usize,
 ) -> Option<bool> {
-    if depth > MAX_CONDITION_DEPTH {
+    if depth > MAX_EXPR_EVAL_DEPTH {
         return None;
     }
     let adapter = InstantiateScalarAdapter {
@@ -342,7 +345,7 @@ fn evaluate_enum_equality_with_depth(
     depth: usize,
 ) -> Option<bool> {
     // Prevent deep recursion
-    if depth > MAX_CONDITION_DEPTH {
+    if depth > MAX_EXPR_EVAL_DEPTH {
         return None;
     }
 
@@ -468,7 +471,7 @@ fn get_enum_value_with_depth(
     depth: usize,
 ) -> Option<ResolvedValueText> {
     // Prevent deep recursion
-    if depth > MAX_CONDITION_DEPTH {
+    if depth > MAX_EXPR_EVAL_DEPTH {
         return None;
     }
 

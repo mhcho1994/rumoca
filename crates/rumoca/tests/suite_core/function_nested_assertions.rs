@@ -28,6 +28,8 @@ equation
 end Branches;
 "#;
 
+// The direct action evaluator below does not run relation-memory updates.
+// Keep the enabling expression event-free to test the function assertion itself.
 const NESTED: &str = r#"
 function checkIds
   input Real ids[:];
@@ -46,17 +48,17 @@ end checkIds;
 model Duplicate
   Real y;
 equation
-  y = checkIds({1,2,1}, time > 0);
+  y = checkIds({1,2,1}, noEvent(time > 0));
 end Duplicate;
 model Unique
   Real y;
 equation
-  y = checkIds({1,2,3,4}, time > 0);
+  y = checkIds({1,2,3,4}, noEvent(time > 0));
 end Unique;
 model Single
   Real y;
 equation
-  y = checkIds({1}, time > 0);
+  y = checkIds({1}, noEvent(time > 0));
 end Single;
 "#;
 

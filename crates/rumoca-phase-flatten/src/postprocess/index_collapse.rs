@@ -406,6 +406,9 @@ impl KnownFlatVars {
         span: rumoca_core::Span,
     ) -> Option<rumoca_core::Expression> {
         let element_cursors = self.occurrences.pending_elements(cursor)?;
+        if members.is_empty() && element_cursors.iter().any(|cursor| {
+            !matches!(cursor, occurrence_graph::PathCursor::At(id) if self.records_by_occurrence.contains_key(id))
+        }) { return None; }
         let mut elements = Vec::with_capacity(element_cursors.len());
         for mut element in element_cursors {
             for (declaration, indices) in members {
@@ -417,7 +420,7 @@ impl KnownFlatVars {
         }
         Some(rumoca_core::Expression::Array {
             elements,
-            is_matrix: false,
+            kind: rumoca_core::ArrayConstructor::Array,
             span,
         })
     }
@@ -516,18 +519,7 @@ impl CollapseIndexRewriter<'_> {
         field_def_id: rumoca_core::DefId,
         span: rumoca_core::Span,
     ) -> rumoca_core::Expression {
-        if let Some(collapsed) =
-            self.known_flat_vars
-                .field_occurrence_expression(base, field_def_id, span)
-        {
-            return collapsed;
-        }
         let base = self.rewrite_expression(base);
-        if let Some(projected) =
-            aggregate_projection::project(&base, field, field_def_id, span, self.known_flat_vars)
-        {
-            return self.rewrite_expression(&projected);
-        }
         if let Some(collapsed) =
             self.known_flat_vars
                 .field_occurrence_expression(&base, field_def_id, span)
@@ -538,6 +530,11 @@ impl CollapseIndexRewriter<'_> {
             collapse_field_access_to_known_var(&base, field, span, self.known_flat_vars)
         {
             return collapsed;
+        }
+        if let Some(projected) =
+            aggregate_projection::project(&base, field, field_def_id, span, self.known_flat_vars)
+        {
+            return self.rewrite_expression(&projected);
         }
         rumoca_core::Expression::FieldAccess {
             base: Box::new(base),
@@ -591,13 +588,13 @@ impl ExpressionRewriter for CollapseIndexRewriter<'_> {
             span,
         } = expr
         {
-            if let Some(collapsed) = self
-                .known_flat_vars
-                .indexed_occurrence_expression(base, subscripts, *span)
-            {
-                return collapsed;
-            }
-            let base = self.rewrite_expression(base);
+            // Preserve the array occurrence until its selection has been
+            // resolved. Expanding the base first loses record-array slices.
+            let base = if matches!(base.as_ref(), rumoca_core::Expression::VarRef { .. }) {
+                self.walk_expression(base)
+            } else {
+                self.rewrite_expression(base)
+            };
             let subscripts = self.rewrite_subscripts(subscripts);
             if let Some(collapsed) =
                 self.known_flat_vars

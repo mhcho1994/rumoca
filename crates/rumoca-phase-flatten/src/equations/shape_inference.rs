@@ -3,7 +3,10 @@
 //! array equations. Split out of `equations/mod.rs` to keep that module under the
 //! SPEC_0021 size limit.
 
+mod constructor_dimensions;
+
 use super::*;
+use constructor_dimensions::infer_constructor_dims;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExpressionShape {
@@ -42,6 +45,9 @@ fn infer_component_ref_dims(
     // (e.g. `medium_T[2].state.X`), so dims are already projected.
     if let Some(dims) = ctx.get_array_dimensions(&qualified) {
         return Some(dims.clone());
+    }
+    if ctx.declared_dimensions.proves_scalar_reference(cr) {
+        return Some(Vec::new());
     }
 
     // Fall back to the unscripted path and project by subscripts in the reference.
@@ -272,7 +278,9 @@ pub(crate) fn infer_expression_shape(
             infer_binary_shape(op, lhs_shape, rhs_shape)
         }
         ast::Expression::FunctionCall { comp, args, .. } => {
-            if is_size_operator(comp)
+            if let Some(dims) = infer_call_result_dims(expr, prefix, ctx) {
+                expression_shape_from_dims(&dims)
+            } else if is_size_operator(comp)
                 && let [argument] = args.as_slice()
             {
                 infer_expression_ndims(argument, prefix, ctx)
@@ -299,13 +307,9 @@ pub(crate) fn infer_expression_shape(
                 ExpressionShape::Other
             }
         }
-        ast::Expression::Array {
-            elements,
-            is_matrix,
-            ..
-        } => {
-            if *is_matrix {
-                matrix_literal_shape(elements, prefix, ctx)
+        ast::Expression::Array { elements, kind, .. } => {
+            if kind.concatenation_axis().is_some() {
+                ExpressionShape::Other
             } else if elements
                 .iter()
                 .all(|e| infer_expression_shape(e, prefix, ctx) == ExpressionShape::Scalar)
@@ -325,48 +329,6 @@ pub(crate) fn infer_expression_shape(
         | ast::Expression::ClassModification { .. }
         | ast::Expression::Empty { .. } => ExpressionShape::Other,
     }
-}
-
-/// Shape of a matrix constructor whose entries are scalars (MLS §10.4.2):
-/// `[a, b, c]` is a 1x3 matrix and `[a, b; c, d]` (rows parsed as nested
-/// matrix rows) a 2x2 one. Concatenations of array blocks stay unknown.
-fn matrix_literal_shape(
-    elements: &[ast::Expression],
-    prefix: &ast::QualifiedName,
-    ctx: &Context,
-) -> ExpressionShape {
-    // Scalar components carry no recorded dimensions, so an entry naming a
-    // component without them is a scalar entry (its shape is otherwise
-    // unknown and would leave the whole constructor unknown).
-    let all_scalar = |entries: &[ast::Expression]| {
-        entries.iter().all(|entry| match entry {
-            ast::Expression::ComponentReference(cr) => {
-                infer_component_ref_dims(cr, prefix, ctx).is_none_or(|dims| dims.is_empty())
-            }
-            _ => infer_expression_shape(entry, prefix, ctx) == ExpressionShape::Scalar,
-        })
-    };
-    if all_scalar(elements) {
-        return ExpressionShape::Matrix(1, elements.len() as i64);
-    }
-    let mut columns = None;
-    for row in elements {
-        let ast::Expression::Array {
-            elements: entries,
-            is_matrix: true,
-            ..
-        } = row
-        else {
-            return ExpressionShape::Other;
-        };
-        if !all_scalar(entries) || columns.is_some_and(|count| count != entries.len()) {
-            return ExpressionShape::Other;
-        }
-        columns = Some(entries.len());
-    }
-    columns.map_or(ExpressionShape::Other, |count| {
-        ExpressionShape::Matrix(elements.len() as i64, count as i64)
-    })
 }
 
 /// Infer the exact result shape of the predefined array operators whose shape
@@ -392,6 +354,9 @@ fn infer_array_builtin_shape(
         .map(|argument| infer_expression_shape(argument, prefix, ctx))
         .collect::<Vec<_>>();
     match (function, shapes.as_slice()) {
+        // MLS §3.7.4 and §3.7.5: `der(expr)` and `pre(y)` of an array apply
+        // element-wise, so the result has the operand's shape.
+        (rumoca_core::BuiltinFunction::Der | rumoca_core::BuiltinFunction::Pre, [shape]) => *shape,
         (
             rumoca_core::BuiltinFunction::Cross,
             [ExpressionShape::Vector(3), ExpressionShape::Vector(3)],
@@ -427,11 +392,32 @@ fn is_size_operator(comp: &ast::ComponentReference) -> bool {
         && comp.parts[0].ident.text.as_ref() == "size"
 }
 
+fn infer_call_result_dims(
+    expression: &ast::Expression,
+    prefix: &ast::QualifiedName,
+    ctx: &Context,
+) -> Option<Vec<i64>> {
+    if let ast::Expression::Parenthesized { inner, .. } = expression {
+        return infer_call_result_dims(inner, prefix, ctx);
+    }
+    let ast::Expression::FunctionCall { comp, .. } = expression else {
+        return None;
+    };
+    infer_constructor_dims(expression, prefix, ctx).or_else(|| {
+        ctx.function_result_shapes
+            .dimensions(comp.target_def_id())
+            .map(<[i64]>::to_vec)
+    })
+}
+
 fn infer_expression_ndims(
     expression: &ast::Expression,
     prefix: &ast::QualifiedName,
     ctx: &Context,
 ) -> Option<usize> {
+    if let Some(dims) = infer_call_result_dims(expression, prefix, ctx) {
+        return Some(dims.len());
+    }
     if let ast::Expression::ComponentReference(reference) = expression {
         return infer_component_ref_dims(reference, prefix, ctx).map(|dims| dims.len());
     }
@@ -478,6 +464,13 @@ pub(crate) fn infer_simple_equation_scalar_count(
         && let Some(count) = tuple_receiver_scalar_count(elements, prefix, ctx)
     {
         return count;
+    }
+    // MLS §10.6.1: either side's complete result shape establishes the
+    // equation cardinality, including ranks beyond vectors and matrices.
+    for expression in [lhs, rhs] {
+        if let Some(dims) = infer_call_result_dims(expression, prefix, ctx) {
+            return dims_scalar_size(&dims);
+        }
     }
     let lhs_shape = infer_expression_shape(lhs, prefix, ctx);
     let rhs_shape = infer_expression_shape(rhs, prefix, ctx);
@@ -565,6 +558,8 @@ pub(crate) fn infer_simple_equation_dims(
     scalar_count: usize,
 ) -> Option<Vec<i64>> {
     let candidates = [
+        infer_call_result_dims(lhs, prefix, ctx),
+        infer_call_result_dims(rhs, prefix, ctx),
         dims_for_shape(infer_expression_shape(lhs, prefix, ctx)),
         dims_for_shape(infer_expression_shape(rhs, prefix, ctx)),
         find_array_refs_needing_expansion(lhs, prefix, ctx)
@@ -593,6 +588,27 @@ fn dims_for_shape(shape: ExpressionShape) -> Option<Vec<i64>> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    const CONSTRUCTOR_IDENTITIES: [(&str, u32); 5] = [
+        ("zeros", 1001),
+        ("ones", 1002),
+        ("fill", 1003),
+        ("identity", 1004),
+        ("linspace", 1005),
+    ];
+
+    fn constructor_context() -> Context {
+        let mut tree = ast::ClassTree::new();
+        for (name, id) in CONSTRUCTOR_IDENTITIES {
+            tree.scope_tree.add_predefined_member(
+                rumoca_core::ComponentPath::from_flat_path(name),
+                rumoca_core::DefId::new(id),
+            );
+        }
+        let mut ctx = Context::new();
+        ctx.predefined_intrinsics = crate::ast_lower::PredefinedIntrinsicIds::from_tree(&tree);
+        ctx
+    }
 
     fn integer(value: i64) -> ast::Expression {
         ast::Expression::Terminal {
@@ -635,8 +651,12 @@ mod tests {
     }
 
     fn function_call(name: &str, args: Vec<ast::Expression>) -> ast::Expression {
+        let mut comp = component_reference(name);
+        comp.parts[0].def_id = CONSTRUCTOR_IDENTITIES
+            .iter()
+            .find_map(|(builtin, id)| (*builtin == name).then(|| rumoca_core::DefId::new(*id)));
         ast::Expression::FunctionCall {
-            comp: component_reference(name),
+            comp,
             args,
             is_partial_application: false,
             span: rumoca_core::Span::DUMMY,
@@ -718,6 +738,32 @@ mod tests {
     }
 
     #[test]
+    fn declared_scalar_references_preserve_array_equation_cardinality() {
+        let source = r#"
+model ScalarElements
+  parameter Real radius = 1;
+  Real s, w, z;
+equation
+  {s, w, z} = {1, 2, radius*radius};
+end ScalarElements;
+"#;
+        let parsed = rumoca_phase_parse::parse_to_ast(source, "scalar_elements.mo").unwrap();
+        let mut tree = ast::ClassTree::from_parsed(parsed);
+        tree.source_map.add("scalar_elements.mo", source);
+        let tree = rumoca_phase_resolve::resolve(ast::ParsedTree::new(tree))
+            .unwrap()
+            .into_inner();
+        let mut overlay =
+            rumoca_phase_instantiate::instantiate_model(&tree, "ScalarElements").unwrap();
+        rumoca_phase_typecheck::typecheck_instanced(&tree, &mut overlay, "ScalarElements").unwrap();
+        let flat = crate::flatten_ref(&tree, &overlay, "ScalarElements").unwrap();
+
+        assert_eq!(flat.equations.len(), 1);
+        assert_eq!(flat.equations[0].scalar_count, 3);
+        assert_eq!(flat.structured_equations.len(), 1);
+    }
+
+    #[test]
     fn one_argument_size_of_vector_has_vector_shape_with_one_element() {
         let mut ctx = Context::new();
         ctx.array_dimensions.insert("v".to_string(), vec![4]);
@@ -790,6 +836,132 @@ mod tests {
                 &ctx,
             ),
             ExpressionShape::Other
+        );
+    }
+
+    #[test]
+    fn constructor_equations_preserve_all_axes_and_empty_extents() {
+        let mut ctx = constructor_context();
+        ctx.parameter_values.insert("joint.n".to_owned(), 3);
+        ctx.array_dimensions.insert("joint.v".to_owned(), vec![4]);
+        let prefix = ast::QualifiedName::from_dotted("joint");
+        let cases = [
+            (function_call("zeros", vec![reference("n")]), vec![3]),
+            (
+                function_call("ones", vec![integer(2), integer(3)]),
+                vec![2, 3],
+            ),
+            (
+                function_call("zeros", vec![integer(2), integer(3), integer(4)]),
+                vec![2, 3, 4],
+            ),
+            (function_call("identity", vec![integer(3)]), vec![3, 3]),
+            (
+                function_call("linspace", vec![integer(1), integer(7), integer(4)]),
+                vec![4],
+            ),
+            (
+                function_call("fill", vec![integer(7), integer(2), integer(3)]),
+                vec![2, 3],
+            ),
+            (
+                function_call("fill", vec![reference("v"), integer(2), integer(3)]),
+                vec![2, 3, 4],
+            ),
+            (
+                function_call(
+                    "fill",
+                    vec![
+                        function_call("zeros", vec![integer(3), integer(4)]),
+                        integer(2),
+                    ],
+                ),
+                vec![2, 3, 4],
+            ),
+            (
+                function_call("zeros", vec![integer(2), integer(0), integer(4)]),
+                vec![2, 0, 4],
+            ),
+        ];
+        for (constructor, dims) in cases {
+            for (lhs, rhs) in [
+                (&constructor, &reference("unknown")),
+                (&reference("unknown"), &constructor),
+            ] {
+                let count = infer_simple_equation_scalar_count(lhs, rhs, &prefix, &ctx);
+                assert_eq!(
+                    count,
+                    dims.iter().product::<i64>() as usize,
+                    "{constructor:?}"
+                );
+                assert_eq!(
+                    infer_simple_equation_dims(lhs, rhs, &prefix, &ctx, count),
+                    Some(dims.clone()),
+                    "{constructor:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn constructors_do_not_invent_unknown_or_invalid_dimensions() {
+        let prefix = ast::QualifiedName::new();
+        let ctx = constructor_context();
+        for expression in [
+            function_call("zeros", vec![]),
+            function_call("ones", vec![integer(-1)]),
+            function_call("zeros", vec![reference("missing")]),
+            function_call("fill", vec![integer(1)]),
+            function_call("fill", vec![reference("unknown_shape"), integer(0)]),
+            function_call("identity", vec![integer(2), integer(3)]),
+            function_call("linspace", vec![integer(1), integer(7), integer(1)]),
+        ] {
+            assert_eq!(infer_constructor_dims(&expression, &prefix, &ctx), None);
+        }
+        let mut comp = component_reference("zeros");
+        comp.parts[0].def_id = Some(rumoca_core::DefId::new(123));
+        let user_function = ast::Expression::FunctionCall {
+            comp,
+            args: vec![integer(3)],
+            is_partial_application: false,
+            span: rumoca_core::Span::DUMMY,
+        };
+        assert_eq!(infer_constructor_dims(&user_function, &prefix, &ctx), None);
+    }
+
+    #[test]
+    fn constructor_shape_follows_predefined_identity_instead_of_display() {
+        let mut expression = function_call("zeros", vec![integer(3)]);
+        let ast::Expression::FunctionCall { comp, .. } = &mut expression else {
+            unreachable!("test constructs a function call");
+        };
+        comp.parts[0].ident.text = Arc::from("display_name");
+        assert_eq!(
+            infer_constructor_dims(
+                &expression,
+                &ast::QualifiedName::new(),
+                &constructor_context()
+            ),
+            Some(vec![3]),
+        );
+    }
+
+    #[test]
+    fn constructor_operands_do_not_turn_dot_product_into_vector_equation() {
+        let dot = ast::Expression::Binary {
+            op: rumoca_core::OpBinary::Mul,
+            lhs: Arc::new(function_call("ones", vec![integer(3)])),
+            rhs: Arc::new(function_call("ones", vec![integer(3)])),
+            span: rumoca_core::Span::DUMMY,
+        };
+        assert_eq!(
+            infer_simple_equation_scalar_count(
+                &dot,
+                &integer(3),
+                &ast::QualifiedName::new(),
+                &constructor_context(),
+            ),
+            1
         );
     }
 }

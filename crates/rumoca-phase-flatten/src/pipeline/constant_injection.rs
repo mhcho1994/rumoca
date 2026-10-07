@@ -2,15 +2,17 @@ use super::*;
 use crate::record_constant_arrays::try_extract_record_array_constructor_constant;
 use crate::source_spans::required_location_span;
 
+mod assertion_levels;
 mod component_binding_values;
 mod context;
 mod function_resolution;
 mod structural_asserts;
 
+pub(crate) use assertion_levels::{predefined_assertion_levels, settle_assertion_levels};
 pub(crate) use component_binding_values::collect_component_binding_values;
 pub(crate) use context::{ConstantOccurrenceId, Context};
 pub(crate) use function_resolution::resolve_function_name;
-pub(crate) use structural_asserts::check_structural_initial_asserts;
+pub(crate) use structural_asserts::fold_structural_initial_asserts;
 
 const NAMED_CONSTRUCTOR_ARG_PREFIX: &str = "__rumoca_named_arg__.";
 
@@ -40,7 +42,14 @@ pub(crate) fn inject_class_extends_constants(
         ctx,
     );
     for ext in &class_def.extends {
-        apply_extends_constants_for_scope(tree, class_index, scope, ext, resolve_context, ctx);
+        apply_extends_constants_for_scope(
+            tree,
+            class_index,
+            scope,
+            (class_def, ext),
+            resolve_context,
+            ctx,
+        );
     }
 }
 
@@ -48,7 +57,7 @@ pub(crate) fn apply_extends_constants_for_scope(
     tree: &ClassTree,
     class_index: &rumoca_ir_ast::ClassDefIndex<'_>,
     scope: &str,
-    ext: &rumoca_ir_ast::Extend,
+    (owner, ext): (&ClassDef, &rumoca_ir_ast::Extend),
     resolve_context: &str,
     ctx: &mut Context,
 ) {
@@ -78,7 +87,7 @@ pub(crate) fn apply_extends_constants_for_scope(
         tree,
         class_index,
         scope,
-        &ext.base_name.to_string(),
+        (owner, &ext.base_name.to_string()),
         resolve_context,
         ctx,
     );
@@ -117,11 +126,18 @@ pub(crate) fn inject_nested_class_constants(
             tree,
             class_index,
             nested_scope,
-            ext,
+            (nested_class, ext),
             resolve_context,
             ctx,
         );
-        apply_extends_constants_for_scope(tree, class_index, comp_scope, ext, resolve_context, ctx);
+        apply_extends_constants_for_scope(
+            tree,
+            class_index,
+            comp_scope,
+            (nested_class, ext),
+            resolve_context,
+            ctx,
+        );
     }
 }
 
@@ -189,7 +205,7 @@ pub(crate) fn inject_alias_component_package_constants(
             tree,
             class_index,
             &alias_scope,
-            ext,
+            (alias_class, ext),
             &alias_context,
             ctx,
         );
@@ -198,7 +214,7 @@ pub(crate) fn inject_alias_component_package_constants(
                 tree,
                 class_index,
                 type_alias_scope,
-                ext,
+                (alias_class, ext),
                 &alias_context,
                 ctx,
             );
@@ -208,7 +224,7 @@ pub(crate) fn inject_alias_component_package_constants(
                 tree,
                 class_index,
                 comp_scope,
-                ext,
+                (alias_class, ext),
                 &alias_context,
                 ctx,
             );
@@ -358,7 +374,7 @@ pub(crate) fn extract_ancestor_constants_multi_pass(
                     tree,
                     class_index,
                     &ancestor_scope,
-                    ext,
+                    (ancestor, ext),
                     &ancestor_scope,
                     ctx,
                 );
@@ -467,7 +483,7 @@ pub(crate) fn extract_constants_from_class(class_def: &ClassDef, ctx: &mut Conte
                     })
             });
             if let Some(value) = value {
-                crate::constant_extraction::record_constant_value_by_def_id(ctx, def_id, value);
+                ctx.record_constant_value(name, def_id, value);
             }
         }
     }
@@ -644,11 +660,9 @@ pub(crate) fn try_eval_const_flat_expr_with_scope(
                 span: expr.span(),
             })
         }
-        ast::Expression::Array {
-            elements,
-            is_matrix,
-            ..
-        } => try_eval_const_array_expr(elements, *is_matrix, expr.span(), ctx, scope),
+        ast::Expression::Array { elements, kind, .. } => {
+            try_eval_const_array_expr(elements, *kind, expr.span(), ctx, scope)
+        }
         ast::Expression::Tuple { elements, .. } => {
             try_eval_const_tuple_expr(elements, expr.span(), ctx, scope)
         }
@@ -1184,7 +1198,7 @@ fn try_eval_const_function_call_expr(
     if short_name == "array" {
         return Some(rumoca_core::Expression::Array {
             elements: evaluated_args,
-            is_matrix: false,
+            kind: rumoca_core::ArrayConstructor::Array,
             span: owner_span,
         });
     }
@@ -1238,7 +1252,7 @@ fn core_component_reference_from_ast(
 
 pub(crate) fn try_eval_const_array_expr(
     elements: &[ast::Expression],
-    is_matrix: bool,
+    kind: rumoca_core::ArrayConstructor,
     owner_span: rumoca_core::Span,
     ctx: &Context,
     scope: &str,
@@ -1250,7 +1264,7 @@ pub(crate) fn try_eval_const_array_expr(
     }
     Some(rumoca_core::Expression::Array {
         elements: out,
-        is_matrix,
+        kind,
         span: owner_span,
     })
 }
@@ -1522,6 +1536,12 @@ struct FlattenDimensionContext<'a> {
 }
 
 impl rumoca_eval_ast::eval::DimensionInferenceContext for FlattenDimensionContext<'_> {
+    fn is_declared_scalar_reference(&self, reference: &ast::ComponentReference) -> bool {
+        self.context
+            .declared_dimensions
+            .proves_scalar_reference(reference)
+    }
+
     fn lookup_dimensions(&self, name: &str, scope: &str) -> Option<Vec<usize>> {
         lookup_size_array_dims_with_scope(name, scope, self.context)?
             .into_iter()

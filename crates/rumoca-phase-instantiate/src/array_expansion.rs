@@ -764,7 +764,7 @@ fn resolve_mod_to_array_depth(
             return resolved;
         }
     }
-    // MLS §11.1.2.1: Evaluate array comprehensions like {j for j in 1:m}
+    // MLS §10.4.1: Evaluate array comprehensions like {j for j in 1:m}
     if let Some(array) = try_eval_array_comprehension(expr, mod_env, effective_components, tree) {
         return array;
     }
@@ -870,7 +870,7 @@ fn try_eval_structural_array_expr(
             let len = n.max(0) as usize;
             Some(ast::Expression::Array {
                 elements: std::iter::repeat_n(value, len).collect(),
-                is_matrix: false,
+                kind: rumoca_core::ArrayConstructor::Array,
                 span: call_span,
             })
         };
@@ -931,7 +931,7 @@ fn try_eval_structural_array_expr(
                     .into_iter()
                     .map(|value| make_real_lit(value, call_span))
                     .collect(),
-                is_matrix: false,
+                kind: rumoca_core::ArrayConstructor::Array,
                 span: call_span,
             })
         }
@@ -979,12 +979,7 @@ fn apply_unary_to_structural_array(
     array: &ast::Expression,
     span: rumoca_core::Span,
 ) -> Option<ast::Expression> {
-    let ast::Expression::Array {
-        elements,
-        is_matrix,
-        ..
-    } = array
-    else {
+    let ast::Expression::Array { elements, kind, .. } = array else {
         return None;
     };
     let mapped = elements
@@ -993,7 +988,7 @@ fn apply_unary_to_structural_array(
         .collect::<Option<Vec<_>>>()?;
     Some(ast::Expression::Array {
         elements: mapped,
-        is_matrix: *is_matrix,
+        kind: *kind,
         span,
     })
 }
@@ -1069,7 +1064,7 @@ fn make_real_lit(value: f64, span: rumoca_core::Span) -> ast::Expression {
 
 /// Evaluate an array comprehension `{expr for j in start:end}` to a concrete array.
 ///
-/// MLS §11.1.2.1: For simple comprehensions like `{j for j in 1:m}`,
+/// MLS §10.4.1: For simple comprehensions like `{j for j in 1:m}`,
 /// evaluates the range and substitutes the loop variable for each value.
 fn try_eval_array_comprehension(
     expr: &ast::Expression,
@@ -1104,7 +1099,7 @@ fn try_eval_array_comprehension(
     }
     Some(ast::Expression::Array {
         elements,
-        is_matrix: false,
+        kind: rumoca_core::ArrayConstructor::Array,
         span: *span,
     })
 }

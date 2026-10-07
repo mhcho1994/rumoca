@@ -1647,6 +1647,9 @@ fn test_convert_component_to_param_preserves_constant_shape_identity() {
             def_id: Some(n_state_def),
             type_name: ast::Name::from_string("Integer"),
             variability: rumoca_core::Variability::Constant(token("constant")),
+            // Only a final declaration fixes the extent; a package extending
+            // this one could otherwise modify it (MLS 3.7 §7.2).
+            is_final: true,
             has_explicit_binding: true,
             binding: Some(ast::Expression::Terminal {
                 terminal_type: rumoca_ir_ast::TerminalType::UnsignedInteger,

@@ -3,7 +3,7 @@
 //!
 //! Replacing `P.c` by its value is an optimization, so the frontend declares
 //! the constant under its qualified name and keeps the reference (`--pass
-//! none` shows it); the `default` group, which a plain compile runs, inlines
+//! none` shows it); the explicit `default` group inlines
 //! it and folds the arithmetic it feeds.
 
 use std::fs;
@@ -70,7 +70,7 @@ fn the_frontend_declares_a_package_constant_and_the_pass_inlines_it() {
     );
     assert_eq!(
         dae_text(source, &[]),
-        optimized,
-        "a plain compile runs the default group"
+        lowered,
+        "a plain compile uses the native frontend"
     );
 }

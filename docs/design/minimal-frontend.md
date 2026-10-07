@@ -110,7 +110,20 @@ separate optional section whose presence is what makes an artifact non-total.
 Stage 3 is the only part that trades away something real, and it should be
 decided deliberately rather than arrived at.
 
-## Status (2026-09-30)
+## v0.10.1 integration (2026-10-07)
+
+The native main pipeline is now the default. Use `--pass default` (or `O1`)
+to run the bitcode optimization group, and `--pass round-trip` to test transport.
+This preserves main's support for recursive functions whose bodies the current
+bitcode profile intentionally elides. Unsupported reconstruction is still an
+error when a bitcode pipeline is explicitly requested. Main's rules for tunable
+parameter dependencies take precedence over declaration-binding folding.
+Function derivative annotations and initial Boolean parameters survive the
+bitcode round trip. Already-differentiated call provenance has no v2 encoding
+and export rejects it explicitly instead of discarding that proof.
+The measurements below describe the earlier branch baseline, not v0.10.1.
+
+## Historical status (2026-09-30)
 
 **The stage exists and is on by default.** A plain `rumoca compile` routes the
 frontend's DAE through `DAE -> RBC -> [default group] -> DAE`

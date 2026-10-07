@@ -63,6 +63,14 @@ pub(super) fn inject_referenced_qualified_class_constants(
         for package in WELL_KNOWN_CONSTANT_PACKAGES {
             scopes.insert((*package).to_string());
         }
+        // MLS §7.3: a selected package exposes its constants under its own name.
+        scopes.extend(ctx.selected_package_names());
+        // MLS §7.3: the package a function is instantiated from (`M.f` of
+        // `package M extends PM(nS = 2)`) gives the constants the function
+        // reads, including the extents of its signature, their values there.
+        scopes.extend(flat.functions.keys().filter_map(|name| {
+            crate::path_utils::enclosing_scope(name.as_str()).map(str::to_string)
+        }));
 
         for scope in &scopes {
             let resolved = resolve_referenced_scope_class(class_index, scope, model_name);
@@ -101,7 +109,7 @@ pub(super) fn inject_referenced_qualified_class_constants(
                     tree,
                     class_index,
                     scope,
-                    ext,
+                    (class_def, ext),
                     &resolve_context,
                     ctx,
                 );
@@ -647,7 +655,7 @@ pub(super) fn inject_model_extends_redeclare_constants(
                     tree,
                     class_index,
                     alias_name,
-                    pkg_ext,
+                    (package_class, pkg_ext),
                     package_context,
                     ctx,
                 );
@@ -804,7 +812,7 @@ pub(super) fn extract_nested_class_constants_with_prefix(
                 tree,
                 class_index,
                 &nested_prefix,
-                ext,
+                (nested_class, ext),
                 nested_context,
                 ctx,
             );
@@ -812,7 +820,7 @@ pub(super) fn extract_nested_class_constants_with_prefix(
                 tree,
                 class_index,
                 nested_name,
-                ext,
+                (nested_class, ext),
                 nested_context,
                 ctx,
             );
@@ -909,7 +917,7 @@ pub(super) fn inject_referenced_nested_class_constants(
             tree,
             class_index,
             nested_prefix,
-            ext,
+            (nested_class, ext),
             nested_context,
             ctx,
         );
@@ -980,11 +988,20 @@ pub(super) fn extract_extends_chain_constants(
     tree: &ast::ClassTree,
     class_index: &ast::ClassDefIndex<'_>,
     alias: &str,
-    base_name: &str,
+    (owner, base_name): (&ast::ClassDef, &str),
     resolve_context: &str,
     ctx: &mut Context,
 ) {
-    let mut visited = std::collections::HashSet::new();
+    // MLS §7.1: the package whose extends clause starts the chain inherits
+    // every constant the chain declares, and their bindings name its members.
+    let exposing_package = owner
+        .def_id
+        .filter(|_| owner.class_type == rumoca_core::ClassType::Package)
+        .and_then(|package| Some((class_index.qualified_name(package)?, package)));
+    let mut walk = ExtendsChainWalk {
+        visited: std::collections::HashSet::new(),
+        exposing_package,
+    };
     extract_extends_chain_constants_inner(
         tree,
         class_index,
@@ -992,8 +1009,15 @@ pub(super) fn extract_extends_chain_constants(
         base_name,
         resolve_context,
         ctx,
-        &mut visited,
+        &mut walk,
     );
+}
+
+/// The state of one extends-chain walk: the classes already visited and the
+/// package that inherits their constants.
+pub(super) struct ExtendsChainWalk<'a> {
+    visited: std::collections::HashSet<String>,
+    exposing_package: Option<(&'a str, rumoca_core::DefId)>,
 }
 
 pub(super) fn extract_extends_chain_constants_inner(
@@ -1003,7 +1027,7 @@ pub(super) fn extract_extends_chain_constants_inner(
     base_name: &str,
     resolve_context: &str,
     ctx: &mut Context,
-    visited: &mut std::collections::HashSet<String>,
+    walk: &mut ExtendsChainWalk<'_>,
 ) {
     let (base_class, resolved_qname) =
         resolve_class_in_scope_indexed(class_index, base_name, resolve_context);
@@ -1011,10 +1035,22 @@ pub(super) fn extract_extends_chain_constants_inner(
         return;
     };
     let qname = resolved_qname.unwrap_or_else(|| base_name.to_string());
-    if !visited.insert(qname.clone()) {
+    if !walk.visited.insert(qname.clone()) {
         return;
     }
-    extract_constants_from_class_with_prefix(class_index, alias, base_class, ctx);
+    extract_scoped_constants_from_class_with_prefix(
+        class_index,
+        alias,
+        base_class,
+        ctx,
+        walk.exposing_package
+            .map(|exposing_package| FunctionCanonicalScope {
+                tree,
+                class_index,
+                source_scope: exposing_package.0,
+                exposing_package: Some(exposing_package),
+            }),
+    );
     for ext in &base_class.extends {
         extract_extends_modification_constants(tree, class_index, alias, ext, &qname, ctx);
         if let Some(base_qname) =
@@ -1037,7 +1073,7 @@ pub(super) fn extract_extends_chain_constants_inner(
             &ext.base_name.to_string(),
             &qname,
             ctx,
-            visited,
+            walk,
         );
     }
 }
@@ -1058,14 +1094,20 @@ pub(super) fn extract_extends_modification_constants(
         if ext_mod.redeclare {
             continue;
         }
-        let _ = extract_extends_modification_expr(
+        // MLS 3.7 §7.2: the modification gives the inherited declaration its
+        // value in `prefix`, the package that extends with it (FLAT-C02).
+        if let Some((def_id, value)) = extract_extends_modification_expr(
             tree,
             class_index,
             prefix,
             &ext_mod.expr,
             resolve_context,
             ctx,
-        );
+        ) && let ast::Expression::Modification { target, .. } = &ext_mod.expr
+        {
+            let full_name = make_prefixed_name(prefix, &target.to_string());
+            ctx.record_constant_value(&full_name, def_id, value);
+        }
     }
 }
 
@@ -1129,7 +1171,7 @@ pub(super) fn extract_extends_redeclare_package_constants(
                 tree,
                 class_index,
                 &alias_scope,
-                &pkg_ext.base_name.to_string(),
+                (package_class, &pkg_ext.base_name.to_string()),
                 resolve_context,
                 ctx,
             );
@@ -1146,7 +1188,7 @@ pub(super) fn extract_extends_redeclare_package_constants(
                 tree,
                 class_index,
                 prefix,
-                &pkg_ext.base_name.to_string(),
+                (package_class, &pkg_ext.base_name.to_string()),
                 resolve_context,
                 ctx,
             );
@@ -1384,6 +1426,18 @@ pub(super) fn extract_constants_from_class_with_prefix(
     class_def: &ast::ClassDef,
     ctx: &mut Context,
 ) {
+    extract_scoped_constants_from_class_with_prefix(class_index, prefix, class_def, ctx, None);
+}
+
+/// [`extract_constants_from_class_with_prefix`] with the call scope its
+/// extracted values are canonicalized in.
+fn extract_scoped_constants_from_class_with_prefix(
+    class_index: &ast::ClassDefIndex<'_>,
+    prefix: &str,
+    class_def: &ast::ClassDef,
+    ctx: &mut Context,
+    function_scope: Option<FunctionCanonicalScope<'_>>,
+) {
     for (name, comp) in &class_def.components {
         if !matches!(
             comp.variability,
@@ -1403,7 +1457,18 @@ pub(super) fn extract_constants_from_class_with_prefix(
         let expr = binding.or(synthesized.as_ref());
         let Some(expr) = expr else { continue };
         let full_name = make_prefixed_name(prefix, name);
-        extract_single_constant_with_prefix(class_index, prefix, name, &full_name, comp, expr, ctx);
+        extract_single_constant_with_prefix_and_function_scope(
+            class_index,
+            ConstantName {
+                prefix,
+                local: name,
+                full: &full_name,
+            },
+            comp,
+            expr,
+            ctx,
+            function_scope,
+        );
     }
 }
 
@@ -1453,6 +1518,7 @@ pub(super) fn extract_constants_from_class_with_prefix_and_imports(
                 tree,
                 class_index,
                 source_scope: resolve_context,
+                exposing_package: None,
             }),
         );
     }
@@ -1477,42 +1543,30 @@ pub(super) fn constant_extraction_imports(
     imports
 }
 
-/// Extract a single constant value (integer or array dims) into the context.
-pub(super) fn extract_single_constant_with_prefix(
-    class_index: &ast::ClassDefIndex<'_>,
-    prefix: &str,
-    name: &str,
-    full_name: &str,
-    comp: &rumoca_ir_ast::Component,
-    expr: &ast::Expression,
-    ctx: &mut Context,
-) {
-    extract_single_constant_with_prefix_and_function_scope(
-        class_index,
-        ConstantName {
-            prefix,
-            local: name,
-            full: full_name,
-        },
-        comp,
-        expr,
-        ctx,
-        None,
-    );
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct FunctionCanonicalScope<'a> {
     tree: &'a ast::ClassTree,
     class_index: &'a ast::ClassDefIndex<'a>,
     source_scope: &'a str,
+    /// The package that inherits the extracted constants (MLS §7.1), when it
+    /// is not the class that declares them.
+    exposing_package: Option<(&'a str, rumoca_core::DefId)>,
 }
 
 pub(super) fn canonicalize_constant_function_calls(
     mut expr: rumoca_core::Expression,
     function_scope: Option<FunctionCanonicalScope<'_>>,
 ) -> rumoca_core::Expression {
-    if let Some(scope) = function_scope {
+    if let Some(scope) = function_scope
+        && let Some(package) = scope.exposing_package
+    {
+        functions::expose_inherited_function_calls(
+            &mut expr,
+            scope.tree,
+            scope.class_index,
+            package,
+        );
+    } else if let Some(scope) = function_scope {
         functions::canonicalize_function_calls_in_expression_with_scope(
             &mut expr,
             scope.tree,
@@ -1641,26 +1695,8 @@ fn record_exact_constant_value(
                 })
         });
     if let Some(value) = value {
-        record_constant_value_by_def_id(ctx, def_id, value);
+        ctx.record_constant_value(qualified_name, def_id, value);
     }
-}
-
-/// Record `value` for declaration `def_id`, remembering when the declaration
-/// was already recorded with a different value (an inherited package constant
-/// modified differently by two extending packages).
-pub(crate) fn record_constant_value_by_def_id(
-    ctx: &mut Context,
-    def_id: rumoca_core::DefId,
-    value: rumoca_core::Expression,
-) {
-    if ctx
-        .constant_values_by_def_id
-        .get(&def_id)
-        .is_some_and(|existing| *existing != value)
-    {
-        ctx.ambiguous_constant_def_ids.insert(def_id);
-    }
-    ctx.constant_values_by_def_id.insert(def_id, value);
 }
 
 pub(super) fn try_extract_constant_alias_expr(

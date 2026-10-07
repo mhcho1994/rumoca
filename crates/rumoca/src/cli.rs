@@ -20,11 +20,13 @@ mod diagnostics_json;
 mod model_resolution;
 #[cfg(test)]
 mod parameter_profile_tests;
+mod projection_report;
+pub(crate) mod sim_defaults;
 mod value;
-
 #[cfg(test)]
 pub(crate) use debug_tracing::expand_trace_filter;
 pub(crate) use debug_tracing::{init_debug_tracing, trace_requests_viewer};
+use sim_defaults::{direct_sim_window, sim_window};
 
 pub use compile_selectors::{CompilePhase, EmissionPolicyArg, InlinePolicyArg, ScalarizePolicyArg};
 
@@ -295,18 +297,11 @@ pub struct ModelOptions {
     #[arg(long = "source-root", value_name = "PATH", action = ArgAction::Append)]
     pub source_roots: Vec<String>,
 
-    /// Keep derived parameter bindings as written instead of replacing them
-    /// with the constant they evaluate to.
+    /// Disable optional folding of parameter declaration bindings.
     ///
-    /// By default `parameter Real d = k * 10` with `k = 2` is emitted as
-    /// `d = 20`, which is the value a solver wants but erases the fact that `d`
-    /// is derived from `k`. With this flag the binding reaches the flat and DAE
-    /// models as `k * 10`, so an analysis can follow the dependency back to the
-    /// parameter a user actually sets.
-    ///
-    /// Structural parameters (MLS §18.3 — array dimensions, for-loop ranges,
-    /// if-equation conditions) and discrete-typed bindings are still evaluated,
-    /// so the flattened model has the same shape either way.
+    /// Main's tunability rules take precedence: references to settable
+    /// parameters remain dependencies even with folding enabled. Structural
+    /// parameters still resolve to determine the model shape.
     #[arg(long)]
     pub no_fold_parameter_bindings: bool,
 
@@ -317,8 +312,8 @@ pub struct ModelOptions {
 
     /// Run a bitcode pass pipeline over the compiled model before it is
     /// simulated or generated: `DAE -> RBC -> [passes] -> DAE`. Repeatable
-    /// and comma-separated; runs in the order given. Without it the `default`
-    /// group runs (every pass this build knows; `O1` is the same); `none` or
+    /// and comma-separated; runs in the order given. The native main pipeline
+    /// runs by default. `default` or `O1` explicitly enables all bitcode passes; `none` or
     /// `O0` compiles the model exactly as the frontend lowered it;
     /// `round-trip` exports and rebuilds with no rewrite. `exec:COMMAND` runs
     /// an external pass as `COMMAND IN.rbc -o OUT.rbc`; `fixpoint(a,b)`
@@ -515,7 +510,8 @@ pub struct SimCommandArgs {
     #[arg(long, value_enum)]
     pub solver: Option<SimulateSolverMode>,
 
-    /// Simulation end time. Direct runs default to 1.0; scenario runs use `sim.t_end`.
+    /// Simulation end time. Direct runs start at `experiment(StartTime)` and
+    /// default to `experiment(StopTime)`; scenario runs use `sim.t_end`.
     #[arg(long)]
     pub t_end: Option<f64>,
 
@@ -1062,7 +1058,7 @@ fn run_configured_simulation(args: SimCommandArgs) -> Result<()> {
         return run_simulation(SimulationRun {
             dae: result.dae.as_ref(),
             model: &compiled_model,
-            t_end: configured_sim_t_end(args.t_end, config.sim.t_end),
+            window: (0.0, configured_sim_t_end(args.t_end, config.sim.t_end)),
             dt: Some(configured_sim_dt(args.dt, config.sim.dt)),
             atol: configured_sim_option(args.atol, config.sim.atol),
             rtol: configured_sim_option(args.rtol, config.sim.rtol),
@@ -1497,7 +1493,7 @@ fn run_direct_simulation(args: SimCommandArgs) -> Result<()> {
     run_simulation(SimulationRun {
         dae: result.dae.as_ref(),
         model: &model,
-        t_end: direct_sim_t_end(args.t_end),
+        window: sim_window(&args, &result),
         dt: args.dt,
         atol: args.atol,
         rtol: args.rtol,
@@ -1538,10 +1534,6 @@ fn simulate_solver_or_auto(
         "bdf" => SimulateSolverMode::Bdf,
         _ => SimulateSolverMode::Auto,
     })
-}
-
-fn direct_sim_t_end(t_end: Option<f64>) -> f64 {
-    t_end.unwrap_or(1.0)
 }
 
 fn run_lint(args: LintArgs) -> Result<()> {
@@ -1866,7 +1858,7 @@ pub(crate) fn simulation_failure_error(
 struct SimulationRun<'a> {
     dae: &'a Dae,
     model: &'a str,
-    t_end: f64,
+    window: (f64, f64),
     dt: Option<f64>,
     atol: Option<f64>,
     rtol: Option<f64>,
@@ -1877,8 +1869,6 @@ struct SimulationRun<'a> {
 }
 
 fn run_simulation(run: SimulationRun<'_>) -> Result<()> {
-    use rumoca_sim::simulate_with_diagnostics_auto_nan_trace;
-
     // Validate the report path before spending a full solve on it: `sim`'s
     // --output is the HTML report *file*, not a directory.
     if let Some(output) = run.output
@@ -1893,7 +1883,8 @@ fn run_simulation(run: SimulationRun<'_>) -> Result<()> {
     // this tree cannot run is reported rather than quietly replaced.
     validate_solver_label(run.solver_label)?;
     let mut opts = SimOptions {
-        t_end: run.t_end,
+        t_start: run.window.0,
+        t_end: run.window.1,
         dt: run.dt,
         solver_mode: run.solver_mode,
         diffsol_method: DiffsolMethod::Bdf,
@@ -1908,17 +1899,24 @@ fn run_simulation(run: SimulationRun<'_>) -> Result<()> {
         opts.rtol = rtol;
     }
 
-    eprintln!("Simulating {} to t={}...", run.model, run.t_end);
+    eprintln!("Simulating {} to t={}...", run.model, run.window.1);
     // On a non-finite-suggestive failure (e.g. a model divide-by-zero showing up
     // as "step size too small"), this re-runs once with NaN tracing so the
     // offending variable(s) are named for the user.
-    let sim = simulate_with_diagnostics_auto_nan_trace(run.dae, &opts)
+    let sim = projection_report::simulate(run.dae, &opts)
         .map_err(|error| simulation_failure_error(&error))?;
     eprintln!(
         "Simulation complete: {} time points, {} variables",
         sim.times.len(),
         sim.names.len()
     );
+    for diagnostic in &sim.diagnostics {
+        eprintln!(
+            "warning[{}]: t={}: {}",
+            diagnostic.code, diagnostic.time, diagnostic.message
+        );
+    }
+    let projection_fallbacks = projection_report::report_projection_fallbacks();
 
     let out_path = match run.output {
         Some(p) => PathBuf::from(p),
@@ -1952,7 +1950,7 @@ fn run_simulation(run: SimulationRun<'_>) -> Result<()> {
         rtol: opts.rtol,
         atol: opts.atol,
     };
-    let metrics = SimulationRunMetrics::default();
+    let metrics = projection_report::run_metrics(projection_fallbacks);
     rumoca_sim::report::write_html_report(
         &sim,
         run.model,

@@ -1,6 +1,9 @@
 //! INST (Instantiation) contract tests - MLS §5, §7
 //!
-//! Tests for the 53 instantiation contracts defined in SPEC_0022.
+//! Tests for the instantiation contracts defined in SPEC_0022; lookup,
+//! inner/outer, final, `break`, `each`, and class-selection contracts are in
+//! `inst_lookup_contracts.rs`, extends-clause contracts in
+//! `inst_extends_contracts.rs`.
 
 use rumoca_compile::compile::FailedPhase;
 use rumoca_contracts::test_support::{
@@ -287,6 +290,23 @@ fn inst_010_final_cannot_modify() {
         end Base;
         model Test
             Base b(p = 2);
+        end Test;
+    "#,
+        "Test",
+        FailedPhase::Instantiate,
+        "EI028",
+    );
+}
+
+#[test]
+fn inst_010_declaration_cannot_modify_final_type_attribute() {
+    expect_failure_in_phase_with_code(
+        r#"
+        type Voltage = Real(final unit = "V");
+        model Test
+            Voltage v(unit = "kV");
+        equation
+            v = 1;
         end Test;
     "#,
         "Test",
@@ -1075,6 +1095,46 @@ fn inst_053_conditional_true_kept() {
         end Test;
     "#,
         "Test",
+    );
+}
+
+// =============================================================================
+// INST-054: Automatic inner creation
+// "An inner declaration of a unique non-partial class is automatically added
+// for outer declarations lacking a matching inner, with a diagnostic"
+// =============================================================================
+
+#[test]
+fn inst_054_outer_without_inner_synthesizes_default() {
+    expect_compile_warning(
+        r#"
+        model World
+            parameter Boolean enableAnimation = true;
+            parameter Real nominalLength = 1;
+            parameter Real defaultBodyDiameter = nominalLength/9;
+            annotation(
+                defaultComponentName="world",
+                defaultComponentPrefixes="inner",
+                missingInnerMessage="A default world component with the default
+gravity field will be used.");
+        end World;
+        model Shape
+            Real s;
+        equation
+            s = 1.0;
+        end Shape;
+        model Body
+            outer World world;
+            parameter Boolean animation = true;
+            parameter Real sphereDiameter = world.defaultBodyDiameter;
+            Shape sphere if world.enableAnimation and animation and sphereDiameter > 0;
+        end Body;
+        model Standalone
+            Body body;
+        end Standalone;
+    "#,
+        "Standalone",
+        "WI013",
     );
 }
 

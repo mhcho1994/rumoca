@@ -10,17 +10,11 @@ pub(super) fn validate_static_quotient(
         unreachable!("builtin result validation proves quotient arity")
     };
     let operator = quotient_name(builtin);
-    let Some(lhs) = static_numeric_value(storage, lhs.index()) else {
-        return Err(DaeConstructionError::NonStaticDiscontinuity {
-            operator,
-            span: at.span(),
-        });
-    };
-    let Some(rhs) = static_numeric_value(storage, rhs.index()) else {
-        return Err(DaeConstructionError::NonStaticDiscontinuity {
-            operator,
-            span: at.span(),
-        });
+    let (Some(lhs), Some(rhs)) = (
+        static_numeric_value(storage, lhs.index()),
+        static_numeric_value(storage, rhs.index()),
+    ) else {
+        return validate_time_invariant_quotient(storage, operator, [*lhs, *rhs], at);
     };
     let function = match builtin {
         PureBuiltin::Div => rumoca_core::BuiltinFunction::Div,
@@ -39,10 +33,21 @@ pub(super) fn validate_static_quotient(
     }
 }
 
+/// Where a runtime quotient is evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuotientScope {
+    /// A model equation: its discontinuities are event roots (MLS §3.7.2).
+    Model,
+    /// A function body: MLS §3.7.2 generates no events inside a function, so
+    /// the quotient is plain arithmetic whatever its operands' variability.
+    FunctionBody,
+}
+
 pub(super) fn validate_runtime_quotient(
     storage: &Storage,
     builtin: PureBuiltin,
     arguments: &[ExprId<'_>],
+    scope: QuotientScope,
     at: DaeProvenance,
 ) -> Result<(), DaeConstructionError> {
     if !matches!(
@@ -66,6 +71,9 @@ pub(super) fn validate_runtime_quotient(
         }
         return Ok(());
     }
+    if scope == QuotientScope::FunctionBody {
+        return Ok(());
+    }
     // A non-literal divisor is admitted when its constructor-derived
     // variability is at most Parameter: the sin(pi·lhs/rhs) indicator the
     // runtime owner builds is well-defined for every nonzero divisor, and a
@@ -84,6 +92,42 @@ pub(super) fn validate_runtime_quotient(
                 span: at.span(),
             })
         }
+    }
+}
+
+/// MLS §3.7.2: `div`, `mod`, and `rem` trigger events where their result
+/// changes discontinuously during continuous integration. Operands of constant
+/// variability, such as the binders of a structured domain, never change, so
+/// the quotient needs no event owner. A statically proven zero divisor is still
+/// an undefined domain. Parameter-variability operands keep their checked
+/// runtime owner, which proves the divisor for the parameter values in use.
+fn validate_time_invariant_quotient(
+    storage: &Storage,
+    operator: &'static str,
+    [lhs, rhs]: [ExprId<'_>; 2],
+    at: DaeProvenance,
+) -> Result<(), DaeConstructionError> {
+    for operand in [lhs, rhs] {
+        if matches!(
+            storage.expr_variability(operand, at)?,
+            ExpressionVariability::Parameter
+                | ExpressionVariability::Discrete
+                | ExpressionVariability::Continuous
+        ) {
+            return Err(DaeConstructionError::NonStaticDiscontinuity {
+                operator,
+                span: at.span(),
+            });
+        }
+    }
+    match static_numeric_value(storage, rhs.index()) {
+        Some(divisor) if divisor == 0.0 || !divisor.is_finite() => {
+            Err(DaeConstructionError::UndefinedBuiltinDomain {
+                operator,
+                span: at.span(),
+            })
+        }
+        _ => Ok(()),
     }
 }
 
@@ -174,11 +218,6 @@ pub(super) fn binary_result(
             }
             Ok(ValueType::scalar(ScalarType::String))
         }
-        // MLS §10.6.1: `+`/`-` require equal shapes; their element-wise
-        // forms also take a scalar on either side, like `.*` `./` `.^`.
-        BinaryOperator::ElementwiseAdd | BinaryOperator::ElementwiseSubtract => {
-            elementwise_result(operator, lhs, rhs, at)
-        }
         BinaryOperator::Add | BinaryOperator::Subtract => {
             expect_same_shape(lhs, rhs, at)?;
             expect_numeric(lhs_scalar, at)?;
@@ -189,7 +228,12 @@ pub(super) fn binary_result(
         BinaryOperator::Multiply => multiplication_result(lhs, rhs, at),
         BinaryOperator::Divide => division_result(lhs, rhs, at),
         BinaryOperator::Power => power_result(lhs, rhs, at),
-        BinaryOperator::ElementwiseMultiply
+        // MLS 3.6 §10.6.2 element-wise `.+` and `.-` admit `size(a) = size(b)`
+        // or a scalar `a` or `b`, so they broadcast a scalar operand exactly as
+        // §10.6.3/§10.6.6/§10.6.7 do for `.*`, `./`, and `.^`.
+        BinaryOperator::ElementwiseAdd
+        | BinaryOperator::ElementwiseSubtract
+        | BinaryOperator::ElementwiseMultiply
         | BinaryOperator::ElementwiseDivide
         | BinaryOperator::ElementwisePower => elementwise_result(operator, lhs, rhs, at),
         BinaryOperator::Equal
@@ -286,15 +330,15 @@ fn power_result(
     {
         return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
     }
-    // Scalar exponentiation is Real even over Integer operands (SPEC_0022
-    // TYPE-034, MLS §6.7); a matrix power is repeated multiplication and
-    // keeps its element type.
     Ok(ValueType::array(
-        promoted_numeric_scalar(lhs.scalar_type(), rhs.scalar_type(), lhs.is_scalar()),
+        promoted_numeric_scalar(lhs.scalar_type(), rhs.scalar_type(), false),
         lhs.dimensions().to_vec(),
     ))
 }
 
+/// The value type of an MLS 3.6 §10.6 element-wise operator (`.+`, `.-`, `.*`,
+/// `./`, `.^`). Each admits `size(a) = size(b)` or a scalar operand that is
+/// expanded to the other's shape; only `./` forces a Real result.
 fn elementwise_result(
     operator: BinaryOperator,
     lhs: &ValueType,
@@ -314,10 +358,7 @@ fn elementwise_result(
         promoted_numeric_scalar(
             lhs.scalar_type(),
             rhs.scalar_type(),
-            matches!(
-                operator,
-                BinaryOperator::ElementwiseDivide | BinaryOperator::ElementwisePower
-            ),
+            matches!(operator, BinaryOperator::ElementwiseDivide),
         ),
         dimensions.to_vec(),
     ))
@@ -366,7 +407,7 @@ pub(super) fn builtin_result<'dae>(
 ) -> Result<ValueType, DaeConstructionError> {
     let Some(first) = arguments.first().copied() else {
         let expected = match builtin {
-            PureBuiltin::OuterProduct => 2,
+            PureBuiltin::OuterProduct | PureBuiltin::LinearSolve => 2,
             _ => 1,
         };
         return Err(invalid_arity(expected, 0, at));
@@ -377,6 +418,9 @@ pub(super) fn builtin_result<'dae>(
     }
     if let Some(result) = special_builtin_result(storage, builtin, arguments, &first, at) {
         return result;
+    }
+    if matches!(builtin, PureBuiltin::Min | PureBuiltin::Max) {
+        return extremum_result(storage, arguments, first, at);
     }
     expect_numeric(first.scalar_type(), at)?;
     match builtin {
@@ -402,9 +446,6 @@ pub(super) fn builtin_result<'dae>(
             expect_arity(arguments, 1, at)?;
             Ok(ValueType::array(ScalarType::Real, first.dimensions()))
         }
-        PureBuiltin::Integer => {
-            unreachable!("the Integer conversion returns before numeric builtin checks")
-        }
         PureBuiltin::Atan2 => {
             expect_arity(arguments, 2, at)?;
             let common = common_value_type(&first, storage.expr_type(arguments[1], at)?, at)?;
@@ -414,7 +455,6 @@ pub(super) fn builtin_result<'dae>(
             expect_arity(arguments, 2, at)?;
             common_value_type(&first, storage.expr_type(arguments[1], at)?, at)
         }
-        PureBuiltin::Homotopy => unreachable!("homotopy returns after checking both branches"),
         PureBuiltin::Smooth => {
             expect_arity(arguments, 2, at)?;
             if !first.is_scalar() || first.scalar_type() != ScalarType::Integer {
@@ -426,15 +466,6 @@ pub(super) fn builtin_result<'dae>(
             expect_arity(arguments, 1, at)?;
             Ok(ValueType::scalar(first.scalar_type()))
         }
-        PureBuiltin::Min | PureBuiltin::Max if arguments.len() == 1 => {
-            Ok(ValueType::scalar(first.scalar_type()))
-        }
-        PureBuiltin::Min | PureBuiltin::Max => {
-            arguments[1..].iter().try_fold(first, |common, argument| {
-                common_value_type(&common, storage.expr_type(*argument, at)?, at)
-            })
-        }
-        PureBuiltin::Size => unreachable!("size returns after checking its dimension argument"),
         PureBuiltin::Zeros
         | PureBuiltin::Ones
         | PureBuiltin::Fill
@@ -447,13 +478,40 @@ pub(super) fn builtin_result<'dae>(
         | PureBuiltin::Transpose
         | PureBuiltin::Diagonal
         | PureBuiltin::OuterProduct
-        | PureBuiltin::Skew => {
+        | PureBuiltin::Skew
+        | PureBuiltin::LinearSolve => {
             unreachable!("array constructors return before numeric builtins")
         }
-        PureBuiltin::NoEvent => {
-            unreachable!("type-preserving noEvent returns before numeric builtin checks")
+        PureBuiltin::NoEvent
+        | PureBuiltin::Integer
+        | PureBuiltin::Homotopy
+        | PureBuiltin::Size
+        | PureBuiltin::Min
+        | PureBuiltin::Max => {
+            unreachable!("type-directed builtins return before numeric dispatch")
         }
     }
+}
+
+/// MLS §10.3.4 (ARR-040): `min` and `max` order Boolean, Integer, and Real
+/// elements, with `false < true` for Boolean. One argument reduces an array to
+/// its element type; several arguments take their common type.
+fn extremum_result(
+    storage: &Storage,
+    arguments: &[ExprId<'_>],
+    first: ValueType,
+    at: DaeProvenance,
+) -> Result<ValueType, DaeConstructionError> {
+    let scalar = first.scalar_type();
+    if scalar != ScalarType::Boolean {
+        expect_numeric(scalar, at)?;
+    }
+    if arguments.len() == 1 {
+        return Ok(ValueType::scalar(scalar));
+    }
+    arguments[1..].iter().try_fold(first, |common, argument| {
+        common_value_type(&common, storage.expr_type(*argument, at)?, at)
+    })
 }
 
 /// MLS §4.9.5.2: `Integer(e)` is the Integer ordinal of an enumeration value,
@@ -534,17 +592,18 @@ fn homotopy_result(
     at: DaeProvenance,
 ) -> Result<ValueType, DaeConstructionError> {
     expect_arity(arguments, 2, at)?;
+    // MLS §3.7.4.4: `actual` and `simplified` are Real expressions of one
+    // common shape; an array homotopy blends each element independently. An
+    // Integer argument is a Real expression by the implicit conversion of
+    // MLS §10.6.13 (`homotopy(if s > 0 then s/rho else 0, 0)` in
+    // `Modelica.Fluid.Machines`).
     let simplified = storage.expr_type(arguments[1], at)?;
-    // MLS §3.7.4.4: both arguments are Real expressions; an Integer operand
-    // such as the common `simplified = 0` is promoted (MLS §10.6.13).
-    if !actual.is_scalar() || !simplified.is_scalar() {
+    expect_numeric(actual.scalar_type(), at)?;
+    expect_numeric(simplified.scalar_type(), at)?;
+    if simplified.dimensions() != actual.dimensions() {
         return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
     }
-    let common = common_value_type(&actual, simplified, at)?;
-    if common.scalar_type() != ScalarType::Real {
-        return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
-    }
-    Ok(common)
+    Ok(ValueType::array(ScalarType::Real, actual.dimensions()))
 }
 
 fn size_result(
@@ -620,6 +679,7 @@ fn shaped_builtin_result(
             return outer_product_result(storage, arguments, first, at);
         }
         PureBuiltin::Skew => return skew_result(arguments, first, at),
+        PureBuiltin::LinearSolve => return linear_solve_result(storage, arguments, first, at),
         _ => unreachable!("only compact shaped builtins use this validator"),
     };
     let dimensions = extents
@@ -740,6 +800,28 @@ fn skew_result(
     expect_arity(arguments, 1, at)?;
     real_three_vector(input, at)?;
     Ok(ValueType::array(ScalarType::Real, [3, 3]))
+}
+
+fn linear_solve_result(
+    storage: &Storage,
+    arguments: &[ExprId<'_>],
+    matrix: &ValueType,
+    at: DaeProvenance,
+) -> Result<ValueType, DaeConstructionError> {
+    expect_arity(arguments, 2, at)?;
+    let rhs = storage.expr_type(arguments[1], at)?;
+    for input in [matrix, rhs] {
+        if input.scalar_type() != ScalarType::Real {
+            return Err(type_mismatch(ScalarType::Real, input.scalar_type(), at));
+        }
+    }
+    let ([rows, columns], [extent]) = (matrix.dimensions(), rhs.dimensions()) else {
+        return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
+    };
+    if *rows == 0 || rows != columns || rows != extent {
+        return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
+    }
+    Ok(rhs.clone())
 }
 
 fn real_three_vector(input: &ValueType, at: DaeProvenance) -> Result<(), DaeConstructionError> {

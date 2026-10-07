@@ -94,7 +94,7 @@ fn record_container_cat_field_shapes_include_container_and_field_axes() {
             },
             Expression::Array {
                 elements: vec![core],
-                is_matrix: false,
+                kind: rumoca_core::ArrayConstructor::Array,
                 span,
             },
             arms,

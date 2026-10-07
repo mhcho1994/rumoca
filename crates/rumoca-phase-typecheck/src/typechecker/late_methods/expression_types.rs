@@ -270,7 +270,8 @@ impl TypeChecker {
             BuiltinFunction::Initial
             | BuiltinFunction::Terminal
             | BuiltinFunction::Edge
-            | BuiltinFunction::Change => Some(type_table.boolean()),
+            | BuiltinFunction::Change
+            | BuiltinFunction::FirstTick => Some(type_table.boolean()),
             BuiltinFunction::Integer
             | BuiltinFunction::Ndims
             | BuiltinFunction::Size

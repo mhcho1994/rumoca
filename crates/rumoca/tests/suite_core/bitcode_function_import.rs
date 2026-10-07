@@ -357,10 +357,11 @@ fn pure_call_folding_is_a_pass_not_a_frontend_step() {
         folded.contains("binding=3.5"),
         "the pass evaluates the body:\n{folded}"
     );
-    let default = disassemble_compiled(work.path(), &[]);
+    assert!(disassemble_compiled(work.path(), &[]).contains("binding=tri(4, 0.5)"));
+    let default = disassemble_compiled(work.path(), &["--pass", "default"]);
     assert!(
         default.contains("binding=3.5"),
-        "a plain compile runs the default group, which folds it:\n{default}"
+        "the explicit default group folds it:\n{default}"
     );
 }
 
@@ -368,7 +369,7 @@ fn pure_call_folding_is_a_pass_not_a_frontend_step() {
 fn a_settled_binding_that_indexes_out_of_bounds_is_still_refused() {
     // Moving pure-call folding out of the frontend kept its one diagnostic:
     // a parameter binding whose evaluation provably indexes out of bounds is
-    // a translation error (EF032), not something to discover at run time.
+    // a translation error (EF036), not something to discover at run time.
     let work = tempdir().expect("temp dir");
     let source = work.path().join("OutOfBounds.mo");
     fs::write(
@@ -385,7 +386,7 @@ fn a_settled_binding_that_indexes_out_of_bounds_is_still_refused() {
         "must be refused: {}",
         text(&compiled)
     );
-    assert!(text(&compiled).contains("EF032"), "{}", text(&compiled));
+    assert!(text(&compiled).contains("EF036"), "{}", text(&compiled));
 }
 
 #[test]

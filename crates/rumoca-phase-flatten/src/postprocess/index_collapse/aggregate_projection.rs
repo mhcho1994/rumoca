@@ -18,15 +18,13 @@ pub(super) fn project(
         span,
     };
     match base {
-        Expression::Array {
-            elements,
-            is_matrix,
-            ..
-        } if !elements.is_empty() => Some(Expression::Array {
-            elements: elements.iter().map(project).collect(),
-            is_matrix: *is_matrix,
-            span,
-        }),
+        Expression::Array { elements, kind, .. } if !elements.is_empty() => {
+            Some(Expression::Array {
+                elements: elements.iter().map(project).collect(),
+                kind: *kind,
+                span,
+            })
+        }
         Expression::BuiltinCall {
             function: BuiltinFunction::Cat,
             args,
