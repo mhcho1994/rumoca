@@ -5,6 +5,27 @@ use std::collections::HashSet;
 use rumoca_ir_dae as dae;
 use rumoca_ir_solve as solve;
 
+/// MLS §11.2.2: a zero extent anywhere in a rectangular loop nest means
+/// that its body, including every assertion predicate, is never evaluated.
+pub(super) fn assertion_domain_is_empty<'dae>(
+    view: dae::DaeView<'dae>,
+    domains: &[dae::DomainId<'dae>],
+    provenance: rumoca_core::Span,
+) -> Result<bool, solve::SolveProgramConstructionError> {
+    for domain in domains {
+        let extents = view
+            .domain(*domain)
+            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
+            .structured()
+            .extents()
+            .map_err(|_| solve::SolveProgramConstructionError::InvalidMap { provenance })?;
+        if extents.contains(&0) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[derive(Clone)]
 pub(super) struct FunctionAssertion<'dae> {
     pub(super) condition: dae::ExprId<'dae>,

@@ -35,10 +35,9 @@ pub(super) fn plan_function_conditional(
     if let Some(selected) = proven_conditional_branch(blocks, context.shapes) {
         return plan_proven_conditional_branch(blocks, fallback, selected, context);
     }
-    let branch_context = FunctionValidationContext {
-        call_scoped_actions: false,
-        ..context
-    };
+    // MLS §11.5 / DAE-C11: lowering guards each branch assertion with the
+    // ordered branch selection before appending it to the enclosing owner.
+    let branch_context = context;
     let mut branches = Vec::with_capacity(blocks.len());
     for block in blocks {
         validate_function_expression_with_roles(
@@ -182,14 +181,8 @@ pub(super) fn resolve_function_conditional(
         _ => unreachable!("a planned function conditional keeps its source fallback shape"),
     };
     if ordered.is_empty() {
-        return Err(ToDaeError::unsupported_flat(
-            "function conditional",
-            format!(
-                "`{}` has a conditional branch without a value definition",
-                context.function.name
-            ),
-            span,
-        ));
+        // An assertion-only conditional has effects but no value join.
+        return Ok(Vec::new());
     }
     let joined = definitions.join_branches(&branch_states, exhaustive, &ordered, context, span)?;
     if !exhaustive && blocks.len() == 1 && is_immutable_guard(&blocks[0].cond, context) {
@@ -391,9 +384,7 @@ fn validate_conditional_branch_shape(
     for (statement, plan) in statements.iter().zip(plans) {
         match (statement, plan) {
             (_, FunctionStatementPlan::ProvenAssertion) => continue,
-            (_, FunctionStatementPlan::RuntimeAssertion) => {
-                unreachable!("runtime conditional assertions are rejected during planning")
-            }
+            (_, FunctionStatementPlan::RuntimeAssertion) => continue,
             (_, FunctionStatementPlan::Assignment(_)) => continue,
             (_, FunctionStatementPlan::RecordAssembly(_))
             | (_, FunctionStatementPlan::RecordAssemblyMember) => continue,

@@ -602,13 +602,22 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                             provenance: provenance.span(),
                         });
                     }
-                    let predicate =
-                        self.map_assertion_predicate(condition, domains, provenance.span())?;
-                    let predicate = self.builder.reduce(
-                        solve::SolveReductionOperator::All,
-                        predicate,
+                    let predicate = if assertions::assertion_domain_is_empty(
+                        self.view,
+                        domains,
                         provenance.span(),
-                    )?;
+                    )? {
+                        self.builder
+                            .constant(solve::SolveValue::boolean(true), provenance.span())?
+                    } else {
+                        let mapped =
+                            self.map_assertion_predicate(condition, domains, provenance.span())?;
+                        self.builder.reduce(
+                            solve::SolveReductionOperator::All,
+                            mapped,
+                            provenance.span(),
+                        )?
+                    };
                     self.record_assertion_predicate(predicate, provenance.span())?;
                 }
                 dae::FunctionStatementView::For {

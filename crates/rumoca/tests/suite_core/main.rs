@@ -58,6 +58,7 @@ mod function_loop_carried_record;
 mod function_loop_carried_scalar;
 mod function_loop_reduction_checked;
 mod function_loop_snapshot_test;
+mod function_nested_assertions;
 mod function_noelse_if_test;
 mod function_output_shadow_state_test;
 mod function_projection_array_shape_test;

@@ -186,6 +186,12 @@ impl ShapeEnvironment {
     pub(super) fn insert(&mut self, name: VarName, shape: ValueShape) {
         self.values.remove_parameter(name.as_str());
         self.integer_bounds.remove(&name);
+        // MLS §12.2: nested size/ndims calls need the same proven axes as
+        // direct extents. An empty shape also shadows an outer array's axes.
+        self.values.add_array_dimensions(
+            name.to_string(),
+            shape.iter().copied().map(i64::from).collect(),
+        );
         self.shapes.insert(name, shape);
     }
 
@@ -195,16 +201,14 @@ impl ShapeEnvironment {
     /// a value only for a scalar, so a bound value that disagreed with a
     /// non-scalar shape would be unrepresentable rather than merely wrong.
     pub(super) fn bind_scalar_value(&mut self, name: VarName, value: EvalValue) {
-        self.integer_bounds.remove(&name);
-        self.shapes.insert(name.clone(), Vec::new());
+        self.insert(name.clone(), Vec::new());
         self.values.add_parameter(name.to_string(), value);
     }
 
     /// Bind a scalar Integer to a proved finite interval without pretending it
     /// has one translation-time value.
     pub(super) fn bind_integer_bounds(&mut self, name: VarName, lower: i64, upper: i64) {
-        self.values.remove_parameter(name.as_str());
-        self.shapes.insert(name.clone(), Vec::new());
+        self.insert(name.clone(), Vec::new());
         self.integer_bounds
             .insert(name, (lower.min(upper), lower.max(upper)));
     }

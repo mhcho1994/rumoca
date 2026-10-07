@@ -1,5 +1,6 @@
 mod missing_provenance;
 mod record_container_shapes;
+mod shape_evaluation;
 mod value_proven_shapes;
 
 use rumoca_core::{
