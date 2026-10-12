@@ -1,5 +1,5 @@
 {#- Follows the whitespace convention stated in `typed_arithmetic.jinja`. -#}
-{%- from "fmi-typed-arithmetic.jinja" import copy %}
+{%- from "fmi-typed-arithmetic.jinja" import copy, binary %}
 {%- macro bounds(index, extent) -%}
 if (r{{ index }}[0]<1 || r{{ index }}[0]>{{ extent }}) return 1;
 {% endmacro %}
@@ -8,7 +8,15 @@ if (r{{ index }}[0]<1 || r{{ index }}[0]>{{ extent }}) return 1;
 {% set dst = "r" ~ op.destination -%}
 {% set ty = program.register_types[op.destination] -%}
 {% if op.operation in ["scale", "matrix_multiply", "cross"] and (ty.scalar.kind != "real" or ty.scalar.profile.format != "binary64") %}{{ fail("unsupported-feature:fmi.c.pure-call: non-Real tensor arithmetic") }}{% endif -%}
-{% if op.operation == "fill" -%}
+{% if op.operation == "reduce" -%}
+{% set operators = {"sum":"add", "product":"multiply", "minimum":"min", "maximum":"max", "all":"and"} -%}
+{% if op.operator not in operators or not ((ty.scalar.kind == "real" and ty.scalar.profile.format == "binary64" and op.operator != "all") or (ty.scalar.kind == "boolean" and op.operator == "all")) %}{{ fail("unsupported-feature:fmi.c.pure-call: reduction type or operator") }}{% endif -%}
+{% set count = program.register_types[op.operand].scalar_count -%}
+{#- Match the typed evaluator's eval_reduce: seed with the first element, then
+    combine in order. An extra identity changes NaNs and signed zeros. -#}
+{{ dst }}[0]=r{{ op.operand }}[0];
+for (size_t k=1; k<{{ count }}; ++k) {{ dst }}[0] = {{ binary(operators[op.operator], dst ~ "[0]", "r" ~ op.operand ~ "[k]") }};
+{% elif op.operation == "fill" -%}
 for (size_t k=0; k<{{ ty.scalar_count }}; ++k) {{ dst }}[k]=r{{ op.value }}[0];
 {% elif op.operation == "identity" -%}
 {% set size = ty.dimensions[0] -%}

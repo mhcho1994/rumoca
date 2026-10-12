@@ -105,6 +105,7 @@ mod fluid_function_data;
 mod fmi_event_c_warnings;
 mod fmi_family_map_loops;
 mod fmi_me_host_divergence;
+mod fmi_parameter_folds;
 mod fmi_projection_descriptors;
 mod fmi_pure_call_families;
 mod for_eq_array_test;
