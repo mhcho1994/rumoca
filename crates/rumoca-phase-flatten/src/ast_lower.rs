@@ -19,12 +19,28 @@ pub(crate) struct LoweringContext<'a> {
     pub(crate) predefined_intrinsics: PredefinedIntrinsicIds,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(crate) struct PredefinedIntrinsicIds {
     identities: [Option<DefId>; rumoca_core::BuiltinFunction::PREDEFINED_IDENTITY_REQUIRED.len()],
+    /// The predefined declaration of every intrinsic's own spelling (`exp`),
+    /// so a call whose name resolves to another declaration (an imported
+    /// `Modelica.ComplexMath.exp`) calls that declaration.
+    spellings: [Option<DefId>; rumoca_core::BuiltinFunction::ALL.len()],
     array_constructors: [Option<DefId>; Self::ARRAY_CONSTRUCTORS.len()],
     assertion: Option<DefId>,
     array_function: Option<DefId>,
+}
+
+impl Default for PredefinedIntrinsicIds {
+    fn default() -> Self {
+        Self {
+            identities: Default::default(),
+            spellings: [None; rumoca_core::BuiltinFunction::ALL.len()],
+            array_constructors: Default::default(),
+            assertion: None,
+            array_function: None,
+        }
+    }
 }
 
 impl PredefinedIntrinsicIds {
@@ -42,6 +58,12 @@ impl PredefinedIntrinsicIds {
                 tree.scope_tree
                     .predefined_member(&rumoca_core::ComponentPath::from_flat_path(
                         rumoca_core::BuiltinFunction::PREDEFINED_IDENTITY_REQUIRED[index].name(),
+                    ))
+            }),
+            spellings: std::array::from_fn(|index| {
+                tree.scope_tree
+                    .predefined_member(&rumoca_core::ComponentPath::from_flat_path(
+                        rumoca_core::BuiltinFunction::ALL[index].name(),
                     ))
             }),
             array_constructors: std::array::from_fn(|index| {
@@ -76,6 +98,26 @@ impl PredefinedIntrinsicIds {
             .into_iter()
             .zip(rumoca_core::BuiltinFunction::PREDEFINED_IDENTITY_REQUIRED)
             .find_map(|(identity, intrinsic)| (identity == Some(target)).then_some(*intrinsic))
+    }
+
+    /// Whether a call spelled `spelling`, the spelling of intrinsic
+    /// `builtin`, resolves to a declaration other than that intrinsic's
+    /// predefined one: an imported or enclosing function of the same name
+    /// shadows the predefined function (MLS §5.3).
+    fn shadowed(
+        self,
+        builtin: rumoca_core::BuiltinFunction,
+        spelling: &str,
+        target: Option<DefId>,
+    ) -> bool {
+        let predefined = rumoca_core::BuiltinFunction::ALL
+            .iter()
+            .position(|candidate| *candidate == builtin)
+            .and_then(|index| self.spellings[index]);
+        match (predefined, target) {
+            (Some(predefined), Some(target)) => spelling == builtin.name() && target != predefined,
+            _ => false,
+        }
     }
 
     fn is_assertion(self, target: Option<DefId>) -> bool {
@@ -374,9 +416,12 @@ fn lower_function_call_statement(
         comp: rumoca_core::Reference::from_component_reference(function_component_ref_from_ast(
             comp, context,
         )?),
+        // MLS §12.4.1 binds a named argument by the input it names; the
+        // statement form `(o1, o2) := f(x = e)` binds exactly like the
+        // expression form, so both carry the same named-argument markers.
         args: args
             .iter()
-            .map(|arg| expression_from_ast_with_context(arg, context))
+            .map(|arg| convert_call_arg_with_context(arg, context))
             .collect::<LowerResult<Vec<_>>>()?,
         outputs: outputs
             .iter()
@@ -931,7 +976,11 @@ fn convert_function_call_with_context(
             });
         }
         if let Some(builtin) = rumoca_core::BuiltinFunction::from_name(func_name) {
-            if builtin.requires_predefined_identity() {
+            if builtin.requires_predefined_identity()
+                || context
+                    .predefined_intrinsics
+                    .shadowed(builtin, func_name, comp.target_def_id())
+            {
                 return lower_user_function_call(comp, args, call_span, context);
             }
             let args = args

@@ -13,6 +13,8 @@ pub fn try_eval_flat_expr_boolean(
         known_bools,
         known_enums,
         array_dims: &FxHashMap::default(),
+        known_values: no_known_values(),
+        resources: None,
         functions: &FxHashMap::default(),
         var_context: None,
     };

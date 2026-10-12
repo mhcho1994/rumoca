@@ -194,3 +194,70 @@ fn an_event_algorithm_reads_its_target_entry_value_as_pre() {
         .compile_str(MODELS, "While.mo")
         .expect("the event algorithm constructs");
 }
+
+#[test]
+fn a_bounded_while_fold_ends_at_its_first_false_condition() {
+    // `halve` runs while `i < 100 and not found`: its compact fold carries
+    // that condition as a continuation instead of running all 100 passes.
+    let compiled = Compiler::new()
+        .model("While.Functions")
+        .compile_str(MODELS, "While.mo")
+        .expect("the model compiles");
+    compiled.dae.inspect(|view| {
+        let function = (0..view.function_count())
+            .filter_map(|index| view.function_id(index).and_then(|id| view.function(id)))
+            .find(|function| function.name().as_str().ends_with("halve"))
+            .expect("the halve function remains visible");
+        let continued = function
+            .statements()
+            .filter_map(|statement| match statement {
+                rumoca_ir_dae::FunctionStatementView::For { fold, .. } => Some(fold),
+                _ => None,
+            })
+            .filter_map(|fold| view.function_fold(fold))
+            .any(|fold| fold.continuation().is_some());
+        assert!(continued, "the while fold carries its condition");
+    });
+}
+
+/// A `while` that can leave through `break` has no exit at which its
+/// condition is known false, so no exit fact or iteration envelope is proven
+/// from the condition, and the loop is refused rather than bounded by it.
+#[test]
+fn a_while_loop_that_can_break_is_refused() {
+    let source = r#"
+function firstAbove
+  input Real x[4];
+  input Real limit;
+  output Integer k;
+protected
+  Integer i;
+algorithm
+  i := 1;
+  k := 0;
+  while i < 5 loop
+    if x[i] > limit then
+      k := i;
+      break;
+    end if;
+    i := i + 1;
+  end while;
+end firstAbove;
+model WhileBreak
+  input Real limit = 2;
+  Real k;
+equation
+  k = firstAbove({1, 2, 3, 4}, limit + time);
+end WhileBreak;
+"#;
+    let error = Compiler::new()
+        .model("WhileBreak")
+        .compile_str(source, "WhileBreak.mo")
+        .map(|_| ())
+        .expect_err("a while loop with break has no proven envelope");
+    let message = error.to_string();
+    assert!(
+        message.contains("`firstAbove`"),
+        "unexpected refusal: {message}"
+    );
+}

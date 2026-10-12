@@ -2,6 +2,8 @@
 
 mod evaluation;
 mod exchange;
+#[cfg(test)]
+mod loop_closure_tests;
 mod preferences;
 
 use std::collections::HashMap;
@@ -12,10 +14,11 @@ use rumoca_ir_dae as dae;
 use rumoca_ir_solve as solve;
 use rumoca_phase_structural::{
     AliasQuotientReport, FormalDerivativeSystem, FormalDerivativeView, FormalStageCoordinate,
-    FormalStateCoordinate, PreparedDae, ReducedSelectionChart, StateSelection, StructuralError,
-    construct_formal_derivatives, fold_constant_values, fold_evaluable_parameters,
-    formal_alias_quotient_report, inline_annotated_calls, inline_formal_calls, prepare_for_solve,
-    quotient_aliases, quotient_formal_aliases,
+    FormalStateCandidate, FormalStateCoordinate, PreparedDae, PreparedStateCoordinates,
+    ReducedSelectionChart, SourceStructuralAnalysis, StateSelection, StructuralError,
+    construct_formal_derivatives, demote_inert_states, fold_constant_values,
+    fold_evaluable_parameters, formal_alias_quotient_report, inline_annotated_calls,
+    inline_formal_calls, prepare_for_solve_from_source, quotient_aliases, quotient_formal_aliases,
 };
 
 use crate::lower::typed_functions::formal_stages::lower_state_selection_stages;
@@ -45,10 +48,6 @@ pub(crate) struct PreparedSelection<'source> {
     /// primary candidate, with every class it left unchanged; empty when the
     /// source basis is retained.
     pub formal_aliases: AliasQuotientReport,
-    /// The integrated coordinates a formal selection chose, as source scalar
-    /// names (a formal derivative order `k` wraps the name in `k` `der`s), in
-    /// selection order; `None` when the primary integrates its own states.
-    pub basis: Option<Vec<String>>,
     /// Why a requested `StateSelect` basis (MLS 3.7 §4.9.7.1) was withheld:
     /// its formal construction or checked selection was refused, so the
     /// reducer's basis is kept.
@@ -95,7 +94,7 @@ fn require_always_states(
     selection: &PreparedSelection<'_>,
 ) -> Result<(), StructuralError> {
     let integrated = selection
-        .integrated_names()
+        .integrated_names()?
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
     let omitted = model.inspect(|source| {
@@ -126,7 +125,6 @@ fn own_selection_loop_guards(
         alternates,
         exchanges,
         formal_aliases,
-        basis,
         withheld_preferences,
     } = selection;
     let alternates = alternates
@@ -142,7 +140,6 @@ fn own_selection_loop_guards(
         alternates,
         exchanges,
         formal_aliases,
-        basis,
         withheld_preferences,
     })
 }
@@ -157,7 +154,6 @@ fn prepare_quotient(
         alternates,
         exchanges,
         formal_aliases,
-        basis,
         withheld_preferences,
     } = prepare_source(&quotient, overrides)?;
     let primary = match primary {
@@ -170,14 +166,14 @@ fn prepare_quotient(
             manifold_redundant,
             pins,
             structural,
-            charts,
+            reduced,
         } => Ok(PreparedDae::Transformed {
             dae,
             manifold,
             manifold_redundant,
             pins,
             structural,
-            charts,
+            reduced,
         }),
     };
     let primary = primary.unwrap_or_else(|(pins, structural)| PreparedDae::Transformed {
@@ -186,14 +182,13 @@ fn prepare_quotient(
         manifold_redundant: Box::new([]),
         pins,
         structural,
-        charts: Box::new([]),
+        reduced: Default::default(),
     });
     Ok(PreparedSelection {
         primary,
         alternates,
         exchanges,
         formal_aliases,
-        basis,
         withheld_preferences,
     })
 }
@@ -202,7 +197,13 @@ fn prepare_source<'source>(
     model: &'source dae::Dae,
     overrides: &HashMap<String, f64>,
 ) -> Result<PreparedSelection<'source>, StructuralError> {
-    match prepare_for_solve(model) {
+    // One structural analysis of the source serves the early loop-closure
+    // decision and the reducer's first round (SPEC_0053 §1).
+    let source = SourceStructuralAnalysis::of(model);
+    if let Some(reduced) = reduce_loop_closure(&source, overrides)? {
+        return Ok(reduced);
+    }
+    match prepare_for_solve_from_source(source) {
         Ok(prepared) => reduce_or_retain(model, prepared, overrides),
         // The ordinary reducer cannot desingularize every constrained system: a
         // buried orientation lock (a quaternion body under a loop joint) leaves
@@ -211,8 +212,13 @@ fn prepare_source<'source>(
         // independent basis for exactly those coordinates, so route a singular
         // system through it before surfacing the reducer's failure. Nothing that
         // the reducer already accepts changes: this branch is reached only when
-        // it fails.
+        // it fails. A state derivative no equation reads (STRUCT-T04) is never
+        // matched, so such a system is always singular here; it is prepared
+        // again with those states declared algebraic before the formal path.
         Err(error) if matches!(error, StructuralError::Singular { .. }) => {
+            if let Some(demoted) = demote_inert_states(model)? {
+                return prepare_quotient(demoted, overrides);
+            }
             recover_singular_via_formal(model, overrides)?.ok_or(error)
         }
         Err(error) => Err(error),
@@ -255,14 +261,8 @@ fn reduce_or_retain<'source>(
     // Construct the reduced candidate first so an infeasible request (an
     // over-constrained `StateSelect.always`, a singular stage Jacobian) still
     // surfaces its exact typed failure rather than being masked by retention.
-    let mut alternate_selections = AlternateSelections::default();
-    let mut basis = Vec::new();
-    let candidate = formal.construct_state_candidate_with_charts(|formal| {
-        let (selection, alternates, primary) = select(formal, overrides)?;
-        alternate_selections = alternates;
-        basis = basis_names(formal.source, &primary);
-        Ok(selection)
-    })?;
+    let reduced = ReducedCandidate::construct(&formal, overrides)?;
+    let basis = reduced.basis()?;
     // Retain the source basis when every manifold constraint is a conserved
     // first integral, reduce when any constraint is a redundant loop closure.
     // A selection that integrates an undifferentiated `StateSelect.prefer`
@@ -275,16 +275,88 @@ fn reduce_or_retain<'source>(
     {
         return Ok(PreparedSelection::retained(prepared));
     }
-    let alternates = prepare_alternate_charts(&formal, &alternate_selections)?;
-    let (primary, formal_aliases) = quotient_formal_candidate(candidate.into_prepared()?)?;
-    Ok(PreparedSelection {
-        primary,
-        alternates,
-        exchanges: alternate_selections.exchanges,
-        formal_aliases,
-        basis: Some(basis),
-        withheld_preferences: None,
-    })
+    reduced.finish(&formal)
+}
+
+/// SPEC_0053 §1: decide reduction from the source when it holds a redundant
+/// loop closure ([`SourceStructuralAnalysis::holds_redundant_loop_closure`]).
+/// Such a closure survives every direct demotion into the reducer's manifold
+/// and classifies redundant, so [`reduce_or_retain`] would reduce to exactly
+/// this formal selection; it is built here without running the per-state
+/// reducer. `None` leaves the decision to the reducer: no such closure, an
+/// inert state that needs demotion first, no formal construction, or a formal
+/// dimension that does not reduce the source states.
+fn reduce_loop_closure(
+    source: &SourceStructuralAnalysis<'_>,
+    overrides: &HashMap<String, f64>,
+) -> Result<Option<PreparedSelection<'static>>, StructuralError> {
+    let model = source.model();
+    if !source.holds_redundant_loop_closure() || demote_inert_states(model)?.is_some() {
+        return Ok(None);
+    }
+    let Ok(formal) = construct_formal_derivatives(model) else {
+        return Ok(None);
+    };
+    let states = model.inspect(|view| {
+        view.variables()
+            .filter(|(_, v)| v.role() == dae::VariableRole::State)
+            .map(|(_, v)| v.scalar_count())
+            .sum::<usize>()
+    });
+    if formal.inspect(|formal| formal.formal_dimension()) >= states {
+        return Ok(None);
+    }
+    ReducedCandidate::construct(&formal, overrides)?
+        .finish(&formal)
+        .map(Some)
+}
+
+/// The primary reduced candidate of a formal system and the alternate
+/// Independent sets its selection issued. Its basis is named from the state
+/// coordinate map the candidate issued with its projection equations.
+struct ReducedCandidate<'formal, 'source> {
+    candidate: FormalStateCandidate<'formal, 'source>,
+    alternates: AlternateSelections,
+}
+
+impl<'formal, 'source> ReducedCandidate<'formal, 'source> {
+    fn construct(
+        formal: &'formal FormalDerivativeSystem<'source>,
+        overrides: &HashMap<String, f64>,
+    ) -> Result<Self, StructuralError> {
+        let mut alternates = AlternateSelections::default();
+        let candidate = formal.construct_state_candidate_with_charts(|formal| {
+            let (selection, issued, _) = select(formal, overrides)?;
+            alternates = issued;
+            Ok(selection)
+        })?;
+        Ok(Self {
+            candidate,
+            alternates,
+        })
+    }
+
+    /// The integrated basis as source scalar names, in state scalar order.
+    fn basis(&self) -> Result<Vec<String>, StructuralError> {
+        candidate_basis(&self.candidate)
+    }
+
+    /// The prepared reduced selection: alternate charts prepared, the
+    /// candidate's formal calls inlined and its formal aliases quotiented.
+    fn finish(
+        self,
+        formal: &FormalDerivativeSystem<'_>,
+    ) -> Result<PreparedSelection<'static>, StructuralError> {
+        let alternates = prepare_alternate_charts(formal, &self.alternates)?;
+        let (primary, formal_aliases) = quotient_formal_candidate(self.candidate.into_prepared()?)?;
+        Ok(PreparedSelection {
+            primary,
+            alternates,
+            exchanges: self.alternates.exchanges,
+            formal_aliases,
+            withheld_preferences: None,
+        })
+    }
 }
 
 /// Whether Solve lowering replaces the constrained state manifold `prepared`
@@ -351,29 +423,21 @@ fn recover_singular_via_formal(
     let Ok(formal) = construct_formal_derivatives(model) else {
         return Ok(None);
     };
-    let mut alternate_selections = AlternateSelections::default();
-    let mut basis = Vec::new();
-    let Ok(candidate) = formal.construct_state_candidate_with_charts(|formal| {
-        let (selection, alternates, primary) = select(formal, overrides)?;
-        alternate_selections = alternates;
-        basis = basis_names(formal.source, &primary);
-        Ok(selection)
-    }) else {
+    let Ok(reduced) = ReducedCandidate::construct(&formal, overrides) else {
         return Ok(None);
     };
-    let Ok(alternates) = prepare_alternate_charts(&formal, &alternate_selections) else {
+    let Ok(alternates) = prepare_alternate_charts(&formal, &reduced.alternates) else {
         return Ok(None);
     };
-    let Ok(candidate) = candidate.into_prepared() else {
+    let Ok(candidate) = reduced.candidate.into_prepared() else {
         return Ok(None);
     };
     let (primary, formal_aliases) = quotient_formal_candidate(candidate)?;
     Ok(Some(PreparedSelection {
         primary,
         alternates,
-        exchanges: alternate_selections.exchanges,
+        exchanges: reduced.alternates.exchanges,
         formal_aliases,
-        basis: Some(basis),
         withheld_preferences: None,
     }))
 }
@@ -389,7 +453,7 @@ fn basis_names(source: dae::DaeView<'_>, basis: &[(u32, usize, u32)]) -> Vec<Str
                 .and_then(|id| source.variable(id))
                 .and_then(|variable| variable.scalar_name(scalar as usize))
                 .expect("a selected coordinate names an issuing source scalar");
-            (0..order).fold(name, |name, _| format!("der({name})"))
+            solve::derivative_name(&name, order)
         })
         .collect()
 }
@@ -404,18 +468,80 @@ fn quotient_formal_candidate(
     Ok((quotient_formal_aliases(candidate)?, report))
 }
 
-impl<'source> PreparedSelection<'source> {
-    /// The scalars the primary integrates, as source scalar names: the formal
-    /// selection's record when one chose the basis, else the primary's states.
-    pub(crate) fn integrated_names(&self) -> Vec<String> {
-        self.basis.clone().unwrap_or_else(|| {
-            self.primary.as_dae().inspect(|view| {
-                view.variables()
-                    .filter(|(_, variable)| variable.role() == dae::VariableRole::State)
-                    .flat_map(|(_, variable)| variable.scalar_names())
-                    .collect()
+/// The generated state a formal selection finalized `system` with and, per
+/// state scalar, the source scalar its value projection equation equates it
+/// to, read from the map the formal state candidate issued with that equation;
+/// `None` for a system no formal selection finalized. A map naming no
+/// variable of `system` is a typed refusal.
+pub(crate) fn state_coordinate_sources<'dae>(
+    system: &rumoca_phase_structural::PreparedSystem<'_, 'dae>,
+) -> Result<Option<(dae::VariableId<'dae>, Vec<solve::SolveStateCoordinate>)>, StructuralError> {
+    system
+        .state_coordinates
+        .map(|map| bound_sources(system.view, map))
+        .transpose()
+}
+
+/// The basis a formal state candidate integrates, as source scalar names in
+/// state scalar order, read from the map it issued with its projection
+/// equations; empty for an empty selection.
+fn candidate_basis(
+    candidate: &FormalStateCandidate<'_, '_>,
+) -> Result<Vec<String>, StructuralError> {
+    candidate.inspect(|system| match system.state_coordinates() {
+        Some(map) => source_names(system.view, map),
+        None => Ok(Vec::new()),
+    })
+}
+
+/// The source scalar names of every scalar of the generated state `map`
+/// names in `view`, in state scalar order.
+fn source_names(
+    view: dae::DaeView<'_>,
+    map: &PreparedStateCoordinates,
+) -> Result<Vec<String>, StructuralError> {
+    let (_, sources) = bound_sources(view, map)?;
+    Ok(sources
+        .iter()
+        .map(solve::SolveStateCoordinate::source_name)
+        .collect())
+}
+
+fn bound_sources<'dae>(
+    view: dae::DaeView<'dae>,
+    map: &PreparedStateCoordinates,
+) -> Result<(dae::VariableId<'dae>, Vec<solve::SolveStateCoordinate>), StructuralError> {
+    let unbound = || failure("a state coordinate map names no prepared variable");
+    let state = map.state(view).ok_or_else(unbound)?;
+    let sources = map
+        .coordinates()
+        .iter()
+        .map(|coordinate| {
+            Ok(solve::SolveStateCoordinate {
+                variable: coordinate.source_scalar_name(view).ok_or_else(unbound)?,
+                derivative_order: coordinate.order,
             })
         })
+        .collect::<Result<Vec<_>, StructuralError>>()?;
+    Ok((state, sources))
+}
+
+impl<'source> PreparedSelection<'source> {
+    /// The scalars the primary integrates, as source scalar names: the
+    /// candidate's state coordinate map when a formal selection chose the
+    /// basis (a formal derivative order `k` wraps the name in `k` `der`s),
+    /// else the primary's states.
+    pub(crate) fn integrated_names(&self) -> Result<Vec<String>, StructuralError> {
+        self.primary
+            .inspect(|system| match system.state_coordinates {
+                Some(map) => source_names(system.view, map),
+                None => Ok(system
+                    .view
+                    .variables()
+                    .filter(|(_, variable)| variable.role() == dae::VariableRole::State)
+                    .flat_map(|(_, variable)| variable.scalar_names())
+                    .collect()),
+            })
     }
 
     /// The retained (or reducer-accepted) basis with no alternate charts. Every
@@ -427,7 +553,6 @@ impl<'source> PreparedSelection<'source> {
             alternates: Vec::new(),
             exchanges: Vec::new(),
             formal_aliases: AliasQuotientReport::default(),
-            basis: None,
             withheld_preferences: None,
         }
     }

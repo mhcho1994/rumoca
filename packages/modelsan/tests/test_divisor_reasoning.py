@@ -57,7 +57,8 @@ def corpus_model(name: str):
     command = [str(RUMOCA), "compile", path, "--model", name,
                "--emit-bitcode", str(artifact), "--no-fold-parameter-bindings"]
     for root in ROOTS:
-        command += ["--source-root", root]
+        if Path(root).is_dir():
+            command += ["--source-root", root]
     subprocess.run(command, capture_output=True, cwd=ROOT)
     _CACHE[name] = None
     if artifact.exists():

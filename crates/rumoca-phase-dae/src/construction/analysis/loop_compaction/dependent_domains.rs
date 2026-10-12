@@ -1,34 +1,69 @@
 //! Rectangularize finite dependent domains without scalar expansion.
 
+#[cfg(test)]
+mod tests;
+
+use super::super::guard_facts::{FactScope, GuardFacts, ValueKinds};
 use super::*;
+use rumoca_core::BuiltinFunction;
+
+struct DependentEnvelope {
+    lower: i64,
+    upper: i64,
+    step: i64,
+}
 
 pub(super) fn rectangularize_dependent_loops(
     statements: &[rumoca_core::Statement],
     static_integers: &HashMap<VarName, i64>,
     shapes: &ShapeEnvironment,
+    kinds: &ValueKinds,
 ) -> Result<Vec<rumoca_core::Statement>, ToDaeError> {
-    rectangularize_loops_in_scope(statements, static_integers, shapes, &HashMap::new())
+    let mut facts = GuardFacts::entry();
+    rectangularize_loops_in_scope(
+        statements,
+        Scope {
+            static_integers,
+            shapes,
+            bounds: &HashMap::new(),
+            kinds,
+        },
+        &mut facts,
+    )
 }
 
+/// The proven values, value bounds and binder bounds of one lexical scope.
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    static_integers: &'a HashMap<VarName, i64>,
+    shapes: &'a ShapeEnvironment,
+    bounds: &'a HashMap<VarName, (i64, i64)>,
+    kinds: &'a ValueKinds,
+}
+
+impl<'a> Scope<'a> {
+    fn facts(self) -> FactScope<'a> {
+        self.kinds.scope(self.shapes)
+    }
+}
+
+/// Rewrite one statement sequence in order, carrying the guard facts that
+/// hold before each statement.
 fn rectangularize_loops_in_scope(
     statements: &[rumoca_core::Statement],
-    static_integers: &HashMap<VarName, i64>,
-    shapes: &ShapeEnvironment,
-    enclosing_bounds: &HashMap<VarName, (i64, i64)>,
+    scope: Scope<'_>,
+    facts: &mut GuardFacts,
 ) -> Result<Vec<rumoca_core::Statement>, ToDaeError> {
     statements
         .iter()
-        .map(|statement| {
-            rectangularize_statement(statement, static_integers, shapes, enclosing_bounds)
-        })
+        .map(|statement| rectangularize_statement(statement, scope, facts))
         .collect()
 }
 
 fn rectangularize_statement(
     statement: &rumoca_core::Statement,
-    static_integers: &HashMap<VarName, i64>,
-    shapes: &ShapeEnvironment,
-    enclosing_bounds: &HashMap<VarName, (i64, i64)>,
+    scope: Scope<'_>,
+    facts: &mut GuardFacts,
 ) -> Result<rumoca_core::Statement, ToDaeError> {
     if let rumoca_core::Statement::If {
         cond_blocks,
@@ -36,31 +71,7 @@ fn rectangularize_statement(
         span,
     } = statement
     {
-        let cond_blocks = cond_blocks
-            .iter()
-            .map(|block| {
-                Ok(rumoca_core::StatementBlock {
-                    cond: block.cond.clone(),
-                    stmts: rectangularize_loops_in_scope(
-                        &block.stmts,
-                        static_integers,
-                        shapes,
-                        enclosing_bounds,
-                    )?,
-                })
-            })
-            .collect::<Result<Vec<_>, ToDaeError>>()?;
-        let else_block = else_block
-            .as_ref()
-            .map(|branch| {
-                rectangularize_loops_in_scope(branch, static_integers, shapes, enclosing_bounds)
-            })
-            .transpose()?;
-        return Ok(rumoca_core::Statement::If {
-            cond_blocks,
-            else_block,
-            span: *span,
-        });
+        return rectangularize_conditional(cond_blocks, else_block.as_deref(), *span, scope, facts);
     }
     let rumoca_core::Statement::For {
         indices,
@@ -68,15 +79,28 @@ fn rectangularize_statement(
         span,
     } = statement
     else {
+        facts.after(statement, scope.facts());
         return Ok(statement.clone());
     };
-    let mut bounds = enclosing_bounds.clone();
+    // MLS §11.2.2 evaluates the ranges once on entry, under the facts that
+    // hold before the loop; the body sees only facts no iteration changes.
+    let range_facts = facts.clone();
+    let binders = indices
+        .iter()
+        .map(|index| VarName::new(&index.ident))
+        .collect::<Vec<_>>();
+    let head = facts.for_head(indices, equations, scope.facts());
+    let mut body_facts = head.loop_entry(&[], &binders);
+    *facts = head;
+    let mut bounds = scope.bounds.clone();
     let mut rectangular = Vec::with_capacity(indices.len());
     let mut guards = Vec::new();
     for index in indices {
         let range_span = expression_span(&index.range)?;
+        let (index_static, mut index_shapes) =
+            scoped_domain_facts(scope.static_integers, scope.shapes, &bounds);
         if let Some((lower, step, upper)) =
-            static_function_range(&index.range, static_integers, shapes)?
+            static_function_range(&index.range, &index_static, &index_shapes)?
         {
             bounds.insert(
                 VarName::new(&index.ident),
@@ -85,34 +109,36 @@ fn rectangularize_statement(
             rectangular.push(index.clone());
             continue;
         }
-        let Some((lower, upper)) =
-            dependent_range_envelope(&index.range, static_integers, shapes, &bounds)?
+        range_facts.refine(&mut index_shapes);
+        let Some(envelope) =
+            dependent_range_envelope(&index.range, &index_static, &index_shapes, &bounds)?
         else {
             rectangular.push(index.clone());
             continue;
         };
-        let Some(reference) = first_binder_reference(equations, &index.ident) else {
-            rectangular.push(index.clone());
-            continue;
-        };
-        guards.push(range_membership_guard(reference, &index.range, range_span)?);
+        require_entry_invariant_range(&index.range, equations, range_span)?;
+        // A body that never reads its binder still runs once per element of
+        // the source range, so its guard reads the binder it introduces.
+        let reference = first_binder_reference(equations, &index.ident)
+            .unwrap_or_else(|| Reference::generated(&index.ident));
+        guards.push(range_membership_guard(
+            reference,
+            &index.range,
+            envelope.step,
+            range_span,
+        )?);
         rectangular.push(rumoca_core::ForIndex {
             ident: index.ident.clone(),
-            range: integer_range(lower, upper, range_span),
+            range: oriented_integer_range(
+                envelope.lower,
+                envelope.upper,
+                envelope.step,
+                range_span,
+            ),
         });
-        bounds.insert(VarName::new(&index.ident), (lower, upper));
+        bounds.insert(VarName::new(&index.ident), (envelope.lower, envelope.upper));
     }
-    let equations = rectangularize_loops_in_scope(equations, static_integers, shapes, &bounds)?;
-    let mut rewriter = MaskedComprehensionRewriter {
-        static_integers,
-        shapes,
-        bounds: &bounds,
-        error: None,
-    };
-    let equations = rewriter.rewrite_statements(&equations);
-    if let Some(error) = rewriter.error {
-        return Err(error);
-    }
+    let equations = rectangularize_loop_body(equations, scope, &bounds, &mut body_facts)?;
     let equations = match combine_guards(guards) {
         Some(condition) => vec![rumoca_core::Statement::If {
             cond_blocks: vec![rumoca_core::StatementBlock {
@@ -129,6 +155,112 @@ fn rectangularize_statement(
         equations,
         span: *span,
     })
+}
+
+fn rectangularize_loop_body(
+    equations: &[rumoca_core::Statement],
+    scope: Scope<'_>,
+    bounds: &HashMap<VarName, (i64, i64)>,
+    facts: &mut GuardFacts,
+) -> Result<Vec<rumoca_core::Statement>, ToDaeError> {
+    let (body_static, body_shapes) =
+        scoped_domain_facts(scope.static_integers, scope.shapes, bounds);
+    let equations = rectangularize_loops_in_scope(
+        equations,
+        Scope {
+            static_integers: &body_static,
+            shapes: &body_shapes,
+            bounds,
+            kinds: scope.kinds,
+        },
+        facts,
+    )?;
+    let mut rewriter = MaskedComprehensionRewriter {
+        static_integers: &body_static,
+        shapes: &body_shapes,
+        bounds,
+        error: None,
+    };
+    let equations = rewriter.rewrite_statements(&equations);
+    match rewriter.error {
+        Some(error) => Err(error),
+        None => Ok(equations),
+    }
+}
+
+fn scoped_domain_facts(
+    static_integers: &HashMap<VarName, i64>,
+    shapes: &ShapeEnvironment,
+    bounds: &HashMap<VarName, (i64, i64)>,
+) -> (HashMap<VarName, i64>, ShapeEnvironment) {
+    let static_integers = static_integers
+        .iter()
+        .filter(|(name, _)| !bounds.contains_key(*name))
+        .map(|(name, value)| (name.clone(), *value))
+        .collect();
+    let mut shapes = shapes.clone();
+    for (name, (lower, upper)) in bounds {
+        shapes.bind_integer_bounds(name.clone(), *lower, *upper);
+    }
+    (static_integers, shapes)
+}
+
+fn rectangularize_conditional(
+    branches: &[rumoca_core::StatementBlock],
+    fallback: Option<&[rumoca_core::Statement]>,
+    span: Span,
+    scope: Scope<'_>,
+    facts: &mut GuardFacts,
+) -> Result<rumoca_core::Statement, ToDaeError> {
+    let conditions = branches.iter().map(|block| &block.cond).collect::<Vec<_>>();
+    let mut entries = facts.branch_entries(&conditions, scope.facts());
+    let mut fallthrough = entries.pop().ok_or_else(|| {
+        ToDaeError::unsupported_flat(
+            "bounded loop conditional",
+            "a conditional has no fall-through entry",
+            span,
+        )
+    })?;
+    let cond_blocks = branches
+        .iter()
+        .zip(&mut entries)
+        .map(|(block, entry)| {
+            Ok(rumoca_core::StatementBlock {
+                cond: block.cond.clone(),
+                stmts: rectangularize_loops_in_scope(&block.stmts, scope, entry)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ToDaeError>>()?;
+    let else_block = fallback
+        .map(|branch| rectangularize_loops_in_scope(branch, scope, &mut fallthrough))
+        .transpose()?;
+    entries.push(fallthrough);
+    *facts = GuardFacts::join(&entries);
+    Ok(rumoca_core::Statement::If {
+        cond_blocks,
+        else_block,
+        span,
+    })
+}
+
+fn require_entry_invariant_range(
+    range: &Expression,
+    body: &[rumoca_core::Statement],
+    span: Span,
+) -> Result<(), ToDaeError> {
+    let mut references = Vec::new();
+    range.collect_var_refs(&mut references);
+    if references
+        .iter()
+        .any(|reference| super::loop_local_substitution::statements_assign_name(body, reference))
+    {
+        return Err(ToDaeError::unsupported_flat(
+            "function loop domain",
+            "a bounded dynamic range requires an entry snapshot when its body writes a range operand",
+            span,
+        ));
+    }
+    Ok(())
 }
 
 struct MaskedComprehensionRewriter<'a> {
@@ -175,13 +307,18 @@ impl ExpressionRewriter for MaskedComprehensionRewriter<'_> {
                 return expression.clone();
             }
         };
-        let Some((lower, upper)) = envelope else {
+        let Some(envelope) = envelope else {
             return self.walk_expression(expression);
         };
+        // This zero-filled reduction view retains its existing unit-stride
+        // shape contract. Strided statement domains are admitted separately.
+        if envelope.step != 1 {
+            return self.walk_expression(expression);
+        }
         let Some(reference) = first_expression_binder_reference(expr, &index.name) else {
             return self.walk_expression(expression);
         };
-        let guard = match range_membership_guard(reference, &index.range, *span) {
+        let guard = match range_membership_guard(reference, &index.range, envelope.step, *span) {
             Ok(guard) => guard,
             Err(error) => {
                 self.error.get_or_insert(error);
@@ -199,7 +336,7 @@ impl ExpressionRewriter for MaskedComprehensionRewriter<'_> {
             }),
             indices: vec![rumoca_core::ComprehensionIndex {
                 name: index.name.clone(),
-                range: integer_range(lower, upper, *span),
+                range: integer_range(envelope.lower, envelope.upper, *span),
             }],
             filter: None,
             span: *span,
@@ -222,7 +359,7 @@ fn dependent_range_envelope(
     static_integers: &HashMap<VarName, i64>,
     shapes: &ShapeEnvironment,
     bounds: &HashMap<VarName, (i64, i64)>,
-) -> Result<Option<(i64, i64)>, ToDaeError> {
+) -> Result<Option<DependentEnvelope>, ToDaeError> {
     let Expression::Range {
         start, step, end, ..
     } = range
@@ -238,40 +375,39 @@ fn dependent_range_envelope(
             step
         }
     };
-    if step != 1 || bounds.len() > 8 {
+    if step == 0 || step.checked_abs().is_none() {
         return Ok(None);
     }
-    if let Some(envelope) = shapes.proven_range_bounds(range) {
-        return Ok(Some(envelope));
+    let mut scoped_shapes = shapes.clone();
+    for (name, value) in static_integers {
+        scoped_shapes.bind_scalar_value(name.clone(), EvalValue::Integer(*value));
     }
-    let mut environments = vec![static_integers.clone()];
     for (name, (lower, upper)) in bounds {
-        let mut expanded = Vec::with_capacity(environments.len() * 2);
-        for environment in environments {
-            let mut lower_environment = environment.clone();
-            lower_environment.insert(name.clone(), *lower);
-            expanded.push(lower_environment);
-            if upper != lower {
-                let mut upper_environment = environment;
-                upper_environment.insert(name.clone(), *upper);
-                expanded.push(upper_environment);
-            }
+        scoped_shapes.bind_integer_bounds(name.clone(), *lower, *upper);
+    }
+    // MLS §10.4.1: every element lies between the start and the end, so an
+    // ascending range needs only the least start and the greatest end, each
+    // proven by any source (settled values, binders, guards).
+    let start = scoped_shapes.proven_integer_interval(start);
+    let end = scoped_shapes.proven_integer_interval(end);
+    let (lower, upper) = if step > 0 {
+        (start.lower, end.upper)
+    } else {
+        (end.lower, start.upper)
+    };
+    let (Some(lower), Some(upper)) = (lower, upper) else {
+        return Ok(None);
+    };
+    if step != 1 && step != -1 {
+        // A strided membership guard is anchored at the start.
+        let Some((start_lower, start_upper)) = start.bounds() else {
+            return Ok(None);
+        };
+        if lower.checked_sub(start_upper).is_none() || upper.checked_sub(start_lower).is_none() {
+            return Ok(None);
         }
-        environments = expanded;
     }
-    let mut starts = Vec::with_capacity(environments.len());
-    let mut ends = Vec::with_capacity(environments.len());
-    for environment in &environments {
-        let Some(start) = static_shape_integer_expression(start, environment, shapes)? else {
-            return Ok(None);
-        };
-        let Some(end) = static_shape_integer_expression(end, environment, shapes)? else {
-            return Ok(None);
-        };
-        starts.push(start);
-        ends.push(end);
-    }
-    Ok(starts.into_iter().min().zip(ends.into_iter().max()))
+    Ok(Some(DependentEnvelope { lower, upper, step }))
 }
 
 fn first_binder_reference(
@@ -334,48 +470,106 @@ fn first_expression_binder_reference(expression: &Expression, binder: &str) -> O
 fn range_membership_guard(
     binder: Reference,
     range: &Expression,
+    stride: i64,
     span: Span,
 ) -> Result<Expression, ToDaeError> {
-    let Expression::Range {
-        start, step, end, ..
-    } = range
-    else {
+    let Expression::Range { start, end, .. } = range else {
         return Err(ToDaeError::unsupported_flat(
             "function loop domain",
             "a masked compact loop requires an explicit range",
             span,
         ));
     };
-    if step.is_some() {
-        return Err(ToDaeError::unsupported_flat(
-            "function loop domain",
-            "a masked compact loop currently requires unit stride",
-            span,
-        ));
-    }
     let binder = || Expression::VarRef {
         name: binder.clone(),
         subscripts: Vec::new(),
         span,
     };
     let lower = Expression::Binary {
-        op: OpBinary::Ge,
+        op: if stride > 0 {
+            OpBinary::Ge
+        } else {
+            OpBinary::Le
+        },
         lhs: Box::new(binder()),
         rhs: start.clone(),
         span,
     };
     let upper = Expression::Binary {
-        op: OpBinary::Le,
+        op: if stride > 0 {
+            OpBinary::Le
+        } else {
+            OpBinary::Ge
+        },
         lhs: Box::new(binder()),
         rhs: end.clone(),
         span,
     };
-    Ok(Expression::Binary {
+    let membership = Expression::Binary {
         op: OpBinary::And,
         lhs: Box::new(lower),
         rhs: Box::new(upper),
         span,
+    };
+    if stride == 1 || stride == -1 {
+        return Ok(membership);
+    }
+    let Some(magnitude) = stride.checked_abs().filter(|magnitude| *magnitude > 0) else {
+        return Err(ToDaeError::unsupported_flat(
+            "function loop domain",
+            "a bounded dynamic stride must have a finite positive magnitude",
+            span,
+        ));
+    };
+    let integer = |value| Expression::Literal {
+        value: Literal::Integer(value),
+        span,
+    };
+    let congruence = Expression::Binary {
+        op: OpBinary::Eq,
+        lhs: Box::new(Expression::BuiltinCall {
+            function: BuiltinFunction::Mod,
+            args: vec![
+                Expression::Binary {
+                    op: OpBinary::Sub,
+                    lhs: Box::new(binder()),
+                    rhs: start.clone(),
+                    span,
+                },
+                integer(magnitude),
+            ],
+            span,
+        }),
+        rhs: Box::new(integer(0)),
+        span,
+    };
+    Ok(Expression::Binary {
+        op: OpBinary::And,
+        lhs: Box::new(membership),
+        rhs: Box::new(congruence),
+        span,
     })
+}
+
+fn oriented_integer_range(lower: i64, upper: i64, source_step: i64, span: Span) -> Expression {
+    if source_step > 0 {
+        return integer_range(lower, upper, span);
+    }
+    Expression::Range {
+        start: Box::new(Expression::Literal {
+            value: Literal::Integer(upper),
+            span,
+        }),
+        step: Some(Box::new(Expression::Literal {
+            value: Literal::Integer(-1),
+            span,
+        })),
+        end: Box::new(Expression::Literal {
+            value: Literal::Integer(lower),
+            span,
+        }),
+        span,
+    }
 }
 
 pub(super) fn integer_range(lower: i64, upper: i64, span: Span) -> Expression {

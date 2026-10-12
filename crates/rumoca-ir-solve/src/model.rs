@@ -7,6 +7,9 @@ mod event_transaction;
 mod guarded_assignment;
 mod jacobian_outputs;
 
+#[cfg(test)]
+mod jacobian_column_cache_tests;
+
 pub use affine_elimination::AffineEliminationLayout;
 pub use event_schedule::{
     CoupledNewtonPolicy, EventIterationSchedule, EventPassStep, EventScheduleError,
@@ -386,6 +389,11 @@ fn causal_coefficient_unproven(coefficient: &CausalCoefficient) -> bool {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct InitializationProjectionPlan {
     pub blocks: Vec<InitializationProjectionBlock>,
+    /// Whether a planned row reads a discrete coordinate the projection holds
+    /// at its current value. The runtime then alternates the projection with
+    /// the discrete assignments until the discrete values stop changing, the
+    /// fixed point of the MLS §8.6 mixed initialization system.
+    pub iterates_discretes: bool,
 }
 
 impl InitializationProjectionPlan {
@@ -465,19 +473,22 @@ pub struct JacobianStructure {
     jacobian_application: Option<ProjectionJacobianApplication>,
     affine_elimination: Option<AffineEliminationLayout>,
     linearization_repeatable: bool,
-    /// The pattern's rows per column, formed once for every colored
-    /// Jacobian evaluation that reads them.
-    column_rows: Vec<Vec<usize>>,
+    /// The immutable pattern's rows per column, derived only when a consumer
+    /// needs the coordinate view. Clone keeps the established owned-cache
+    /// behavior: an initialized view is copied; an unused view stays unused.
+    column_rows: std::sync::OnceLock<Vec<Vec<usize>>>,
+    /// Compact storage layout shared by every matrix in this pattern.
+    compact: std::sync::OnceLock<std::sync::Arc<CompactPatternLayout>>,
 }
 
 impl JacobianStructure {
     pub fn derived(pattern: StructuralPattern) -> Self {
         let coloring = pattern.column_coloring();
-        let column_rows = pattern.column_rows();
         Self {
             pattern,
             coloring,
-            column_rows,
+            column_rows: std::sync::OnceLock::new(),
+            compact: std::sync::OnceLock::new(),
             output_evaluations: Box::default(),
             residual_output_evaluation: None,
             jacobian_application: None,
@@ -496,7 +507,9 @@ impl JacobianStructure {
 
     /// [`StructuralPattern::column_rows`] of this structure's pattern.
     pub fn column_rows(&self) -> &[Vec<usize>] {
-        &self.column_rows
+        self.column_rows
+            .get_or_init(|| self.pattern.column_rows())
+            .as_slice()
     }
 
     pub fn output_evaluation(&self, color: usize) -> Option<&ProjectionJacobianOutputs> {
@@ -517,6 +530,12 @@ impl JacobianStructure {
 
     pub const fn jacobian_application(&self) -> Option<&ProjectionJacobianApplication> {
         self.jacobian_application.as_ref()
+    }
+
+    /// The compact storage order of this structure's pattern.
+    pub fn compact_layout(&self) -> &std::sync::Arc<CompactPatternLayout> {
+        self.compact
+            .get_or_init(|| std::sync::Arc::new(CompactPatternLayout::of(&self.pattern)))
     }
 }
 
@@ -947,6 +966,43 @@ pub struct StructuredDiscreteTargetMap {
 }
 
 impl DiscreteSolveSystem {
+    /// The periodic clock that owns one event-iteration run, `None` for a run
+    /// that iterates with the event (SPEC_0044 ME-EVENT-006). Clock-owned runs
+    /// advance their `previous()` history on their tick when the event commits
+    /// and take no part in the pass-to-pass fixed point.
+    pub fn event_iteration_run_clock(
+        &self,
+        run: &EventIterationRun,
+    ) -> Result<Option<PeriodicClockId>, &'static str> {
+        match run.owner {
+            EventIterationOwner::Hold => Ok(None),
+            EventIterationOwner::ScalarRows { start_row } => self
+                .clock_owners
+                .get(start_row)
+                .copied()
+                .ok_or("event-iteration scalar owner clock is out of bounds"),
+            EventIterationOwner::StructuredUpdate { update_index } => self
+                .structured_updates
+                .get(update_index)
+                .map(|update| update.clock_owner)
+                .ok_or("event-iteration structured owner clock is out of bounds"),
+            EventIterationOwner::GuardedAssignment { program_index, .. } => self
+                .guarded_assignments
+                .get(program_index)
+                .map(GuardedAssignmentProgram::clock_owner)
+                .ok_or("event-iteration guarded owner clock is out of bounds"),
+            EventIterationOwner::EventTransaction {
+                program_index,
+                target_index,
+            } => self
+                .event_transactions
+                .get(program_index)
+                .and_then(|transaction| transaction.targets().get(target_index))
+                .map(EventTransactionTarget::clock_owner)
+                .ok_or("event-iteration transaction owner clock is out of bounds"),
+        }
+    }
+
     /// Checked scalar adapter view for one compact structured update.
     ///
     /// Each pair is `(target slot, structured_rhs output lane)`. Backends use
@@ -1150,6 +1206,11 @@ pub enum SolveEventActionKind {
     /// reported and never aborts the run, creates an event, or influences
     /// step control. It owns no root program.
     Warning,
+    /// A model message (MLS 3.7 §12.9 `ModelicaInternal_print` to the
+    /// terminal): each settled event at which the action condition is true
+    /// reports the message once. It never aborts the run, creates an event,
+    /// or influences step control, and owns no root program.
+    Print,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1219,6 +1280,24 @@ pub enum DiscreteRowRole {
     EventAction,
     /// Runtime memory for detecting a condition edge.
     ConditionMemory,
+    /// Condition memory whose condition reads a periodic clock activation
+    /// lane (`clocks.activation_parameter_indices`).
+    ///
+    /// MLS §3.7.5 makes `sample(start, interval)` true only at its tick
+    /// instants, so the left limit a later instant reads is the condition with
+    /// every activation lane cleared. A runtime re-evaluates these rows with
+    /// the lanes at zero once an event has converged, and seeds them that way
+    /// at initialization; inside the tick's own event iteration they follow
+    /// the current value like any other buffer.
+    PulseConditionMemory,
+}
+
+impl DiscreteRowRole {
+    /// Whether this row is the edge buffer of a condition, of either kind.
+    #[must_use]
+    pub const fn is_condition_memory(self) -> bool {
+        matches!(self, Self::ConditionMemory | Self::PulseConditionMemory)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1677,6 +1756,60 @@ pub struct SolveVariableMeta {
     pub nominal: Option<String>,
     pub fixed: Option<bool>,
     pub description: Option<String>,
+    /// For a scalar of a generated state that a reduced state selection
+    /// integrates, the source scalar it equals; `None` for every other
+    /// visible scalar, each of which is its own declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_coordinate: Option<SolveStateCoordinate>,
+    /// For a scalar whose defining equation makes it the angle of a phasor,
+    /// or the cosine of that angle, the phasor's component scalars; `None`
+    /// for every other visible scalar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phasor: Option<SolvePhasor>,
+}
+
+/// The phasor one visible scalar is a function of: its defining equation
+/// reads `atan2(im, re)` of the two visible scalars `im` and `re`, each up to
+/// sign. Its angle is meaningful only modulo `2*pi`, and neither the angle
+/// nor its cosine is defined where the phasor `(re, im)` is zero.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SolvePhasor {
+    pub function: SolvePhasorFunction,
+    pub re: String,
+    pub im: String,
+}
+
+/// How a scalar depends on the angle of its phasor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SolvePhasorFunction {
+    /// The angle itself, on any `2*pi` branch.
+    Angle,
+    /// The cosine of the angle (a power factor).
+    CosineOfAngle,
+}
+
+/// The source scalar one generated state coordinate equals: the
+/// `derivative_order`-th time derivative of the visible scalar `variable`.
+/// Order zero is the declared value itself.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SolveStateCoordinate {
+    pub variable: String,
+    pub derivative_order: u32,
+}
+
+impl SolveStateCoordinate {
+    /// The coordinate named as its source scalar wrapped in `derivative_order`
+    /// `der`s, as a state-selection record names a formal derivative.
+    pub fn source_name(&self) -> String {
+        derivative_name(&self.variable, self.derivative_order as usize)
+    }
+}
+
+/// `name` wrapped in `order` `der`s: the name of the `order`-th formal time
+/// derivative of a source scalar; order zero is the scalar itself.
+pub fn derivative_name(name: &str, order: usize) -> String {
+    (0..order).fold(name.to_string(), |name, _| format!("der({name})"))
 }
 
 /// Solver-facing Solve IR package.
@@ -1702,12 +1835,23 @@ pub struct SolveModel {
 }
 
 impl SolveModel {
-    /// Clone this compile-time model and resolve every periodic schedule at
-    /// the FMI instance's simulation start instant.
+    /// This compile-time model with every periodic schedule resolved at the
+    /// FMI instance's simulation start instant. A model with no periodic
+    /// schedule has nothing to resolve and is borrowed, not copied.
     pub fn resolved_periodic_schedules_at(
         &self,
         start_time: f64,
-    ) -> Result<Self, rumoca_core::ClockLatticeErrorKind> {
+    ) -> Result<std::borrow::Cow<'_, Self>, rumoca_core::ClockLatticeErrorKind> {
+        if self.problem.clocks.periodic_event_schedules.is_empty()
+            && self
+                .problem
+                .solve_layout
+                .pre_param_bindings
+                .iter()
+                .all(|binding| binding.clock_schedule.is_none())
+        {
+            return Ok(std::borrow::Cow::Borrowed(self));
+        }
         let mut resolved = self.clone();
         for schedule in &mut resolved.problem.clocks.periodic_event_schedules {
             *schedule = schedule.resolved_at(start_time)?;
@@ -1717,7 +1861,7 @@ impl SolveModel {
                 *schedule = schedule.resolved_at(start_time)?;
             }
         }
-        Ok(resolved)
+        Ok(std::borrow::Cow::Owned(resolved))
     }
 
     pub fn state_scalar_count(&self) -> usize {

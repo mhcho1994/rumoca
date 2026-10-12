@@ -18,6 +18,66 @@ pub(super) fn quality_gate_v3_metric_schema_migration() -> MslMetricSchemaMigrat
 }
 
 pub(super) fn reviewed_reference_boundary_migration() -> MslReferenceBoundaryMigration {
+    let mut migration = v13_reference_boundary_migration();
+    migration.previous = Some(Box::new(migration.clone()));
+    migration.metric.from_quality_gate_version = 13;
+    migration.metric.to_quality_gate_version = 14;
+    migration.metric.change = "phasor-angle-comparison-v1".to_string();
+    migration.metric.strict_high_before = 298;
+    migration.metric.strict_high_after = 304;
+    migration.metric.policy_excluded_after = 53;
+    migration.metric.excluded_strict_high_before = 0;
+    migration.metric.excluded_non_high_before = 0;
+    migration.metric.exclusions_sha256 =
+        "19d0bef167c5120f371e59de5f3c4ed785779b16115f4689ebd8976be55a1a14".to_string();
+    migration.evidence_git_commit = "f45f742de6ca9d824e3b707d1e91b31edd33ac7f".to_string();
+    migration.evidence_run = "ang-compare-quasistatic-focused".to_string();
+    migration.policy_excluded_before = 59;
+    migration.roster_additions = Vec::new();
+    migration
+}
+
+pub(super) fn v13_reference_boundary_migration() -> MslReferenceBoundaryMigration {
+    let mut migration = v12_reference_boundary_migration();
+    migration.previous = Some(Box::new(migration.clone()));
+    migration.metric.from_quality_gate_version = 12;
+    migration.metric.to_quality_gate_version = 13;
+    migration.metric.change = "typed-trace-exceptions-v6".to_string();
+    migration.metric.strict_high_before = 298;
+    migration.metric.strict_high_after = 298;
+    migration.metric.policy_excluded_after = 59;
+    migration.metric.excluded_strict_high_before = 0;
+    migration.metric.excluded_non_high_before = 8;
+    migration.metric.exclusions_sha256 =
+        "088949f877eab0b276dc056cb54e1bc2c62b25e1813d29cd1f5c616b6909d5ed".to_string();
+    migration.evidence_git_commit = "20face9056ff23ca23b71d111151d174c3755a05".to_string();
+    migration.evidence_run = "ci-37253114196".to_string();
+    migration.policy_excluded_before = 51;
+    migration.roster_additions = Vec::new();
+    migration
+}
+
+pub(super) fn v12_reference_boundary_migration() -> MslReferenceBoundaryMigration {
+    let mut migration = v11_reference_boundary_migration();
+    migration.previous = Some(Box::new(migration.clone()));
+    migration.metric.from_quality_gate_version = 11;
+    migration.metric.to_quality_gate_version = 12;
+    migration.metric.change = "typed-trace-exceptions-v5".to_string();
+    migration.metric.strict_high_before = 290;
+    migration.metric.strict_high_after = 290;
+    migration.metric.policy_excluded_after = 51;
+    migration.metric.excluded_strict_high_before = 0;
+    migration.metric.excluded_non_high_before = 0;
+    migration.metric.exclusions_sha256 =
+        "e4d219fec8391057e3e446b7e5cf83c115937e72d640eb92770bb6ddaf564bbb".to_string();
+    migration.evidence_git_commit = "a6ab80615c5f5efcd174c33979ddd3b35db1cfdb".to_string();
+    migration.evidence_run = "package-coverage-integration-full".to_string();
+    migration.policy_excluded_before = 38;
+    migration.roster_additions = Vec::new();
+    migration
+}
+
+pub(super) fn v11_reference_boundary_migration() -> MslReferenceBoundaryMigration {
     let mut migration = v10_reference_boundary_migration();
     migration.previous = Some(Box::new(migration.clone()));
     migration.metric.from_quality_gate_version = 10;

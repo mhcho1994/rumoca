@@ -45,6 +45,16 @@ pub trait DimensionInferenceContext {
         false
     }
 
+    /// Dimensions of the constant a resolved reference names, from that
+    /// constant's own binding (MLS 5.3).
+    fn declared_constant_dimensions(
+        &self,
+        _reference: &rumoca_ir_ast::ComponentReference,
+        _scope: &str,
+    ) -> Option<Vec<usize>> {
+        None
+    }
+
     fn infer_user_function_dimensions(
         &self,
         _function: &str,
@@ -132,6 +142,8 @@ fn component_reference_path(cr: &rumoca_ir_ast::ComponentReference) -> Cow<'_, s
 }
 
 pub struct TypeCheckEvalContext {
+    /// Cycle guard for dimension inference through constant bindings.
+    dimension_walk: crate::declared_constants::ConstantWalk,
     pub integers: FxHashMap<String, i64>,
     pub reals: FxHashMap<String, f64>,
     pub booleans: FxHashMap<String, bool>,
@@ -141,6 +153,8 @@ pub struct TypeCheckEvalContext {
     pub declared_dimensions: Arc<DeclaredDimensions>,
     /// Element values of one-dimensional Real array parameters.
     pub real_arrays: FxHashMap<String, Vec<f64>>,
+    /// Constant declarations by declaration identity (MLS 5.3).
+    pub declared_constants: rumoca_ir_ast::DeclaredConstants,
     /// Function definitions for compile-time evaluation (MLS §12.4).
     pub functions: Arc<FxHashMap<String, ClassDef>>,
     pub func_eval_depth: usize,
@@ -167,6 +181,8 @@ impl TypeCheckEvalContext {
             dimensions: FxHashMap::default(),
             declared_dimensions: Arc::default(),
             real_arrays: FxHashMap::default(),
+            declared_constants: Default::default(),
+            dimension_walk: Default::default(),
             functions: Arc::new(FxHashMap::default()),
             func_eval_depth: 0,
             enum_sizes: FxHashMap::default(),
@@ -232,6 +248,17 @@ impl TypeCheckEvalContext {
 }
 
 impl DimensionInferenceContext for TypeCheckEvalContext {
+    fn declared_constant_dimensions(
+        &self,
+        reference: &rumoca_ir_ast::ComponentReference,
+        scope: &str,
+    ) -> Option<Vec<usize>> {
+        self.dimension_walk
+            .enter(&self.declared_constants, reference, |binding| {
+                infer_dimensions_from_binding_with_scope(binding, self, scope)
+            })
+    }
+
     fn is_declared_scalar_reference(&self, reference: &rumoca_ir_ast::ComponentReference) -> bool {
         self.declared_dimensions.proves_scalar_reference(reference)
     }
@@ -916,17 +943,45 @@ fn eval_integer_array_with_scope(
 
 struct TypeCheckScalarAdapter<'a> {
     ctx: &'a TypeCheckEvalContext,
+    walk: crate::declared_constants::ConstantWalk,
 }
 
+impl<'a> TypeCheckScalarAdapter<'a> {
+    fn new(ctx: &'a TypeCheckEvalContext) -> Self {
+        Self {
+            ctx,
+            walk: Default::default(),
+        }
+    }
+
+    /// Evaluate the constant a resolved reference names in that constant's own
+    /// lexical scope (MLS 5.3), whichever scope reads it.
+    fn declared_constant<T>(
+        &self,
+        expr: &Expression,
+        eval: impl FnOnce(&Expression) -> Option<T>,
+    ) -> Option<T> {
+        let Expression::ComponentReference(reference) = expr else {
+            return None;
+        };
+        self.walk
+            .enter(&self.ctx.declared_constants, reference, eval)
+    }
+}
 impl AstScalarContext for TypeCheckScalarAdapter<'_> {
-    fn lookup_integer(&self, expr: &Expression, scope: &str, _depth: usize) -> Option<i64> {
+    fn lookup_integer(&self, expr: &Expression, scope: &str, depth: usize) -> Option<i64> {
         let path = rumoca_ir_ast::expression_component_path(expr)?.to_flat_string();
         lookup_with_scope(&path, scope, &self.ctx.integers)
             .copied()
             .or_else(|| lookup_with_scope(&path, scope, &self.ctx.enum_ordinals).copied())
+            .or_else(|| {
+                self.declared_constant(expr, |binding| {
+                    ast_scalar::eval_integer(binding, self, scope, depth + 1)
+                })
+            })
     }
 
-    fn lookup_real(&self, expr: &Expression, scope: &str, _depth: usize) -> Option<f64> {
+    fn lookup_real(&self, expr: &Expression, scope: &str, depth: usize) -> Option<f64> {
         let path = rumoca_ir_ast::expression_component_path(expr)?.to_flat_string();
         lookup_by_scope(&path, scope, &self.ctx.reals)
             .copied()
@@ -934,11 +989,20 @@ impl AstScalarContext for TypeCheckScalarAdapter<'_> {
                 lookup_by_scope(&path, scope, &self.ctx.integers).map(|value| *value as f64)
             })
             .or_else(|| array_values::lookup_real_element(expr, self.ctx, scope))
+            .or_else(|| {
+                self.declared_constant(expr, |binding| {
+                    ast_scalar::eval_real(binding, self, scope, depth + 1)
+                })
+            })
     }
 
-    fn lookup_boolean(&self, expr: &Expression, scope: &str, _depth: usize) -> Option<bool> {
+    fn lookup_boolean(&self, expr: &Expression, scope: &str, depth: usize) -> Option<bool> {
         let path = rumoca_ir_ast::expression_component_path(expr)?.to_flat_string();
-        lookup_boolean_with_scope(&path, self.ctx, scope)
+        lookup_boolean_with_scope(&path, self.ctx, scope).or_else(|| {
+            self.declared_constant(expr, |binding| {
+                ast_scalar::eval_boolean(binding, self, scope, depth + 1)
+            })
+        })
     }
 
     fn call_integer(
@@ -1013,7 +1077,7 @@ pub fn eval_real_with_scope(
     ctx: &TypeCheckEvalContext,
     scope: &str,
 ) -> Option<f64> {
-    ast_scalar::eval_real(expr, &TypeCheckScalarAdapter { ctx }, scope, 0)
+    ast_scalar::eval_real(expr, &TypeCheckScalarAdapter::new(ctx), scope, 0)
 }
 
 /// Scope-aware evaluation of real-valued function calls.
@@ -1066,7 +1130,7 @@ pub fn eval_boolean_with_scope(
     ctx: &TypeCheckEvalContext,
     scope: &str,
 ) -> Option<bool> {
-    ast_scalar::eval_boolean(expr, &TypeCheckScalarAdapter { ctx }, scope, 0)
+    ast_scalar::eval_boolean(expr, &TypeCheckScalarAdapter::new(ctx), scope, 0)
 }
 
 /// Try to evaluate an AST expression to a boolean.
@@ -1229,7 +1293,7 @@ pub fn eval_integer_with_scope(
     ctx: &TypeCheckEvalContext,
     scope: &str,
 ) -> Option<i64> {
-    ast_scalar::eval_integer(expr, &TypeCheckScalarAdapter { ctx }, scope, 0)
+    ast_scalar::eval_integer(expr, &TypeCheckScalarAdapter::new(ctx), scope, 0)
 }
 
 /// Infer dimensions from an array literal expression.
@@ -1544,3 +1608,14 @@ pub use late_inference::{
     VariabilityLevel, collect_constants, collect_subscript_refs, collect_variable_refs,
     max_variability_in_expr,
 };
+
+/// Evaluate an integer expression that reads only constants, each in its own
+/// declaration scope (MLS 5.3), without any parameter or instance values.
+pub fn eval_integer_of_declared_constants(
+    expr: &Expression,
+    constants: &rumoca_ir_ast::DeclaredConstants,
+) -> Option<i64> {
+    let mut ctx = TypeCheckEvalContext::new();
+    ctx.declared_constants = constants.clone();
+    eval_integer_with_scope(expr, &ctx, "")
+}

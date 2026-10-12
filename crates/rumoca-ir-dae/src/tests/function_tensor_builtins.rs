@@ -87,12 +87,26 @@ fn ones_and_fill_are_compact_typed_array_operations() {
     let encoded = serde_json::to_string(&dae).unwrap();
     let decoded: Dae = serde_json::from_str(&encoded).unwrap();
     decoded.inspect(|view| {
-        for (index, builtin, dimensions, text) in [
-            (2, PureBuiltin::Ones, &[2, 2][..], "ones(2, 2)"),
-            (5, PureBuiltin::Fill, &[3][..], "fill(0.5, 3)"),
+        // MLS 3.7 §10.3.3: `ones` is an Integer array; `fill` has the type of
+        // its value.
+        for (index, builtin, scalar, dimensions, text) in [
+            (
+                2,
+                PureBuiltin::Ones,
+                ScalarType::Integer,
+                &[2, 2][..],
+                "ones(2, 2)",
+            ),
+            (
+                5,
+                PureBuiltin::Fill,
+                ScalarType::Real,
+                &[3][..],
+                "fill(0.5, 3)",
+            ),
         ] {
             let expression = view.expression(view.expression_id(index).unwrap()).unwrap();
-            assert_eq!(expression.value_type().scalar_type(), ScalarType::Real);
+            assert_eq!(expression.value_type().scalar_type(), scalar);
             assert_eq!(expression.value_type().dimensions(), dimensions);
             assert_eq!(view.source_text(expression.provenance()), Some(text));
             assert!(matches!(
@@ -259,7 +273,7 @@ fn vector_is_one_compact_constructor_derived_view_and_round_trips() {
         bincode::serialize(&PureBuiltin::Vector).unwrap(),
         38_u32.to_le_bytes()
     );
-    assert_eq!(DAE_SCHEMA_VERSION, 43);
+    assert_eq!(DAE_SCHEMA_VERSION, 44);
     let json = serde_json::to_string(&dae).unwrap();
     assert!(json.contains("\"builtin\":\"vector\""));
     let decoded: Dae = serde_json::from_str(&json).unwrap();
@@ -437,7 +451,7 @@ fn transpose_swaps_only_the_first_two_axes_and_round_trips() {
         bincode::serialize(&PureBuiltin::Transpose).unwrap(),
         39_u32.to_le_bytes()
     );
-    assert_eq!(DAE_SCHEMA_VERSION, 43);
+    assert_eq!(DAE_SCHEMA_VERSION, 44);
     let json = serde_json::to_string(&dae).unwrap();
     assert!(json.contains("\"builtin\":\"transpose\""));
     let decoded: Dae = serde_json::from_str(&json).unwrap();
@@ -614,7 +628,7 @@ fn diagonal_and_outer_product_are_checked_compact_matrix_operations() {
         bincode::serialize(&PureBuiltin::OuterProduct).unwrap(),
         41_u32.to_le_bytes()
     );
-    assert_eq!(DAE_SCHEMA_VERSION, 43);
+    assert_eq!(DAE_SCHEMA_VERSION, 44);
     let json = serde_json::to_string(&dae).unwrap();
     assert!(json.contains("\"builtin\":\"diagonal\""));
     assert!(json.contains("\"builtin\":\"outer_product\""));
@@ -784,7 +798,7 @@ fn skew_is_one_checked_compact_real_matrix_operation_and_round_trips() {
         bincode::serialize(&PureBuiltin::Skew).unwrap(),
         42_u32.to_le_bytes()
     );
-    assert_eq!(DAE_SCHEMA_VERSION, 43);
+    assert_eq!(DAE_SCHEMA_VERSION, 44);
     let json = serde_json::to_string(&dae).unwrap();
     assert!(json.contains("\"builtin\":\"skew\""));
     let decoded: Dae = serde_json::from_str(&json).unwrap();

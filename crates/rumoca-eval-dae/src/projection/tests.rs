@@ -1,5 +1,18 @@
+mod abs_projection;
 mod array_update;
+mod conditional_activation;
+pub(super) mod domain_context;
+mod floor_projection;
+pub(super) mod fold_context;
+mod fold_external;
+mod indexed_write_fold;
+mod integer_calls;
 mod linear_solve;
+mod literal_update_sweeps;
+mod parameter_fragment_reuse;
+mod query;
+mod record_comprehension;
+pub(super) mod shape_only_size;
 mod shared_dag;
 mod zero_coefficients;
 

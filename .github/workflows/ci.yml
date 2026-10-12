@@ -11,6 +11,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # MSL parity phase budgets, shared by the shards that measure under them and
+  # the merge that certifies against them (SPEC_0050 timing margin).
+  MSL_PARITY_SIM_TIMEOUT_SECS: 45
+  MSL_PARITY_MODEL_ATTEMPT_TIMEOUT_SECS: 20
 
 # Prevent duplicate runs
 concurrency:
@@ -85,6 +89,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Install Node for CI script tests
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Test CI scripts
+        run: node --test .github/scripts/*.test.mjs
+
       # Architectural invariant, checked without compiling anything: `xtask` must
       # carry NO rumoca-* workspace crate. It parses args, moves files, and shells
       # out; compiler-linked work runs on demand through a command in its owning
@@ -146,6 +158,7 @@ jobs:
           name: architecture-review-scan
           path: target/review/review-scan.json
           if-no-files-found: ignore
+          retention-days: 7
 
       - name: Check generated parsers are current
         shell: bash
@@ -164,6 +177,7 @@ jobs:
           name: crate-dag
           path: target/crate-dag/workspace-crate-dag.dot
           if-no-files-found: error
+          retention-days: 7
 
   # Reproducible package build via the root crane+fenix flake. Nix store paths
   # are cached privately in GitHub Actions, so pull requests need no external
@@ -247,6 +261,7 @@ jobs:
           name: kani-proof-summary
           path: target/verification/kani-summary.json
           if-no-files-found: warn
+          retention-days: 7
 
   test:
     name: Test (${{ matrix.os }})
@@ -334,9 +349,15 @@ jobs:
         # Enabling it on Linux too is what stops ubuntu recompiling all of rumoca
         # every run (it previously had NO compiler cache — rust-cache keeps deps
         # but not workspace crates). Relies on the global CARGO_INCREMENTAL=0.
+        # The GHA cache service is an optimization, not a dependency: when it
+        # is unreachable the step is tolerated, the wrapper stays off and the
+        # later steps (MSL, CMM, tests) still run.
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Enable sccache wrapper
+        if: steps.sccache.outcome == 'success'
         shell: bash
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
@@ -487,6 +508,7 @@ jobs:
           name: tensor-compile-scaling-report
           path: target/tensor-scaling/report.json
           if-no-files-found: warn
+          retention-days: 7
 
   template-runtime-tests:
     name: Template Runtime (${{ matrix.backend }})
@@ -815,15 +837,16 @@ jobs:
           name: lsp-msl-benchmark-report
           path: target/lsp-msl-benchmark
           if-no-files-found: warn
+          retention-days: 7
 
   coverage-gate:
     name: Coverage Gate
     runs-on: ubuntu-24.04
     # This job installs cargo-llvm-cov and generates full workspace artifacts
-    # before running the trim/gate steps, so 30 minutes is too tight on cold
-    # GitHub runners. Keep explicit headroom here to avoid job-level
+    # before running the trim/gate steps; a full run takes about 45 minutes on
+    # cold GitHub runners. Keep explicit headroom here to avoid job-level
     # cancellation while tests are still progressing.
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -1188,8 +1211,8 @@ jobs:
             --sim-parallelism 2 \
             --sim-worker-memory-mb 2048 \
             --sim-total-memory-mb 6144 \
-            --sim-timeout-secs 45 \
-            --model-attempt-timeout-secs 20 \
+            --sim-timeout-secs "$MSL_PARITY_SIM_TIMEOUT_SECS" \
+            --model-attempt-timeout-secs "$MSL_PARITY_MODEL_ATTEMPT_TIMEOUT_SECS" \
             --monitor-interval-secs 10
 
       - name: Upload shard results
@@ -1202,6 +1225,7 @@ jobs:
             target/msl/results/sim_trace_comparison.json
             target/msl/results/msl_band_table.json
           if-no-files-found: error
+          retention-days: 7
 
   msl-merge:
     name: MSL Quality Gate (merge + gate)
@@ -1265,6 +1289,8 @@ jobs:
         run: |
           cargo xtask verify msl-parity \
             --merge-shards target/msl/shards \
+            --sim-timeout-secs "$MSL_PARITY_SIM_TIMEOUT_SECS" \
+            --model-attempt-timeout-secs "$MSL_PARITY_MODEL_ATTEMPT_TIMEOUT_SECS" \
             --prebuilt-test-binary "$PWD/result-msl-artifacts/bin/msl_tests"
 
       # The band table is part of the merged evidence, not an optional extra:
@@ -1506,6 +1532,7 @@ jobs:
             target/msl/results/msl_compatibility_report.md
             target/msl/results/msl_compatibility_report.json
           if-no-files-found: error
+          retention-days: 7
 
   msl-pr-status-on-failure:
     name: MSL PR status (upstream failure)
@@ -1718,6 +1745,7 @@ jobs:
             target/msl/modelicatest-survey/modelica_test_catalog.md
             target/msl/modelicatest-survey/modelica_test_targets_ci.promoted.json
           if-no-files-found: warn
+          retention-days: 7
 
   modelica-models-gate:
     name: modelica_models Compatibility Gate
@@ -1829,6 +1857,7 @@ jobs:
         with:
           name: documentation
           path: target/doc/
+          retention-days: 7
 
   # ============================================================================
   # VS Code Extension
@@ -1908,6 +1937,9 @@ jobs:
         #                                          diffsol is excluded, it pulls a
         #                                          non-browser-safe relaxed-SIMD graph)
         #   core     -> @cognipilot/rumoca-core  (no bundled solver — bring your own)
+        env:
+          # Sign in with ChatGPT client id for the hosted site; empty until issued.
+          OPENAI_SIWC_CLIENT_ID: ${{ vars.OPENAI_SIWC_CLIENT_ID }}
         run: |
           nix develop .#ci-wasm --command bash <<'EOF'
           set -euo pipefail
@@ -1958,6 +1990,7 @@ jobs:
               -e "s|window.rumocaWasmPkgSubdir = 'release-full-web';|window.rumocaWasmPkgSubdir = '$PKG_SUBDIR';|g" \
               -e "s|window.rumocaWasmPkgSubdir = 'release-full-web-rayon';|window.rumocaWasmPkgSubdir = '$PKG_SUBDIR';|g" \
               -e "s|window.rumocaRepoAssetBase = '../../';|window.rumocaRepoAssetBase = './';|g" \
+              -e "s|openaiSiwcClientId: ''|openaiSiwcClientId: '${OPENAI_SIWC_CLIENT_ID}'|g" \
               -e "s|../../assets/brand/rumoca.svg|assets/brand/rumoca.svg|g" \
               packages/playground/index.html > gh-pages/index.html
 
@@ -1980,6 +2013,7 @@ jobs:
         with:
           name: wasm-package
           path: packages/rumoca/dist/
+          retention-days: 7
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -2070,7 +2104,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             rumoca_asset: rumoca-linux-aarch64
             lsp_asset: rumoca-lsp-linux-aarch64
-          - os: macos-15-intel
+          - os: macos-15
             target: x86_64-apple-darwin
             rumoca_asset: rumoca-macos-x86_64
             lsp_asset: rumoca-lsp-macos-x86_64
@@ -2185,12 +2219,14 @@ jobs:
         with:
           name: ${{ matrix.rumoca_asset }}
           path: ./target/${{ matrix.target }}/release/rumoca${{ startsWith(matrix.target, 'x86_64-pc-windows-') && '.exe' || '' }}
+          retention-days: 7
 
       - name: Upload LSP binary
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.lsp_asset }}
           path: ./target/${{ matrix.target }}/release/rumoca-lsp${{ startsWith(matrix.target, 'x86_64-pc-windows-') && '.exe' || '' }}
+          retention-days: 7
 
   build-python-wheels:
     name: Build Python (${{ matrix.name }})
@@ -2211,7 +2247,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             nix_system: aarch64-linux
             name: linux-aarch64-gnu
-          - os: macos-15-intel
+          - os: macos-15
             target: x86_64-apple-darwin
             nix_system: x86_64-darwin
             name: macos-x86_64
@@ -2228,11 +2264,19 @@ jobs:
           token: ${{ github.token }}
           persist-credentials: true
 
+      - name: Ensure Rosetta for the x86_64 wheel on Apple Silicon
+        # GitHub no longer offers Intel macOS runners with a supported Nix
+        # installer, so the x86_64-darwin wheel builds on an Apple Silicon
+        # runner through Rosetta with Nix's x86_64-darwin platform enabled.
+        if: matrix.nix_system == 'x86_64-darwin'
+        run: softwareupdate --install-rosetta --agree-to-license
+
       - name: Install Nix
         if: runner.os != 'Windows'
         uses: DeterminateSystems/nix-installer-action@v22
         with:
           determinate: false
+          extra-conf: ${{ matrix.nix_system == 'x86_64-darwin' && 'extra-platforms = x86_64-darwin' || '' }}
 
       - name: GitHub Actions Nix cache
         if: runner.os != 'Windows'
@@ -2260,11 +2304,15 @@ jobs:
         if: runner.os == 'Windows'
         run: python -m pip install maturin
 
+      # The wheel steps run a plain (non-login) shell inside the Nix dev shell:
+      # a login profile re-prepends the runner's rustup and Homebrew paths,
+      # which shadow the pinned Nix toolchain and Python (on Apple Silicon the
+      # rustup host toolchain has no x86_64-apple-darwin standard library).
       - name: Run Python binding Rust tests
         if: matrix.name == 'linux-x86_64-gnu'
         shell: bash
         run: |
-          nix develop ".#devShells.${{ matrix.nix_system }}.ci-python-wheel" --command bash -lc '
+          nix develop ".#devShells.${{ matrix.nix_system }}.ci-python-wheel" --command bash -c '
             set -euo pipefail
             export PYO3_PYTHON="$(command -v python)"
             cargo test --package rumoca-bind-python --lib
@@ -2273,7 +2321,7 @@ jobs:
       - name: Build wheels (Nix)
         if: runner.os != 'Windows'
         run: |
-          nix develop ".#devShells.${{ matrix.nix_system }}.ci-python-wheel" --command bash -lc '
+          nix develop ".#devShells.${{ matrix.nix_system }}.ci-python-wheel" --command bash -c '
             set -euo pipefail
             target="${{ matrix.target }}"
             # Linux runners ship a very new glibc, so a native build tags the
@@ -2315,7 +2363,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          nix develop ".#devShells.${{ matrix.nix_system }}.ci-python-wheel" --command bash -lc '
+          nix develop ".#devShells.${{ matrix.nix_system }}.ci-python-wheel" --command bash -c '
             set -euo pipefail
             python -m venv target/python-wheel-smoke-venv
             . target/python-wheel-smoke-venv/bin/activate
@@ -2347,6 +2395,7 @@ jobs:
         with:
           name: wheels-${{ matrix.name }}
           path: dist
+          retention-days: 7
 
   build-python-sdist:
     name: Build Python sdist
@@ -2384,6 +2433,7 @@ jobs:
         with:
           name: wheels-sdist
           path: crates/rumoca-bind-python/dist
+          retention-days: 7
 
   # ============================================================================
   # Deployment (only on tags, after verification and build completion)
@@ -2573,6 +2623,7 @@ jobs:
         with:
           name: release-assets
           path: release-assets/
+          retention-days: 7
 
       - name: Publish VS Code extensions to marketplaces
         shell: bash

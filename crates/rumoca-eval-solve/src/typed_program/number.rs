@@ -183,6 +183,14 @@ fn eval_integer_binary(
         SolveBinaryOperator::IntegerQuotient => lhs.checked_div(rhs),
         SolveBinaryOperator::Min => Some(lhs.min(rhs)),
         SolveBinaryOperator::Max => Some(lhs.max(rhs)),
+        SolveBinaryOperator::IntegerRemainder => integer_remainder(lhs, rhs),
+        SolveBinaryOperator::IntegerModulo => integer_remainder(lhs, rhs).and_then(|remainder| {
+            if remainder != 0 && (remainder < 0) != (rhs < 0) {
+                remainder.checked_add(rhs)
+            } else {
+                Some(remainder)
+            }
+        }),
         _ => None,
     }
     .filter(|result| domain.contains(*result))
@@ -193,6 +201,15 @@ fn eval_integer_binary(
     Ok(SolveValueKind::Integer(result))
 }
 
+fn integer_remainder(lhs: i64, rhs: i64) -> Option<i64> {
+    // The remainder is representable even when the intermediate quotient is not.
+    if rhs == -1 {
+        Some(0)
+    } else {
+        lhs.checked_rem(rhs)
+    }
+}
+
 fn eval_real_binary_f32(operator: SolveBinaryOperator, lhs: f32, rhs: f32) -> f32 {
     match operator {
         SolveBinaryOperator::Add => lhs + rhs,
@@ -201,11 +218,13 @@ fn eval_real_binary_f32(operator: SolveBinaryOperator, lhs: f32, rhs: f32) -> f3
         SolveBinaryOperator::Divide => lhs / rhs,
         SolveBinaryOperator::Power => lhs.powf(rhs),
         SolveBinaryOperator::Atan2 => lhs.atan2(rhs),
-        SolveBinaryOperator::Min => lhs.min(rhs),
-        SolveBinaryOperator::Max => lhs.max(rhs),
-        SolveBinaryOperator::IntegerQuotient
-        | SolveBinaryOperator::And
-        | SolveBinaryOperator::Or => f32::NAN,
+        SolveBinaryOperator::Min => rumoca_ir_solve::real_extremum(lhs, rhs, true),
+        SolveBinaryOperator::Max => rumoca_ir_solve::real_extremum(lhs, rhs, false),
+        SolveBinaryOperator::And
+        | SolveBinaryOperator::Or
+        | SolveBinaryOperator::IntegerQuotient
+        | SolveBinaryOperator::IntegerModulo
+        | SolveBinaryOperator::IntegerRemainder => f32::NAN,
     }
 }
 
@@ -217,11 +236,13 @@ fn eval_real_binary_f64(operator: SolveBinaryOperator, lhs: f64, rhs: f64) -> f6
         SolveBinaryOperator::Divide => lhs / rhs,
         SolveBinaryOperator::Power => lhs.powf(rhs),
         SolveBinaryOperator::Atan2 => lhs.atan2(rhs),
-        SolveBinaryOperator::Min => lhs.min(rhs),
-        SolveBinaryOperator::Max => lhs.max(rhs),
-        SolveBinaryOperator::IntegerQuotient
-        | SolveBinaryOperator::And
-        | SolveBinaryOperator::Or => f64::NAN,
+        SolveBinaryOperator::Min => rumoca_ir_solve::real_extremum(lhs, rhs, true),
+        SolveBinaryOperator::Max => rumoca_ir_solve::real_extremum(lhs, rhs, false),
+        SolveBinaryOperator::And
+        | SolveBinaryOperator::Or
+        | SolveBinaryOperator::IntegerQuotient
+        | SolveBinaryOperator::IntegerModulo
+        | SolveBinaryOperator::IntegerRemainder => f64::NAN,
     }
 }
 

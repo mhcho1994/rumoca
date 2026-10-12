@@ -175,6 +175,8 @@ mod tests {
                 nominal: None,
                 fixed: None,
                 description: None,
+                state_coordinate: None,
+                phasor: None,
             }],
         }
     }

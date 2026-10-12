@@ -1,6 +1,8 @@
 //! Evaluation of checked multi-lane tangent programs.
 
 use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use rumoca_ir_solve::{ColoredTangentPlan, TangentLaneProgram, TornTangentPlan};
 
@@ -89,12 +91,27 @@ pub struct TornTangentJacobian {
 /// `false` to decline.
 pub type DirectionCall<'a> = dyn FnMut(usize, &[f64], &mut Vec<f64>) -> bool + 'a;
 
+/// The sweep buffers of one [`TornTangentEvaluator`], kept between evaluations
+/// so a sweep allocates and zeroes nothing proportional to the point. `seed`
+/// is element-major, sized to the point times the lane count (one lane for a
+/// one-direction plan),
+/// and all zero between evaluations: a sweep writes only its tear and step
+/// target entries and restores exactly those. `out` holds one program's
+/// lane outputs, every entry of which the program writes.
+#[derive(Default)]
+struct LaneBuffers {
+    seed: Vec<f64>,
+    out: Vec<f64>,
+}
+
 /// A [`TornTangentPlan`] prepared for repeated evaluation.
 pub struct TornTangentEvaluator {
     plan: TornTangentPlan,
     programs: Vec<PreparedTangentLaneProgram>,
     /// The JVP rows a one-direction plan evaluates.
     directions: Option<std::rc::Rc<crate::PreparedScalarProgramBlock>>,
+    /// The sweep buffers, kept between evaluations; see [`LaneBuffers`].
+    buffers: RefCell<LaneBuffers>,
 }
 
 impl TornTangentEvaluator {
@@ -134,6 +151,7 @@ impl TornTangentEvaluator {
             plan,
             programs,
             directions,
+            buffers: RefCell::new(LaneBuffers::default()),
         })
     }
 
@@ -161,25 +179,52 @@ impl TornTangentEvaluator {
         point: TangentPoint<'_>,
         call: &mut DirectionCall<'_>,
     ) -> Result<Option<TornTangentJacobian>, EvalSolveError> {
-        if let Some(directions) = &self.directions {
-            return self.eval_directions(directions, point, call);
+        let lanes = if self.directions.is_some() {
+            1
+        } else {
+            self.plan.lanes()
+        };
+        let mut buffers = self.buffers.borrow_mut();
+        let LaneBuffers { seed, out } = &mut *buffers;
+        if seed.len() != point.y.len() * lanes {
+            seed.clear();
+            seed.resize(point.y.len() * lanes, 0.0);
         }
+        let result = match &self.directions {
+            Some(directions) => self.eval_directions(directions, point, call, (seed, out)),
+            None => self.eval_lanes_through(point, seed, out),
+        };
+        for &target in self.plan.tear_targets() {
+            seed[target * lanes..(target + 1) * lanes].fill(0.0);
+        }
+        for step in self.plan.steps() {
+            seed[step.target * lanes..(step.target + 1) * lanes].fill(0.0);
+        }
+        result
+    }
+
+    /// The multi-lane sweep of [`Self::eval_through`] over `seed`, which is
+    /// all zero on entry; it writes only tear and step target entries.
+    fn eval_lanes_through(
+        &self,
+        point: TangentPoint<'_>,
+        seed: &mut [f64],
+        out: &mut Vec<f64>,
+    ) -> Result<Option<TornTangentJacobian>, EvalSolveError> {
         let lanes = self.plan.lanes();
         let tears = lanes - 1;
         let steps = self.plan.steps();
-        let mut seed = vec![0.0; point.y.len() * lanes];
         for (column, &target) in self.plan.tear_targets().iter().enumerate() {
             seed[target * lanes + column] = 1.0;
         }
         let mut recovered = Vec::with_capacity(steps.len() * tears);
-        let mut out = Vec::new();
         let mut outputs = 0;
         for (index, step) in steps.iter().enumerate() {
             if step.group > 0 {
                 let group = &steps[index..index + step.group];
-                seed_group(&mut seed, group, (lanes, tears), 1.0);
-                outputs = self.eval_lanes(point, &seed, step.source.program, &mut out)?;
-                seed_group(&mut seed, group, (lanes, tears), 0.0);
+                seed_group(seed, group, (lanes, tears), 1.0);
+                outputs = self.eval_lanes(point, seed, step.source.program, out)?;
+                seed_group(seed, group, (lanes, tears), 0.0);
             }
             let tangent = |lane: usize| out[lane * outputs + step.source.output];
             let coefficient = tangent(tears);
@@ -195,7 +240,7 @@ impl TornTangentEvaluator {
         let mut residual = vec![0.0; tears * tears];
         for (row, entry) in self.plan.residuals().iter().enumerate() {
             if entry.group > 0 {
-                outputs = self.eval_lanes(point, &seed, entry.source.program, &mut out)?;
+                outputs = self.eval_lanes(point, seed, entry.source.program, out)?;
             }
             for lane in 0..tears {
                 residual[row * tears + lane] = out[lane * outputs + entry.source.output];
@@ -216,11 +261,10 @@ impl TornTangentEvaluator {
         directions: &crate::PreparedScalarProgramBlock,
         point: TangentPoint<'_>,
         call: &mut DirectionCall<'_>,
+        (seed, out): (&mut [f64], &mut Vec<f64>),
     ) -> Result<Option<TornTangentJacobian>, EvalSolveError> {
         let tears = self.plan.lanes() - 1;
         let steps = self.plan.steps();
-        let mut seed = vec![0.0; point.y.len()];
-        let mut out = Vec::new();
         let mut direction = |seed: &[f64], program: usize, out: &mut Vec<f64>| {
             if call(program, seed, out) {
                 return Ok(());
@@ -243,9 +287,9 @@ impl TornTangentEvaluator {
                 continue;
             }
             let group = &steps[index..index + step.group];
-            seed_group(&mut seed, group, (1, 0), 1.0);
-            direction(&seed, step.source.program, &mut out)?;
-            seed_group(&mut seed, group, (1, 0), 0.0);
+            seed_group(seed, group, (1, 0), 1.0);
+            direction(seed, step.source.program, out)?;
+            seed_group(seed, group, (1, 0), 0.0);
             coefficients.extend(group.iter().map(|member| out[member.source.output]));
             if coefficients[index..]
                 .iter()
@@ -261,7 +305,7 @@ impl TornTangentEvaluator {
             for (index, step) in steps.iter().enumerate() {
                 let fresh = step.group > 0;
                 fresh
-                    .then(|| direction(&seed, step.source.program, &mut out))
+                    .then(|| direction(seed, step.source.program, out))
                     .transpose()?;
                 let value = -out[step.source.output] / coefficients[index];
                 seed[step.target] = value;
@@ -270,7 +314,7 @@ impl TornTangentEvaluator {
             for (row, entry) in self.plan.residuals().iter().enumerate() {
                 let fresh = entry.group > 0;
                 fresh
-                    .then(|| direction(&seed, entry.source.program, &mut out))
+                    .then(|| direction(seed, entry.source.program, out))
                     .transpose()?;
                 residual[row * tears + column] = out[entry.source.output];
             }
@@ -343,17 +387,48 @@ fn seed_group(
 /// A [`ColoredTangentPlan`] prepared for repeated evaluation.
 pub struct ColoredTangentEvaluator {
     plan: ColoredTangentPlan,
-    programs: Vec<PreparedTangentLaneProgram>,
+    programs: Vec<Rc<PreparedTangentLaneProgram>>,
+}
+
+/// The prepared lane programs that several colored evaluators share: each
+/// widened program (by identity) is prepared once, with one scratch.
+#[derive(Default)]
+pub struct PreparedLaneCatalog {
+    entries: Vec<(Arc<TangentLaneProgram>, Rc<PreparedTangentLaneProgram>)>,
+}
+
+impl PreparedLaneCatalog {
+    fn prepare(&mut self, program: &Arc<TangentLaneProgram>) -> Rc<PreparedTangentLaneProgram> {
+        if let Some((_, prepared)) = self
+            .entries
+            .iter()
+            .find(|(widened, _)| Arc::ptr_eq(widened, program))
+        {
+            return Rc::clone(prepared);
+        }
+        let prepared = Rc::new(PreparedTangentLaneProgram::new(TangentLaneProgram::clone(
+            program,
+        )));
+        self.entries
+            .push((Arc::clone(program), Rc::clone(&prepared)));
+        prepared
+    }
 }
 
 impl ColoredTangentEvaluator {
     #[must_use]
     pub fn new(plan: ColoredTangentPlan) -> Self {
+        Self::sharing(plan, &mut PreparedLaneCatalog::default())
+    }
+
+    /// [`Self::new`] for one of several evaluators whose plans share widened
+    /// programs: each is prepared once into `catalog`.
+    #[must_use]
+    pub fn sharing(plan: ColoredTangentPlan, catalog: &mut PreparedLaneCatalog) -> Self {
         let programs = plan
             .programs()
             .iter()
-            .cloned()
-            .map(PreparedTangentLaneProgram::new)
+            .map(|program| catalog.prepare(program))
             .collect();
         Self { plan, programs }
     }

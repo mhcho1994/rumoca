@@ -7,7 +7,7 @@ pub(super) struct SourceBalanceInput<'scope> {
     pub(super) excluded_equation_rows: &'scope HashSet<usize>,
     pub(super) record_equations: &'scope HashMap<usize, RecordEquationPlan>,
     pub(super) multi_output_equations: &'scope HashMap<usize, MultiOutputEquationPlan>,
-    pub(super) connection_ranks: &'scope HashMap<VarName, usize>,
+    pub(super) connection_ranks: &'scope DiscreteConnectionRanks,
     pub(super) aggregate_connections: &'scope AggregateDiscreteConnections,
 }
 
@@ -102,11 +102,11 @@ fn add_multi_output_receivers(
     detail: &mut BalanceDetail,
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
-    receivers: &[&VarName],
+    receivers: &[VarName],
 ) -> Result<(), ToDaeError> {
     for receiver in receivers {
-        let scalar_count = checked_shape_size(receiver, &flat.variables[*receiver])?;
-        match roles[*receiver] {
+        let scalar_count = checked_shape_size(receiver, &flat.variables[receiver])?;
+        match roles[receiver] {
             PlannedRole::DiscreteReal => detail.discrete_real_equations += scalar_count,
             PlannedRole::DiscreteValue => detail.discrete_value_definitions += scalar_count,
             _ => detail.continuous_equations += scalar_count,
@@ -120,9 +120,14 @@ fn multi_output_equation_scalar_count(
     equation: &flat::Equation,
     plan: &MultiOutputEquationPlan,
 ) -> Result<usize, ToDaeError> {
+    let records = plan
+        .records
+        .iter()
+        .flat_map(|record| record.plan.fields.iter().map(|field| &field.target));
     plan.outputs
         .iter()
         .flatten()
+        .chain(records)
         .try_fold(0usize, |count, target| {
             count
                 .checked_add(checked_shape_size(target, &flat.variables[target])?)

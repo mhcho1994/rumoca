@@ -1,4 +1,5 @@
 use super::*;
+use nalgebra::DMatrix;
 
 #[test]
 fn diagnostics_are_opt_in_thread_local_bounded_and_reset() {
@@ -18,7 +19,7 @@ fn diagnostics_are_opt_in_thread_local_bounded_and_reset() {
 #[test]
 fn projection_keeps_native_matrix_and_omits_oversized_values_explicitly() {
     let scope = Scope::start().unwrap();
-    let matrix = DMatrix::from_row_slice(2, 2, &[1., 2., 3., 4.]);
+    let matrix = BlockJacobian::dense(DMatrix::from_row_slice(2, 2, &[1., 2., 3., 4.]));
     projection("initialization", 0.0, &[1, 3], &[2, 4], &[5., 6.], &matrix);
     projection(
         "projection",
@@ -26,7 +27,7 @@ fn projection_keeps_native_matrix_and_omits_oversized_values_explicitly() {
         &[0; 65],
         &[1],
         &[0.; 65],
-        &DMatrix::zeros(65, 1),
+        &BlockJacobian::zeros(65, 1),
     );
     let evidence = scope.finish();
     assert_eq!(

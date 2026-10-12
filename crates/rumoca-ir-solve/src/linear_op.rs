@@ -105,6 +105,19 @@ pub enum TargetAssignmentShape {
         coefficient: f64,
         expr_eval_len: usize,
     },
+    /// The residual is `divisor_scale * divisor + numerator_scale * (c / target)`
+    /// with `c` the nonzero finite literal stored in `numerator_reg`, and the
+    /// divisor independent of the target. The isolated value is
+    /// `-(numerator_scale * c) / (divisor_scale * divisor)`: the unique
+    /// solution whenever the divisor is nonzero and finite, and none otherwise.
+    Reciprocal {
+        target_y_index: usize,
+        numerator_reg: Reg,
+        numerator_scale: f64,
+        divisor_reg: Reg,
+        divisor_scale: f64,
+        expr_eval_len: usize,
+    },
     TensorAffine {
         target_y_index: usize,
         projection: crate::refresh::AffineTensorProjection,
@@ -124,6 +137,7 @@ impl TargetAssignmentShape {
                 coefficient_reg, ..
             } => coefficient_reg.is_none(),
             Self::TensorAffine { projection, .. } => projection.constant_coefficient(),
+            Self::Reciprocal { .. } => false,
         }
     }
 
@@ -139,6 +153,11 @@ impl TargetAssignmentShape {
             } => ([Some(*offset_reg), *coefficient_reg], &[]),
             Self::Additive { offset_terms, .. } => ([None, None], offset_terms),
             Self::TensorAffine { .. } => ([None, None], &[]),
+            Self::Reciprocal {
+                numerator_reg,
+                divisor_reg,
+                ..
+            } => ([Some(*numerator_reg), Some(*divisor_reg)], &[]),
         };
         fixed
             .into_iter()
@@ -166,7 +185,8 @@ impl TargetAssignmentShape {
             | Self::Direct { target_y_index, .. }
             | Self::Affine { target_y_index, .. }
             | Self::Additive { target_y_index, .. }
-            | Self::TensorAffine { target_y_index, .. } => *target_y_index,
+            | Self::TensorAffine { target_y_index, .. }
+            | Self::Reciprocal { target_y_index, .. } => *target_y_index,
         }
     }
 
@@ -177,7 +197,8 @@ impl TargetAssignmentShape {
             | Self::Direct { expr_eval_len, .. }
             | Self::Affine { expr_eval_len, .. }
             | Self::Additive { expr_eval_len, .. }
-            | Self::TensorAffine { expr_eval_len, .. } => *expr_eval_len,
+            | Self::TensorAffine { expr_eval_len, .. }
+            | Self::Reciprocal { expr_eval_len, .. } => *expr_eval_len,
         }
     }
 }
@@ -268,6 +289,27 @@ impl BinaryOp {
     }
 }
 
+/// Real `min` (`minimum` true) or `max` as every backend evaluates it: a single
+/// NaN operand is ignored, two NaN operands give a quiet NaN (`lhs + rhs`), and
+/// otherwise the strictly smaller (larger) operand is returned, `rhs` on a tie.
+///
+/// This is defined here rather than by the host's `f32::min`/`f64::min`,
+/// whose handling of a signaling NaN differs between targets.
+#[must_use]
+pub fn real_extremum<T>(lhs: T, rhs: T, minimum: bool) -> T
+where
+    T: Copy + PartialOrd + std::ops::Add<Output = T>,
+{
+    let nan = |value: T| value.partial_cmp(&value).is_none();
+    match (nan(lhs), nan(rhs)) {
+        (true, true) => lhs + rhs,
+        (true, false) => rhs,
+        (false, true) => lhs,
+        (false, false) if (minimum && lhs < rhs) || (!minimum && lhs > rhs) => lhs,
+        (false, false) => rhs,
+    }
+}
+
 /// Comparison operation that yields Modelica boolean-as-real (`0.0`/`1.0`).
 ///
 /// Equality and inequality are exact IEEE comparisons at Solve-IR row level.
@@ -333,20 +375,15 @@ pub enum TensorIndex {
     Runtime(Reg),
 }
 
-/// One axis of a compact tensor update.
+/// One axis of a compact tensor update, ordinary or one patch of a tensor-valued
+/// fold transition (`FoldTensorUpdate`).
 ///
 /// `Whole` preserves that axis in the update value. `Index` removes it and
 /// selects one zero-based constant or one-based runtime Modelica coordinate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TensorSubscript {
-    Whole,
-    Index(TensorIndex),
-}
-
-/// One axis of a compact ordinary tensor update.
-///
-/// A slice remains a packed register range of one-based Modelica indices; it
-/// is never enumerated into an extent-sized select graph in Solve IR.
+/// A slice remains a packed register range of one-based Modelica indices (the
+/// window `a[s:s + k - 1]` is `k` registers holding `s`, `s + 1`, ...); the
+/// update value keeps that axis at the slice extent. It is never enumerated
+/// into an extent-sized select graph in Solve IR.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TensorUpdateSubscript {
     Whole,
@@ -357,10 +394,63 @@ pub enum TensorUpdateSubscript {
 /// One ordered patch in a compact tensor-valued fold transition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FoldTensorUpdate {
-    pub subscripts: Box<[TensorSubscript]>,
+    pub subscripts: Box<[TensorUpdateSubscript]>,
     pub condition: Option<Reg>,
     pub value_start: Reg,
     pub value_stride: usize,
+}
+
+impl TensorUpdateSubscript {
+    /// Extent this axis contributes to the update value: the whole `extent`,
+    /// one for an index, the slice extent for a slice. `None` on overflow.
+    #[must_use]
+    pub fn value_extent(&self, extent: u32) -> Option<usize> {
+        match self {
+            Self::Whole => Some(extent as usize),
+            Self::Index(_) => Some(1),
+            Self::Slice { dimensions, .. } => dimensions
+                .iter()
+                .try_fold(1usize, |count, extent| count.checked_mul(*extent as usize)),
+        }
+    }
+
+    /// First register and register count of the run-time coordinates this axis
+    /// reads: one register for a run-time index, the packed index range of a
+    /// slice. A whole or constant-index axis reads none.
+    #[must_use]
+    pub fn runtime_registers(&self) -> Option<(Reg, usize)> {
+        match self {
+            Self::Whole | Self::Index(TensorIndex::Constant(_)) => None,
+            Self::Index(TensorIndex::Runtime(register)) => Some((*register, 1)),
+            Self::Slice { start, .. } => Some((*start, self.value_extent(0)?)),
+        }
+    }
+}
+
+impl FoldTensorUpdate {
+    /// Scalars one patch of a tensor of `dimensions` carries per lane, or
+    /// `None` on overflow.
+    #[must_use]
+    pub fn value_count(&self, dimensions: &[u32]) -> Option<usize> {
+        dimensions
+            .iter()
+            .zip(self.subscripts.iter())
+            .try_fold(1usize, |count, (&extent, subscript)| {
+                count.checked_mul(subscript.value_extent(extent)?)
+            })
+    }
+
+    /// Last register this patch's run-time coordinates read, if any.
+    #[must_use]
+    pub fn last_coordinate_register(&self) -> Option<Reg> {
+        self.subscripts
+            .iter()
+            .filter_map(TensorUpdateSubscript::runtime_registers)
+            .filter_map(|(start, count)| {
+                start.checked_add(Reg::try_from(count.checked_sub(1)?).ok()?)
+            })
+            .max()
+    }
 }
 
 /// One compact tensor-expression node. Node id zero is the carried source;
@@ -399,6 +489,19 @@ pub struct FunctionFoldProgram {
     pub capture_count: usize,
     pub register_count: usize,
     pub update: Vec<LinearOp>,
+    /// A bounded `while` fold's predicate (MLS §11.2.3), evaluated on the
+    /// carried tuple and captures before each pass; the first false value
+    /// ends the fold with that tuple. It reads no binder.
+    #[serde(default)]
+    pub continuation: Option<FoldContinuation>,
+}
+
+/// The checked predicate region of a bounded `while` fold: exactly one
+/// stored output, read as a Boolean (nonzero continues).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FoldContinuation {
+    pub register_count: usize,
+    pub ops: Vec<LinearOp>,
 }
 
 impl FunctionFoldProgram {
@@ -427,7 +530,33 @@ impl FunctionFoldProgram {
             capture_count,
             register_count,
             update,
+            continuation: None,
         })
+    }
+
+    /// Make this fold end at the first pass whose `ops` predicate is false.
+    /// The region reads the carried tuple and captures only, never a binder,
+    /// and stores exactly one value.
+    pub fn with_continuation(
+        mut self,
+        ops: Vec<LinearOp>,
+    ) -> Result<Self, ScalarProgramRegisterError> {
+        let register_count =
+            continuation_register_count(&ops, self.carried_count, self.capture_count)?;
+        self.continuation = Some(FoldContinuation {
+            register_count,
+            ops,
+        });
+        Ok(self)
+    }
+
+    /// Every op region of the fold: the update, then the continuation.
+    pub fn regions(&self) -> impl Iterator<Item = &[LinearOp]> {
+        std::iter::once(self.update.as_slice()).chain(
+            self.continuation
+                .as_ref()
+                .map(|continuation| continuation.ops.as_slice()),
+        )
     }
 
     pub fn register_flow(&self) -> Result<ScalarProgramRegisterFlow, ScalarProgramRegisterError> {
@@ -446,8 +575,41 @@ impl FunctionFoldProgram {
                 reason: "stored update register count does not match its body",
             });
         }
+        if let Some(continuation) = &self.continuation
+            && continuation_register_count(
+                &continuation.ops,
+                self.carried_count,
+                self.capture_count,
+            )? != continuation.register_count
+        {
+            return Err(ScalarProgramRegisterError::InvalidFunctionFold {
+                op_index: 0,
+                reason: "stored continuation register count does not match its region",
+            });
+        }
         Ok(flow)
     }
+}
+
+/// The register count of a continuation region over a fold's carried tuple
+/// and captures; a binder read or any output count but one is refused.
+fn continuation_register_count(
+    ops: &[LinearOp],
+    carried_count: usize,
+    capture_count: usize,
+) -> Result<usize, ScalarProgramRegisterError> {
+    let flow = ScalarProgramRegisterFlow::derive_inner(
+        ops,
+        Some((carried_count, 0, capture_count)),
+        None,
+    )?;
+    if fold_output_count(ops, 0)? != 1 {
+        return Err(ScalarProgramRegisterError::InvalidFunctionFold {
+            op_index: 0,
+            reason: "a fold continuation stores exactly one predicate",
+        });
+    }
+    Ok(flow.register_count())
 }
 
 /// One checked condition and its lazily selected correlated result region.
@@ -1578,11 +1740,61 @@ fn mark_register_range_initialized(initialized: &mut Vec<bool>, dst: Reg, count:
 /// Every extracted check needs the same row context, so bundling it keeps the
 /// per-operation helpers below the workspace argument budget and keeps one
 /// operation-name spelling (`LinearOp::kind_name`) in every diagnostic.
+/// The registers an operation's sources may read: those an earlier write
+/// defined, or, when collecting, every register the operation reads (each is
+/// recorded and counts as defined, so one validation yields the whole read
+/// set in time linear in it).
+#[derive(Clone, Copy)]
+pub(crate) struct Initialized<'a> {
+    flags: &'a [bool],
+    reads: Option<&'a std::cell::RefCell<Vec<Reg>>>,
+}
+
+impl<'a> Initialized<'a> {
+    fn is_defined(self, register: Reg) -> bool {
+        match self.reads {
+            Some(reads) => {
+                reads.borrow_mut().push(register);
+                true
+            }
+            None => self.flags.get(register as usize).copied().unwrap_or(false),
+        }
+    }
+}
+
+impl<'a> From<&'a [bool]> for Initialized<'a> {
+    fn from(flags: &'a [bool]) -> Self {
+        Self { flags, reads: None }
+    }
+}
+
+impl<'a> From<&'a Vec<bool>> for Initialized<'a> {
+    fn from(flags: &'a Vec<bool>) -> Self {
+        Self::from(flags.as_slice())
+    }
+}
+
+/// Every register `op` reads, ascending, as its register-flow validation
+/// proves them; `None` when `op` cannot be validated at the top level.
+pub(crate) fn op_read_registers(op: &LinearOp) -> Option<Vec<Reg>> {
+    let reads = std::cell::RefCell::new(Vec::new());
+    let collecting = Initialized {
+        flags: &[],
+        reads: Some(&reads),
+    };
+    let mut validation = ScalarProgramValidationCache::default();
+    validate_op_sources(op, 0, collecting, None, None, &mut validation).ok()?;
+    let mut reads = reads.into_inner();
+    reads.sort_unstable();
+    reads.dedup();
+    Some(reads)
+}
+
 #[derive(Clone, Copy)]
 struct OpSources<'a> {
     op: &'a LinearOp,
     op_index: usize,
-    initialized: &'a [bool],
+    initialized: Initialized<'a>,
     fold_context: Option<(usize, usize, usize)>,
     conditional_capture_count: Option<usize>,
     max_lanes: usize,
@@ -1691,15 +1903,16 @@ impl FoldSlot {
 /// per line, which triples the table without telling a reader anything the
 /// single-line form does not.
 #[rustfmt::skip]
-fn validate_op_sources(
+fn validate_op_sources<'a>(
     op: &LinearOp,
     op_index: usize,
-    initialized: &[bool],
+    initialized: impl Into<Initialized<'a>>,
     fold_context: Option<(usize, usize, usize)>,
     conditional_capture_count: Option<usize>,
     validation: &mut ScalarProgramValidationCache,
 ) -> Result<Option<Reg>, ScalarProgramRegisterError> {
     let max_lanes = validation.max_tensor_lanes();
+    let initialized = initialized.into();
     let cx = OpSources { op, op_index, initialized, fold_context, conditional_capture_count, max_lanes };
     match *op {
         LinearOp::Const { .. } | LinearOp::LoadTime { .. } | LinearOp::LoadY { .. }
@@ -2042,7 +2255,7 @@ fn fold_tensor_patches(
         }
         for (&extent, subscript) in dimensions.iter().zip(update.subscripts.iter()) {
             value_count =
-                fold_tensor_subscript(cx, extent, *subscript, value_count, &mut max_register)?;
+                fold_tensor_subscript(cx, extent, subscript, value_count, &mut max_register)?;
         }
         let value_last_offset = (value_count - 1)
             .checked_mul(update.value_stride)
@@ -2064,26 +2277,17 @@ fn fold_tensor_patches(
 fn fold_tensor_subscript(
     cx: OpSources<'_>,
     extent: u32,
-    subscript: TensorSubscript,
+    subscript: &TensorUpdateSubscript,
     value_count: usize,
     max_register: &mut Option<Reg>,
 ) -> Result<usize, ScalarProgramRegisterError> {
-    match subscript {
-        TensorSubscript::Whole => value_count
-            .checked_mul(extent as usize)
-            .ok_or_else(|| cx.tensor_error("tensor update value extent overflows")),
-        TensorSubscript::Index(TensorIndex::Constant(coordinate)) => {
-            if coordinate >= extent {
-                return Err(cx.tensor_error("constant tensor update coordinate is out of range"));
-            }
-            Ok(value_count)
-        }
-        TensorSubscript::Index(TensorIndex::Runtime(register)) => {
-            cx.require(register)?;
-            *max_register = Some(max_register.map_or(register, |last: Reg| last.max(register)));
-            Ok(value_count)
-        }
+    // `last` stays zero, the smallest register, unless the axis reads registers.
+    let mut last = 0;
+    let value_count = tensor_update_subscript(cx, extent, subscript, value_count, &mut last)?;
+    if subscript.runtime_registers().is_some() {
+        *max_register = Some(max_register.map_or(last, |previous: Reg| previous.max(last)));
     }
+    Ok(value_count)
 }
 
 /// Element-major lane values read by one aggregate tensor patch.
@@ -2765,7 +2969,7 @@ fn require_strided_registers(
     start: Reg,
     count: usize,
     stride: usize,
-    initialized: &[bool],
+    initialized: Initialized<'_>,
 ) -> Result<Reg, ScalarProgramRegisterError> {
     let Some(last_term) = count.checked_sub(1) else {
         return Err(ScalarProgramRegisterError::EmptyRegisterRange {
@@ -2811,9 +3015,9 @@ fn require_register(
     op_index: usize,
     operation: &'static str,
     register: Reg,
-    initialized: &[bool],
+    initialized: Initialized<'_>,
 ) -> Result<(), ScalarProgramRegisterError> {
-    if initialized.get(register as usize).copied().unwrap_or(false) {
+    if initialized.is_defined(register) {
         return Ok(());
     }
     Err(ScalarProgramRegisterError::UndefinedRegister {
@@ -2828,7 +3032,7 @@ fn require_register_range(
     operation: &'static str,
     start: Reg,
     len: usize,
-    initialized: &[bool],
+    initialized: Initialized<'_>,
 ) -> Result<Reg, ScalarProgramRegisterError> {
     let Some(last_offset) = len.checked_sub(1) else {
         return Err(ScalarProgramRegisterError::EmptyRegisterRange {
@@ -2853,7 +3057,7 @@ fn require_register_range(
         },
     )?;
     for register in start..=end {
-        if !initialized.get(register as usize).copied().unwrap_or(false) {
+        if !initialized.is_defined(register) {
             return Err(ScalarProgramRegisterError::UndefinedRegister {
                 op_index,
                 operation,
@@ -2870,7 +3074,7 @@ fn require_strided_register_range(
     start: Reg,
     count: usize,
     stride: usize,
-    initialized: &[bool],
+    initialized: Initialized<'_>,
 ) -> Result<Reg, ScalarProgramRegisterError> {
     let Some(last_ordinal) = count.checked_sub(1) else {
         return Err(ScalarProgramRegisterError::EmptyRegisterRange {
@@ -2928,6 +3132,25 @@ fn checked_register_count(max_register: Option<Reg>) -> Result<usize, ScalarProg
 #[cfg(test)]
 mod tests {
     use super::{BinaryOp, CompareOp, LinearOp, UnaryOp};
+
+    #[test]
+    fn real_extremum_ignores_one_nan_and_quiets_two() {
+        use super::real_extremum;
+        let signaling = f64::from_bits(0x7ff0_0000_0000_0001);
+        for minimum in [true, false] {
+            assert_eq!(real_extremum(signaling, 1.0, minimum), 1.0);
+            assert_eq!(real_extremum(-2.0, f64::NAN, minimum), -2.0);
+            let both = real_extremum(signaling, signaling, minimum);
+            assert!(both.is_nan() && both.to_bits() & (1 << 51) != 0);
+        }
+        assert_eq!(real_extremum(1.0, 2.0, true), 1.0);
+        assert_eq!(real_extremum(1.0, 2.0, false), 2.0);
+        assert_eq!(
+            real_extremum(-0.0f64, 0.0, true).to_bits(),
+            0.0f64.to_bits()
+        );
+        assert_eq!(real_extremum(f32::NAN, 3.0f32, true), 3.0);
+    }
 
     #[test]
     fn compare_op_equality_is_exact_not_epsilon_based() {

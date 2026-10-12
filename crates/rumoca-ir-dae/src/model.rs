@@ -164,7 +164,9 @@ pub(crate) use construction_checks::{
 /// exported causality.
 /// 43 marks a B.1c owner whose targets are unread observations of a
 /// continuous-time definition, evaluated at every output point.
-pub const DAE_SCHEMA_VERSION: u16 = 43;
+/// 44 adds an optional continuation predicate to compact function folds: a
+/// bounded `while` loop is one fold that ends at its first false predicate.
+pub const DAE_SCHEMA_VERSION: u16 = 44;
 
 pub use domains::Domains;
 pub(crate) use domains::insert_domain;
@@ -172,7 +174,7 @@ use external_functions::build_external_body;
 pub use external_functions::{
     ExternalArgument, ExternalFunctionBody, ExternalLanguage, ExternalLinkage, FunctionPurity,
 };
-pub(crate) use external_functions::{ExternalArgumentEntry, ExternalBodyEntry};
+pub(crate) use external_functions::{ExternalArgumentEntry, ExternalBodyEntry, NativeBodyBinding};
 use function_checks::*;
 use function_derivatives::FunctionDerivativeEntry;
 pub use function_derivatives::FunctionDerivativeView;
@@ -189,8 +191,8 @@ pub use view::{
     ExpressionOperation, ExpressionView, ExternalArgumentView, ExternalFunctionView,
     FunctionConditionalView, FunctionDefinitionValues, FunctionDefinitionView, FunctionFoldView,
     FunctionParameterView, FunctionStatementView, FunctionStatements, FunctionValueView,
-    FunctionView, InitializationOwnerView, RangeBoundView, RangeView, RecordFieldLayout,
-    ResidualEquationView, RuntimeQuotientOwnerKind, RuntimeQuotientOwnerView,
+    FunctionView, InitializationOwnerView, NativeBodyView, RangeBoundView, RangeView,
+    RecordFieldLayout, ResidualEquationView, RuntimeQuotientOwnerKind, RuntimeQuotientOwnerView,
     StringConversionFormatView, StructuredFamilyView, SubscriptView, SubscriptsView,
     ValueTypeOperands, VariableIdentity, VariableView, broadcast_scalar_values,
 };
@@ -219,6 +221,7 @@ pub(crate) struct VariableAttributesWire {
     unit: Option<String>,
     state_select: StateSelect,
     description: Option<String>,
+    enumeration: Option<rumoca_core::EnumerationDeclaration>,
     pub(crate) causality: VariableCausality,
     declared_causality: DeclaredCausality,
     is_tunable: bool,
@@ -326,6 +329,10 @@ pub struct VariableAttributes<'dae> {
     pub unit: Option<String>,
     pub state_select: StateSelect,
     pub description: Option<String>,
+    /// The declaration of the enumeration type of an enumeration variable
+    /// (MLS §4.9.5), so a consumer that exposes the variable names its
+    /// literals.
+    pub enumeration: Option<rumoca_core::EnumerationDeclaration>,
     pub causality: VariableCausality,
     /// The source `input`/`output` prefix. An exported `Input` or `Output`
     /// causality requires the same declared causality (SPEC_0040 DAE-C24).
@@ -499,6 +506,10 @@ pub(crate) struct FunctionFoldEntry {
     pub(crate) initial_definitions: Vec<u32>,
     pub(crate) update_definitions: Vec<u32>,
     pub(crate) output_definitions: Vec<u32>,
+    /// A Boolean expression of the loop body scope, evaluated on the carried
+    /// state at the start of each iteration; the first false value ends the
+    /// fold with that state (a bounded `while`, MLS §11.2.3).
+    pub(crate) continuation: Option<u32>,
     pub(crate) provenance: DaeProvenance,
 }
 
@@ -1215,6 +1226,7 @@ fn erase_variable_attributes(attributes: VariableAttributes<'_>) -> VariableAttr
         unit: attributes.unit,
         state_select: attributes.state_select,
         description: attributes.description,
+        enumeration: attributes.enumeration,
         causality: attributes.causality,
         declared_causality: attributes.declared_causality,
         is_tunable: attributes.is_tunable,

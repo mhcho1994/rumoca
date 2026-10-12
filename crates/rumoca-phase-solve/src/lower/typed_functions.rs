@@ -2,18 +2,27 @@
 
 mod assertions;
 mod captures;
+mod family_owner;
 mod folds;
 pub(crate) mod formal_stages;
 mod indexed_slices;
 mod indexed_values;
+mod leaf_count;
 mod model_calls;
 mod model_coordinates;
 pub(in crate::lower) mod model_events;
+mod native;
+mod record_fills;
+mod recursive_groups;
 mod regions;
 mod registration;
 mod tensor;
+mod total_conditionals;
+mod value_types;
 
 use assertions::{assertion_conditions, assertion_is_map_independent, nested_calls};
+pub(crate) use family_owner::AlgebraicFamilyForm;
+use indexed_values::leading_index_axes;
 use model_coordinates::ModelCoordinateKey;
 pub(super) use model_events::lower_model_event_transactions;
 use regions::{
@@ -22,6 +31,8 @@ use regions::{
     lower_region_conditional, lower_region_values,
 };
 use registration::register_call;
+pub(crate) use value_types::{is_text_value, record_field_scalar_leaf};
+use value_types::{lower_primitive_type, lower_value_type_leaves, record_field_leaf_range};
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -38,7 +49,8 @@ use rumoca_ir_solve as solve;
 /// Registration happens at the DAE expression boundary, before a consumer can
 /// emit a projection. It never scans, hashes, or reconstructs an already
 /// lowered scalar program. Nested owners are issued before their caller, so
-/// the resulting table is finite and topological by construction.
+/// the resulting table is finite and topological by construction, except
+/// that the members of one SOLVE-C62 recursive group are issued together.
 pub(crate) struct PureCallRegistry<'dae> {
     table: solve::SolvePureCallTableBuilder,
     identities: CallRegistration<'dae>,
@@ -103,10 +115,18 @@ pub(super) fn lower_exact_call<'dae>(
     Ok(table.finish())
 }
 
+/// One issued pure-call owner together with its checked call site.
 #[derive(Clone)]
 pub(crate) struct RegisteredCall<'dae> {
-    pub(crate) owner: solve::SolvePureCallOwnerId,
+    pub(crate) callee: CalleeInterface<'dae>,
     pub(crate) site: solve::SolvePureCallSite,
+}
+
+/// The owner interface a caller body lowers a call against. A SOLVE-C62
+/// recursive group member has it before the group, and so its site, exists.
+#[derive(Clone)]
+pub(crate) struct CalleeInterface<'dae> {
+    pub(crate) owner: solve::SolvePureCallOwnerId,
     pub(crate) result_ranges: Box<[Range<usize>]>,
     pub(crate) result_leaf_count: usize,
     /// Every call-scoped assertion output after the result leaves, in owner
@@ -114,6 +134,9 @@ pub(crate) struct RegisteredCall<'dae> {
     /// each nested call's complete slot tuple.
     pub(crate) assertion_slots: std::sync::Arc<[AssertionSlot]>,
     pub(crate) assertions: Box<[RegisteredAssertion<'dae>]>,
+    /// Whether an invocation can enter a SOLVE-C62 recursive group, whose
+    /// body no caller may expand in place.
+    pub(crate) recursive: bool,
 }
 
 /// One call-scoped assertion output of a pure-call owner.
@@ -298,6 +321,12 @@ struct CallRegistration<'dae> {
     reserved: Option<solve::SolvePureCallIdentity>,
     next: u64,
     calls: HashMap<dae::ExprId<'dae>, RegisteredCall<'dae>>,
+    /// SOLVE-C70 owners, keyed by the DAE family they lower.
+    families: HashMap<dae::ContinuousFamilyId<'dae>, solve::SolvePureCallSite>,
+    /// Functions whose call SCC was already examined for a SOLVE-C62 group.
+    examined_functions: std::collections::HashSet<dae::FunctionId<'dae>>,
+    /// What each function contributes to every owner of it, derived once.
+    function_facts: HashMap<dae::FunctionId<'dae>, std::rc::Rc<registration::FunctionFacts<'dae>>>,
 }
 
 impl CallRegistration<'_> {
@@ -306,6 +335,9 @@ impl CallRegistration<'_> {
             reserved,
             next: 1,
             calls: HashMap::new(),
+            families: HashMap::new(),
+            examined_functions: std::collections::HashSet::new(),
+            function_facts: HashMap::new(),
         }
     }
 
@@ -372,138 +404,6 @@ fn arithmetic_profile() -> solve::SolveArithmeticProfile {
     )
 }
 
-/// Typed leaves one DAE value type occupies in a pure-call interface.
-///
-/// A leaf holds scalars, so a value type holds exactly as many leaves as it
-/// takes to hold its scalars. MLS 3.6 §10.3.1 admits a zero-size array
-/// dimension, and such a value holds no scalars at all: it occupies no leaf.
-/// That is the same rule the record arm applies field by field, so a record
-/// with a zero-size field is narrower than its field count by construction and
-/// every consumer that walks leaves by width - the interface, the call site's
-/// packing, and record-field projection - agrees without a second convention.
-fn lower_value_type_leaves<'dae>(
-    view: dae::DaeView<'dae>,
-    id: dae::ValueTypeId<'dae>,
-    arithmetic: solve::SolveArithmeticProfile,
-) -> Result<Vec<solve::SolveValueType>, solve::SolveProgramConstructionError> {
-    let value_type = view
-        .value_type(id)
-        .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-    if value_type.dimensions().contains(&0) {
-        return Ok(Vec::new());
-    }
-    if !value_type.is_record() {
-        return Ok(vec![lower_primitive_type(view, id, arithmetic)?]);
-    }
-    // A record the DAE resolved names its fields. A record that names none is
-    // an unresolved type, not an empty one, so it never reaches an interface.
-    if value_type.record_field_count() == 0 {
-        return Err(solve::SolveProgramConstructionError::InvalidCallInterface {
-            provenance: value_type_provenance(view, id),
-        });
-    }
-    let mut leaves = Vec::new();
-    for ordinal in 0..value_type.record_field_count() {
-        let (_, field_type) = view.record_field(id, ordinal).ok_or(
-            solve::SolveProgramConstructionError::InvalidCallInterface {
-                provenance: value_type_provenance(view, id),
-            },
-        )?;
-        for field_leaf in lower_value_type_leaves(view, field_type, arithmetic)? {
-            if value_type.dimensions().is_empty() {
-                leaves.push(field_leaf);
-                continue;
-            }
-            let mut dimensions = value_type.dimensions().to_vec();
-            dimensions.extend_from_slice(field_leaf.dimensions());
-            leaves.push(
-                solve::SolveValueType::tensor(field_leaf.element_type(), dimensions).map_err(
-                    |_| solve::SolveProgramConstructionError::InvalidCallInterface {
-                        provenance: value_type_provenance(view, id),
-                    },
-                )?,
-            );
-        }
-    }
-    Ok(leaves)
-}
-
-fn value_type_provenance<'dae>(
-    view: dae::DaeView<'dae>,
-    id: dae::ValueTypeId<'dae>,
-) -> rumoca_core::Span {
-    view.value_type_provenance(id)
-        .expect("final DAE value type carries provenance")
-        .span()
-}
-
-fn record_field_leaf_range<'dae>(
-    view: dae::DaeView<'dae>,
-    record: dae::ValueTypeId<'dae>,
-    field: usize,
-    arithmetic: solve::SolveArithmeticProfile,
-) -> Result<Range<usize>, solve::SolveProgramConstructionError> {
-    let value_type = view
-        .value_type(record)
-        .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-    if !value_type.is_record() {
-        return Err(solve::SolveProgramConstructionError::InvalidCallInterface {
-            provenance: value_type_provenance(view, record),
-        });
-    }
-    let mut start = 0usize;
-    for ordinal in 0..value_type.record_field_count() {
-        let (_, field_type) = view.record_field(record, ordinal).ok_or(
-            solve::SolveProgramConstructionError::InvalidCallInterface {
-                provenance: value_type_provenance(view, record),
-            },
-        )?;
-        let width = lower_value_type_leaves(view, field_type, arithmetic)?.len();
-        if ordinal == field {
-            return Ok(start..start + width);
-        }
-        start = start.checked_add(width).ok_or(
-            solve::SolveProgramConstructionError::IdentityOverflow {
-                provenance: value_type_provenance(view, record),
-            },
-        )?;
-    }
-    Err(solve::SolveProgramConstructionError::InvalidCallInterface {
-        provenance: value_type_provenance(view, record),
-    })
-}
-
-fn lower_primitive_type<'dae>(
-    view: dae::DaeView<'dae>,
-    id: dae::ValueTypeId<'dae>,
-    arithmetic: solve::SolveArithmeticProfile,
-) -> Result<solve::SolveValueType, solve::SolveProgramConstructionError> {
-    let value_type = view
-        .value_type(id)
-        .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-    let scalar = match value_type.scalar_type() {
-        dae::ScalarType::Real => solve::SolveScalarType::real(arithmetic),
-        dae::ScalarType::Integer | dae::ScalarType::Enumeration => {
-            solve::SolveScalarType::integer(arithmetic)
-        }
-        dae::ScalarType::Boolean => solve::SolveScalarType::Boolean,
-        dae::ScalarType::String | dae::ScalarType::Record => {
-            return Err(solve::SolveProgramConstructionError::InvalidCallInterface {
-                provenance: value_type_provenance(view, id),
-            });
-        }
-    };
-    if value_type.dimensions().is_empty() {
-        Ok(solve::SolveValueType::scalar(scalar))
-    } else {
-        solve::SolveValueType::tensor(scalar, value_type.dimensions().to_vec()).map_err(|_| {
-            solve::SolveProgramConstructionError::InvalidCallInterface {
-                provenance: value_type_provenance(view, id),
-            }
-        })
-    }
-}
-
 struct ExpressionLowerer<'builder, 'program, 'dae> {
     view: dae::DaeView<'dae>,
     builder: &'builder mut solve::TypedProgramBuilder<'program>,
@@ -524,7 +424,7 @@ struct ExpressionLowerer<'builder, 'program, 'dae> {
     fold_parameters: HashMap<(dae::FunctionFoldId<'dae>, u32), LoweredValue<'program, 'dae>>,
     fold_values: HashMap<dae::FunctionFoldId<'dae>, Vec<LoweredValue<'program, 'dae>>>,
     binders: HashMap<(u32, u32), solve::ProgramRegister<'program>>,
-    callees: HashMap<dae::ExprId<'dae>, RegisteredCall<'dae>>,
+    callees: HashMap<dae::ExprId<'dae>, CalleeInterface<'dae>>,
     predicate_ranges: HashMap<dae::ExprId<'dae>, Range<usize>>,
     cache: HashMap<dae::ExprId<'dae>, LoweredValue<'program, 'dae>>,
     call_values: HashMap<dae::ExprId<'dae>, Vec<solve::ProgramRegister<'program>>>,
@@ -533,6 +433,41 @@ struct ExpressionLowerer<'builder, 'program, 'dae> {
     assertion_slots: std::sync::Arc<[AssertionSlot]>,
     next_direct_assertion: usize,
     direct_assertion_count: usize,
+    /// Whether each expression evaluates without failure or effect (see
+    /// `total_conditionals`).
+    totality: HashMap<dae::ExprId<'dae>, bool>,
+}
+
+impl<'builder, 'program, 'dae> ExpressionLowerer<'builder, 'program, 'dae> {
+    /// A lowerer for an owner body over captured model coordinates alone: no
+    /// function parameters, definitions, folds, or nested calls.
+    fn for_model_coordinates(
+        view: dae::DaeView<'dae>,
+        builder: &'builder mut solve::TypedProgramBuilder<'program>,
+        model_coordinates: HashMap<ModelCoordinateKey<'dae>, LoweredValue<'program, 'dae>>,
+    ) -> Self {
+        Self {
+            view,
+            builder,
+            model_coordinates,
+            parameters: HashMap::new(),
+            function_values: HashMap::new(),
+            conditional_groups: HashMap::new(),
+            fold_bodies: HashMap::new(),
+            fold_parameters: HashMap::new(),
+            fold_values: HashMap::new(),
+            binders: HashMap::new(),
+            callees: HashMap::new(),
+            predicate_ranges: HashMap::new(),
+            cache: HashMap::new(),
+            call_values: HashMap::new(),
+            predicate_values: Vec::new(),
+            assertion_slots: std::sync::Arc::from([]),
+            next_direct_assertion: 0,
+            direct_assertion_count: 0,
+            totality: HashMap::new(),
+        }
+    }
 }
 
 impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
@@ -770,6 +705,9 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
     ) -> Result<LoweredValue<'program, 'dae>, solve::SolveProgramConstructionError> {
         if operands.len() < 3 || operands.len().is_multiple_of(2) {
             return Err(solve::SolveProgramConstructionError::InvalidRegion { provenance });
+        }
+        if let Some(value) = self.total_conditional(value_type, operands, provenance)? {
+            return Ok(value);
         }
         let condition = self.expression(operands[0])?.only_register(provenance)?;
         let pending = self.pending_predicates(operands[1..].iter().copied());
@@ -1363,6 +1301,14 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             let (_, field_type) = self.view.record_field(value_type, ordinal).ok_or(
                 solve::SolveProgramConstructionError::InvalidCallInterface { provenance: at },
             )?;
+            if is_text_value(
+                self.view
+                    .value_type(field_type)
+                    .ok_or(solve::SolveProgramConstructionError::WireMismatch)?,
+            ) {
+                // A text field occupies no leaf, so its value is not lowered.
+                continue;
+            }
             let field = self.expression(argument)?;
             leaves.extend(self.coerce_value(field, field_type, at)?.leaves);
         }
@@ -1498,10 +1444,19 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             .structured()
             .clone();
         if body_node.binder_domain().is_some() {
-            let result = self.mapped_expression(body, domain_id, domain, at)?;
-            return Ok(LoweredValue::scalar(value_type, result));
+            let leaves = self.mapped_leaves(body, domain_id, domain, at)?;
+            return Ok(LoweredValue { value_type, leaves });
         }
-        let value = self.expression(body)?.only_register(at)?;
+        let body_value = self.expression(body)?;
+        if body_value.leaves.len() != 1 {
+            return self.filled_record_comprehension(
+                (value_type, body_node.value_type_id()),
+                &domain,
+                body_value,
+                at,
+            );
+        }
+        let value = body_value.only_register(at)?;
         if !body_node.value_type().dimensions().is_empty() {
             let body_type =
                 lower_primitive_type(self.view, body_node.value_type_id(), arithmetic_profile())?;
@@ -1550,6 +1505,23 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         domain: rumoca_core::StructuredIndexDomain,
         at: rumoca_core::Span,
     ) -> Result<solve::ProgramRegister<'program>, solve::SolveProgramConstructionError> {
+        let [leaf] = self
+            .mapped_leaves(body, domain_id, domain, at)?
+            .try_into()
+            .map_err(|_| solve::SolveProgramConstructionError::InvalidMap { provenance: at })?;
+        Ok(leaf)
+    }
+
+    /// One compact map per leaf of the body: a record-valued comprehension
+    /// is the struct of arrays of its fields, each leaf a map over the
+    /// domain that evaluates only the body field holding that leaf.
+    fn mapped_leaves(
+        &mut self,
+        body: dae::ExprId<'dae>,
+        domain_id: dae::DomainId<'dae>,
+        domain: rumoca_core::StructuredIndexDomain,
+        at: rumoca_core::Span,
+    ) -> Result<Vec<solve::ProgramRegister<'program>>, solve::SolveProgramConstructionError> {
         if !self.pending_predicates([body]).is_empty() {
             return Err(solve::SolveProgramConstructionError::InvalidCallInterface {
                 provenance: at,
@@ -1563,33 +1535,90 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                 .value_type_id(),
             arithmetic_profile(),
         )?;
-        let [body_type] = body_types.as_slice() else {
+        if body_types.is_empty() {
             return Err(solve::SolveProgramConstructionError::InvalidMap { provenance: at });
-        };
+        }
         let (captures, environment) = self.capture_environment_for([body])?;
-        let context = RegionContext {
-            view: self.view,
-            callees: self.callees.clone(),
-            predicate_ranges: self.predicate_ranges.clone(),
-            conditional_groups: self.conditional_groups.clone(),
-            fold_bodies: self.fold_bodies.clone(),
-            assertion_slots: self.assertion_slots.clone(),
-            direct_assertion_count: self.direct_assertion_count,
+        let environment = std::rc::Rc::new(environment);
+        let mut leaves = Vec::with_capacity(body_types.len());
+        for (leaf, body_type) in body_types.into_iter().enumerate() {
+            let context = RegionContext {
+                view: self.view,
+                callees: self.callees.clone(),
+                predicate_ranges: self.predicate_ranges.clone(),
+                conditional_groups: self.conditional_groups.clone(),
+                fold_bodies: self.fold_bodies.clone(),
+                assertion_slots: self.assertion_slots.clone(),
+                direct_assertion_count: self.direct_assertion_count,
+            };
+            let environment = std::rc::Rc::clone(&environment);
+            let domain = domain.clone();
+            leaves.push(self.builder.map(
+                domain,
+                &captures,
+                body_type,
+                at,
+                move |builder, captures, binders, output| {
+                    let mut lowerer =
+                        load_region_lowerer(builder, captures, &environment, &context, at)?;
+                    lowerer.load_domain_binders(domain_id, binders, at)?;
+                    let value = lowerer.expression_leaf(body, leaf, at)?;
+                    lowerer.builder.store(output, value, at)
+                },
+            )?);
+        }
+        Ok(leaves)
+    }
+
+    /// Leaf `leaf` of a value: a record constructor lowers, and coerces to
+    /// its declared field type, only the field that holds the leaf.
+    fn expression_leaf(
+        &mut self,
+        expression: dae::ExprId<'dae>,
+        leaf: usize,
+        at: rumoca_core::Span,
+    ) -> Result<solve::ProgramRegister<'program>, solve::SolveProgramConstructionError> {
+        let node = self
+            .view
+            .expression(expression)
+            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
+        let value = match node.operation() {
+            dae::ExpressionOperation::Record(arguments) => {
+                let value_type = node.value_type_id();
+                let mut selected = None;
+                for (ordinal, argument) in arguments.iter().enumerate() {
+                    let range = record_field_leaf_range(
+                        self.view,
+                        value_type,
+                        ordinal,
+                        arithmetic_profile(),
+                    )?;
+                    selected = selected.or(range.contains(&leaf).then_some((
+                        ordinal,
+                        argument,
+                        range.start,
+                    )));
+                }
+                let (ordinal, argument, start) =
+                    selected.ok_or(solve::SolveProgramConstructionError::InvalidCallInterface {
+                        provenance: at,
+                    })?;
+                let (_, field_type) = self.view.record_field(value_type, ordinal).ok_or(
+                    solve::SolveProgramConstructionError::InvalidCallInterface { provenance: at },
+                )?;
+                let field = self.expression(argument)?;
+                let value = self.coerce_value(field, field_type, at)?;
+                return value.leaves.get(leaf - start).copied().ok_or(
+                    solve::SolveProgramConstructionError::InvalidCallInterface { provenance: at },
+                );
+            }
+            _ => self.expression(expression)?,
         };
-        let result = self.builder.map(
-            domain,
-            &captures,
-            body_type.clone(),
-            at,
-            move |builder, captures, binders, output| {
-                let mut lowerer =
-                    load_region_lowerer(builder, captures, &environment, &context, at)?;
-                lowerer.load_domain_binders(domain_id, binders, at)?;
-                let value = lowerer.expression(body)?.only_register(at)?;
-                lowerer.builder.store(output, value, at)
-            },
-        )?;
-        Ok(result)
+        value
+            .leaves
+            .get(leaf)
+            .copied()
+            .ok_or(solve::SolveProgramConstructionError::InvalidCallInterface { provenance: at })
     }
 
     fn array_update(
@@ -1671,8 +1700,20 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            self.builder
-                .update_element(base, value_register, &indices, at)?
+            let base_dimensions = self
+                .view
+                .value_type(base_value.value_type)
+                .ok_or(solve::SolveProgramConstructionError::WireMismatch)?
+                .dimensions();
+            if indices.len() < base_dimensions.len() {
+                // MLS 10.5.3: the unsubscripted trailing axes are whole, so the
+                // update replaces the sub-array the leading indices select.
+                let axes = leading_index_axes(&indices, &base_dimensions[indices.len()..]);
+                self.builder.update_view(base, value_register, &axes, at)?
+            } else {
+                self.builder
+                    .update_element(base, value_register, &indices, at)?
+            }
         };
         Ok(LoweredValue::scalar(value_type, result))
     }
@@ -1770,6 +1811,15 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         }
         let mut lowered = Vec::new();
         for (argument, target) in arguments.iter().zip(parameter_types.iter()) {
+            if is_text_value(
+                self.view
+                    .value_type(target)
+                    .ok_or(solve::SolveProgramConstructionError::WireMismatch)?,
+            ) {
+                // A text input occupies no leaf (a decomposed record's `name`
+                // field, for example), so its argument is not lowered.
+                continue;
+            }
             let value = self.expression(argument)?;
             lowered.extend(self.coerce_value(value, target, at)?.leaves);
         }

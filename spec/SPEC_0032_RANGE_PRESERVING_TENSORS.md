@@ -21,27 +21,25 @@ scalar rows are derived views, not recovered structure.
 | Domain payloads are compact | IR serialization | Avoids O(N) metadata |
 | Binder ids are stable and explicit | `StructuredIndexBinder` / phase maps | Names can shadow |
 | Empty domains produce zero scalar rows | Scalar views | Valid zero-iteration ranges |
+| Each body of a loop nest owns one family over the whole nest | Flatten | An unrolled outer binder scalarizes every grid row |
 
-Structured families include source `for` equations, whole-array equations,
-slices, comprehensions, boundary ranges, and connection-generated array
-equations that are naturally ranged. Domain payloads must not serialize one
-entry per scalar iteration except inside an explicitly materialized scalar view.
-Stage-specific structured-equation ids remain stage-owned and must be mapped
-explicitly when identity crosses phase boundaries.
+Structured families include `for` equations, whole-array equations, slices,
+comprehensions, boundary ranges, and naturally ranged connection equations.
+Only explicitly materialized scalar views may serialize one domain entry per
+iteration. Structured-equation ids remain stage-owned; crossing phase
+boundaries requires explicit identity mapping.
 
-An event-generating relation inside a structured family is itself a compact
-family over the same checked domain. DAE owns continuously monitored state
-relations as compact root families, and Solve derives one root program for each
-domain point in canonical order. A structured event kind without its own
-compact owner MUST be rejected at the exact relation; lowering MUST NOT retain
-the conditional value while silently omitting its event boundary.
+An event-generating relation in a structured family owns a compact family over
+the same checked domain. DAE owns continuously monitored relations as compact
+root families; Solve derives one root program per domain point in canonical
+order. A structured event kind lacking a compact owner MUST be rejected at the
+exact relation. Lowering MUST NOT retain its conditional value while omitting
+the event boundary.
 
-Instantiation may compact an array of structured components: it resolves one
-template domain point and derives the others by reindexing instance paths
-(`rumoca-phase-instantiate/src/array_expansion/`). This is an instantiation
-optimization, not an ownership change — Instance IR's authoritative
-representation of the array is still the per-element `components`/`classes`
-entries, and every later phase reads those.
+Instantiation may compact structured-component arrays by resolving one domain
+point and reindexing its instance paths
+(`rumoca-phase-instantiate/src/array_expansion/`). Per-element
+`components`/`classes` entries remain authoritative; all later phases read them.
 
 **REQUIRED:** a compacted array must produce byte-identical per-element
 entries — including `InstanceId` allocation order, on which flat variable
@@ -89,7 +87,7 @@ compacting a genuinely per-element array would produce a wrong model.
 | View ordering is deterministic | Domain enumeration | Backend agreement |
 | Views carry provenance | Structured equation/tensor scalar views | Diagnostics and fallback |
 | Derivative substitution retains the matched state, defining expression, and enclosing lowering context. A component index selects an output, not a new definition environment. A construction-issued empty binder domain proves that the definition's scalar-view domain point cannot affect expression reuse; otherwise its exact domain point remains part of the context. Original evaluation and derivative-cycle rejection remain authoritative. | Solve derivative scalar projection | MLS §3.7.4 and §8.3.1 preserve one tensor definition without conflating binder-dependent component equations |
-| Product incidence may omit a Real factor only when the other selected scalar is proven invariant zero through literal structure (literals, arrays, unary signs, `transpose`, and selections by literal subscripts), non-tunable, fixed parameter bindings, and continuous algebraic declarations their own residual owner binds to such a literal ([SPEC_0043 §4](SPEC_0043_CONSTRUCTION_CATALOG.md)). The omitted factor is a coordinate read, a literal, or a sum, difference, product, array, transpose, or literal-subscript selection of these; division, calls, and every other operation with domain or validation effects are never omitted. Tunable parents, initialization unknowns, and unsupported binding operations cannot establish this proof. The original DAE tensor expression remains authoritative. Solve lowering omits exactly the product terms this same proof omits (one proof, `rumoca_eval_dae::ZeroCoefficients`, two consumers), so executed rows read only the coordinates the block ordering matched and a non-finite factor of an omitted term does not propagate. A target isolator whose coefficient is zero at construction (a zero scale or a literal-zero coefficient register) is not issued, and a causal step whose row reads its unknown only through such a coefficient is a construction error, because the incidence proof omits that term and matching cannot have chosen it; the run time carries no check for this case. | DAE scalar dependency projection, Solve scalar lowering, and Solve isolator certification | MLS §7.2.6 and §10.6.4 permit exact zero coefficients without freezing parameter defaults or erasing evaluation obligations |
+| Product incidence may omit a Real factor only when the other selected scalar is proven invariant zero through literal structure (literals, arrays, unary signs, `transpose`, and selections by literal subscripts), non-tunable, fixed parameter bindings, and continuous algebraic declarations their own residual owner binds to such a literal ([SPEC_0043 §4](SPEC_0043_CONSTRUCTION_CATALOG.md)), or to a scalar expression that is zero wherever it has a value: a product with a proven-zero factor, a quotient with a proven-zero numerator, a sum or difference of proven-zero terms, or `smooth`/`noEvent` of one, whatever the other operands are. The owner row still evaluates that whole expression, calls and divisions included, and a non-finite value fails there, so the declaration is zero at every instant it has a value (MLS 3.7 §3.3 would even let a tool skip the other operand). The omitted factor is a coordinate read, a literal, or a sum, difference, product, array, transpose, or literal-subscript selection of these; division, calls, and every other operation with domain or validation effects are never omitted. Tunable parents, initialization unknowns, and unsupported binding operations cannot establish this proof. The original DAE tensor expression remains authoritative. Solve lowering omits exactly the product terms this same proof omits (one proof, `rumoca_eval_dae::ZeroCoefficients`, two consumers), so executed rows read only the coordinates the block ordering matched and a non-finite factor of an omitted term does not propagate. A target isolator whose coefficient is zero at construction (a zero scale or a literal-zero coefficient register) is not issued, and a causal step whose row reads its unknown only through such a coefficient is a construction error, because the incidence proof omits that term and matching cannot have chosen it; the run time carries no check for this case. | DAE scalar dependency projection, Solve scalar lowering, and Solve isolator certification | MLS §7.2.6 and §10.6.4 permit exact zero coefficients without freezing parameter defaults or erasing evaluation obligations |
 | No scalar-row reassembly | Solve lowering | Prevents fragile recovery |
 | Structured B.1c views retain assignment identity | DAE/Solve scalar views | Preserve target and update policy |
 | Structured root rows are generated views | Event evaluator/backend boundary | Root location sees every domain point in canonical order |
@@ -151,6 +149,10 @@ or scalar-type-incompatible projection is rejected at this owner.
 | Solve grouping is semantic | `rumoca-phase-solve` | Backends do not redefine IR |
 | Scalar fallback uses shared scalarization | `rumoca-eval-solve` | One ordering implementation |
 | Structured B.1c uses compact map and target map | Solve IR | Preserve the authoritative discrete family |
+| A derivative family's output map is the affine image of its matched slots | `rumoca-phase-solve` | A strided grid interior stays one node |
+| A native backend executes a `Map`/`AffineStencil` node as one loop kernel over its compact domain, driven by the same point plan that generates the node's scalar view | `rumoca-eval-solve::AffineKernelPlan`, native backends | Compile cost independent of domain size; the kernel and the view cannot disagree |
+| A single-body structured initialization family whose points share one affine program lowers to one `Map` node over its consecutive residual rows; its Jacobian is that node's tensor JVP | `rumoca-phase-solve` initialization lowering | The initialization system stays compact through Solve and the runtime |
+| A scalar Jacobian artifact of a block is the scalar view of the block's tensor JVP: forward AD runs once per tensor node's base program | `rumoca-phase-solve` artifacts | Under the solver-y and parameter seed every AD rule is independent of load indices and constant values, so the view equals per-row AD while its cost follows the node, not its domain |
 
 `Map` represents canonical DAE residual families that are elementwise over a
 compact domain, including `der(u) = w` after DAE canonicalization. `AffineStencil`
@@ -158,6 +160,33 @@ comes from structured DAE domains plus affine operand proofs; Solve lowering
 must not rediscover stencils by scanning anonymous scalar rows. Backends may
 fuse or split generated kernels as target-local codegen, but the reported
 kernel inventory must match the generated work.
+
+A derivative family's output slots are read from the structural matching and
+need not be contiguous: the interior of a grid writes a strided sub-range of
+its state array, interleaved with edge rows. Lowering fits one affine output
+map from the base point and one step per binder and checks it at every point;
+a family with no such map keeps its scalar rows. The derivative block proves
+that every state slot is written exactly once, not that pieces are adjacent.
+
+An affine tensor node's point plan is constructed once from its domain, output
+map, base program, and stride metadata. Construction combines each operation's
+strides per binder and proves over the whole domain that every load and output
+index lies in `[0, max]` and every strided constant is finite (each bound is
+affine or monotone in every binder ordinal, so its extremes lie on the domain
+box's corners). The scalar view is the plan evaluated at each point in canonical
+order; a native kernel evaluates the same plan in a loop nest with the view's
+integer index arithmetic and IEEE constant operations in the same order, so its
+results are bitwise identical to the view. The kernel takes its proven maxima as
+its length requirements and checks no bound per point. A node whose base program
+the kernel path does not support keeps the per-row path, chosen when the block
+is compiled.
+
+An initialization family is certified like a structured B.1c family: it
+becomes a `Map` node only when one base program with affine load and constant
+strides reproduces every point's compiled program exactly. The node writes the
+family's rows at the residual positions the per-point rows held, so projection,
+incidence, and scalar consumers see the same rows. Any other family keeps its
+scalar rows.
 
 Structured B.1c lowering uses `ComputeNode::Map` (or a stronger proven tensor
 node) together with a compact affine target map. Discrete row role, pre mode,
@@ -173,7 +202,7 @@ enumerate coordinates into scalar registers, repeated operations, or select
 chains. A scalar consumer receives a projection of this aggregate owner; it
 does not become the owner. Evaluators and native backends execute the compact
 operation directly. Text backends may materialize target-language coordinate
-operations only while rendering the final checked template view.
+operations only while rendering the final checked template view. Native checked-assignment WASM gather and fault rows live in [SPEC_0043 §6](SPEC_0043_CONSTRUCTION_CATALOG.md).
 
 ### 5. Ownership Boundaries
 

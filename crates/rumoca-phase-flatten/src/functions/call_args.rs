@@ -515,6 +515,9 @@ impl ExpressionRewriter for DefaultInputSubstituter<'_> {
         subscripts: &[rumoca_core::Subscript],
         span: rumoca_core::Span,
     ) -> rumoca_core::Expression {
+        if let Some(field_path) = self.field_path_of_supplied_record(name, span) {
+            return field_path;
+        }
         let Some(value) = name
             .target_def_id()
             .and_then(|def_id| self.values.get(&def_id))
@@ -530,6 +533,69 @@ impl ExpressionRewriter for DefaultInputSubstituter<'_> {
             span,
         }
     }
+}
+
+impl DefaultInputSubstituter<'_> {
+    /// A default that reads a field of an earlier record input (`previous.catalog.n`)
+    /// reads that field of the record the call supplied for it.
+    fn field_path_of_supplied_record(
+        &mut self,
+        name: &rumoca_core::Reference,
+        span: rumoca_core::Span,
+    ) -> Option<rumoca_core::Expression> {
+        let reference = name.component_ref()?;
+        let (root, fields) = reference.parts().split_first()?;
+        if fields.is_empty() {
+            return None;
+        }
+        let mut value = self.values.get(&root.def_id)?.clone();
+        if let rumoca_core::Expression::VarRef {
+            name: supplied,
+            subscripts,
+            ..
+        } = &value
+            && subscripts.is_empty()
+            && let Some(extended) = extend_supplied_reference(supplied, fields)
+        {
+            return Some(rumoca_core::Expression::VarRef {
+                name: extended,
+                subscripts: Vec::new(),
+                span,
+            });
+        }
+        for field in fields {
+            value = rumoca_core::Expression::FieldAccess {
+                base: Box::new(value),
+                field: field.ident.clone(),
+                field_def_id: field.def_id,
+                span,
+            };
+            if !field.subs.is_empty() {
+                value = rumoca_core::Expression::Index {
+                    base: Box::new(value),
+                    subscripts: self.rewrite_subscripts(&field.subs),
+                    span,
+                };
+            }
+        }
+        Some(value)
+    }
+}
+
+/// The reference `supplied` extended by the field parts a default selects
+/// from it, keeping every part's declaration identity (MLS 12.4.1: the
+/// default reads the supplied actual in the caller's scope).
+fn extend_supplied_reference(
+    supplied: &rumoca_core::Reference,
+    fields: &[rumoca_core::ComponentRefPart],
+) -> Option<rumoca_core::Reference> {
+    let base = supplied.component_ref()?;
+    let mut parts = base.parts().to_vec();
+    parts.extend(fields.iter().cloned());
+    let extended =
+        rumoca_core::ComponentReference::construct(base.local(), base.span(), parts).ok()?;
+    let spelled = rumoca_core::ComponentPath::from_component_reference(&extended).to_flat_string();
+    Some(supplied.with_rewritten_component_reference(spelled, extended))
 }
 
 pub(crate) fn rewrite_model_expressions<R: FallibleStatementRewriter<Error = FlattenError>>(

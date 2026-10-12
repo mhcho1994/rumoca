@@ -1,9 +1,15 @@
 mod guarded_loop_analysis;
+mod loop_definitions;
 mod top_level_definedness;
 
+use super::fold_scopes::IterationSummary;
 use super::*;
 use crate::construction::function_shapes::ProvenValue;
-use guarded_loop_analysis::{seed_guarded_sequence_scratch, statement_reads_target};
+pub(super) use guarded_loop_analysis::statement_reads_target;
+use guarded_loop_analysis::{confine_guarded_seeds, seed_guarded_sequence_scratch};
+use loop_definitions::resolve_function_loop_definitions;
+use rumoca_core::Progression;
+use std::rc::Rc;
 use top_level_definedness::{
     after_top_level_statement, before_top_level_statement, validate_top_level_statements,
 };
@@ -26,10 +32,22 @@ pub(in crate::construction) fn validate_function_certificate(
     certificate: &FunctionShapeCertificate,
 ) -> Result<FunctionPlan, ToDaeError> {
     let function = &flat.functions[&certificate.key.function];
+    certify_function(function, flat, shapes, certificate)
+        .map_err(|error| error.within_function(function.name.as_str()))
+}
+
+fn certify_function(
+    function: &rumoca_core::Function,
+    flat: &flat::Model,
+    shapes: &FunctionShapeAnalysis,
+    certificate: &FunctionShapeCertificate,
+) -> Result<FunctionPlan, ToDaeError> {
     validate_function_declaration(function, flat, &certificate.values)?;
     let static_integers = immutable_integer_defaults(function, flat, &certificate.values)?;
     let roles = function_expression_roles(function, flat);
     let staged_record_fields = HashSet::new();
+    let loop_binders = HashSet::new();
+    let scalars = super::guard_facts::ValueKinds::of(function, flat);
     let context = FunctionValidationContext {
         function,
         flat,
@@ -39,7 +57,10 @@ pub(in crate::construction) fn validate_function_certificate(
         shape_analysis: shapes,
         generated_booleans: &[],
         staged_record_fields: &staged_record_fields,
+        loop_binders: &loop_binders,
+        scalars: &scalars,
         call_scoped_actions: true,
+        inside_fold: false,
     };
     if function.external.is_some() {
         return validate_external_body(function, context);
@@ -105,7 +126,7 @@ fn validate_external_body(
             function.span,
         ));
     }
-    if let Some(plan) = super::function_native_lapack::native_linear_solve_plan(function, context) {
+    if let Some(plan) = super::function_native_lapack::native_lapack_plan(function, context) {
         return Ok(plan);
     }
     Ok(FunctionPlan::External(validate_external_function(
@@ -117,53 +138,39 @@ fn validate_statement_function(
     function: &rumoca_core::Function,
     context: FunctionValidationContext<'_>,
 ) -> Result<FunctionPlan, ToDaeError> {
-    // Normalize only semantics-preserving compact loop rewrites. A dependent
-    // domain is refused rather than expanded into scalar statements.
-    let returned = normalize_function_returns(&function.body)?;
-    let returned_roles = roles_with_guards(context.roles, &returned.guards);
-    let returned_shapes = shapes_with_guards(context.shapes, &returned.guards);
-    let returned_context = FunctionValidationContext {
-        roles: &returned_roles,
-        shapes: &returned_shapes,
-        generated_booleans: &returned.guards,
+    let normalized = normalize_function_source(function, &function.body, context, true)?;
+    let roles = roles_with_guards(context.roles, &normalized.guards);
+    let shapes = shapes_with_guards(context.shapes, &normalized.guards);
+    let normalized_context = FunctionValidationContext {
+        roles: &roles,
+        shapes: &shapes,
+        generated_booleans: &normalized.guards,
         ..context
     };
-    check_function_assignment_shapes(&returned.statements, returned_context)?;
-    if returned.has_returns {
-        validate_nonreturn_path(function, context)?;
-    }
-    let source = compact_function_loops(
-        &returned.statements,
-        returned_context.static_integers,
-        returned_context.shapes,
-        function,
-        context.flat,
-        returned.has_returns,
-    )?;
-    let source = super::function_static_extents::settle_static_extents(
-        &source,
-        returned_context.static_integers,
-        returned_context.shapes,
-    );
     let mut definitions = FunctionDefinitions::new(function);
     let mut entry_seeds = certified_return_output_seeds(
         function,
-        returned.has_returns,
-        returned_context,
+        normalized.has_returns,
+        normalized_context,
         &mut definitions,
     )?;
-    entry_seeds.extend(definitions.empty_value_seeds(returned_context)?);
-    let (statements, definedness) =
-        validate_top_level_statements(function, &source, returned_context, &mut definitions)?;
+    entry_seeds.extend(definitions.empty_value_seeds(normalized_context)?);
+    let (statements, definedness) = validate_top_level_statements(
+        function,
+        &normalized.statements,
+        normalized_context,
+        &mut definitions,
+    )?;
+    entry_seeds.extend(definitions.take_contradiction_seeds());
     require_total_outputs(function, &definitions)?;
     Ok(FunctionPlan::Statements {
-        source,
         statements,
-        generated_booleans: returned
+        generated_booleans: normalized
             .guards
             .iter()
             .map(|guard| (guard.target.clone(), guard.span))
             .collect(),
+        source: normalized.statements,
         entry_seeds,
         definedness,
     })
@@ -174,7 +181,8 @@ fn validate_nonreturn_path(
     context: FunctionValidationContext<'_>,
 ) -> Result<(), ToDaeError> {
     certify_nonleading_return_branches(function, context)?;
-    let nonreturn = normalize_function_returns(&nonreturn_path(&function.body))?;
+    let nonreturn =
+        normalize_function_source(function, &nonreturn_path(&function.body), context, false)?;
     let roles = roles_with_guards(context.roles, &nonreturn.guards);
     let shapes = shapes_with_guards(context.shapes, &nonreturn.guards);
     let nonreturn_context = FunctionValidationContext {
@@ -183,23 +191,62 @@ fn validate_nonreturn_path(
         generated_booleans: &nonreturn.guards,
         ..context
     };
-    let source = compact_function_loops(
+    let mut definitions = FunctionDefinitions::new(function);
+    definitions.empty_value_seeds(nonreturn_context)?;
+    validate_top_level_statements(
+        function,
         &nonreturn.statements,
+        nonreturn_context,
+        &mut definitions,
+    )?;
+    require_total_outputs(function, &definitions)
+}
+
+/// The one normalized statement sequence a function body is planned from.
+///
+/// Early returns become lexical continuations first, then semantics-preserving
+/// compact loop rewrites run over the source conditionals, and finally every
+/// conditional that owns a loop has its branch selection captured at its source
+/// position. Captures are introduced last, so no compaction rewrite reasons
+/// about a definition it cannot read.
+fn normalize_function_source(
+    function: &rumoca_core::Function,
+    body: &[rumoca_core::Statement],
+    context: FunctionValidationContext<'_>,
+    certify_nonreturn_path: bool,
+) -> Result<function_returns::NormalizedFunctionReturns, ToDaeError> {
+    let returned = normalize_function_returns(body)?;
+    let roles = roles_with_guards(context.roles, &returned.guards);
+    let shapes = shapes_with_guards(context.shapes, &returned.guards);
+    let returned_context = FunctionValidationContext {
+        roles: &roles,
+        shapes: &shapes,
+        generated_booleans: &returned.guards,
+        ..context
+    };
+    check_function_assignment_shapes(&returned.statements, returned_context)?;
+    if certify_nonreturn_path && returned.has_returns {
+        validate_nonreturn_path(function, context)?;
+    }
+    let compacted = compact_function_loops(
+        &returned.statements,
         context.static_integers,
         &shapes,
         function,
         context.flat,
-        false,
     )?;
-    let source = super::function_static_extents::settle_static_extents(
-        &source,
+    let compacted = super::function_static_extents::settle_static_extents(
+        &compacted,
         context.static_integers,
         &shapes,
     );
-    let mut definitions = FunctionDefinitions::new(function);
-    definitions.empty_value_seeds(nonreturn_context)?;
-    validate_top_level_statements(function, &source, nonreturn_context, &mut definitions)?;
-    require_total_outputs(function, &definitions)
+    let mut guards = returned.guards.clone();
+    let statements = branch_snapshots::snapshot_loop_conditionals(&compacted, &mut guards)?;
+    Ok(function_returns::NormalizedFunctionReturns {
+        statements,
+        guards,
+        has_returns: returned.has_returns,
+    })
 }
 
 fn roles_with_guards(
@@ -372,6 +419,11 @@ fn annotate_iteration_locals<'a>(
         .iter()
         .map(|local| VarName::new(&local.name))
         .collect::<HashSet<_>>();
+    let generated = context
+        .generated_booleans
+        .iter()
+        .map(|guard| guard.target.clone())
+        .collect::<HashSet<_>>();
     for index in 0..statements.len() {
         let mut suffix = Vec::with_capacity(enclosing_suffix.len() + 1);
         suffix.push(&statements[index + 1..]);
@@ -390,7 +442,11 @@ fn annotate_iteration_locals<'a>(
             ) => {
                 let (_, body) = flattened_function_loop_source(indices, equations, *source_depth);
                 classify_iteration_local_targets(
-                    lowering, body, body_plans, &locals, &suffix, back_edges,
+                    lowering,
+                    (body, body_plans),
+                    (&locals, &generated),
+                    &suffix,
+                    back_edges,
                 );
                 let mut nested_back_edges = Vec::with_capacity(back_edges.len() + 1);
                 nested_back_edges.push(body);
@@ -421,9 +477,8 @@ fn annotate_iteration_locals<'a>(
 
 fn classify_iteration_local_targets(
     lowering: &mut FunctionLoopLowering,
-    body: &[rumoca_core::Statement],
-    body_plans: &[FunctionStatementPlan],
-    locals: &HashSet<VarName>,
+    (body, body_plans): (&[rumoca_core::Statement], &[FunctionStatementPlan]),
+    (locals, generated): (&HashSet<VarName>, &HashSet<VarName>),
     suffix: &[&[rumoca_core::Statement]],
     back_edges: &[&[rumoca_core::Statement]],
 ) {
@@ -436,6 +491,17 @@ fn classify_iteration_local_targets(
     };
     let mut retained = Vec::with_capacity(targets.len());
     for target in std::mem::take(targets) {
+        // A generated selection's scope certificate already proves it is read
+        // only after its definition in this body; dominance places that
+        // definition on every iteration.
+        if generated.contains(&target) {
+            if loop_has_dominating_whole_definition(body, body_plans, &target) {
+                iteration_locals.push(target);
+            } else {
+                retained.push(target);
+            }
+            continue;
+        }
         let local = locals.contains(&target)
             && loop_has_dominating_whole_definition(body, body_plans, &target)
             && !loop_compaction::statements_read_incoming_name(body, &target)
@@ -473,6 +539,9 @@ fn loop_has_dominating_whole_definition(
                 assignment.target() == target && assignment.is_whole()
             }
             FunctionStatementPlan::RecordAssembly(assembly) => &assembly.target == target,
+            FunctionStatementPlan::GeneratedBooleanAssignment {
+                target: generated, ..
+            } => generated == target,
             FunctionStatementPlan::MultiOutputCall { outputs } => outputs
                 .iter()
                 .flatten()
@@ -661,17 +730,25 @@ fn plan_one_function_statement(
             },
             context,
         ),
-        _ => {
-            let span = required_statement_span(statement, "unsupported function body statement")?;
-            Err(ToDaeError::unsupported_flat(
-                "function statement",
-                format!(
-                    "`{}` contains a statement without a checked DAE owner",
-                    context.function.name
-                ),
-                span,
-            ))
-        }
+        rumoca_core::Statement::While { .. } => Err(unsupported_statement(
+            statement,
+            "unbounded function while loop",
+            "function loop domain",
+            format!(
+                "a `while` loop of `{}` has no translation-time iteration bound: its condition {}",
+                context.function.name,
+                loop_compaction::UNBOUNDED_LOOP_DOMAIN
+            ),
+        )),
+        _ => Err(unsupported_statement(
+            statement,
+            "unsupported function body statement",
+            "function statement",
+            format!(
+                "`{}` contains a statement without a checked DAE owner",
+                context.function.name
+            ),
+        )),
     }
 }
 
@@ -1169,7 +1246,7 @@ fn resolve_sequence_definitions(
     mut definedness: Option<&mut FunctionDefinednessPlan>,
 ) -> Result<(), ToDaeError> {
     debug_assert_eq!(statements.len(), plans.len());
-    seed_guarded_sequence_scratch(statements, plans, context, definitions)?;
+    let seeds = seed_guarded_sequence_scratch(statements, plans, context, definitions)?;
     let mut index = 0usize;
     while index < statements.len() {
         let partial_before = match definedness.as_deref_mut() {
@@ -1216,8 +1293,10 @@ fn resolve_sequence_definitions(
                 plan,
             )?;
         }
+        definitions.advance_facts_over(&statements[index..index + count], context);
         index += count;
     }
+    confine_guarded_seeds(statements, seeds, context, definitions);
     Ok(())
 }
 
@@ -1397,6 +1476,9 @@ fn resolve_generated_boolean_definition(
 ) -> Result<(), ToDaeError> {
     definitions.require_readable(value, context, span)?;
     definitions.define_whole(target);
+    // The capture holds its condition's value from here on, so a branch it
+    // selects later sees that condition's facts.
+    definitions.assign_facts(target, value, context);
     Ok(())
 }
 
@@ -1486,289 +1568,6 @@ fn subscript_expression(subscript: &Subscript) -> Option<&Expression> {
         rumoca_core::Subscript::Expr { expr, .. } => Some(expr),
         rumoca_core::Subscript::Index { .. } | rumoca_core::Subscript::Colon { .. } => None,
     }
-}
-
-/// A loop transition may only carry values whose elements already have a
-/// definition, because MLS §12.4.4 gives the carried value no other owner.
-fn resolve_function_loop_definitions(
-    source: (&[rumoca_core::ForIndex], &[rumoca_core::Statement], Span),
-    planned: (
-        &StructuredIndexDomain,
-        usize,
-        &mut FunctionLoopLowering,
-        &mut [FunctionStatementPlan],
-    ),
-    context: FunctionValidationContext<'_>,
-    definitions: &mut FunctionDefinitions,
-) -> Result<(), ToDaeError> {
-    let (indices, statements, span) = source;
-    let (domain, source_depth, lowering, body) = planned;
-    match lowering {
-        FunctionLoopLowering::TotalArrayDefinition => {
-            for plan in body {
-                if let FunctionStatementPlan::Assignment(assignment) = plan {
-                    definitions.define_whole(&assignment.target);
-                }
-            }
-        }
-        FunctionLoopLowering::Fold {
-            targets,
-            iteration_locals,
-        } => {
-            resolve_fold_definitions(
-                (indices, statements, span),
-                (domain, source_depth, body, targets, iteration_locals),
-                context,
-                definitions,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn resolve_fold_definitions(
-    source: (&[rumoca_core::ForIndex], &[rumoca_core::Statement], Span),
-    planned: (
-        &StructuredIndexDomain,
-        usize,
-        &mut [FunctionStatementPlan],
-        &mut Vec<VarName>,
-        &mut Vec<VarName>,
-    ),
-    context: FunctionValidationContext<'_>,
-    definitions: &mut FunctionDefinitions,
-) -> Result<(), ToDaeError> {
-    let (indices, statements, span) = source;
-    let (domain, source_depth, plans, targets, iteration_locals) = planned;
-    let enclosing_definitions = definitions.clone();
-    let (indices, statements) = flattened_function_loop_source(indices, statements, source_depth);
-    seed_guarded_sequence_scratch(statements, plans, context, definitions)?;
-    let point_count = domain.scalar_count().map_err(|error| {
-        ToDaeError::unsupported_flat(
-            "function loop transition",
-            format!(
-                "`{}` has an invalid compact domain: {error}",
-                context.function.name
-            ),
-            span,
-        )
-    })?;
-    for ordinal in 0..point_count {
-        definitions.clear_names(iteration_locals);
-        let point = domain
-            .index_tuple_at(ordinal)
-            .map_err(|error| {
-                ToDaeError::unsupported_flat(
-                    "function loop transition",
-                    format!(
-                        "`{}` cannot project its compact domain: {error}",
-                        context.function.name
-                    ),
-                    span,
-                )
-            })?
-            .ok_or_else(|| {
-                ToDaeError::unsupported_flat(
-                    "function loop transition",
-                    format!(
-                        "`{}` has a missing compact-domain point",
-                        context.function.name
-                    ),
-                    span,
-                )
-            })?;
-        let mut integers = context.static_integers.clone();
-        integers.extend(
-            indices
-                .iter()
-                .zip(point)
-                .map(|(index, value)| (VarName::new(&index.ident), value)),
-        );
-        let point_context = FunctionValidationContext {
-            static_integers: &integers,
-            ..context
-        };
-        resolve_fold_iteration(statements, plans, point_context, definitions)?;
-        definitions.forget_varying_guard_paths(context.generated_booleans);
-    }
-    targets.retain(|target| {
-        definitions.is_defined(target) || definitions.has_total_guarded_definition(target)
-    });
-    definitions.restore_names(&enclosing_definitions, iteration_locals);
-    Ok(())
-}
-
-fn resolve_fold_iteration(
-    statements: &[rumoca_core::Statement],
-    plans: &mut [FunctionStatementPlan],
-    context: FunctionValidationContext<'_>,
-    definitions: &mut FunctionDefinitions,
-) -> Result<(), ToDaeError> {
-    let mut index = 0usize;
-    while index < statements.len() {
-        if let FunctionStatementPlan::RecordAssembly(assembly) = &mut plans[index] {
-            let count = assembly.statement_count;
-            resolve_fold_record_assembly(
-                &statements[index..index + count],
-                assembly,
-                context,
-                definitions,
-            )?;
-            index += count;
-            continue;
-        }
-        let statement = &statements[index];
-        let plan = &mut plans[index];
-        match (statement, plan) {
-            (statement, FunctionStatementPlan::ProvenAssertion) => {
-                let assertion = function_assertion(statement, context.flat)?
-                    .expect("a proven loop assertion owns an assertion statement");
-                definitions.require_readable(assertion.condition, context, assertion.span)?;
-            }
-            (statement, FunctionStatementPlan::RuntimeAssertion) => {
-                let assertion = function_assertion(statement, context.flat)?
-                    .expect("a runtime loop assertion owns an assertion statement");
-                definitions.require_readable(assertion.condition, context, assertion.span)?;
-                definitions.require_readable(assertion.message, context, assertion.span)?;
-            }
-            (
-                rumoca_core::Statement::Assignment { value, span, .. },
-                FunctionStatementPlan::Assignment(assignment),
-            ) => resolve_fold_assignment(value, *span, assignment, context, definitions)?,
-            (
-                rumoca_core::Statement::If {
-                    cond_blocks,
-                    else_block,
-                    span,
-                },
-                FunctionStatementPlan::If {
-                    branches,
-                    fallback,
-                    targets,
-                },
-            ) => {
-                let point_targets = resolve_function_conditional(
-                    cond_blocks,
-                    else_block.as_deref(),
-                    branches,
-                    fallback.as_mut(),
-                    *span,
-                    context,
-                    definitions,
-                )?;
-                union_targets(targets, point_targets);
-            }
-            (
-                rumoca_core::Statement::If {
-                    cond_blocks,
-                    else_block,
-                    ..
-                },
-                FunctionStatementPlan::ProvenBranch {
-                    selected,
-                    statements,
-                },
-            ) => {
-                let selected =
-                    selected_conditional_statements(cond_blocks, else_block.as_deref(), *selected);
-                resolve_fold_iteration(selected, statements, context, definitions)?;
-            }
-            (
-                rumoca_core::Statement::For {
-                    indices,
-                    equations,
-                    span,
-                },
-                FunctionStatementPlan::For {
-                    domain,
-                    lowering,
-                    statements,
-                    source_depth,
-                    ..
-                },
-            ) => resolve_function_loop_definitions(
-                (indices, equations, *span),
-                (domain, *source_depth, lowering, statements),
-                context,
-                definitions,
-            )?,
-            (
-                rumoca_core::Statement::FunctionCall { args, span, .. },
-                FunctionStatementPlan::MultiOutputCall { outputs },
-            ) => {
-                resolve_multi_output_definitions(args, *span, outputs, context, definitions)?;
-            }
-            _ => unreachable!("analysis admits only checked transition statements in a fold"),
-        }
-        index += 1;
-    }
-    Ok(())
-}
-
-fn resolve_fold_record_assembly(
-    statements: &[rumoca_core::Statement],
-    assembly: &mut FunctionRecordAssemblyPlan,
-    context: FunctionValidationContext<'_>,
-    definitions: &mut FunctionDefinitions,
-) -> Result<(), ToDaeError> {
-    for statement in statements {
-        let rumoca_core::Statement::Assignment { value, span, .. } = statement else {
-            unreachable!("record assembly certificate contains assignments")
-        };
-        definitions.require_readable(value, context, *span)?;
-    }
-    if !definitions.is_defined(&assembly.target) && assembly.seed.is_none() {
-        let span = required_statement_span(&statements[0], "function loop record assembly")?;
-        assembly.seed = Some(definitions.whole_loop_seed(&assembly.target, context, span)?);
-    }
-    definitions.define_whole(&assembly.target);
-    Ok(())
-}
-
-fn union_targets(targets: &mut Vec<VarName>, candidates: Vec<VarName>) {
-    for target in candidates {
-        if !targets.contains(&target) {
-            targets.push(target);
-        }
-    }
-}
-
-fn resolve_fold_assignment(
-    value: &Expression,
-    span: Span,
-    assignment: &mut FunctionAssignmentPlan,
-    context: FunctionValidationContext<'_>,
-    definitions: &mut FunctionDefinitions,
-) -> Result<(), ToDaeError> {
-    definitions.require_readable(value, context, span)?;
-    for expression in assignment
-        .subscripts()
-        .iter()
-        .filter_map(subscript_expression)
-    {
-        definitions.require_readable(expression, context, span)?;
-    }
-    if assignment.subscripts().is_empty() {
-        seed_undefined_whole_loop_value(assignment, context, definitions, span)?;
-        definitions.define_whole(assignment.target());
-        return Ok(());
-    }
-    let seed =
-        definitions.write_elements(assignment.target(), assignment.subscripts(), context, span)?;
-    assignment.seed = assignment.seed.take().or(seed);
-    Ok(())
-}
-
-fn seed_undefined_whole_loop_value(
-    assignment: &mut FunctionAssignmentPlan,
-    context: FunctionValidationContext<'_>,
-    definitions: &FunctionDefinitions,
-    span: Span,
-) -> Result<(), ToDaeError> {
-    if !definitions.is_defined(assignment.target()) && assignment.seed.is_none() {
-        assignment.seed = Some(definitions.whole_loop_seed(assignment.target(), context, span)?);
-    }
-    Ok(())
 }
 
 pub(super) fn validate_function_subscripts(

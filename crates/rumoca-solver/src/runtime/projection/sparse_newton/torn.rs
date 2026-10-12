@@ -12,11 +12,11 @@ pub(super) struct TornNewtonCache {
 impl TornNewtonCache {
     pub(super) fn solve_scaled(
         &mut self,
-        source: &DMatrix<f64>,
+        source: &super::super::BlockJacobian,
         rhs: &DVector<f64>,
-        row_scales: &[f64],
-        variable_scales: &[f64],
+        (row_scales, variable_scales): (&[f64], &[f64]),
         layout: &solve::AffineEliminationLayout,
+        revision: Option<u64>,
     ) -> Option<DVector<f64>> {
         let n = layout.pattern().rows() as usize;
         if source.shape() != (n, n)
@@ -30,7 +30,7 @@ impl TornNewtonCache {
             self.system = TornSystem::new(layout);
         }
         let system = self.system.as_mut()?;
-        system.update(source, row_scales, variable_scales);
+        system.update(source, (row_scales, variable_scales), revision);
         system.solve(rhs)
     }
 
@@ -58,6 +58,27 @@ struct TornSystem {
     capacity: usize,
     offsets: Box<[usize]>,
     values: Box<[f64]>,
+    /// The unscaled source entry each of `values` was conditioned from, and
+    /// the row and variable scales it was conditioned with, so an update
+    /// recomputes only the entries whose inputs changed: an entry is a pure
+    /// function of its source value and its two scales.
+    sources: Box<[f64]>,
+    row_scales: Box<[f64]>,
+    variable_scales: Box<[f64]>,
+    /// Per variable, whether its scale differs from the one held.
+    rescaled: Box<[bool]>,
+    /// The compact layout of the block pattern, whose slots are this system's
+    /// entries in order: both list each row's pattern columns ascending.
+    compact: rumoca_ir_solve::CompactPatternLayout,
+    /// The last source layout found equal to `compact`, so a source stored in
+    /// it is read by slot without comparing layouts again.
+    matched: Option<std::sync::Arc<rumoca_ir_solve::CompactPatternLayout>>,
+    /// Whether `values` holds a conditioning of held inputs at all; until the
+    /// first update every entry is recomputed.
+    conditioned: bool,
+    /// The revision of the inputs `values` and the factor were last formed
+    /// from: an update under the same revision holds bitwise those inputs.
+    revision: Option<u64>,
     recovery: Box<[f64]>,
     /// For every block coordinate, the recovery columns its row can hold
     /// nonzero, ascending: a tear's own column, and for a causal target the
@@ -116,6 +137,14 @@ impl TornSystem {
             layout: layout.clone(),
             capacity,
             values: vec![0.0; offsets[n]].into_boxed_slice(),
+            sources: vec![0.0; offsets[n]].into_boxed_slice(),
+            row_scales: vec![0.0; n].into_boxed_slice(),
+            variable_scales: vec![0.0; n].into_boxed_slice(),
+            rescaled: vec![true; n].into_boxed_slice(),
+            compact: rumoca_ir_solve::CompactPatternLayout::of(layout.pattern()),
+            matched: None,
+            conditioned: false,
+            revision: None,
             offsets: offsets.into_boxed_slice(),
             recovery: vec![0.0; n.checked_mul(capacity)?].into_boxed_slice(),
             support: vec![Vec::new(); n],
@@ -137,7 +166,7 @@ impl TornSystem {
     /// checked on unconditioned coefficients: conditioning may underflow a
     /// nonzero future dependency to zero. Returns whether the promoted set
     /// differs from the one the current factor was built with.
-    fn preflight_guards(&mut self, source: &DMatrix<f64>) -> bool {
+    fn preflight_guards(&mut self, source: &super::super::BlockJacobian) -> bool {
         self.next_guarded.fill(false);
         for (&(row, column), &(holder, solver)) in self
             .layout
@@ -154,17 +183,37 @@ impl TornSystem {
         changed
     }
 
-    fn update(&mut self, source: &DMatrix<f64>, rows: &[f64], columns: &[f64]) {
+    fn update(
+        &mut self,
+        source: &super::super::BlockJacobian,
+        (rows, columns): (&[f64], &[f64]),
+        revision: Option<u64>,
+    ) {
+        if revision.is_some() && revision == self.revision {
+            return;
+        }
+        self.revision = revision;
         let mut changed = matches!(self.factor, Factor::Unfactored);
         changed |= self.preflight_guards(source);
+        let fresh = !self.conditioned;
+        self.conditioned = true;
+        for ((&scale, held), rescaled) in columns
+            .iter()
+            .zip(self.variable_scales.iter_mut())
+            .zip(self.rescaled.iter_mut())
+        {
+            *rescaled = fresh || scale.to_bits() != held.to_bits();
+            *held = scale;
+        }
+        let compact = source
+            .compact_storage()
+            .filter(|(layout, _)| self.matches(layout))
+            .map(|(_, values)| values);
         for (row, &row_scale) in rows.iter().enumerate() {
-            let values = &mut self.values[self.offsets[row]..self.offsets[row + 1]];
-            for (value, &column) in values.iter_mut().zip(self.layout.row_columns(row)) {
-                let next = source[(row, column)] * valid_variable_scale(columns[column])
-                    / valid_variable_scale(row_scale);
-                changed |= value.to_bits() != next.to_bits();
-                *value = next;
-            }
+            let row_scaled = fresh || row_scale.to_bits() != self.row_scales[row].to_bits();
+            self.row_scales[row] = row_scale;
+            let read = SourceRow { source, compact };
+            changed |= self.condition_row(read, (row, row_scale, row_scaled), columns);
         }
         if changed {
             // Revoke the previous factor before changing its recovery relation.
@@ -173,6 +222,34 @@ impl TornSystem {
                 self.factor = Factor::Ready(factor);
             }
         }
+    }
+
+    /// Recondition the entries of `row` whose source value or scales changed;
+    /// whether any conditioned value changed.
+    fn condition_row(
+        &mut self,
+        read: SourceRow<'_>,
+        (row, row_scale, row_scaled): (usize, f64, bool),
+        columns: &[f64],
+    ) -> bool {
+        let mut changed = false;
+        let entries = self.offsets[row]..self.offsets[row + 1];
+        for (((value, held), &column), slot) in self.values[entries.clone()]
+            .iter_mut()
+            .zip(&mut self.sources[entries.clone()])
+            .zip(self.layout.row_columns(row))
+            .zip(entries)
+        {
+            let raw = read.value(row, column, slot);
+            if row_scaled || self.rescaled[column] || raw.to_bits() != held.to_bits() {
+                *held = raw;
+                let next =
+                    raw * valid_variable_scale(columns[column]) / valid_variable_scale(row_scale);
+                changed |= value.to_bits() != next.to_bits();
+                *value = next;
+            }
+        }
+        changed
     }
 
     fn row_values(&self, row: usize) -> &[f64] {
@@ -422,5 +499,40 @@ impl TornSystem {
             .iter()
             .all(|value| value.is_finite())
             .then(|| self.work.clone())
+    }
+}
+
+/// Where a torn update reads source entries: by slot from compact storage in
+/// the system's own layout, else by coordinate.
+#[derive(Clone, Copy)]
+struct SourceRow<'a> {
+    source: &'a super::super::BlockJacobian,
+    compact: Option<&'a [f64]>,
+}
+
+impl SourceRow<'_> {
+    fn value(self, row: usize, column: usize, slot: usize) -> f64 {
+        match self.compact {
+            Some(values) => values[slot],
+            None => self.source[(row, column)],
+        }
+    }
+}
+
+impl TornSystem {
+    /// Whether `layout` is this system's compact layout.
+    fn matches(&mut self, layout: &std::sync::Arc<rumoca_ir_solve::CompactPatternLayout>) -> bool {
+        if self
+            .matched
+            .as_ref()
+            .is_some_and(|matched| std::sync::Arc::ptr_eq(matched, layout))
+        {
+            return true;
+        }
+        let equal = **layout == self.compact;
+        if equal {
+            self.matched = Some(std::sync::Arc::clone(layout));
+        }
+        equal
     }
 }

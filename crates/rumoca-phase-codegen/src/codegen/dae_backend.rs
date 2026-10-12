@@ -232,6 +232,7 @@ fn project_functions(view: dae::DaeView<'_>) -> Vec<Value> {
                             "initial_definitions": definition_ordinals(fold.initial_values()),
                             "update_definitions": definition_ordinals(fold.update_values()),
                             "output_definitions": definition_ordinals(fold.output_values()),
+                            "continuation": fold.continuation().map(|condition| condition.index()),
                             "provenance": fold.provenance(),
                         })
                     })
@@ -980,6 +981,10 @@ fn project_event_action(operation: dae::EventActionOperation<'_>) -> Value {
         }),
         dae::EventActionOperation::Terminate { message } => json!({
             "kind": "terminate",
+            "message": message.index(),
+        }),
+        dae::EventActionOperation::Print { message } => json!({
+            "kind": "print",
             "message": message.index(),
         }),
         dae::EventActionOperation::Reinitialize { state, value } => json!({

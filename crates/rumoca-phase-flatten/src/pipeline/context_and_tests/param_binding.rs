@@ -9,6 +9,13 @@ pub(super) struct ParamBinding<'a> {
     pub(super) binding: &'a Expression,
     pub(super) may_be_record_alias: bool,
     pub(super) binding_from_modification: bool,
+    /// The declared type is String or the declaration is an array, so the
+    /// binding value has no scalar inventory.
+    pub(super) aggregate: bool,
+    /// The declared type is an enumeration (MLS 3.7 §4.8.5), so the binding
+    /// value belongs to the enumeration inventory. A parameter of any other
+    /// type never holds an enumeration value, whatever its binding spells.
+    pub(super) enumeration: bool,
 }
 
 pub(super) fn is_array_literal_binding(binding: &Expression) -> bool {
@@ -24,4 +31,11 @@ pub(super) fn is_plain_component_reference(binding: &Expression) -> bool {
             name, subscripts, ..
         } if subscripts.is_empty() && !looks_like_enum_literal_path(name.as_str())
     )
+}
+
+/// True when `var` is declared with the predefined String type.
+pub(super) fn is_string_variable(flat: &Model, var: &flat::Variable) -> bool {
+    flat.effective_types
+        .get(&var.type_id)
+        .is_some_and(|effective| effective.canonical_type() == flat.predefined_types.string)
 }

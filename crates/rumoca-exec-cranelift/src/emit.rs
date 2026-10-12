@@ -37,6 +37,7 @@ mod register_storage_tests;
 mod selected_jvp;
 mod selected_residual;
 mod status;
+mod tensor_kernel;
 pub(crate) mod typed_program;
 
 use host_runtime::{host_jit_builder, register_math_symbols, with_active_external_tables};
@@ -49,6 +50,10 @@ use input_validation::{
 use interpreter::execute_row;
 use owned_jit_module::{OwnedJitModule, declare_far_call_in_func};
 pub(crate) use projection_batch::SharedProjectionModule;
+pub(crate) use tensor_kernel::{
+    CompiledTensorKernels, DirectionalKernels, KernelFrame, KernelId, KernelKind, KernelProgram,
+    ResidualKernels,
+};
 
 // Each compiled program writes its outputs through the trailing `*mut f64`
 // pointer (one program may emit several outputs via consecutive StoreOutputs).
@@ -517,7 +522,7 @@ impl CompiledJacobianRows {
 }
 
 #[derive(Clone, Copy)]
-enum RowKind {
+pub(crate) enum RowKind {
     Residual,
     JacobianV,
 }
@@ -724,7 +729,9 @@ fn residual_program_cost(program: &[LinearOp]) -> usize {
             LinearOp::FunctionFold { program, .. }
             | LinearOp::GuardedFunctionFold { program, .. }
             | LinearOp::StoreOutputFunctionFold { program, .. } => {
-                1usize.saturating_add(residual_program_cost(&program.update))
+                program.regions().fold(1usize, |cost, region| {
+                    cost.saturating_add(residual_program_cost(region))
+                })
             }
             LinearOp::FunctionConditional { program, .. } => {
                 let arm_cost = program.arms.iter().fold(0usize, |cost, arm| {
@@ -1175,9 +1182,9 @@ impl CraneliftEmitter {
             match operation {
                 LinearOp::FunctionFold { program, .. }
                 | LinearOp::GuardedFunctionFold { program, .. }
-                | LinearOp::StoreOutputFunctionFold { program, .. } => {
-                    self.ensure_conditional_programs(&program.update, kind)?;
-                }
+                | LinearOp::StoreOutputFunctionFold { program, .. } => program
+                    .regions()
+                    .try_for_each(|region| self.ensure_conditional_programs(region, kind))?,
                 LinearOp::FunctionConditional { program, .. } => {
                     self.ensure_nested_conditional_program(program, kind)?;
                 }
@@ -1331,7 +1338,9 @@ impl CraneliftEmitter {
         self.canonical_fold_functions
             .push((program.clone(), function));
         self.ensure_fold_programs(&program.update, kind)?;
-        self.ensure_conditional_programs(&program.update, kind)?;
+        for region in program.regions() {
+            self.ensure_conditional_programs(region, kind)?;
+        }
 
         let mut context = self.module.make_context();
         context.func.signature = signature;
@@ -3394,7 +3403,12 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         // code even when runtime indexing requires a register tape: the tape
         // remains addressable, while we eliminate loop control and integer
         // div/rem from every estimator matrix reduction.
-        if count <= INLINE_FIXED_FOLD_POINT_LIMIT && program.update.len() <= 128 {
+        // A bounded `while` fold keeps its loop: each pass first tests the
+        // continuation and exits with the current tuple when it is false.
+        if count <= INLINE_FIXED_FOLD_POINT_LIMIT
+            && program.update.len() <= 128
+            && program.continuation.is_none()
+        {
             for ordinal in 0..count {
                 let constants = fold_index_constants(&program.domain, &extents, &strides, ordinal);
                 let indices = constants
@@ -3432,6 +3446,20 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
 
         self.fb.switch_to_block(body);
         self.fb.seal_block(body);
+        if let Some(continuation) = &program.continuation {
+            let predicate = self.lower_fold_continuation(
+                carried_slot,
+                captures,
+                captures_ptr,
+                (program.carried_count, &continuation.ops),
+            )?;
+            let zero = self.fb.ins().f64const(0.0);
+            let proceed = self.fb.ins().fcmp(FloatCC::NotEqual, predicate, zero);
+            let pass = self.fb.create_block();
+            self.fb.ins().brif(proceed, pass, &[], exit, &[]);
+            self.fb.switch_to_block(pass);
+            self.fb.seal_block(pass);
+        }
         let mut indices = Vec::with_capacity(program.domain.binders.len());
         for ((binder, extent), stride) in program.domain.binders.iter().zip(extents).zip(strides) {
             let position = if stride == 1 {
@@ -3463,6 +3491,54 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         self.fb.switch_to_block(exit);
         self.fb.seal_block(exit);
         Ok(())
+    }
+
+    /// Evaluate a bounded `while` fold's continuation on the carried tuple.
+    fn lower_fold_continuation(
+        &mut self,
+        carried_slot: StackSlot,
+        captures: &[cranelift_codegen::ir::Value],
+        captures_ptr: Option<cranelift_codegen::ir::Value>,
+        (carried_count, ops): (usize, &[LinearOp]),
+    ) -> Result<cranelift_codegen::ir::Value, CompileError> {
+        let pointer_type = self.module.target_config().pointer_type();
+        let backing_regs_ptr = create_fold_register_tape(self.fb, pointer_type, ops)?;
+        let mut continuation_regs = HashMap::new();
+        let mut continuation = RowLowerCtx {
+            fb: self.fb,
+            module: self.module,
+            math: self.math,
+            regs: &mut continuation_regs,
+            y_ptr: self.y_ptr,
+            p_ptr: self.p_ptr,
+            t_value: self.t_value,
+            v_ptr: self.v_ptr,
+            backing_regs_ptr,
+            flags: self.flags,
+            loaded_y: None,
+            loaded_p: None,
+            fold_carried: Some(carried_slot),
+            fold_indices: Some(&[]),
+            fold_index_constants: None,
+            fold_captures: Some(captures),
+            fold_captures_ptr: captures_ptr,
+            conditional_captures: self.conditional_captures,
+            conditional_captures_ptr: self.conditional_captures_ptr,
+            fold_functions: self.fold_functions,
+            conditional_functions: self.conditional_functions,
+            pure_call_functions: self.pure_call_functions,
+            pure_call_results: HashMap::new(),
+            nested_fold_results: HashMap::new(),
+            conditional_results: HashMap::new(),
+            fold_carried_versions: vec![0; carried_count],
+            known_constants: HashMap::new(),
+        };
+        match continuation.lower_fold_update_body(ops)?.as_slice() {
+            [LinearOp::StoreOutput { src }] => continuation.lookup(*src),
+            _ => Err(CompileError::Backend(
+                "a fold continuation stores exactly one predicate".to_string(),
+            )),
+        }
     }
 
     fn lower_function_fold_iteration(
@@ -5728,21 +5804,11 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                     "function-fold tensor patch rank mismatch".to_string(),
                 ));
             }
-            let value_count = dimensions
-                .iter()
-                .zip(update.subscripts.iter())
-                .try_fold(1usize, |count, (&extent, subscript)| {
-                    if matches!(subscript, rumoca_ir_solve::TensorSubscript::Whole) {
-                        count.checked_mul(extent as usize)
-                    } else {
-                        Some(count)
-                    }
-                })
-                .ok_or_else(|| {
-                    CompileError::Backend(
-                        "function-fold tensor update value extent overflow".to_string(),
-                    )
-                })?;
+            let value_count = update.value_count(dimensions).ok_or_else(|| {
+                CompileError::Backend(
+                    "function-fold tensor update value extent overflow".to_string(),
+                )
+            })?;
             let value_bytes = value_count
                 .checked_mul(lanes)
                 .and_then(|count| count.checked_mul(std::mem::size_of::<f64>()))
@@ -5836,13 +5902,13 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 } else {
                     self.fb.ins().urem_imm(coordinate, i64::from(extent))
                 };
-                match *subscript {
-                    rumoca_ir_solve::TensorSubscript::Whole => {
+                match subscript {
+                    rumoca_ir_solve::TensorUpdateSubscript::Whole => {
                         value_element = self.fb.ins().imul_imm(value_element, i64::from(extent));
                         value_element = self.fb.ins().iadd(value_element, coordinate);
                     }
-                    rumoca_ir_solve::TensorSubscript::Index(index) => {
-                        let selected = match index {
+                    rumoca_ir_solve::TensorUpdateSubscript::Index(index) => {
+                        let selected = match *index {
                             rumoca_ir_solve::TensorIndex::Constant(selected) => {
                                 self.fb.ins().iconst(types::I64, i64::from(selected))
                             }
@@ -5869,6 +5935,27 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                         };
                         let matches = self.fb.ins().icmp(IntCC::Equal, coordinate, selected);
                         valid = self.fb.ins().band(valid, matches);
+                    }
+                    rumoca_ir_solve::TensorUpdateSubscript::Slice {
+                        start,
+                        dimensions: slice_dimensions,
+                    } => {
+                        let slice_count = slice_dimensions
+                            .iter()
+                            .try_fold(1usize, |count, extent| count.checked_mul(*extent as usize))
+                            .ok_or_else(|| {
+                                CompileError::Backend("tensor update slice overflow".into())
+                            })?;
+                        let (found, position) =
+                            self.lower_slice_position(*start, slice_count, coordinate)?;
+                        valid = self.fb.ins().band(valid, found);
+                        value_element = self.fb.ins().imul_imm(
+                            value_element,
+                            i64::try_from(slice_count).map_err(|_| {
+                                CompileError::Backend("tensor update slice exceeds i64".into())
+                            })?,
+                        );
+                        value_element = self.fb.ins().iadd(value_element, position);
                     }
                 }
             }
@@ -5968,6 +6055,39 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         Ok(())
     }
 
+    /// Position of the zero-based `coordinate` in the packed one-based index
+    /// range `start..start + count` of a fold-patch slice axis, and whether it
+    /// is present. The registers are SSA values of the fold body, so the scan
+    /// is unrolled over the constant slice extent; the first match wins.
+    fn lower_slice_position(
+        &mut self,
+        start: u32,
+        count: usize,
+        coordinate: cranelift_codegen::ir::Value,
+    ) -> Result<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value), CompileError> {
+        let wanted = self.fb.ins().iadd_imm(coordinate, 1);
+        let wanted = self.fb.ins().fcvt_from_uint(types::F64, wanted);
+        let mut found = self.fb.ins().iconst(types::I8, 0);
+        let mut position = self.fb.ins().iconst(types::I64, 0);
+        for offset in (0..count).rev() {
+            let candidate = self.lookup(checked_reg_offset(
+                start,
+                offset,
+                "function-fold tensor update slice",
+            )?)?;
+            let matches = self.fb.ins().fcmp(FloatCC::Equal, candidate, wanted);
+            let offset = self.fb.ins().iconst(
+                types::I64,
+                i64::try_from(offset).map_err(|_| {
+                    CompileError::Backend("tensor update slice offset exceeds i64".into())
+                })?,
+            );
+            position = self.fb.ins().select(matches, offset, position);
+            found = self.fb.ins().bor(found, matches);
+        }
+        Ok((found, position))
+    }
+
     fn try_lower_scalar_fold_tensor_update(
         &mut self,
         carried: StackSlot,
@@ -5995,8 +6115,9 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             .subscripts
             .iter()
             .map(|subscript| match subscript {
-                rumoca_ir_solve::TensorSubscript::Index(index) => Some(*index),
-                rumoca_ir_solve::TensorSubscript::Whole => None,
+                rumoca_ir_solve::TensorUpdateSubscript::Index(index) => Some(*index),
+                rumoca_ir_solve::TensorUpdateSubscript::Whole
+                | rumoca_ir_solve::TensorUpdateSubscript::Slice { .. } => None,
             })
             .collect::<Option<Vec<_>>>();
         let Some(indices) = indices else {
@@ -6333,8 +6454,8 @@ fn fold_binary_constant(op: BinaryOp, lhs: f64, rhs: f64) -> Option<f64> {
         BinaryOp::Sub => lhs - rhs,
         BinaryOp::Mul => lhs * rhs,
         BinaryOp::Div => lhs / rhs,
-        BinaryOp::Min => lhs.min(rhs),
-        BinaryOp::Max => lhs.max(rhs),
+        BinaryOp::Min => rumoca_ir_solve::real_extremum(lhs, rhs, true),
+        BinaryOp::Max => rumoca_ir_solve::real_extremum(lhs, rhs, false),
         _ => return None,
     })
 }
@@ -6482,10 +6603,33 @@ fn emit_binary_op(
             bool_to_f64(fb, or_bits)
         }
         BinaryOp::Atan2 => call_binary_math(fb, module, math, BinaryMathFn::Atan2, lhs, rhs)?,
-        BinaryOp::Min => fb.ins().fmin(lhs, rhs),
-        BinaryOp::Max => fb.ins().fmax(lhs, rhs),
+        BinaryOp::Min => emit_real_extremum(fb, lhs, rhs, true),
+        BinaryOp::Max => emit_real_extremum(fb, lhs, rhs, false),
     };
     Ok(value)
+}
+
+/// `rumoca_ir_solve::real_extremum`: a single NaN operand is ignored, two give
+/// the quiet NaN `lhs + rhs`, and a tie selects `rhs`.
+fn emit_real_extremum(
+    fb: &mut FunctionBuilder<'_>,
+    lhs: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+    minimum: bool,
+) -> cranelift_codegen::ir::Value {
+    let lhs_nan = fb.ins().fcmp(FloatCC::Unordered, lhs, lhs);
+    let rhs_nan = fb.ins().fcmp(FloatCC::Unordered, rhs, rhs);
+    let both_nan = fb.ins().band(lhs_nan, rhs_nan);
+    let ordered = if minimum {
+        FloatCC::LessThan
+    } else {
+        FloatCC::GreaterThan
+    };
+    let strictly = fb.ins().fcmp(ordered, lhs, rhs);
+    let keep_lhs = fb.ins().bor(strictly, rhs_nan);
+    let selected = fb.ins().select(keep_lhs, lhs, rhs);
+    let quiet = fb.ins().fadd(lhs, rhs);
+    fb.ins().select(both_nan, quiet, selected)
 }
 
 fn emit_compare_op(
@@ -7550,19 +7694,9 @@ fn max_reg_index(op: LinearOp) -> Result<Option<usize>, CompileError> {
         } => {
             let mut last = 0;
             for update in updates {
-                let value_count = dimensions
-                    .iter()
-                    .zip(update.subscripts.iter())
-                    .try_fold(1usize, |count, (&extent, subscript)| {
-                        if matches!(subscript, rumoca_ir_solve::TensorSubscript::Whole) {
-                            count.checked_mul(extent as usize)
-                        } else {
-                            Some(count)
-                        }
-                    })
-                    .ok_or_else(|| {
-                        CompileError::Backend("tensor update value extent overflow".to_string())
-                    })?;
+                let value_count = update.value_count(&dimensions).ok_or_else(|| {
+                    CompileError::Backend("tensor update value extent overflow".to_string())
+                })?;
                 let value_last = checked_strided_register(
                     update.value_start,
                     value_count.saturating_sub(1),
@@ -7576,13 +7710,8 @@ fn max_reg_index(op: LinearOp) -> Result<Option<usize>, CompileError> {
                     CompileError::Backend("tensor update value register overflow".to_string())
                 })?;
                 last = last.max(value_last);
-                for subscript in update.subscripts {
-                    if let rumoca_ir_solve::TensorSubscript::Index(
-                        rumoca_ir_solve::TensorIndex::Runtime(register),
-                    ) = subscript
-                    {
-                        last = last.max(register);
-                    }
+                if let Some(coordinate) = update.last_coordinate_register() {
+                    last = last.max(coordinate);
                 }
                 if let Some(condition) = update.condition {
                     last = last.max(condition);
@@ -7834,19 +7963,9 @@ fn validate_row_sources(defined: &[bool], op: LinearOp) -> Result<(), CompileErr
                 if let Some(condition) = update.condition {
                     validate_reg_defined(defined, condition)?;
                 }
-                let value_count = dimensions
-                    .iter()
-                    .zip(update.subscripts.iter())
-                    .try_fold(1usize, |count, (&extent, subscript)| {
-                        if matches!(subscript, rumoca_ir_solve::TensorSubscript::Whole) {
-                            count.checked_mul(extent as usize)
-                        } else {
-                            Some(count)
-                        }
-                    })
-                    .ok_or_else(|| {
-                        CompileError::Backend("tensor update value extent overflow".to_string())
-                    })?;
+                let value_count = update.value_count(&dimensions).ok_or_else(|| {
+                    CompileError::Backend("tensor update value extent overflow".to_string())
+                })?;
                 for element in 0..value_count {
                     let base = checked_strided_register(
                         update.value_start,
@@ -7868,12 +7987,16 @@ fn validate_row_sources(defined: &[bool], op: LinearOp) -> Result<(), CompileErr
                         )?;
                     }
                 }
-                for subscript in update.subscripts {
-                    if let rumoca_ir_solve::TensorSubscript::Index(
-                        rumoca_ir_solve::TensorIndex::Runtime(register),
-                    ) = subscript
-                    {
-                        validate_reg_defined(defined, register)?;
+                for (start, count) in update
+                    .subscripts
+                    .iter()
+                    .filter_map(rumoca_ir_solve::TensorUpdateSubscript::runtime_registers)
+                {
+                    for offset in 0..count {
+                        validate_reg_defined(
+                            defined,
+                            checked_reg_offset(start, offset, "tensor update slice index")?,
+                        )?;
                     }
                 }
             }
@@ -8219,10 +8342,23 @@ fn to_backend_err<E: std::fmt::Display>(err: E) -> CompileError {
     CompileError::Backend(err.to_string())
 }
 
+#[cfg(test)]
+thread_local! {
+    static FINALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many JIT module finalizations this thread has run.
+#[cfg(test)]
+pub(crate) fn take_finalizations() -> usize {
+    FINALIZATIONS.with(|count| count.replace(0))
+}
+
 // The closure returns cranelift-module's `ModuleError`, whose size this crate
 // does not control; boxing it here would only move the allocation.
 #[allow(clippy::result_large_err)]
 pub(super) fn finalize_jit_module(module: &mut JITModule) -> Result<(), CompileError> {
+    #[cfg(test)]
+    FINALIZATIONS.with(|count| count.set(count.get() + 1));
     catch_cranelift_unwind("finalization", || module.finalize_definitions())?
         .map_err(to_backend_err)
 }
@@ -8243,5 +8379,7 @@ fn catch_cranelift_unwind<T>(
 
 #[cfg(test)]
 mod emit_tests;
+#[cfg(test)]
+mod fold_tests;
 #[cfg(test)]
 mod interpreter_tests;

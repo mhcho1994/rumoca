@@ -4,6 +4,7 @@ pub(super) mod conditional_guards;
 mod discontinuities;
 mod integer_steps;
 mod operators;
+mod shared_record_calls;
 mod temporal;
 
 use super::*;
@@ -16,6 +17,7 @@ use conditional_guards::{
 };
 use discontinuities::*;
 use operators::*;
+use shared_record_calls::SharedRecordCalls;
 use temporal::*;
 
 pub(super) fn lower_expression<'dae>(
@@ -385,22 +387,34 @@ fn promote_dynamic_deadline_to_real<'dae>(
     deadline: dae::ExprId<'dae>,
     owner: dae::DaeProvenance,
 ) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
-    let value_type =
-        construction.expressions(|expressions| expressions.value_type(deadline, owner))?;
-    if !value_type.is_scalar() || value_type.scalar_type() != dae::ScalarType::Integer {
-        return Ok(deadline);
-    }
     let generated =
         dae::DaeProvenance::generated(dae::DaeGeneration::ConditionLowering, owner.span())?;
-    let zero = construction.expressions(|expressions| {
+    promote_integer_value_to_real(construction, deadline, generated)
+}
+
+/// Materialize the MLS 3.6 §10.6.13 Integer-to-Real conversion of a scalar or
+/// array value, so a reader sees the Real value its destination declares.
+/// An Integer value is multiplied by the Real literal one, which is exact for
+/// every Integer a binary64 Real represents; any other value is returned as is.
+pub(super) fn promote_integer_value_to_real<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    value: dae::ExprId<'dae>,
+    generated: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let value_type =
+        construction.expressions(|expressions| expressions.value_type(value, generated))?;
+    if value_type.scalar_type() != dae::ScalarType::Integer {
+        return Ok(value);
+    }
+    let one = construction.expressions(|expressions| {
         expressions
             .at(generated)
-            .literal(dae::DaeLiteral::Real(0.0))
+            .literal(dae::DaeLiteral::Real(1.0))
     })?;
     construction.expressions(|expressions| {
         expressions
             .at(generated)
-            .binary(dae::BinaryOperator::Add, deadline, zero)
+            .binary(dae::BinaryOperator::Multiply, value, one)
     })
 }
 
@@ -426,7 +440,8 @@ fn lower_expression_node<'dae>(
             name, subscripts, ..
         } => lower_variable_reference(construction, symbols, binders, name, subscripts, provenance),
         Expression::BuiltinCall { function, args, .. } => {
-            lower_builtin_expression(construction, symbols, binders, *function, args, provenance)
+            let call = (expression, *function, args.as_slice());
+            lower_builtin_node(construction, symbols, binders, call, provenance)
         }
         Expression::Literal { value, .. } => construction
             .expressions(|expressions| expressions.at(provenance).literal(lower_literal(value))),
@@ -1140,6 +1155,15 @@ fn lower_builtin_call<'dae>(
     // extents only from the trailing arguments, and `linspace(x1, x2, n)`
     // declares its extent in the third; the extent positions are named per
     // builtin so a non-extent argument is never mistaken for one.
+    if function == BuiltinFunction::Size
+        && let Some(extent) = static_size(symbols, arguments)
+    {
+        return construction.expressions(|expressions| {
+            expressions
+                .at(provenance)
+                .literal(dae::DaeLiteral::Integer(extent))
+        });
+    }
     let source_arguments = arguments;
     let arguments = arguments
         .iter()
@@ -1332,7 +1356,7 @@ pub(super) fn lower_call_operands<'dae>(
         for (name, binder) in binders {
             let (lower, upper) =
                 construction.domains(|domains| domains.binder_bounds(*binder, provenance))?;
-            shapes.bind_integer_bounds(name.clone(), lower, upper);
+            shapes.bind_slice_binder(name.clone(), lower, upper);
         }
         Some(shapes)
     };
@@ -1344,6 +1368,7 @@ pub(super) fn lower_call_operands<'dae>(
         provenance.span(),
     )?;
     let key = &call.specialization;
+    let mut shared_calls = SharedRecordCalls::new();
     let arguments = arguments
         .iter()
         .enumerate()
@@ -1369,7 +1394,7 @@ pub(super) fn lower_call_operands<'dae>(
                     argument,
                 );
             }
-            lower_expression_scoped(construction, symbols, binders, argument, None)
+            shared_calls.lower_argument(construction, symbols, binders, argument)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let vectorization = if call.prefix.is_empty() {
@@ -1537,17 +1562,7 @@ fn lower_conditional_expression<'dae>(
     // In an equation, such a guard is kept as a run-time branch when its arms
     // are structurally equal (SPEC_0040 DAE-C22); only a structural selection
     // is evaluated at translation.
-    let preserve_tunable_conditional = if symbols.shapes.is_attribute_scope() {
-        !attribute_conditional_folds(branches, else_branch, symbols.shapes)
-            && branches
-                .iter()
-                .any(|(condition, _)| guard_reads_tunable_parameter(symbols.coordinates, condition))
-    } else {
-        !symbols.shapes.is_structural_selection(span)
-            && symbols.shapes.evaluable().is_some_and(|evaluable| {
-                retains_equation_guard(symbols.coordinates, evaluable, branches, else_branch)
-            })
-    };
+    let preserve_tunable_conditional = retained_conditional(symbols, branches, else_branch, span);
     let mut lowered = Vec::with_capacity(branches.len());
     for (condition, value) in branches {
         let proven = if preserve_tunable_conditional {
@@ -1556,12 +1571,7 @@ fn lower_conditional_expression<'dae>(
             symbols.shapes.proven_value(condition)
         };
         match proven {
-            // A proven-dead arm is never built; MLS §11.5 skips to the next
-            // condition, so lowering resumes at the following branch.
             Some(ProvenValue::Boolean(false)) => continue,
-            // The first proven-`true` condition selects its value. With no
-            // undecided earlier branch its value is the whole result; otherwise
-            // it is the fallback the retained conditional falls through to.
             Some(ProvenValue::Boolean(true)) => {
                 let taken = lower_expression_scoped(construction, symbols, binders, value, None)?;
                 if lowered.is_empty() {
@@ -1571,8 +1581,6 @@ fn lower_conditional_expression<'dae>(
                     expressions.at(provenance).conditional(lowered, taken)
                 });
             }
-            // An unproven condition (or a non-Boolean fold, which a well-typed
-            // conditional never produces) keeps its arm exactly as written.
             _ => {
                 lowered.push((
                     lower_expression_scoped(construction, symbols, binders, condition, None)?,
@@ -1587,6 +1595,26 @@ fn lower_conditional_expression<'dae>(
     }
     construction
         .expressions(|expressions| expressions.at(provenance).conditional(lowered, fallback))
+}
+
+/// The shared DAE-C22 authority used by ordinary and structured equations.
+pub(super) fn retained_conditional(
+    symbols: LoweringSymbols<'_, '_>,
+    branches: &[(Expression, Expression)],
+    else_branch: &Expression,
+    span: Span,
+) -> bool {
+    if symbols.shapes.is_attribute_scope() {
+        !attribute_conditional_folds(branches, else_branch, symbols.shapes)
+            && branches
+                .iter()
+                .any(|(condition, _)| guard_reads_tunable_parameter(symbols.coordinates, condition))
+    } else {
+        !symbols.shapes.is_structural_selection(span)
+            && symbols.shapes.evaluable().is_some_and(|evaluable| {
+                retains_equation_guard(symbols.coordinates, evaluable, branches, else_branch)
+            })
+    }
 }
 
 fn lower_array_expression<'dae>(
@@ -1717,7 +1745,11 @@ fn lower_subscript<'dae>(
         }
         Subscript::Colon { .. } => dae::Subscript::Whole { provenance },
         Subscript::Expr { expr, .. } => {
-            let expression = lower_expression_scoped(construction, symbols, binders, expr, None)?;
+            let expression =
+                match super::affine_slices::lower(construction, symbols, binders, expr)? {
+                    Some(expression) => expression,
+                    None => lower_expression_scoped(construction, symbols, binders, expr, None)?,
+                };
             dae::Subscript::Value {
                 expression,
                 provenance,
@@ -1825,4 +1857,64 @@ pub(super) fn expression_children(expression: &Expression) -> Vec<&Expression> {
         Expression::FieldAccess { base, .. } => vec![base],
         Expression::Literal { .. } | Expression::Empty { .. } => Vec::new(),
     }
+}
+
+/// MLS §10.3.1: `size(A, i)` is the extent of `A`, never its value. A
+/// function body proves that extent from the declaration (MLS §12.2), so the
+/// query folds to that Integer and reads nothing, which lets an output state
+/// its own extent before the algorithm defines it, as in
+/// `state := f(size(state, 1))`.
+fn lower_builtin_node<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    symbols: LoweringSymbols<'_, 'dae>,
+    binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
+    (expression, function, arguments): (&Expression, BuiltinFunction, &[Expression]),
+    provenance: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let proven = (function == BuiltinFunction::Size
+        && arguments.len() == 2
+        && symbols.function_body.is_some())
+    .then(|| symbols.shapes.proven_extent(expression))
+    .flatten();
+    match proven {
+        Some(extent) => construction.expressions(|expressions| {
+            expressions
+                .at(provenance)
+                .literal(dae::DaeLiteral::Integer(extent))
+        }),
+        None => lower_builtin_expression(
+            construction,
+            symbols,
+            binders,
+            function,
+            arguments,
+            provenance,
+        ),
+    }
+}
+
+/// The extent `size(a, k)` names when `k` is a translation-time Integer.
+///
+/// MLS §10.3.1: `size` reads only the shape of `a`, which the shape proof of
+/// the scope fixes (through the callee specialization for a call result), so
+/// the call is that Integer and `a` is not lowered: a call result `a` is never
+/// evaluated (nor its assertions checked) for a value no one uses.
+fn static_size(symbols: LoweringSymbols<'_, '_>, arguments: &[Expression]) -> Option<i64> {
+    let [array, axis] = arguments else {
+        return None;
+    };
+    let axis = match axis {
+        Expression::Literal {
+            value: Literal::Integer(axis),
+            ..
+        } => Some(*axis),
+        _ => symbols.shapes.proven_extent(axis),
+    };
+    let axis = usize::try_from(axis?).ok()?.checked_sub(1)?;
+    let shape = symbols
+        .functions
+        .shapes
+        .expression_shape(array, symbols.shapes)
+        .ok()?;
+    shape.get(axis).map(|extent| i64::from(*extent))
 }

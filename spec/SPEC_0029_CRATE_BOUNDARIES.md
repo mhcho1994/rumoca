@@ -20,8 +20,7 @@ by reference from the section that links it.
 
 ### 2. Strict DAG Dependency Graph
 
-No circular dependencies. Dependency tiers form an acyclic graph enforced by the
-Rust compiler. See [Dependency Tiers](#dependency-tiers).
+No circular dependencies. The Rust compiler enforces the acyclic [Dependency Tiers](#dependency-tiers).
 
 ### 3. IR Crates Are Pure Data
 
@@ -63,10 +62,8 @@ non-cloneable checked operation so catalog and expression identity change
 atomically. Keep read-only traversal/query helpers and rewrite-shape helpers
 separate so reviewers can see observation versus mutation.
 
-Analysis consumes IR, never the reverse: an IR crate MUST NOT depend on an
-analysis crate. Reusable analyses over IR are passes governed by
-[SPEC_0052](SPEC_0052_MODEL_ANALYSIS_PASSES.md); their crate placement is
-[SPEC_0041 §6](SPEC_0041_CRATE_OWNERSHIP_CATALOG.md#6-analysis-pass-ownership-catalog-spec_0029-3).
+IR crates MUST NOT depend on analysis crates. Analysis-pass design: [SPEC_0055](SPEC_0055_MODEL_ANALYSIS_PASSES.md).
+Placement: [SPEC_0041 §7](SPEC_0041_CRATE_OWNERSHIP_CATALOG.md#7-analysis-pass-ownership-catalog-spec_0029-3).
 
 ### 3a. Foundation Types Live in rumoca-core
 

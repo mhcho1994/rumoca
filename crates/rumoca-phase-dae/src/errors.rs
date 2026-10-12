@@ -44,7 +44,7 @@ pub enum ToDaeError {
 
     #[error("the model requires the derivative of top-level input `{name}`")]
     #[diagnostic(
-        code(rumoca::todae::ED022),
+        code(rumoca::todae::ED024),
         help(
             "a top-level input is supplied by the environment and is not a state (MLS §4.4.2.2); \
              der(...) of it needs the input's derivative, which the canonical DAE does not carry. \
@@ -59,7 +59,7 @@ pub enum ToDaeError {
 
     #[error("cyclic dependency in parameter binding: {cycle}")]
     #[diagnostic(
-        code(rumoca::todae::ED023),
+        code(rumoca::todae::ED025),
         help(
             "MLS §8.6: parameter and constant bindings must be solvable in a sequential order; \
              modify one of the parameters on the cycle to break it"
@@ -289,6 +289,24 @@ impl ToDaeError {
             feature: feature.into(),
             detail: detail.into(),
             span,
+        }
+    }
+
+    /// Name the function whose body raised this refusal, unless its detail
+    /// already does (SPEC_0008: every refusal carries its provenance).
+    #[must_use]
+    pub fn within_function(self, function: &str) -> Self {
+        match self {
+            Self::UnsupportedFlatSemantics {
+                feature,
+                detail,
+                span,
+            } if !detail.contains(function) => Self::UnsupportedFlatSemantics {
+                feature,
+                detail: format!("in function `{function}`: {detail}"),
+                span,
+            },
+            other => other,
         }
     }
 

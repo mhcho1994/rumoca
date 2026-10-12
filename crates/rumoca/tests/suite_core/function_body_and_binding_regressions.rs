@@ -120,11 +120,10 @@ end PB;
     assert_compiles(FIXTURE, "PB.M");
 }
 
-/// TOOLBUG-153: mutually defaulted parameters are legal when the instance
-/// modifies one of them (IBPSA `PlugFlowPipeDiscretized`); a cycle that
-/// survives in the instance is still rejected, now with the instance path.
+/// Upstream rejects cyclic parameter defaults during Resolve, even when
+/// a later instance modifier could break the cycle.
 #[test]
-fn parameter_cycles_are_judged_on_the_instance() {
+fn parameter_cycles_follow_upstream_resolve_policy() {
     const FIXTURE: &str = "\
 package Cy
   model Pipe
@@ -143,14 +142,15 @@ package Cy
   end Bad;
 end Cy;
 ";
-    assert_compiles(FIXTURE, "Cy.Ok");
-    let bad = compile(FIXTURE, "Cy.Bad");
-    let stderr = String::from_utf8_lossy(&bad.stderr);
-    assert!(!bad.status.success(), "the unbroken cycle is rejected");
-    assert!(
-        stderr.contains("ED023") && stderr.contains("p.totLen -> p.segLen"),
-        "the cycle is named on the instance: {stderr}"
-    );
+    for model in ["Cy.Ok", "Cy.Bad"] {
+        let result = compile(FIXTURE, model);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "cyclic defaults must be rejected");
+        assert!(
+            stderr.contains("ER007"),
+            "expected Resolve rejection: {stderr}"
+        );
+    }
 }
 
 /// TOOLBUG-155: `String(x)` in a package-constant modifier is the predefined

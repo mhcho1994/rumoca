@@ -281,6 +281,17 @@ impl SolveRuntime {
     }
 }
 
+/// Whether a row is an activation buffer that advances with the `pre` lanes
+/// between event passes ([`SolveRuntime::advance_condition_memory`]) rather
+/// than settling inside one. A clocked buffer is written once on its own tick
+/// (MLS §16.5) by the clock partition, so it keeps that owner.
+fn advances_between_passes(
+    role: solve::DiscreteRowRole,
+    clock_owner: Option<solve::PeriodicClockId>,
+) -> bool {
+    role == solve::DiscreteRowRole::ConditionMemory && clock_owner.is_none()
+}
+
 #[derive(Clone, Copy)]
 struct DiscreteRowEvalScope {
     skip_solver_or_time_rows: bool,
@@ -923,10 +934,14 @@ pub(crate) fn seed_condition_memory_for_initialization_core(
     // `initial()` is true only at the initial event, so the buffered value
     // it enters that event with is the value it has everywhere else.
     super::set_initial_event_flag(model, &mut seed_p, false);
+    // A `sample(start, interval)` tick is likewise true only at its own event
+    // (MLS §3.7.5), and a tick at the start instant is the first event after
+    // initialization, so every clock activation lane seeds cleared.
+    crate::runtime::solve_ops::write_observation_clock_activation_params(model, &mut seed_p);
     let mut seeded = Vec::new();
     let mut writes = Vec::new();
     for row_idx in 0..model.problem.discrete.rhs.len() {
-        if model.problem.discrete.row_roles[row_idx] != solve::DiscreteRowRole::ConditionMemory {
+        if !model.problem.discrete.row_roles[row_idx].is_condition_memory() {
             continue;
         }
         // A clocked buffer is only defined on its own ticks (MLS §16.5).
@@ -1018,11 +1033,13 @@ impl SolveRuntime {
         }
         let mut seed_p = crate::event_eval_params_for_pre_mode(&self.model, p, y, p, t, tol);
         super::set_initial_event_flag(&self.model, &mut seed_p, false);
+        crate::runtime::solve_ops::write_observation_clock_activation_params(
+            &self.model,
+            &mut seed_p,
+        );
         let mut writes = Vec::new();
         for row in self.structured_discrete_rows.rows().iter().copied() {
-            if row.role != solve::DiscreteRowRole::ConditionMemory
-                || !self.structured_discrete_row_active_at(row, t)?
-            {
+            if !row.role.is_condition_memory() || !self.structured_discrete_row_active_at(row, t)? {
                 continue;
             }
             let value = self
@@ -1047,6 +1064,133 @@ impl SolveRuntime {
             solve_eval::apply_scalar_slot_value_exact(target, value, y, p)?;
         }
         Ok(seeded)
+    }
+
+    /// Advance every unclocked activation buffer to its condition's value on
+    /// the coordinate an event pass settled.
+    ///
+    /// MLS §8.3.5.1 reads `when c then v = e; end when` as `b = c; v = if
+    /// edge(b) then e else pre(v)` with `edge(b) = b and not pre(b)`, and
+    /// Appendix B fixes every `pre` for one whole pass. The buffer is that
+    /// `pre(b)`: it holds while the pass settles, so a body active at the
+    /// instant keeps running until the values it reads have settled with it,
+    /// and it advances only here, at the end of each pass and before the
+    /// ordinary `pre` lanes advance. Returns whether any buffer changed, which
+    /// keeps the event iteration going.
+    pub(super) fn advance_condition_memory(
+        &self,
+        snapshot: &DiscretePreSnapshot<'_>,
+        y: &mut [f64],
+        p: &mut [f64],
+        t: f64,
+    ) -> Result<bool, RuntimeSolveError> {
+        let eval_y = copy_runtime_values(y, "condition-memory advance y snapshot")?;
+        let eval_p = copy_runtime_values(p, "condition-memory advance p snapshot")?;
+        let mut eval_p_cache = EventEvalParamCache::default();
+        let mut writes = Vec::new();
+        for row_idx in 0..self.model.problem.discrete.rhs.len() {
+            if self.event_transaction_coverage.discrete_rows[row_idx]
+                || !advances_between_passes(
+                    self.model.problem.discrete.row_roles[row_idx],
+                    self.model.problem.discrete.clock_owners[row_idx],
+                )
+            {
+                continue;
+            }
+            let input = DiscreteRowEvalInput {
+                snapshot,
+                row_idx,
+                eval_y: &eval_y,
+                eval_p: &eval_p,
+                t,
+            };
+            if let Some(value) =
+                self.eval_discrete_row_for_pre_snapshot(input, &mut eval_p_cache)?
+            {
+                writes.push((self.model.problem.discrete.update_targets[row_idx], value));
+            }
+        }
+        for row in self.structured_discrete_rows.rows().iter().copied() {
+            if self.event_transaction_coverage.structured_updates[row.update_index]
+                || !advances_between_passes(row.role, row.clock_owner)
+            {
+                continue;
+            }
+            let input = StructuredDiscreteRowEvalInput {
+                snapshot,
+                row,
+                eval_y: &eval_y,
+                eval_p: &eval_p,
+                t,
+            };
+            let value =
+                self.eval_structured_discrete_row_for_pre_snapshot(input, &mut eval_p_cache)?;
+            if let Some(value) = value {
+                writes.push((row.target, value));
+            }
+        }
+        let mut changed = false;
+        for (target, value) in writes {
+            changed |= solve_eval::apply_scalar_slot_value_exact(target, value, y, p)?;
+        }
+        Ok(changed)
+    }
+
+    /// Leave every pulse condition buffer at the value the next instant reads
+    /// as its left limit.
+    ///
+    /// MLS §3.7.5 makes a `sample(start, interval)` tick true only at its own
+    /// instant. Inside the tick's event iteration the buffer follows the
+    /// current value, so an activation rises once and does not rise again at
+    /// the same instant; once the event has converged the tick is over, so
+    /// the buffer becomes the condition with every clock activation lane
+    /// cleared. Without this a buffer that saw a tick stays true and the next
+    /// tick of the same schedule finds no rising edge.
+    pub(super) fn release_condition_pulses(
+        &self,
+        y: &mut [f64],
+        p: &mut [f64],
+        t: f64,
+    ) -> Result<(), RuntimeSolveError> {
+        let discrete = &self.model.problem.discrete;
+        if !discrete
+            .row_roles
+            .contains(&solve::DiscreteRowRole::PulseConditionMemory)
+        {
+            return Ok(());
+        }
+        let mut cleared = copy_runtime_values(p, "pulse condition release parameters")?;
+        crate::runtime::solve_ops::write_observation_clock_activation_params(
+            &self.model,
+            &mut cleared,
+        );
+        let mut writes = Vec::new();
+        for (row_idx, role) in discrete.row_roles.iter().enumerate() {
+            if *role != solve::DiscreteRowRole::PulseConditionMemory {
+                continue;
+            }
+            let (program, output) =
+                self.discrete_rhs
+                    .row_output_position(row_idx)
+                    .ok_or_else(|| {
+                        RuntimeSolveError::solve_ir(format!(
+                            "pulse condition-memory output {row_idx} has no producing program"
+                        ))
+                    })?;
+            let value = self.discrete_rhs.eval_row_output_unchecked_with_context(
+                program,
+                output,
+                y,
+                &cleared,
+                t,
+                self.row_eval_context(),
+            )?;
+            writes.push((discrete.update_targets[row_idx], value));
+        }
+        for (target, value) in writes {
+            solve_eval::apply_scalar_slot_value_exact(target, value, y, p)?;
+        }
+        Ok(())
     }
 
     pub(super) fn settle_discrete_rows_for_pre_snapshot(
@@ -1204,7 +1348,8 @@ impl SolveRuntime {
                 evaluated_transactions: &mut evaluated_transactions,
             },
         )?;
-        self.collect_scalar_discrete_row_values(input, &mut eval_p_cache, &mut row_values)?;
+        let pending_fault =
+            self.collect_scalar_discrete_row_values(input, &mut eval_p_cache, &mut row_values)?;
         guarded_values.extend(self.collect_guarded_discrete_row_values(input, &mut eval_p_cache)?);
         self.collect_structured_discrete_row_values(input, &mut eval_p_cache, &mut row_values)?;
         self.override_relation_memory_row_values(snapshot.root_relation_overrides, &mut row_values);
@@ -1222,15 +1367,24 @@ impl SolveRuntime {
             )?;
         }
         changed |= self.commit_successful_event_transactions(evaluated_transactions, y, p)?;
-        Ok(changed)
+        // A fault read from an iterate that this pass changed is not a value
+        // of the settled solution; the next pass evaluates the row again.
+        match pending_fault {
+            Some(fault) if !changed => Err(fault),
+            _ => Ok(changed),
+        }
     }
 
+    /// Collect every scalar row value of one Appendix-B pass. A row whose
+    /// source operation faults keeps its previous value, and the first such
+    /// fault is returned for the caller to report if the pass settles.
     fn collect_scalar_discrete_row_values(
         &self,
         input: DiscreteSnapshotEvalInput<'_, '_, '_>,
         eval_p_cache: &mut EventEvalParamCache,
         row_values: &mut Vec<DiscreteRowValue>,
-    ) -> Result<(), RuntimeSolveError> {
+    ) -> Result<Option<RuntimeSolveError>, RuntimeSolveError> {
+        let mut pending_fault = None;
         let ordered_clocked = self.clock_partition_owns_clocked_rows();
         for row_idx in 0..self.model.problem.discrete.rhs.len() {
             if self.event_transaction_coverage.discrete_rows[row_idx] {
@@ -1243,6 +1397,11 @@ impl SolveRuntime {
             if input.scope.observation_only && !self.observation_refresh_row(row_idx)? {
                 continue;
             }
+            if !input.scope.observation_only
+                && advances_between_passes(role, self.model.problem.discrete.clock_owners[row_idx])
+            {
+                continue;
+            }
             if input.scope.initialization_equations_only && role != solve::DiscreteRowRole::Equation
             {
                 continue;
@@ -1252,7 +1411,7 @@ impl SolveRuntime {
             {
                 continue;
             }
-            let Some(value) = self.eval_discrete_row_for_pre_snapshot(
+            let value = match self.eval_discrete_row_for_pre_snapshot(
                 DiscreteRowEvalInput {
                     snapshot: input.snapshot,
                     row_idx,
@@ -1261,13 +1420,18 @@ impl SolveRuntime {
                     t: input.t,
                 },
                 eval_p_cache,
-            )?
-            else {
-                continue;
+            ) {
+                Ok(Some(value)) => value,
+                Ok(None) => continue,
+                Err(fault @ RuntimeSolveError::SourceFault { .. }) => {
+                    pending_fault.get_or_insert(fault);
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
             row_values.push((self.model.problem.discrete.update_targets[row_idx], value));
         }
-        Ok(())
+        Ok(pending_fault)
     }
 
     fn discrete_row_reads_solver_or_time(&self, row_idx: usize) -> Result<bool, RuntimeSolveError> {
@@ -1368,6 +1532,9 @@ impl SolveRuntime {
                 continue;
             }
             if input.scope.observation_only && !row.observation_refresh {
+                continue;
+            }
+            if !input.scope.observation_only && advances_between_passes(row.role, row.clock_owner) {
                 continue;
             }
             if input.scope.initialization_equations_only

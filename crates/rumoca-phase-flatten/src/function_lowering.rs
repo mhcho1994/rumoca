@@ -6,10 +6,12 @@
 //! - Normalizing structured record-field component references
 //! - Rewriting FieldAccess expressions on decomposed record params to direct VarRef
 
+mod record_copies;
 mod record_field_locals;
 mod sibling_field_shapes;
 #[cfg(test)]
 mod tests;
+use record_copies::expand_record_copies;
 
 use crate::errors::FlattenError;
 use rumoca_core::{ExpressionRewriter, StatementRewriter};
@@ -21,7 +23,13 @@ fn record_fields_from_constructor_metadata(
     type_name: &str,
     type_def_id: Option<rumoca_core::DefId>,
     span: rumoca_core::Span,
-) -> Result<(String, rumoca_core::DefId, Vec<rumoca_core::FunctionParam>), FlattenError> {
+) -> Result<
+    (
+        rumoca_core::RecordConstructorRef,
+        Vec<rumoca_core::FunctionParam>,
+    ),
+    FlattenError,
+> {
     let type_def_id = type_def_id.ok_or_else(|| {
         FlattenError::missing_resolved_class_metadata(
             type_name,
@@ -38,18 +46,14 @@ fn record_fields_from_constructor_metadata(
                     span,
                 )
             })?;
-    let constructor_def_id = constructor.def_id.ok_or_else(|| {
+    let identity = rumoca_core::RecordConstructorRef::of(constructor).ok_or_else(|| {
         FlattenError::missing_resolved_class_metadata(
             type_name,
             "record constructor identity",
             constructor.span,
         )
     })?;
-    Ok((
-        constructor.name.as_str().to_string(),
-        constructor_def_id,
-        constructor.inputs.to_vec(),
-    ))
+    Ok((identity, constructor.inputs.to_vec()))
 }
 
 /// Rewrite FieldAccess on decomposed record params to direct VarRef.
@@ -121,29 +125,14 @@ impl ExpressionRewriter for WholeRecordParamRewriter<'_> {
                 .iter()
                 .find(|param| param.param_name == name.as_str())
         {
-            return rumoca_core::Expression::FunctionCall {
-                name: rumoca_core::Reference::with_component_reference(
-                    &param.constructor_name,
-                    rumoca_core::ComponentReference::construct(
-                        false,
-                        *span,
-                        vec![rumoca_core::ComponentRefPart {
-                            ident: param.constructor_name.clone(),
-                            span: *span,
-                            subs: Vec::new(),
-                            def_id: param.constructor_def_id,
-                        }],
-                    )
-                    .expect("record constructor metadata has a nonzero resolved identity"),
-                ),
-                args: param
+            return param.constructor.call(
+                param
                     .fields
                     .iter()
                     .map(|field| record_param_field_var_ref(&param.param_name, &field.name, *span))
                     .collect(),
-                is_constructor: true,
-                span: *span,
-            };
+                *span,
+            );
         }
 
         self.walk_expression(expr)
@@ -346,6 +335,9 @@ fn rewrite_record_param_size_refs_in_function(
         if let Some(default) = &mut param.default {
             *default = rewriter.rewrite_expression(default);
         }
+        // A declared extent may read a sibling record parameter's size, as in
+        // `input Complex c2[size(c1, 1)]` of `Complex.'*'.scalarProduct`.
+        param.shape_expr = rewriter.rewrite_subscripts(&param.shape_expr);
     }
     for stmt in &mut func.body {
         *stmt = rewriter.rewrite_statement(stmt);
@@ -585,6 +577,16 @@ fn record_write_may_move(
     output: &str,
     value: &rumoca_core::Expression,
 ) -> bool {
+    // A write moves only past statements disjoint from its target. The test
+    // is by field name, conservative for subscripted parts: a write to the
+    // whole output or to a field of the same name would be reordered with the
+    // moved write, so the later one would no longer win.
+    let moved_field = match &statements[start] {
+        rumoca_core::Statement::Assignment { comp, .. } => {
+            comp.parts().get(1).map(|field| field.ident.as_str())
+        }
+        _ => None,
+    };
     let mut references = Vec::new();
     value.collect_var_refs(&mut references);
     let dependencies = references
@@ -597,6 +599,17 @@ fn record_write_may_move(
         let rumoca_core::Statement::Assignment { comp, value, .. } = statement else {
             return false;
         };
+        let overlaps = comp
+            .parts()
+            .first()
+            .is_some_and(|root| root.ident == output)
+            && comp
+                .parts()
+                .get(1)
+                .is_none_or(|field| Some(field.ident.as_str()) == moved_field);
+        if overlaps {
+            return false;
+        }
         let assigned = comp.parts().first().map(|part| part.ident.as_str());
         if assigned.is_some_and(|assigned| dependencies.contains(assigned)) {
             return false;
@@ -720,18 +733,12 @@ fn seed_complete_record_defaults(flat: &mut flat::Model) {
         .values()
         .filter(|function| function.is_constructor)
         .filter_map(|function| {
-            let def_id = function.def_id?;
-            let instance_id = function.instance_id?;
+            let identity = rumoca_core::RecordConstructorRef::of(function)?;
             function
                 .inputs
                 .iter()
                 .all(|input| input.default.is_some())
-                .then(|| {
-                    (
-                        (def_id, function.name.as_str().to_string()),
-                        (function.name.clone(), instance_id),
-                    )
-                })
+                .then(|| ((identity.def_id, identity.name.clone()), identity))
         })
         .collect::<HashMap<_, _>>();
     for function in flat
@@ -749,22 +756,11 @@ fn seed_complete_record_defaults(flat: &mut flat::Model) {
             let Some(type_def_id) = value.type_def_id else {
                 continue;
             };
-            let Some((constructor_name, instance_id)) =
-                constructors.get(&(type_def_id, value.type_name.clone()))
+            let Some(constructor) = constructors.get(&(type_def_id, value.type_name.clone()))
             else {
                 continue;
             };
-            value.default = Some(rumoca_core::Expression::FunctionCall {
-                name: rumoca_core::Reference::from_var_name(constructor_name.clone())
-                    .with_resolved_function(rumoca_core::ResolvedFunctionReference {
-                        instance_id: *instance_id,
-                        base_part_count: 0,
-                        transitively_non_replaceable: false,
-                    }),
-                args: Vec::new(),
-                is_constructor: true,
-                span: value.span,
-            });
+            value.default = Some(constructor.call(Vec::new(), value.span));
         }
     }
 }
@@ -817,14 +813,13 @@ fn lower_record_function_params_once(flat: &mut flat::Model) -> Result<bool, Fla
     for (func_name, func) in flat.functions.iter_mut() {
         let mut decomposed: Vec<DecomposedParam> = Vec::new();
         for (idx, input) in func.inputs.iter().enumerate() {
-            if let Some((constructor_name, constructor_def_id, fields)) =
+            if let Some((constructor, fields)) =
                 record_fields_by_function_input.get(&(func_name.clone(), idx))
             {
                 decomposed.push(DecomposedParam {
                     original_index: idx,
                     param_name: input.name.clone(),
-                    constructor_name: constructor_name.clone(),
-                    constructor_def_id: *constructor_def_id,
+                    constructor: constructor.clone(),
                     fields: fields.clone(),
                 });
             }
@@ -1013,6 +1008,9 @@ fn rewrite_decomposed_record_call_sites(
         if let Some(decomposed) = decomposition_map.get_name(func_name.as_str()) {
             for stmt in &mut func.body {
                 rewrite_field_access_in_statement(stmt, decomposed);
+            }
+            func.body = expand_record_copies(std::mem::take(&mut func.body), decomposed);
+            for stmt in &mut func.body {
                 rewrite_whole_record_params_in_statement(stmt, decomposed);
             }
             rewrite_decomposed_params_in_defaults(func, decomposed, true);
@@ -1103,8 +1101,7 @@ fn decompose_record_calls_in_when_equations(
 struct DecomposedParam {
     original_index: usize,
     param_name: String,
-    constructor_name: String,
-    constructor_def_id: rumoca_core::DefId,
+    constructor: rumoca_core::RecordConstructorRef,
     fields: Vec<rumoca_core::FunctionParam>,
 }
 
@@ -1181,17 +1178,35 @@ fn decomposed_record_field_param(
     original_param: &rumoca_core::FunctionParam,
     field: &rumoca_core::FunctionParam,
 ) -> rumoca_core::FunctionParam {
+    record_field_column_param(
+        format!("{}_{}", param_name, field.name),
+        original_param.dimensions(),
+        &original_param.shape_expr,
+        field,
+    )
+}
+
+/// The function value holding record field `field` of every element of an
+/// enclosing record value with extents `enclosing` (struct of arrays): the
+/// field's type with shape `enclosing ++ field extents` and no binding.
+///
+/// A record field binding is a constructor default, not a default for every
+/// function value whose type happens to be that record. Calls already pass
+/// every projected field when they supply the record argument, and a record
+/// result or local is initialized by its own algorithm. Retaining the
+/// constructor binding here both changes MLS function-default semantics and
+/// leaves sibling field references (for example `weight = mass * g`) outside
+/// the decomposed coordinate space.
+pub(crate) fn record_field_column_param(
+    name: String,
+    enclosing: &[i64],
+    enclosing_shape: &[rumoca_core::Subscript],
+    field: &rumoca_core::FunctionParam,
+) -> rumoca_core::FunctionParam {
     let mut param = field.clone();
-    param.name = format!("{}_{}", param_name, field.name);
-    // A record field binding is a constructor default, not a default for every
-    // function input whose type happens to be that record. Calls already pass
-    // every projected field when they supply the record argument. Retaining
-    // the constructor binding here both changes MLS function-default semantics
-    // and leaves sibling field references (for example `weight = mass * g`)
-    // outside the decomposed function-input coordinate space.
+    param.name = name;
     param.default = None;
-    let dimensions = original_param
-        .dimensions()
+    let dimensions = enclosing
         .iter()
         .chain(field.dimensions().iter())
         .copied()
@@ -1202,8 +1217,7 @@ fn decomposed_record_field_param(
         dimensions,
     )
     .expect("concatenating checked function dimensions preserves the type contract");
-    param.shape_expr = original_param
-        .shape_expr
+    param.shape_expr = enclosing_shape
         .iter()
         .chain(field.shape_expr.iter())
         .cloned()
@@ -1456,7 +1470,7 @@ fn named_function_arg_marker(
 }
 
 /// Expand a record argument into scalar field arguments.
-fn expand_record_arg(
+pub(crate) fn expand_record_arg(
     function_name: &str,
     arg: &rumoca_core::Expression,
     fields: &[rumoca_core::FunctionParam],
@@ -1465,6 +1479,72 @@ fn expand_record_arg(
     out: &mut Vec<rumoca_core::Expression>,
 ) -> Result<(), FlattenError> {
     if expand_record_constructor_arg(function_name, arg, fields, out)? {
+        return Ok(());
+    }
+
+    // An array of records passes, per field, the array of that field of each
+    // element: `{C(1, 2), v[2]}` is `{1, v[2].re}` and `{2, v[2].im}`.
+    if let rumoca_core::Expression::Array {
+        elements,
+        kind: rumoca_core::ArrayConstructor::Array,
+        span,
+    } = arg
+        && !elements.is_empty()
+    {
+        let mut per_element = Vec::with_capacity(elements.len());
+        for element in elements {
+            let mut element_fields = Vec::with_capacity(fields.len());
+            expand_record_arg(
+                function_name,
+                element,
+                fields,
+                local_record_params,
+                aggregate_record_values,
+                &mut element_fields,
+            )?;
+            per_element.push(element_fields);
+        }
+        for index in 0..fields.len() {
+            out.push(rumoca_core::Expression::Array {
+                elements: per_element
+                    .iter()
+                    .map(|element_fields| element_fields[index].clone())
+                    .collect(),
+                kind: rumoca_core::ArrayConstructor::Array,
+                span: *span,
+            });
+        }
+        return Ok(());
+    }
+
+    // A record array comprehension passes, per field, the comprehension of
+    // that field of its element (MLS §10.4.1): `{c[k]*d for k in 1:n}` is
+    // `{(c[k]*d).re for k in 1:n}` and `{(c[k]*d).im for k in 1:n}`, so each
+    // field reads the iterator inside the comprehension that binds it.
+    if let rumoca_core::Expression::ArrayComprehension {
+        expr,
+        indices,
+        filter,
+        span,
+    } = arg
+    {
+        let mut element_fields = Vec::with_capacity(fields.len());
+        expand_record_arg(
+            function_name,
+            expr,
+            fields,
+            local_record_params,
+            aggregate_record_values,
+            &mut element_fields,
+        )?;
+        out.extend(element_fields.into_iter().map(|field_expr| {
+            rumoca_core::Expression::ArrayComprehension {
+                expr: Box::new(field_expr),
+                indices: indices.clone(),
+                filter: filter.clone(),
+                span: *span,
+            }
+        }));
         return Ok(());
     }
 

@@ -1,6 +1,9 @@
 use super::*;
 use rumoca_core::Reference;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn validate_guarded_function_return(
     function: &rumoca_core::Function,
     context: FunctionValidationContext<'_>,
@@ -19,8 +22,12 @@ pub(super) fn validate_guarded_function_return(
     else {
         return Ok(None);
     };
+    // This owner lowers its tail as written. A tail holding a conditional that
+    // owns a loop needs the normalized source of `validate_statement_function`,
+    // which owns leading returns as well.
     if cond_blocks.is_empty()
         || tail.is_empty()
+        || super::branch_snapshots::contains_loop_conditional(tail)
         || !cond_blocks.iter().all(|block| {
             matches!(
                 block.stmts.last(),
@@ -91,7 +98,7 @@ pub(super) struct NormalizedFunctionReturns {
     pub(super) has_returns: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct GeneratedBooleanDefinition {
     pub(super) target: VarName,
     pub(super) value: Expression,
@@ -182,25 +189,10 @@ pub(super) fn normalize_function_returns(
             normalized.push(continued);
             break;
         }
-        if let Some(expanded) = snapshot_loop_conditional(statement, active.as_ref(), &mut guards) {
-            normalized.extend(expanded);
-            continue;
-        }
-        normalized.push(active.as_ref().map_or_else(
-            || statement.clone(),
-            |active| {
-                rumoca_core::Statement::If {
-                    cond_blocks: vec![rumoca_core::StatementBlock {
-                        cond: active.clone(),
-                        stmts: vec![statement.clone()],
-                    }],
-                    else_block: None,
-                    span: statement
-                        .source_span()
-                        .expect("return normalization preserves statement provenance"),
-                }
-            },
-        ));
+        normalized.push(match &active {
+            Some(active) => guarded_statement(statement, active.clone()),
+            None => statement.clone(),
+        });
     }
     Ok(NormalizedFunctionReturns {
         statements: normalized,
@@ -209,151 +201,7 @@ pub(super) fn normalize_function_returns(
     })
 }
 
-fn snapshot_loop_conditional(
-    statement: &rumoca_core::Statement,
-    active: Option<&Expression>,
-    guards: &mut Vec<GeneratedBooleanDefinition>,
-) -> Option<Vec<rumoca_core::Statement>> {
-    let rumoca_core::Statement::If {
-        cond_blocks,
-        else_block,
-        span,
-    } = statement
-    else {
-        return None;
-    };
-    if !cond_blocks
-        .iter()
-        .any(|block| statements_contain_loop(&block.stmts))
-        && !else_block.as_deref().is_some_and(statements_contain_loop)
-    {
-        return None;
-    }
-    let mut expanded = Vec::new();
-    let mut remaining = active.cloned().unwrap_or(Expression::Literal {
-        value: Literal::Boolean(true),
-        span: *span,
-    });
-    let mut branch_guards = Vec::with_capacity(cond_blocks.len());
-    for block in cond_blocks {
-        let guard_span = expression_span(&block.cond).ok()?;
-        let target = rumoca_core::function_branch_guard_name(guard_span.start.0);
-        let value = Expression::If {
-            branches: vec![(remaining.clone(), block.cond.clone())],
-            else_branch: Box::new(Expression::Literal {
-                value: Literal::Boolean(false),
-                span: guard_span,
-            }),
-            span: guard_span,
-        };
-        expanded.push(rumoca_core::Statement::Empty { span: guard_span });
-        guards.push(GeneratedBooleanDefinition {
-            target: target.clone(),
-            value,
-            span: guard_span,
-        });
-        let guard = Expression::VarRef {
-            name: Reference::generated(target.as_str()),
-            subscripts: Vec::new(),
-            span: guard_span,
-        };
-        remaining = and_condition(
-            remaining,
-            Expression::Unary {
-                op: OpUnary::Not,
-                rhs: Box::new(guard.clone()),
-                span: guard_span,
-            },
-            guard_span,
-        );
-        branch_guards.push(guard);
-    }
-    // Each branch runs exactly when its immutable guard holds, so the prefix
-    // through its last loop runs as guarded statements (the loop owner cannot
-    // sit inside a value conditional), and the loop-free remainder stays one
-    // conditional over the same guards. That keeps a value every remainder
-    // defines defined on every path, as the source conditional did.
-    let mut remainders = Vec::with_capacity(cond_blocks.len());
-    for (block, guard) in cond_blocks.iter().zip(&branch_guards) {
-        let remainder = hoist_loop_prefix(&block.stmts, guard, guards, &mut expanded);
-        remainders.push(rumoca_core::StatementBlock {
-            cond: guard.clone(),
-            stmts: remainder.to_vec(),
-        });
-    }
-    let fallback = else_block
-        .as_deref()
-        .map(|fallback| hoist_loop_prefix(fallback, &remaining, guards, &mut expanded).to_vec());
-    let fallback = fallback.filter(|statements| !statements.is_empty());
-    let complete = remainders.iter().all(|block| !block.stmts.is_empty());
-    remainders.retain(|block| !block.stmts.is_empty());
-    // An else part may stand for the remaining case only while every guarded
-    // branch is still listed; otherwise it names its own guard.
-    let fallback = match fallback {
-        Some(statements) if !complete && !remainders.is_empty() => {
-            remainders.push(rumoca_core::StatementBlock {
-                cond: remaining.clone(),
-                stmts: statements,
-            });
-            None
-        }
-        fallback => fallback,
-    };
-    match (remainders.is_empty(), fallback) {
-        (true, None) => {}
-        (true, Some(fallback)) => expanded.extend(
-            fallback
-                .iter()
-                .map(|statement| guarded_statement(statement, remaining.clone())),
-        ),
-        (false, fallback) => expanded.push(rumoca_core::Statement::If {
-            cond_blocks: remainders,
-            else_block: fallback,
-            span: *span,
-        }),
-    }
-    Some(expanded)
-}
-
-/// Emit `statements` through their last loop as statements guarded by
-/// `guard`, and return the loop-free remainder.
-fn hoist_loop_prefix<'a>(
-    statements: &'a [rumoca_core::Statement],
-    guard: &Expression,
-    guards: &mut Vec<GeneratedBooleanDefinition>,
-    expanded: &mut Vec<rumoca_core::Statement>,
-) -> &'a [rumoca_core::Statement] {
-    let split = statements
-        .iter()
-        .rposition(|statement| statements_contain_loop(std::slice::from_ref(statement)))
-        .map_or(0, |last| last + 1);
-    for statement in &statements[..split] {
-        match snapshot_loop_conditional(statement, Some(guard), guards) {
-            Some(nested) => expanded.extend(nested),
-            None => expanded.push(guarded_statement(statement, guard.clone())),
-        }
-    }
-    &statements[split..]
-}
-
-fn statements_contain_loop(statements: &[rumoca_core::Statement]) -> bool {
-    statements.iter().any(|statement| match statement {
-        rumoca_core::Statement::For { .. } | rumoca_core::Statement::While { .. } => true,
-        rumoca_core::Statement::If {
-            cond_blocks,
-            else_block,
-            ..
-        } => {
-            cond_blocks
-                .iter()
-                .any(|block| statements_contain_loop(&block.stmts))
-                || else_block.as_deref().is_some_and(statements_contain_loop)
-        }
-        _ => false,
-    })
-}
-
-fn guarded_statement(
+pub(super) fn guarded_statement(
     statement: &rumoca_core::Statement,
     condition: Expression,
 ) -> rumoca_core::Statement {
@@ -365,7 +213,7 @@ fn guarded_statement(
         else_block: None,
         span: statement
             .source_span()
-            .expect("conditional snapshot preserves statement provenance"),
+            .expect("a guarded statement preserves its source provenance"),
     }
 }
 
@@ -428,23 +276,39 @@ fn guarded_return(
 }
 
 fn disjoin_conditions(blocks: &[rumoca_core::StatementBlock], span: Span) -> Expression {
-    blocks
-        .iter()
-        .map(|block| block.cond.clone())
-        .reduce(|left, right| Expression::Binary {
-            op: OpBinary::Or,
-            lhs: Box::new(left),
-            rhs: Box::new(right),
+    // MLS §11.2.6 selects the first true clause without evaluating later
+    // predicates. Ordinary Boolean operators do not own that statement-level
+    // control flow; retain it explicitly in the generated return predicate.
+    Expression::If {
+        branches: blocks
+            .iter()
+            .map(|block| {
+                (
+                    block.cond.clone(),
+                    Expression::Literal {
+                        value: Literal::Boolean(true),
+                        span,
+                    },
+                )
+            })
+            .collect(),
+        else_branch: Box::new(Expression::Literal {
+            value: Literal::Boolean(false),
             span,
-        })
-        .expect("a guarded return has at least one condition")
+        }),
+        span,
+    }
 }
 
-fn and_condition(left: Expression, right: Expression, span: Span) -> Expression {
-    Expression::Binary {
-        op: OpBinary::And,
-        lhs: Box::new(left),
-        rhs: Box::new(right),
+pub(super) fn and_condition(left: Expression, right: Expression, span: Span) -> Expression {
+    // A continuation after an earlier return must not evaluate its original
+    // source predicate. This is an algorithm activation, not a source `and`.
+    Expression::If {
+        branches: vec![(left, right)],
+        else_branch: Box::new(Expression::Literal {
+            value: Literal::Boolean(false),
+            span,
+        }),
         span,
     }
 }
@@ -563,14 +427,14 @@ fn unsupported_return_shape<T>(
     function: &rumoca_core::Function,
     statement: &rumoca_core::Statement,
 ) -> Result<T, ToDaeError> {
-    let span = required_statement_span(statement, "unsupported guarded function return statement")?;
-    Err(ToDaeError::unsupported_flat(
+    Err(unsupported_statement(
+        statement,
+        "unsupported guarded function return statement",
         "function return",
         format!(
             "`{}` requires a leading guarded return with total output definitions",
             function.name
         ),
-        span,
     ))
 }
 
@@ -595,21 +459,21 @@ fn continue_branch_return(
 ) -> Result<Option<rumoca_core::Statement>, ToDaeError> {
     let Some(branches) = branch_return(statement) else {
         if contains_return(std::slice::from_ref(statement)) {
-            let span = required_statement_span(statement, "nested function return")?;
-            return Err(ToDaeError::unsupported_flat(
+            return Err(unsupported_statement(
+                statement,
+                "nested function return",
                 "function return",
                 "a non-guarded nested return requires a checked control-flow owner",
-                span,
             ));
         }
         return Ok(None);
     };
     if contains_return(rest) {
-        let span = required_statement_span(statement, "nested function return")?;
-        return Err(ToDaeError::unsupported_flat(
+        return Err(unsupported_statement(
+            statement,
+            "nested function return",
             "function return",
             "a return after a partially returning conditional requires a checked control-flow owner",
-            span,
         ));
     }
     let continued = branches.continued_by(rest);

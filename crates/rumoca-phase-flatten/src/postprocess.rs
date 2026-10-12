@@ -18,7 +18,6 @@ mod index_collapse;
 mod indexed_dimension_recovery;
 mod invariant_bindings;
 mod occurrence_graph;
-mod operator_records;
 mod package_constants;
 mod parameter_derivatives;
 mod record_alias;
@@ -39,8 +38,7 @@ pub(super) use field_access::{
 };
 pub(crate) use index_collapse::{collapse_index_refs_to_known_varrefs, field_access_flat_path};
 pub(crate) use indexed_dimension_recovery::recover_indexed_lhs_dimensions;
-pub(crate) use invariant_bindings::fold_invariant_scalar_bindings;
-pub(crate) use operator_records::lower_operator_record_equations;
+pub(crate) use invariant_bindings::fold_invariant_bindings;
 pub(crate) use parameter_derivatives::fold_time_invariant_derivatives;
 
 use constant_substituter::{

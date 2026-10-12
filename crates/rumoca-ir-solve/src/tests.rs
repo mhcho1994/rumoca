@@ -84,6 +84,107 @@ fn event_iteration_contract_fixture() -> SolveProblem {
 }
 
 #[test]
+fn a_problem_with_states_records_its_typed_native_refusal() {
+    let mut problem = representative_solve_problem_fixture();
+    assert!(
+        problem
+            .continuous
+            .refresh_owners
+            .native_assignment_refusal()
+            .is_none()
+    );
+    issue_native_assignment_schedule(&mut problem);
+    let owners = &problem.continuous.refresh_owners;
+    assert!(owners.native_assignment_schedule().is_none());
+    assert_eq!(
+        owners.native_assignment_refusal(),
+        Some(&NativeScheduleRefusal::Evaluation(
+            NativeEvaluationRefusal::ContinuousStates
+        ))
+    );
+}
+
+/// One stateless discrete Integer row sourced from a literal classifies into
+/// one typed derived output: an 8-byte Integer lane at offset 0, numbered
+/// after the solver coordinates, with its literal recorded as the source.
+#[test]
+fn a_literal_integer_discrete_row_is_one_typed_derived_output() {
+    let mut problem = event_iteration_contract_fixture();
+    problem.solve_layout.variable_storage_runs[0].value_kind = SolveVariableValueKind::Integer;
+    problem.solve_layout.variable_storage_runs[0].role = SolveVariableStorageRole::DiscreteValue;
+    problem.solve_layout.variable_declarations[0] = SolveVariableDeclaration::new(
+        SolveVariableStorageRole::DiscreteValue,
+        SolveVariableValueKind::Integer,
+    );
+    issue_native_assignment_schedule(&mut problem);
+    let owners = &problem.continuous.refresh_owners;
+    let schedule = owners.native_assignment_schedule().unwrap_or_else(|| {
+        panic!(
+            "one literal Integer row evaluates natively: {:?}",
+            owners.native_assignment_refusal()
+        )
+    });
+    let [output] = schedule.derived_outputs() else {
+        panic!("one discrete row is one derived output");
+    };
+    assert_eq!(
+        (output.row(), output.p_index(), output.work_index()),
+        (0, 0, 0)
+    );
+    assert_eq!(output.lane(), NativeOutputLane::Integer);
+    assert_eq!(output.lane().as_str(), "i64");
+    assert_eq!(output.lane_offset(), 0);
+    assert_eq!(
+        output.integer_source(),
+        Some(NativeIntegerSource::Literal(1))
+    );
+    assert_eq!(schedule.lane_bytes(), 8);
+}
+
+#[test]
+fn an_integer_external_input_is_one_typed_input_lane() {
+    let mut problem = event_iteration_contract_fixture();
+    problem.solve_layout.variable_storage_runs[0].value_kind = SolveVariableValueKind::Integer;
+    problem.solve_layout.variable_storage_runs[0].role = SolveVariableStorageRole::DiscreteValue;
+    problem.solve_layout.variable_declarations[0] = SolveVariableDeclaration::new(
+        SolveVariableStorageRole::DiscreteValue,
+        SolveVariableValueKind::Integer,
+    );
+    problem
+        .solve_layout
+        .variable_storage_runs
+        .push(SolveVariableStorageRun {
+            base: scalar_slot_p(2),
+            scalar_count: 1,
+            role: SolveVariableStorageRole::ExternalInput,
+            value_kind: SolveVariableValueKind::Integer,
+        });
+    problem
+        .solve_layout
+        .variable_declarations
+        .push(SolveVariableDeclaration::new(
+            SolveVariableStorageRole::ExternalInput,
+            SolveVariableValueKind::Integer,
+        ));
+    problem.solve_layout.compiled_parameter_len = 3;
+    issue_native_assignment_schedule(&mut problem);
+    let owners = &problem.continuous.refresh_owners;
+    let schedule = owners.native_assignment_schedule().unwrap_or_else(|| {
+        panic!(
+            "an Integer input beside a literal row evaluates natively: {:?}",
+            owners.native_assignment_refusal()
+        )
+    });
+    let [lane] = schedule.input_lanes() else {
+        panic!("one Integer input is one typed input lane");
+    };
+    assert_eq!(lane.p_index(), 2);
+    assert_eq!(lane.lane(), NativeOutputLane::Integer);
+    assert_eq!(lane.lane_offset(), 0);
+    assert_eq!(schedule.input_lane_bytes(), 8);
+}
+
+#[test]
 fn event_iteration_contract_accepts_complete_typed_reverse_bijection() {
     event_iteration_contract_fixture()
         .validate_shape_contract()
@@ -1137,6 +1238,16 @@ fn solve_model_resolves_start_relative_schedules_at_instance_boundary() {
     );
 }
 
+#[test]
+fn solve_model_without_periodic_schedules_is_borrowed_not_copied() {
+    let model = SolveModel::default();
+    let resolved = model.resolved_periodic_schedules_at(2.0).unwrap();
+    assert!(
+        matches!(resolved, std::borrow::Cow::Borrowed(borrowed) if std::ptr::eq(borrowed, &model)),
+        "a model with nothing to resolve must not be cloned at instantiation"
+    );
+}
+
 fn assert_same_json_shape<T: serde::Serialize>(actual: &T, expected: &T) {
     assert_eq!(
         serde_json::to_value(actual).expect("serialize actual"),
@@ -1166,8 +1277,7 @@ fn p_slice_returns_some_for_p_array_variable() {
 fn indexed_bindings_are_derived_from_shape_metadata() {
     let layout = make_layout(&[("body.frame.R.T", vec![3, 3])], &[]);
     let entries = layout
-        .indexed_bindings()
-        .get(&ComponentReferenceKey::generated("body.frame.R.T"))
+        .indexed_slots("body.frame.R.T")
         .expect("array layout should expose structured scalar slots");
 
     assert_eq!(entries.len(), 9);
@@ -1957,6 +2067,7 @@ fn solve_problem_shape_contract_rejects_duplicate_initial_projection_unknown() {
         .initialization
         .into_input();
     input.projection_plan = InitializationProjectionPlan {
+        iterates_discretes: false,
         blocks: vec![InitializationProjectionBlock {
             rows: vec![0, 0],
             unknowns: vec![scalar_slot_y(1), scalar_slot_y(1)],
@@ -2364,4 +2475,79 @@ fn unlocalizable_guards_round_trip_and_are_omitted_when_empty() {
         Some("V0*v_in > vps")
     );
     assert!(UnlocalizableGuard::covering(&back.unlocalizable_guards, 1).is_none());
+}
+
+#[test]
+fn state_coordinate_is_named_by_its_source_and_omitted_when_absent() {
+    let value = SolveStateCoordinate {
+        variable: "mass.s".to_string(),
+        derivative_order: 0,
+    };
+    let rate = SolveStateCoordinate {
+        derivative_order: 2,
+        ..value.clone()
+    };
+    assert_eq!(value.source_name(), "mass.s");
+    assert_eq!(rate.source_name(), "der(der(mass.s))");
+
+    let mut meta = SolveVariableMeta {
+        name: "$state_coordinates[1]".to_string(),
+        source_span: Span::DUMMY,
+        role: "state".to_string(),
+        is_state: true,
+        value_type: None,
+        variability: None,
+        time_domain: None,
+        unit: None,
+        start: None,
+        min: None,
+        max: None,
+        nominal: None,
+        fixed: None,
+        description: None,
+        state_coordinate: None,
+        phasor: None,
+    };
+    let plain = serde_json::to_string(&meta).expect("serialize plain metadata");
+    assert!(!plain.contains("\"state_coordinate\""));
+    meta.state_coordinate = Some(rate.clone());
+    let charted = serde_json::to_string(&meta).expect("serialize charted metadata");
+    let back: SolveVariableMeta = serde_json::from_str(&charted).expect("decode metadata");
+    assert_eq!(back.state_coordinate, Some(rate));
+    let decoded: SolveVariableMeta = serde_json::from_str(&plain).expect("decode plain");
+    assert_eq!(decoded.state_coordinate, None);
+}
+
+#[test]
+fn an_event_iteration_run_reports_the_clock_of_its_owner() {
+    let discrete = DiscreteSolveSystem {
+        clock_owners: vec![None],
+        ..DiscreteSolveSystem::default()
+    };
+    let run = |owner| EventIterationRun {
+        variable: 0,
+        pre_binding_start: 0,
+        owner,
+    };
+    assert_eq!(
+        discrete.event_iteration_run_clock(&run(EventIterationOwner::Hold)),
+        Ok(None)
+    );
+    assert_eq!(
+        discrete.event_iteration_run_clock(&run(EventIterationOwner::ScalarRows { start_row: 0 })),
+        Ok(None)
+    );
+    assert!(
+        discrete
+            .event_iteration_run_clock(&run(EventIterationOwner::ScalarRows { start_row: 1 }))
+            .is_err()
+    );
+    assert!(
+        discrete
+            .event_iteration_run_clock(&run(EventIterationOwner::GuardedAssignment {
+                program_index: 0,
+                target_range_index: 0,
+            }))
+            .is_err()
+    );
 }

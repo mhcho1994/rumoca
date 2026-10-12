@@ -101,7 +101,8 @@ pub(super) fn combined_parameter_seed_index(
 /// The initialization system a homotopy continuation sweeps.
 ///
 /// `homotopy_parameter_index` is the hidden λ slot; `None` means the model
-/// carries no `homotopy(...)` and the plan is projected once, as-is.
+/// carries no `homotopy(...)`: the plan is projected once, or alternated with
+/// the discrete assignments when it holds discretes (`iterates_discretes`).
 pub(crate) struct InitialHomotopySystem<'a, M> {
     pub model: &'a M,
     pub t: f64,
@@ -227,45 +228,21 @@ pub(super) fn project_initial_variables_by_plan<M: AlgebraicProjectionModel>(
     let mut residual = vec![0.0; model.initial_residual_len()];
     let projection_indices = initial_plan_projection_indices(plan);
     let projection_rows = initial_plan_rows(plan);
+    if projection_rows.is_empty() {
+        return finish_initial_projection(model, y, p, t, plan, tol);
+    }
     for iteration in 0..ALGEBRAIC_PROJECTION_MAX_ITERS {
         seed_nonfinite_projection_values(y, &projection_indices);
-        model.eval_initial_residual(y, p, t, &mut residual)?;
-        if iteration > 0 && residual_converged(&residual, tol) {
-            return Ok(());
-        }
-        let selected = initial_plan_residual(&residual, plan)?;
-        if tracing::enabled!(target: "rumoca_solver::projection", tracing::Level::DEBUG) {
-            let worst_row = residual
-                .iter()
-                .enumerate()
-                .max_by(|(_, lhs), (_, rhs)| {
-                    residual_sort_key(**lhs).total_cmp(&residual_sort_key(**rhs))
-                })
-                .map(|(row, _)| row);
-            let worst_block = worst_row
-                .and_then(|row| plan.blocks.iter().find(|block| block.rows.contains(&row)));
-            let worst_initial_target = worst_row
-                .and_then(|row| model.initial_target(row))
-                .and_then(y_index_for_slot)
-                .and_then(|index| model.variable_name_for_y_index(index));
-            tracing::debug!(
-                target: "rumoca_solver::projection",
-                iteration,
-                full_norm = residual_norm(&residual),
-                selected_norm = residual_norm(&selected),
-                worst_row,
-                worst_row_selected = worst_row.is_some_and(|row| projection_rows.contains(&row)),
-                worst_target = worst_initial_target,
-                worst_slot = ?worst_row.and_then(|row| model.initial_target(row)),
-                worst_block_rows = ?worst_block.map(|block| block.rows.as_slice()),
-                worst_block_y_indices = ?worst_block.map(|block| block.y_indices.as_slice()),
-                blocks = plan.blocks.len(),
-                projected_variables = projection_indices.len(),
-                "initial algebraic projection iteration"
-            );
-        }
-        if selected.is_empty() {
-            break;
+        // The first pass starts from the seed, where a row outside a block's
+        // read cone may be undefined (an enthalpy `H = m*h` at a startless
+        // zero mass): each block evaluates only the rows it solves, so the
+        // complete residual is first read after every block has had a pass.
+        if iteration > 0 {
+            model.eval_initial_residual(y, p, t, None, &mut residual)?;
+            if residual_converged(&residual, tol) {
+                return Ok(());
+            }
+            trace_initial_projection_iteration(model, plan, &residual, iteration);
         }
         let mut changed = false;
         for (block_index, block) in plan.blocks.iter().enumerate() {
@@ -276,8 +253,22 @@ pub(super) fn project_initial_variables_by_plan<M: AlgebraicProjectionModel>(
             break;
         }
     }
-    seed_nonfinite_projection_values(y, &projection_indices);
-    model.eval_initial_residual(y, p, t, &mut residual)?;
+    finish_initial_projection(model, y, p, t, plan, tol)
+}
+
+/// Accept the projected coordinates when the complete initialization residual
+/// holds at `y`, in absolute or block-scaled terms.
+fn finish_initial_projection<M: AlgebraicProjectionModel>(
+    model: &M,
+    y: &mut [f64],
+    p: &[f64],
+    t: f64,
+    plan: &solve::AlgebraicProjectionPlan,
+    tol: f64,
+) -> Result<(), RuntimeSolveError> {
+    let mut residual = vec![0.0; model.initial_residual_len()];
+    seed_nonfinite_projection_values(y, &initial_plan_projection_indices(plan));
+    model.eval_initial_residual(y, p, t, None, &mut residual)?;
     if residual_converged(&residual, tol) {
         return Ok(());
     }
@@ -292,6 +283,48 @@ pub(super) fn project_initial_variables_by_plan<M: AlgebraicProjectionModel>(
         &rows,
         &residual,
     ))
+}
+
+fn trace_initial_projection_iteration<M: AlgebraicProjectionModel>(
+    model: &M,
+    plan: &solve::AlgebraicProjectionPlan,
+    residual: &[f64],
+    iteration: usize,
+) {
+    if tracing::enabled!(target: "rumoca_solver::projection", tracing::Level::DEBUG) {
+        let Ok(selected) = initial_plan_residual(residual, plan) else {
+            return;
+        };
+        let projection_rows = initial_plan_rows(plan);
+        let worst_row = residual
+            .iter()
+            .enumerate()
+            .max_by(|(_, lhs), (_, rhs)| {
+                residual_sort_key(**lhs).total_cmp(&residual_sort_key(**rhs))
+            })
+            .map(|(row, _)| row);
+        let worst_block =
+            worst_row.and_then(|row| plan.blocks.iter().find(|block| block.rows.contains(&row)));
+        let worst_initial_target = worst_row
+            .and_then(|row| model.initial_target(row))
+            .and_then(y_index_for_slot)
+            .and_then(|index| model.variable_name_for_y_index(index));
+        tracing::debug!(
+            target: "rumoca_solver::projection",
+            iteration,
+            full_norm = residual_norm(residual),
+            selected_norm = residual_norm(&selected),
+            worst_row,
+            worst_row_selected = worst_row.is_some_and(|row| projection_rows.contains(&row)),
+            worst_target = worst_initial_target,
+            worst_slot = ?worst_row.and_then(|row| model.initial_target(row)),
+            worst_block_rows = ?worst_block.map(|block| block.rows.as_slice()),
+            worst_block_y_indices = ?worst_block.map(|block| block.y_indices.as_slice()),
+            blocks = plan.blocks.len(),
+            projected_variables = initial_plan_projection_indices(plan).len(),
+            "initial algebraic projection iteration"
+        );
+    }
 }
 
 pub(super) fn initial_plan_projection_indices(plan: &solve::AlgebraicProjectionPlan) -> Vec<usize> {
@@ -374,7 +407,7 @@ pub(super) fn project_initial_block<M: AlgebraicProjectionModel>(
         return Ok(update);
     }
     let mut residual = vec![0.0; model.initial_residual_len()];
-    model.eval_initial_residual(y, p, t, &mut residual)?;
+    model.eval_initial_residual(y, p, t, Some(rows), &mut residual)?;
     let selected = rows
         .iter()
         .map(|row| initial_residual_at(&residual, *row, "algebraic projection block"))
@@ -385,7 +418,7 @@ pub(super) fn project_initial_block<M: AlgebraicProjectionModel>(
             settled: false,
         });
     }
-    let jacobian = initial_block_jacobian(model, y, p, t, rows, y_indices, &residual)?;
+    let jacobian = initial_block_jacobian(model, y, p, t, rows, y_indices)?;
     crate::diagnostics::projection("initialization", t, rows, y_indices, &selected, &jacobian);
     let structure = model
         .initial_projection_block_structure(block_index)
@@ -432,9 +465,10 @@ fn solve_coupled_initial_block<M: AlgebraicProjectionModel>(
     context: InitialBlockDeltaCtx<'_, M>,
     y: &mut [f64],
     residual: &[f64],
-    jacobian: DMatrix<f64>,
+    jacobian: BlockJacobian,
 ) -> Result<ProjectionBlockUpdate, RuntimeSolveError> {
     let delta = scaled_newton_delta(ScaledNewtonSystem {
+        revision: None,
         jacobian: &jacobian,
         residual,
         row_scales: context.row_scales,
@@ -474,7 +508,7 @@ pub(super) fn trace_initial_projection_block<M: AlgebraicProjectionModel>(
     rows: &[usize],
     y_indices: &[usize],
     residual: &[f64],
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
     tolerance: f64,
 ) {
     if !tracing::enabled!(target: "rumoca_solver::projection", tracing::Level::DEBUG) {
@@ -498,7 +532,7 @@ pub(super) fn trace_initial_projection_block<M: AlgebraicProjectionModel>(
                 .unwrap_or("<none>")
         })
         .collect::<Vec<_>>();
-    let decomposition = jacobian.clone().svd(true, true);
+    let decomposition = jacobian.as_dense().into_owned().svd(true, true);
     let singular_values = &decomposition.singular_values;
     let largest = singular_values.iter().copied().fold(0.0_f64, f64::max);
     let rank_threshold = tolerance.max(f64::EPSILON * largest * rows.len() as f64);
@@ -632,7 +666,7 @@ fn project_initial_full_residual_singleton_assignment<M: AlgebraicProjectionMode
     y[*y_index] = value;
     let mut residual_after = vec![0.0; ctx.model.initial_residual_len()];
     ctx.model
-        .eval_initial_residual(y, ctx.p, ctx.t, &mut residual_after)?;
+        .eval_initial_residual(y, ctx.p, ctx.t, Some(ctx.rows), &mut residual_after)?;
     let after = initial_residual_at(
         &residual_after,
         *row,
@@ -730,7 +764,7 @@ fn relax_initial_block_from_row_targets<M: AlgebraicProjectionModel>(
     ctx: InitialBlockDeltaCtx<'_, M>,
     y: &mut [f64],
     residual: &[f64],
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
 ) -> Result<bool, RuntimeSolveError> {
     let snapshot = y.to_vec();
     let mut updated_rows = Vec::new();
@@ -767,7 +801,7 @@ fn relax_initial_block_from_row_targets<M: AlgebraicProjectionModel>(
 
     let mut residual_after = vec![0.0; ctx.model.initial_residual_len()];
     ctx.model
-        .eval_initial_residual(y, ctx.p, ctx.t, &mut residual_after)?;
+        .eval_initial_residual(y, ctx.p, ctx.t, Some(ctx.rows), &mut residual_after)?;
     let target_rows_improved = updated_rows.iter().all(|(row, before)| {
         let row_pos = ctx.rows.iter().position(|candidate| candidate == row);
         let row_tol = row_pos
@@ -795,7 +829,7 @@ pub(super) fn initial_selected_residual_norm<M: AlgebraicProjectionModel>(
     row_scales: &[f64],
 ) -> Result<f64, RuntimeSolveError> {
     let mut residual = vec![0.0; model.initial_residual_len()];
-    model.eval_initial_residual(y, p, t, &mut residual)?;
+    model.eval_initial_residual(y, p, t, Some(rows), &mut residual)?;
     let mut selected = Vec::with_capacity(rows.len());
     for row in rows {
         let value = initial_residual_at(&residual, *row, "selected initial projection rows")?;
@@ -864,25 +898,40 @@ pub(super) fn algebraic_block_jacobian(
     rows: &[usize],
     y_indices: &[usize],
     structure: Option<&solve::JacobianStructure>,
-) -> Result<DMatrix<f64>, RuntimeSolveError> {
-    let jacobian = DMatrix::<f64>::zeros(rows.len(), y_indices.len());
+) -> Result<BlockJacobian, RuntimeSolveError> {
+    let jacobian = match structure {
+        Some(structure) => BlockJacobian::compact(structure.compact_layout()),
+        None => BlockJacobian::zeros(rows.len(), y_indices.len()),
+    };
     algebraic_block_jacobian_in(model, y, p, t, (rows, y_indices), structure, jacobian)
 }
 
 /// [`algebraic_block_jacobian`] filled into `jacobian`, which must be block-shaped
-/// and zero wherever a fresh zero matrix would be read: everywhere without a
-/// structure, and at every entry with one, since every structured writer
-/// writes only pattern entries. A reused matrix that is zero outside the
-/// pattern therefore needs only its pattern entries cleared.
+/// and zero at every entry it stores. A structured block's matrix is stored
+/// in its pattern's compact layout, the storage a compiled projection
+/// Jacobian writes; every structured writer writes only pattern entries.
 pub(super) fn algebraic_block_jacobian_in(
     model: &dyn ImplicitProjectionModel,
     y: &[f64],
     p: &[f64],
     t: f64,
+    coordinates: (&[usize], &[usize]),
+    structure: Option<&solve::JacobianStructure>,
+    jacobian: BlockJacobian,
+) -> Result<BlockJacobian, RuntimeSolveError> {
+    algebraic_block_jacobian_by_rows_in(model, (y, p, t), coordinates, structure, jacobian)
+        .map(|(jacobian, _)| jacobian)
+}
+
+/// [`algebraic_block_jacobian_in`], and whether every row was filled from its
+/// own reverse gradient, the formation [`refill_reverse_rows`] repeats.
+pub(super) fn algebraic_block_jacobian_by_rows_in(
+    model: &dyn ImplicitProjectionModel,
+    (y, p, t): (&[f64], &[f64], f64),
     (rows, y_indices): (&[usize], &[usize]),
     structure: Option<&solve::JacobianStructure>,
-    mut jacobian: DMatrix<f64>,
-) -> Result<DMatrix<f64>, RuntimeSolveError> {
+    mut jacobian: BlockJacobian,
+) -> Result<(BlockJacobian, bool), RuntimeSolveError> {
     if let Some(structure) = structure {
         validate_projection_structure(
             structure.pattern(),
@@ -893,16 +942,17 @@ pub(super) fn algebraic_block_jacobian_in(
     }
     debug_assert_eq!(jacobian.shape(), (rows.len(), y_indices.len()));
     if let Some(structure) = structure
+        && jacobian.is_stored_in(structure.compact_layout())
         && model.eval_prepared_implicit_jacobian(
             structure,
             (rows, y_indices),
             y,
             p,
             t,
-            jacobian.as_mut_slice(),
+            jacobian.storage_mut(),
         )?
     {
-        return Ok(jacobian);
+        return Ok((jacobian, false));
     }
     let mut reverse_gradient = vec![0.0; y.len()];
     let mut needs_forward_jvp = vec![true; rows.len()];
@@ -925,7 +975,7 @@ pub(super) fn algebraic_block_jacobian_in(
         );
     }
     if needs_forward_jvp.iter().all(|needs_forward| !needs_forward) {
-        return Ok(jacobian);
+        return Ok((jacobian, true));
     }
     if let Some(structure) = structure {
         fill_colored_algebraic_rows(
@@ -941,7 +991,7 @@ pub(super) fn algebraic_block_jacobian_in(
             &needs_forward_jvp,
             structure,
         )?;
-        return Ok(jacobian);
+        return Ok((jacobian, false));
     }
 
     // The tensor JVP certificate uses the canonical `[solver-y | parameter]`
@@ -981,7 +1031,39 @@ pub(super) fn algebraic_block_jacobian_in(
         }
         seed[y_idx] = 0.0;
     }
-    Ok(jacobian)
+    Ok((jacobian, false))
+}
+
+/// Refill rows `local_rows` of `jacobian` from their reverse gradients at
+/// `(y, p, t)`, exactly as [`algebraic_block_jacobian_by_rows_in`] fills them
+/// when every row has one. `false` when some row has no reverse gradient.
+pub(super) fn refill_reverse_rows(
+    model: &dyn ImplicitProjectionModel,
+    point: (&[f64], &[f64], f64),
+    (rows, y_indices): (&[usize], &[usize]),
+    structure: &solve::StructuralPattern,
+    local_rows: &[usize],
+    jacobian: &mut BlockJacobian,
+) -> Result<bool, RuntimeSolveError> {
+    let mut reverse_gradient = vec![0.0; point.0.len()];
+    for &row in local_rows {
+        let residual_idx = rows[row];
+        if !reverse_row(model, point, residual_idx, y_indices, &mut reverse_gradient)? {
+            return Ok(false);
+        }
+        fill_reverse_projection_row(
+            jacobian,
+            ReverseProjectionRowInput {
+                row,
+                residual_idx,
+                y_indices,
+                gradient: &reverse_gradient,
+                structure: Some(structure),
+                model,
+            },
+        );
+    }
+    Ok(true)
 }
 
 /// One algebraic projection block and the point its Jacobian is formed at.
@@ -1001,7 +1083,7 @@ struct AlgebraicBlockPoint<'a> {
 }
 
 fn fill_colored_algebraic_rows(
-    jacobian: &mut DMatrix<f64>,
+    jacobian: &mut BlockJacobian,
     block: AlgebraicBlockPoint<'_>,
     selected_rows: &[bool],
     structure: &solve::JacobianStructure,
@@ -1070,7 +1152,7 @@ fn with_zero_seed<R>(len: usize, set: &[usize], body: impl FnOnce(&mut [f64]) ->
 }
 
 fn fill_colored_groups(
-    jacobian: &mut DMatrix<f64>,
+    jacobian: &mut BlockJacobian,
     block: AlgebraicBlockPoint<'_>,
     selected_rows: &[bool],
     structure: &solve::JacobianStructure,
@@ -1136,7 +1218,7 @@ fn fill_colored_groups(
 }
 
 fn fill_prepared_algebraic_color(
-    jacobian: &mut DMatrix<f64>,
+    jacobian: &mut BlockJacobian,
     block: AlgebraicBlockPoint<'_>,
     selected_rows: &[bool],
     selection: Option<&solve::ProjectionJacobianOutputs>,
@@ -1207,7 +1289,7 @@ struct ReverseProjectionRowInput<'a> {
     model: &'a dyn ImplicitProjectionModel,
 }
 
-fn fill_reverse_projection_row(jacobian: &mut DMatrix<f64>, input: ReverseProjectionRowInput<'_>) {
+fn fill_reverse_projection_row(jacobian: &mut BlockJacobian, input: ReverseProjectionRowInput<'_>) {
     let ReverseProjectionRowInput {
         row,
         residual_idx,
@@ -1224,9 +1306,7 @@ fn fill_reverse_projection_row(jacobian: &mut DMatrix<f64>, input: ReverseProjec
         }
         return;
     };
-    structure.visit_row_columns(row, &mut |column| {
-        jacobian[(row, column)] = gradient[y_indices[column]];
-    });
+    jacobian.set_row(row, structure, &mut |column| gradient[y_indices[column]]);
 }
 
 fn projection_entry_depends(
@@ -1244,7 +1324,7 @@ fn projection_entry_depends(
 }
 
 pub(super) fn fill_jacobian_column_from_jvp(
-    jacobian: &mut DMatrix<f64>,
+    jacobian: &mut BlockJacobian,
     column: usize,
     rows: &[usize],
     jvp: &[f64],
@@ -1267,8 +1347,7 @@ pub(super) fn initial_block_jacobian(
     t: f64,
     rows: &[usize],
     y_indices: &[usize],
-    _base_residual: &[f64],
-) -> Result<DMatrix<f64>, RuntimeSolveError> {
+) -> Result<BlockJacobian, RuntimeSolveError> {
     let mut jacobian = DMatrix::<f64>::zeros(rows.len(), y_indices.len());
     let mut seed = vec![0.0; y.len()];
     let mut jvp = vec![0.0; model.initial_residual_len()];
@@ -1287,7 +1366,7 @@ pub(super) fn initial_block_jacobian(
         }
         seed[y_idx] = 0.0;
     }
-    Ok(jacobian)
+    Ok(BlockJacobian::dense(jacobian))
 }
 
 pub(super) fn residual_at(

@@ -8,20 +8,21 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 
 **Compatibility** is per member. `additive` means a reader of an artifact written before the member existed still works, because the member is optional or defaulted; `required` means adding it is a version break.
 
-85 types.
+89 types.
 
 | Type | Kind | Members |
 |---|---|---:|
-| [`RbcModel`](#rbcmodel) | struct | 33 |
+| [`RbcModel`](#rbcmodel) | struct | 34 |
 | [`RbcSummary`](#rbcsummary) | struct | 29 |
-| [`RbcAction`](#rbcaction) | enum | 3 |
+| [`RbcAction`](#rbcaction) | enum | 4 |
+| [`RbcAssertionLevel`](#rbcassertionlevel) | enum | 2 |
 | [`RbcBinaryOp`](#rbcbinaryop) | enum | 18 |
 | [`RbcBinder`](#rbcbinder) | struct | 5 |
 | [`RbcBranch`](#rbcbranch) | struct | 2 |
 | [`RbcCausality`](#rbccausality) | enum | 6 |
 | [`RbcClock`](#rbcclock) | struct | 3 |
 | [`RbcClockAnchor`](#rbcclockanchor) | enum | 2 |
-| [`RbcClockNode`](#rbcclocknode) | enum | 2 |
+| [`RbcClockNode`](#rbcclocknode) | enum | 3 |
 | [`RbcClockOwnership`](#rbcclockownership) | struct | 4 |
 | [`RbcClockRational`](#rbcclockrational) | struct | 2 |
 | [`RbcClockTransferKind`](#rbcclocktransferkind) | enum | 4 |
@@ -36,11 +37,12 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcConnectorMember`](#rbcconnectormember) | struct | 2 |
 | [`RbcConnectorType`](#rbcconnectortype) | struct | 4 |
 | [`RbcCoordinate`](#rbccoordinate) | enum | 19 |
+| [`RbcDeclaredCausality`](#rbcdeclaredcausality) | enum | 3 |
 | [`RbcDelay`](#rbcdelay) | struct | 3 |
 | [`RbcDelayKind`](#rbcdelaykind) | enum | 2 |
 | [`RbcDiscreteActivation`](#rbcdiscreteactivation) | enum | 2 |
 | [`RbcDiscreteBranch`](#rbcdiscretebranch) | struct | 3 |
-| [`RbcDiscreteDefinition`](#rbcdiscretedefinition) | struct | 3 |
+| [`RbcDiscreteDefinition`](#rbcdiscretedefinition) | struct | 4 |
 | [`RbcDiscreteRealActivation`](#rbcdiscreterealactivation) | enum | 2 |
 | [`RbcDiscreteRealEquation`](#rbcdiscreterealequation) | struct | 7 |
 | [`RbcDomain`](#rbcdomain) | struct | 6 |
@@ -54,10 +56,11 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcFile`](#rbcfile) | struct | 5 |
 | [`RbcFlowBalance`](#rbcflowbalance) | struct | 2 |
 | [`RbcFlowTerm`](#rbcflowterm) | struct | 2 |
-| [`RbcFunction`](#rbcfunction) | struct | 10 |
+| [`RbcFunction`](#rbcfunction) | struct | 11 |
 | [`RbcFunctionBody`](#rbcfunctionbody) | enum | 3 |
 | [`RbcFunctionConditional`](#rbcfunctionconditional) | struct | 3 |
 | [`RbcFunctionDefinition`](#rbcfunctiondefinition) | struct | 2 |
+| [`RbcFunctionDerivative`](#rbcfunctionderivative) | struct | 5 |
 | [`RbcFunctionFold`](#rbcfunctionfold) | struct | 10 |
 | [`RbcFunctionParameter`](#rbcfunctionparameter) | struct | 3 |
 | [`RbcFunctionStatement`](#rbcfunctionstatement) | enum | 4 |
@@ -65,7 +68,7 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcFunctionValueRole`](#rbcfunctionvaluerole) | enum | 2 |
 | [`RbcGeneration`](#rbcgeneration) | enum | 25 |
 | [`RbcInitialDiscreteValue`](#rbcinitialdiscretevalue) | struct | 3 |
-| [`RbcInline`](#rbcinline) | enum | 3 |
+| [`RbcInline`](#rbcinline) | enum | 4 |
 | [`RbcLiteral`](#rbcliteral) | enum | 5 |
 | [`RbcModelEventDefinition`](#rbcmodeleventdefinition) | struct | 3 |
 | [`RbcModelEventStep`](#rbcmodeleventstep) | struct | 5 |
@@ -86,6 +89,7 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcSchedule`](#rbcschedule) | enum | 2 |
 | [`RbcSource`](#rbcsource) | struct | 3 |
 | [`RbcSpan`](#rbcspan) | struct | 5 |
+| [`RbcStateSelect`](#rbcstateselect) | enum | 5 |
 | [`RbcStringConversionFormat`](#rbcstringconversionformat) | enum | 2 |
 | [`RbcStructuredRoot`](#rbcstructuredroot) | struct | 3 |
 | [`RbcSubscript`](#rbcsubscript) | enum | 3 |
@@ -96,7 +100,7 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcType`](#rbctype) | struct | 4 |
 | [`RbcUnaryOp`](#rbcunaryop) | enum | 3 |
 | [`RbcVariability`](#rbcvariability) | enum | 4 |
-| [`RbcVariable`](#rbcvariable) | struct | 23 |
+| [`RbcVariable`](#rbcvariable) | struct | 28 |
 
 ## RbcModel
 
@@ -116,6 +120,7 @@ A compiled Modelica model in public form.
 | `domains` | `Vec<RbcDomain>` | additive | Iteration domains referenced by the equation families. |
 | `discrete_real_equations` | `Vec<RbcDiscreteRealEquation>` | additive | MLS Appendix B.1b coupled discrete-Real equations, which `equations` does not contain. |
 | `initial_discrete_values` | `Vec<RbcInitialDiscreteValue>` | additive | Values discrete-valued variables take at the initialization instant. |
+| `initial_parameter_values` | `Vec<RbcInitialDiscreteValue>` | additive | — |
 | `functions` | `Vec<RbcFunction>` | additive | Function declarations named by `RbcExprNode::Call`, with their bodies when this artifact carries them (`RbcFunctionBody`). |
 | `equation_families` | `Vec<RbcEquationFamily>` | additive | Array/`for` equations, which `equations` does not contain. |
 | `initial_equation_families` | `Vec<RbcEquationFamily>` | additive | — |
@@ -180,9 +185,19 @@ _No description._
 
 | Variant | Meaning |
 |---|---|
+| `Warning` | Report when the condition is false, without introducing a state event. |
 | `Reinitialize` | `reinit(state, value)`. |
 | `Assert` | — |
 | `Terminate` | — |
+
+## RbcAssertionLevel
+
+MLS assertion severity, independent of compiler-private enum ordinals.
+
+| Variant | Meaning |
+|---|---|
+| `Error` | — |
+| `Warning` | — |
 
 ## RbcBinaryOp
 
@@ -268,6 +283,7 @@ _No description._
 
 | Variant | Meaning |
 |---|---|
+| `Shifted` | — |
 | `Periodic` | — |
 | `Triggered` | — |
 
@@ -450,6 +466,16 @@ A leaf referencing a model quantity. This is how expressions name variables — 
 | `Terminal` | `terminal()`. |
 | `FunctionParameter` | — |
 
+## RbcDeclaredCausality
+
+_No description._
+
+| Variant | Meaning |
+|---|---|
+| `None` | — |
+| `Input` | — |
+| `Output` | — |
+
 ## RbcDelay
 
 _No description._
@@ -494,6 +520,7 @@ One MLS Appendix B.1c definition owner: a set of discrete-valued targets defined
 
 | Member | Type | Compatibility | Meaning |
 |---|---|---|---|
+| `observed` | `bool` | additive | — |
 | `targets` | `Vec<VariableId>` | required | The discrete-valued variables this owner defines, in the order the branches' `values` follow. |
 | `branches` | `Vec<RbcDiscreteBranch>` | required | — |
 | `provenance` | `RbcProvenance` | required | — |
@@ -666,7 +693,7 @@ One flow member of a connection set, with the sign the balance gives it.
 
 ## RbcFunction
 
-One function declaration, and its body when the artifact carries it. The signature is what a *call site* needs: which function, how many arguments, what they mean. The body -- SSA definitions, loop transitions, conditionals, or an external interface -- is `body`, with the value table and folds its statements address; `ElidedModelica` records a body that exists and is not here (a recursive function), so an absent body is never mistaken for an empty one.
+_No description._
 
 | Member | Type | Compatibility | Meaning |
 |---|---|---|---|
@@ -675,6 +702,7 @@ One function declaration, and its body when the artifact carries it. The signatu
 | `parameters` | `Vec<RbcFunctionParameter>` | required | — |
 | `results` | `Vec<TypeId>` | required | Result types in declaration order; a call names one by ordinal. |
 | `inline` | `RbcInline` | required | The MLS §18.3 `Inline`/`LateInline` request the declaration wrote. |
+| `derivatives` | `Vec<RbcFunctionDerivative>` | additive | — |
 | `body` | `RbcFunctionBody` | required | — |
 | `values` | `Vec<RbcFunctionValue>` | additive | Output and local values, in owner-local ordinal order. |
 | `folds` | `Vec<RbcFunctionFold>` | additive | Bounded loops this body contains, addressed by owner-local ordinal. Beside the statements rather than inside them so a nested fold can name its parent by ordinal, which is how the DAE addresses them. |
@@ -709,6 +737,18 @@ One SSA definition inside a fold's transition.
 |---|---|---|---|
 | `value` | `u32` | required | Owner-local ordinal of the value defined. |
 | `expression` | `ExprId` | required | — |
+
+## RbcFunctionDerivative
+
+One function declaration, and its body when the artifact carries it. The signature is what a *call site* needs: which function, how many arguments, what they mean. The body -- SSA definitions, loop transitions, conditionals, or an external interface -- is `body`, with the value table and folds its statements address; `ElidedModelica` records a body that exists and is not here (a recursive function), so an absent body is never mistaken for an empty one. Checked derivative links attached to a function in priority order.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `target` | `FunctionId` | required | — |
+| `inputs` | `Vec<rumoca_core::FunctionDerivativeInput>` | required | — |
+| `priority` | `u32` | required | — |
+| `previous` | `Option<(FunctionId, u32)>` | additive | — |
+| `provenance` | `RbcProvenance` | required | — |
 
 ## RbcFunctionFold
 
@@ -819,6 +859,7 @@ _No description._
 | `Unstated` | — |
 | `Requested` | — |
 | `Never` | — |
+| `AfterIndexReduction` | — |
 
 ## RbcLiteral
 
@@ -1029,6 +1070,18 @@ A resolved source location. Byte offsets are authoritative; line and column are 
 | `line` | `u32` | required | 1-based line of `start`. |
 | `column` | `u32` | required | 1-based column of `start`. |
 
+## RbcStateSelect
+
+_No description._
+
+| Variant | Meaning |
+|---|---|
+| `Never` | — |
+| `Avoid` | — |
+| `Default` | — |
+| `Prefer` | — |
+| `Always` | — |
+
 ## RbcStringConversionFormat
 
 Optional operands of the predefined String conversion (MLS §3.7.1).
@@ -1149,6 +1202,7 @@ _No description._
 | `name` | `String` | required | Fully-qualified flattened name, e.g. `"motor.flange.tau"`. |
 | `role` | `RbcRole` | required | — |
 | `causality` | `RbcCausality` | required | — |
+| `declared_causality` | `Option<RbcDeclaredCausality>` | additive | The written prefix, independently of the exported storage role. Absent in older artifacts, where input/output causality implied it. |
 | `value_type` | `TypeId` | required | — |
 | `scalar_count` | `u32` | required | Number of scalars this variable expands to (1 for a scalar). |
 | `contract` | `Option<RbcSymbolContract>` | additive | What the source says this symbol *is*: whether it may change, who may change it, and what its value depends on. Without this an analysis has only `role`, which answers a different question. `role` is the Appendix-B partition a coordinate belongs to; the contract is the declaration's promise. A divide-by-zero analysis that reads `role` alone proposes setting `Modelica.Constants.pi` to zero, and did. |
@@ -1165,6 +1219,10 @@ _No description._
 | `max` | `Option<ExprId>` | additive | — |
 | `nominal` | `Option<ExprId>` | additive | — |
 | `fixed` | `Option<bool>` | additive | — |
+| `fixed_elements` | `Option<Vec<bool>>` | additive | Per-element fixed attributes when they are not uniform. |
+| `evaluable` | `bool` | additive | — |
+| `held` | `bool` | additive | — |
+| `state_select` | `RbcStateSelect` | additive | — |
 | `tunable` | `bool` | additive | — |
 | `from_source` | `bool` | additive | True when the variable was written in the source rather than generated. |
 | `connector` | `Option<RbcConnectorMember>` | additive | Connector semantics recovered from flattening, when this variable is a connector member. |

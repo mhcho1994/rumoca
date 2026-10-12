@@ -298,13 +298,7 @@ fn trace_from_sim_result(model_name: &str, sim: &SimResult) -> SimTrace {
         Some(
             sim.variable_meta
                 .iter()
-                .map(|meta| SimTraceVariableMeta {
-                    name: meta.name.clone(),
-                    role: Some(meta.role.clone()),
-                    value_type: meta.value_type.clone(),
-                    variability: meta.variability.clone(),
-                    time_domain: meta.time_domain.clone(),
-                })
+                .map(SimTraceVariableMeta::of)
                 .collect(),
         )
     };
@@ -325,7 +319,7 @@ fn generate_omc_trace(paths: &MslPaths, model_name: &str, output_path: &Path) ->
         .with_context(|| format!("failed to create '{}'", work_dir.display()))?;
     let check_file = work_dir.join("plot_compare_omc_check.txt");
     let mos_file = work_dir.join("plot_compare_omc.mos");
-    let script = build_omc_script(paths, model_name, &check_file);
+    let script = build_omc_script(paths, model_name, &check_file)?;
     std::fs::write(&mos_file, script)
         .with_context(|| format!("failed to write '{}'", mos_file.display()))?;
 
@@ -362,8 +356,8 @@ fn generate_omc_trace(paths: &MslPaths, model_name: &str, output_path: &Path) ->
     Ok(())
 }
 
-fn build_omc_script(paths: &MslPaths, model_name: &str, check_file: &Path) -> String {
-    let mut lines = msl_load_lines(paths);
+fn build_omc_script(paths: &MslPaths, model_name: &str, check_file: &Path) -> Result<String> {
+    let mut lines = msl_load_lines(paths)?;
     lines.push("getErrorString();".to_string());
     lines.push(format!(
         "simRes := simulate({model_name}, outputFormat=\"csv\", fileNamePrefix=\"{model_name}\");"
@@ -373,7 +367,7 @@ fn build_omc_script(paths: &MslPaths, model_name: &str, check_file: &Path) -> St
         "writeFile(\"{}\", \"ERROR:\" + err + \"\\n\");",
         check_file.display()
     ));
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 fn resolve_omc_csv_path(work_dir: &Path, model_name: &str, output: &str) -> PathBuf {
@@ -1042,7 +1036,52 @@ end NominalScaled;
             value_type: entry.value_type.clone(),
             variability: entry.variability.clone(),
             time_domain: entry.time_domain.clone(),
+            state_coordinate: entry.state_coordinate.clone(),
+            phasor: entry.phasor.clone(),
         };
         assert_eq!(trace_meta.name, "T");
+    }
+}
+
+#[cfg(test)]
+mod omc_script_tests {
+    use super::*;
+    use crate::msl_tools::common::omc_services_package;
+
+    fn paths_under(root: &Path) -> MslPaths {
+        let results_dir = root.join("results");
+        MslPaths {
+            repo_root: root.to_path_buf(),
+            msl_dir: root.join("ModelicaStandardLibrary-4.1.0"),
+            flat_dir: results_dir.join("omc_flat"),
+            work_dir: results_dir.join("omc_work"),
+            sim_work_dir: results_dir.join("omc_sim_work"),
+            omc_trace_dir: results_dir.join("sim_traces/omc"),
+            rumoca_trace_dir: results_dir.join("sim_traces/rumoca"),
+            results_dir,
+        }
+    }
+
+    #[test]
+    fn the_omc_script_loads_the_pinned_services_before_simulating() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = paths_under(temp.path());
+        let check = temp.path().join("check.txt");
+        assert!(
+            build_omc_script(&paths, "Lib.Model", &check).is_err(),
+            "no script without the pinned services"
+        );
+        let services = omc_services_package(&paths);
+        std::fs::create_dir_all(services.parent().expect("services dir")).expect("dir");
+        std::fs::write(&services, "").expect("services package");
+        let script = build_omc_script(&paths, "Lib.Model", &check).expect("script");
+        let lines: Vec<&str> = script.lines().collect();
+        assert_eq!(lines[0], format!("loadFile(\"{}\");", services.display()));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("simRes := simulate(Lib.Model"))
+        );
+        assert!(lines.last().expect("check line").contains("check.txt"));
     }
 }

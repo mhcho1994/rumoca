@@ -8,7 +8,7 @@ pub(crate) struct InputRequirements {
 }
 
 impl InputRequirements {
-    fn merge(self, other: Self) -> Self {
+    pub(super) fn merge(self, other: Self) -> Self {
         Self {
             y_len: self.y_len.max(other.y_len),
             p_len: self.p_len.max(other.p_len),
@@ -66,7 +66,11 @@ fn input_requirements_for_linear_op(op: LinearOp) -> Result<InputRequirements, C
         LinearOp::FunctionFold { program, .. }
         | LinearOp::GuardedFunctionFold { program, .. }
         | LinearOp::StoreOutputFunctionFold { program, .. } => {
-            input_requirements_for_linear_ops(&program.update)
+            program
+                .regions()
+                .try_fold(InputRequirements::default(), |requirements, region| {
+                    input_requirements_for_linear_ops(region).map(|found| requirements.merge(found))
+                })
         }
         LinearOp::FunctionConditional { program, .. } => {
             let mut requirements = input_requirements_for_linear_ops(&program.fallback)?;

@@ -39,6 +39,7 @@ mod connections_builtin;
 mod constant_extraction;
 #[cfg(test)]
 mod context_suffix_tests;
+mod continuous_algebraic;
 mod enum_literals;
 mod equations;
 mod errors;
@@ -46,6 +47,7 @@ mod function_lowering;
 mod function_precollect;
 mod functions;
 mod name_simplify;
+mod operator_records;
 mod outer_refs;
 mod param_variability;
 mod path_utils;
@@ -55,6 +57,7 @@ pub mod qualify;
 pub(crate) mod record_constant_arrays;
 #[cfg(test)]
 mod reference_contract_tests;
+mod resource_roots;
 mod source_spans;
 mod static_subscripts;
 #[cfg(test)]
@@ -106,8 +109,8 @@ pub(crate) use function_precollect::{
 use pipeline::*;
 use postprocess::*;
 use record_constant_arrays::{
-    component_type_is_record, synthesize_component_modification_binding,
-    try_extract_record_array_constructor_constant,
+    component_type_is_record, component_type_may_be_enumeration,
+    synthesize_component_modification_binding, try_extract_record_array_constructor_constant,
 };
 use rumoca_eval_flat::phase_constant::{
     ParamEvalContext, ParamEvaluator, eval_user_func_real, infer_array_dimensions,
@@ -349,6 +352,7 @@ pub fn flatten_ref_with_options(
         .scope_tree
         .predefined_member(&rumoca_core::ComponentPath::from_flat_path("String"));
     ctx.predefined_intrinsics = ast_lower::PredefinedIntrinsicIds::from_tree(tree);
+    ctx.resource_roots = resource_roots::resource_roots(tree);
     ctx.materialize_structured_families = options.materialize_structured_families;
     if !model_name.is_empty() {
         ctx.simulated_root_name = Some(crate::path_utils::leaf_segment(model_name).to_string());
@@ -365,6 +369,11 @@ pub fn flatten_ref_with_options(
             })
             .collect(),
     );
+    ctx.declaration_owners = tree
+        .def_map
+        .keys()
+        .filter_map(|id| Some((*id, class_index.parent_def_id(*id)?)))
+        .collect();
     ctx.target_def_names = tree
         .def_map
         .iter()

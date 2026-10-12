@@ -1189,8 +1189,14 @@ class Event:
 
     @property
     def message(self) -> Expression | None:
-        """For an ``assert`` or ``terminate`` action, its message expression."""
+        """For an ``assert``, ``warning`` or ``terminate``, its message expression."""
         index = self._raw["action"].get("message")
+        return None if index is None else self._model.expressions[index]
+
+    @property
+    def condition(self) -> Expression | None:
+        """For a ``warning`` action, the Boolean assertion condition it checks."""
+        index = self._raw["action"].get("condition")
         return None if index is None else self._model.expressions[index]
 
     @property

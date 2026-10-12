@@ -5,9 +5,11 @@ use super::entry::lower_dae_for_simulation;
 use crate::SimulationSession;
 use crate::{SimOptions, SimSolverMode, simulate_dae, simulate_dae_with_diagnostics};
 
+mod array_storage_views;
 mod array_trajectories;
 mod block_residual_split;
 mod coincident_strict;
+mod function_returns;
 #[cfg(all(feature = "solver-diffsol", feature = "solver-rk45"))]
 mod input_batches;
 mod jacobian_source_trajectories;
@@ -890,7 +892,7 @@ fn unprovided_input_is_rejected_instead_of_receiving_a_default_value() {
 /// `examples/interactive/rover` — and aborted `prepare_gpu_simulation` before any shader
 /// was rendered.
 #[test]
-fn gpu_preparation_seeds_host_driven_inputs_from_their_declared_start() {
+fn host_driven_preparation_seeds_inputs_from_their_declared_start() {
     let dae = compile(
         concat!(
             "model HostDrivenInput\n",
@@ -904,21 +906,28 @@ fn gpu_preparation_seeds_host_driven_inputs_from_their_declared_start() {
         "HostDrivenInput",
     );
 
-    let prepared = super::entry::lower_dae_for_gpu_preparation(&dae, &SimOptions::default())
-        .expect("a host-driven input carries its declared start into the prepared vectors");
-    let slot = prepared
-        .problem
-        .layout
-        .binding("u_cmd")
-        .expect("the input keeps a storage slot the host can write");
-    let rumoca_ir_solve::ScalarSlot::P { index, .. } = slot else {
-        panic!("a host-driven input belongs in parameter storage, got {slot:?}");
-    };
-    assert_eq!(
-        prepared.parameters.get(index).copied(),
-        Some(2.0),
-        "the seeded slot must hold the declared start, not a stand-in"
-    );
+    // Native expression-kernel preparation hands its host the same `P` slots, so it
+    // shares the rule.
+    for prepare in [
+        super::entry::lower_dae_for_gpu_preparation,
+        super::entry::lower_dae_for_native_preparation,
+    ] {
+        let prepared = prepare(&dae, &SimOptions::default())
+            .expect("a host-driven input carries its declared start into the prepared vectors");
+        let slot = prepared
+            .problem
+            .layout
+            .binding("u_cmd")
+            .expect("the input keeps a storage slot the host can write");
+        let rumoca_ir_solve::ScalarSlot::P { index, .. } = slot else {
+            panic!("a host-driven input belongs in parameter storage, got {slot:?}");
+        };
+        assert_eq!(
+            prepared.parameters.get(index).copied(),
+            Some(2.0),
+            "the seeded slot must hold the declared start, not a stand-in"
+        );
+    }
 
     // The strict rule for headless simulation is untouched: the same model still has no
     // provider when nothing drives it.
@@ -1562,21 +1571,15 @@ fn a_failed_initialization_names_the_coordinate_its_row_was_planned_to_determine
     );
 }
 
-/// A row no block solves is not automatically a surplus check, and calling it one
-/// names the wrong defect. MLS 3.6 §8.6 makes a surplus row legal — a coordinate a
-/// declaration determines may still be read by another initialization equation —
-/// so failing one means two declarations contradict each other. A row over a
-/// coordinate the projection never owned is the opposite: nothing solved that
-/// coordinate. The two must not share a message.
-///
-/// `Modelica.Electrical.Analog.Examples.IdealTriacCircuit` is the MSL model this
-/// separates: its failing row reads a discrete coordinate, and the old message
-/// called it a consistency check.
+/// A row that reads a discrete coordinate is planned with the discrete held at
+/// its current value (MLS 3.7 §8.6 mixed system): `x = d + 2` with
+/// `d(start = 0, fixed = true)` initializes `x = 2`, as OpenModelica does. A row
+/// whose algebraic dependency the continuous matching owns is solved through it.
 #[test]
-fn an_unowned_initialization_row_is_not_reported_as_a_surplus_check() {
+fn initialization_rows_read_held_discretes_and_owned_algebraics() {
     let discrete_read = compile(
         concat!(
-            "model UnownedDiscrete\n",
+            "model HeldDiscrete\n",
             "  Real x(start=0, fixed=false);\n",
             "  discrete Real d(start=0, fixed=true);\n",
             "equation\n",
@@ -1586,22 +1589,13 @@ fn an_unowned_initialization_row_is_not_reported_as_a_surplus_check() {
             "  end when;\n",
             "initial equation\n",
             "  x = d + 2;\n",
-            "end UnownedDiscrete;\n",
+            "end HeldDiscrete;\n",
         ),
-        "UnownedDiscrete",
+        "HeldDiscrete",
     );
-    let error = simulate_dae(&discrete_read, &SimOptions::default())
-        .expect_err("a discrete coordinate is outside the planned unknown space")
-        .to_string();
-    assert!(
-        error.contains("outside the planned initialization unknown space")
-            && error.contains("discrete-time coordinate"),
-        "an unowned discrete read names its kind, got: {error}"
-    );
-    assert!(
-        !error.contains("surplus-check"),
-        "a row nothing solved must not be reported as a surplus check, got: {error}"
-    );
+    let result = simulate_dae(&discrete_read, &SimOptions::default())
+        .expect("the projection holds the discrete and solves x");
+    assert!((column(&result, "x")[0] - 2.0).abs() <= 1.0e-9);
 
     let algebraic_read = compile(
         concat!(

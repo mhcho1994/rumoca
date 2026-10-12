@@ -79,11 +79,11 @@ pub use runtime::solve_ops::{
 pub use runtime::solve_runtime::{
     AlgebraicLinearization, AlgebraicSettle, BlockResidualSplitCounts,
     CompiledSolveAssignmentSchedule, CompiledSolveEventTransaction, CompiledSolveExpression,
-    CompiledSolveJacobianExpression, CompiledSolveProjectionJacobian, EventTransactionExecution,
-    EventUpdateRowFilter, InitialEventObservation, ProjectedEventUpdateInput,
-    ProjectedInitialEventInput, ProjectedInitialEventOutcome, ProjectedPostInitialEventInput,
-    SolveExecutionBackend, SolveRuntime, block_residual_split_counts,
-    reset_block_residual_split_counts,
+    CompiledSolveJacobianExpression, CompiledSolveProjectionJacobian, CompiledSolveTargetValues,
+    EventTransactionExecution, EventUpdateRowFilter, InitialEventObservation,
+    ProjectedEventUpdateInput, ProjectedInitialEventInput, ProjectedInitialEventOutcome,
+    ProjectedPostInitialEventInput, SolveExecutionBackend, SolveRuntime,
+    block_residual_split_counts, reset_block_residual_split_counts,
 };
 #[cfg(not(kani))]
 pub use runtime::time::{
@@ -96,7 +96,19 @@ pub use runtime::timeout::{
     run_timeout_step_result,
 };
 #[cfg(not(kani))]
+pub use runtime::trajectory::{
+    ForwardSensitivityTrajectory, PluginBuilder, QuadratureIntegrand, TrajectoryConfig,
+    TrajectoryError, TrajectoryProblem, forward_sensitivity_trajectory,
+};
+#[cfg(not(kani))]
+pub use runtime::trajectory_objective::{
+    DataSeries, ObjectiveGradient, ResolvedObjective, RunningKind, RunningTerm, TerminalTerm,
+    TrajectoryObjective, adjoint_objective_gradient, forward_objective_gradient,
+};
+#[cfg(not(kani))]
 pub use solver::{
-    DiffsolMethod, SimBackend, SimDiagnostic, SimExecutionPolicy, SimOptions, SimPacingMode,
-    SimResult, SimSolverMode, SimTermination, SimVariableMeta, WARNING_ASSERTION_CODE,
+    DEFAULT_CHECKPOINT_BUDGET_BYTES, DiffsolMethod, MODEL_MESSAGE_CODE, SimBackend, SimDiagnostic,
+    SimExecutionEngine, SimExecutionPolicy, SimExecutionReceipt, SimNativeDecline,
+    SimNativeRefusal, SimOptions, SimPacingMode, SimResult, SimSolverMode, SimTermination,
+    SimVariableMeta, WARNING_ASSERTION_CODE,
 };

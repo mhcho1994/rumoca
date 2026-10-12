@@ -6,7 +6,9 @@ import { createInputRuntime } from "../runtime/rumoca_interactive.js";
 import {
   createVirtualGamepad,
   scenarioUsesTouchControls,
+  shapeStickAxis,
   stickAxes,
+  touchAxisShapes,
   touchControlButtons,
 } from "../runtime/rumoca_touch_controls.js";
 
@@ -29,9 +31,9 @@ function quadrotorConfig() {
       mode: "auto",
       gamepad: {
         axes: {
-          pitch: { source: "RightStickY", write: "pitch_cmd" },
-          roll: { source: "RightStickX", write: "roll_cmd" },
-          yaw: { source: "LeftStickX", write: "yaw_cmd" },
+          pitch: { invert: true, source: "RightStickX", write: "pitch_cmd" },
+          roll: { source: "RightStickY", write: "roll_cmd" },
+          yaw: { invert: true, source: "LeftStickX", write: "yaw_cmd" },
         },
         buttons: {
           arm: {
@@ -101,11 +103,12 @@ test("touch sticks drive the scenario gamepad axes and integrators", () => {
   pad.engage();
   const up = stickAxes(0, -50, 50);
   pad.setStick("left", up.x, up.y);
-  const right = stickAxes(25, 0, 50);
+  const right = stickAxes(25, -25, 50);
   pad.setStick("right", right.x, right.y);
   input.update(0.5);
   close(input.locals.get("throttle"), 0.35, "throttle after 0.5 s");
-  close(input.locals.get("roll_cmd"), 0.5, "roll from right stick X");
+  close(input.locals.get("roll_cmd"), 0.5, "stick up rolls positive like ArrowUp");
+  close(input.locals.get("pitch_cmd"), -0.5, "stick right pitches negative like ArrowRight");
   assert.equal(input.runtimeFields(1).input_mode, "touch");
 
   // Releasing re-centers the set-style axes; the integrator holds its value.
@@ -114,6 +117,7 @@ test("touch sticks drive the scenario gamepad axes and integrators", () => {
   input.update(0.5);
   close(input.locals.get("throttle"), 0.35, "throttle holds");
   close(input.locals.get("roll_cmd"), 0, "roll re-centers");
+  close(input.locals.get("pitch_cmd"), 0, "pitch re-centers");
 });
 
 test("touch deflection inside the scenario deadband leaves the integrator untouched", () => {
@@ -179,7 +183,7 @@ test("a connected physical gamepad takes precedence over the touch pad", () => {
       delete globalThis.navigator;
     }
   }
-  close(input.locals.get("roll_cmd"), -0.5, "physical roll wins");
+  close(input.locals.get("pitch_cmd"), 0.5, "physical pitch wins over the touch stick");
   assert.equal(input.runtimeFields(0).input_mode, "gamepad");
 });
 
@@ -229,4 +233,73 @@ test("touch overlay hides on fine pointers and does not block the capture handle
   assert.match(touch, /touch-action: none/);
   assert.match(touch, /env\(safe-area-inset-bottom/);
   assert.match(runtime, /closest\?\.\('\.rumoca-interactive-controls, \.rumoca-touch-controls'\)/);
+});
+
+test("stick shaping removes the deadzone, keeps full range and softens center", () => {
+  assert.equal(shapeStickAxis(0.1, 0.12, 0.7), 0);
+  assert.equal(shapeStickAxis(-0.12, 0.12, 0.7), 0);
+  close(shapeStickAxis(1, 0.12, 0.7), 1, "full deflection");
+  close(shapeStickAxis(-1, 0.12, 0.7), -1, "full negative deflection");
+  // Linear shaping rescales the live range so the output starts at zero.
+  close(shapeStickAxis(0.56, 0.12, 0), 0.5, "rescaled midpoint");
+  // Expo lowers the response near center and is odd-symmetric.
+  const soft = shapeStickAxis(0.56, 0.12, 0.7);
+  assert(soft < 0.5 && soft > 0, `expo response ${soft}`);
+  close(shapeStickAxis(-0.56, 0.12, 0.7), -soft, "odd symmetry");
+  assert.equal(shapeStickAxis(Number.NaN, 0.12, 0.7), 0);
+});
+
+test("touch axis shaping follows what the scenario binds each stick axis to", () => {
+  const shapes = touchAxisShapes(quadrotorConfig());
+  // Left stick Y integrates throttle with its own deadband: no extra shaping.
+  assert.deepEqual(shapes[1], { deadzone: 0, expo: 0 });
+  // Attitude axes get the deadzone and expo.
+  assert.equal(shapes[0].expo > 0 && shapes[0].deadzone > 0, true);
+  assert.equal(shapes[2].expo > 0 && shapes[3].expo > 0, true);
+
+  const rover = touchAxisShapes({
+    input: {
+      gamepad: {
+        axes: {
+          steering: { source: "RightStickX", write: "steering" },
+          throttle: { source: "LeftStickY", write: "throttle" },
+        },
+      },
+    },
+  });
+  assert.equal(rover[2].expo > 0, true, "steering is shaped");
+  assert.equal(rover[1].expo, 0, "a throttle axis stays linear");
+  assert.equal(rover[1].deadzone > 0, true, "a throttle axis still has a deadzone");
+
+  const unbound = touchAxisShapes({});
+  assert.equal(unbound.length, 4);
+  assert(unbound.every((shape) => shape.expo === 0 && shape.deadzone > 0));
+});
+
+test("the quadrotor stick axes point the same way as its keyboard keys", async () => {
+  const text = await readFile(
+    new URL("../../../examples/interactive/quadrotor/rumoca-scenario.acro.toml", import.meta.url),
+    "utf8",
+  );
+  const section = (name) => {
+    const match = new RegExp(`^\\[${name.replace(/\./g, "\\.")}\\]\\n((?:[^\\[\\n][^\\n]*\\n?)*)`, "m").exec(text);
+    assert(match, `missing [${name}]`);
+    return match[1];
+  };
+  const axis = (name) => {
+    const body = section(`input.gamepad.axes.${name}`);
+    return {
+      source: /^source = "(\w+)"/m.exec(body)?.[1],
+      invert: /^invert = true$/m.test(body),
+    };
+  };
+  const key = (name) => Number(/^value = (-?[\d.]+)/m.exec(section(`input.keyboard.keys.${name}`))[1]);
+  // Stick up reads +1 on RightStickY / LeftStickY after the runtime's sign flip,
+  // and stick right reads +1 on the X axes.
+  assert.deepEqual(axis("roll"), { source: "RightStickY", invert: false });
+  assert(key("ArrowUp") > 0, "ArrowUp drives roll_cmd positive, as the stick does when pushed up");
+  assert.deepEqual(axis("pitch"), { source: "RightStickX", invert: true });
+  assert(key("ArrowRight") < 0, "ArrowRight drives pitch_cmd negative, as the inverted X axis does");
+  assert.deepEqual(axis("yaw"), { source: "LeftStickX", invert: true });
+  assert(key("d") < 0, "d (right) drives yaw_cmd negative, as the inverted X axis does");
 });

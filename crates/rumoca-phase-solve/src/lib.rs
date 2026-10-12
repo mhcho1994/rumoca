@@ -11,7 +11,9 @@ mod layout;
 mod lower;
 mod model_values;
 mod model_wire;
+mod phasor_sources;
 mod proven_tearing;
+mod sensitivity_parameters;
 mod state_selection;
 
 pub mod ad;
@@ -36,6 +38,7 @@ pub use model_wire::{
     SOLVE_MODEL_SCHEMA_VERSION, SolveModelWireError, SolveModelWireRef, deserialize_solve_model,
     solve_model_wire,
 };
+pub use sensitivity_parameters::{independent_tunable_parameters, select_sensitivity_parameters};
 
 use rumoca_ir_dae as dae;
 use rumoca_ir_solve as solve;
@@ -67,18 +70,17 @@ pub fn lower_solve_package(dae: &dae::Dae) -> Result<LoweredSolvePackage, LowerE
 }
 
 /// The scalars Solve lowering integrates for `dae`, as source scalar names in
-/// basis order: the state selection's own record when a formal selection chose
+/// basis order: the candidate's state coordinate map when a formal selection chose
 /// the basis (a formal derivative order `k` wraps the name in `k` `der`s), and
 /// the prepared system's states otherwise.
 pub fn integrated_state_names(dae: &dae::Dae) -> Result<Vec<String>, LowerError> {
-    let selection =
-        state_selection::prepare(dae, &std::collections::HashMap::new()).map_err(|error| {
-            LowerError::Structural {
-                reason: error.to_string(),
-                span: error.source_span(),
-            }
-        })?;
-    Ok(selection.integrated_names())
+    let structural = |error: rumoca_phase_structural::StructuralError| LowerError::Structural {
+        reason: error.to_string(),
+        span: error.source_span(),
+    };
+    state_selection::prepare(dae, &std::collections::HashMap::new())
+        .and_then(|selection| selection.integrated_names())
+        .map_err(structural)
 }
 
 /// Why Solve lowering kept the reducer's basis for `dae` although its

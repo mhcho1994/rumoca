@@ -418,6 +418,13 @@ impl Session {
         let build_started = maybe_start_timer();
         let (tree, diagnostics, model_names) =
             self.resolve_documents_for_mode(ResolveBuildMode::StrictCompileRecovery)?;
+        // Per-root summaries cannot bind references to other source roots.
+        // Once all documents are resolved together, rebuild their dependency
+        // graph from these exact identities before selecting a strict closure.
+        self.query_state
+            .resolved
+            .dependency_fingerprints
+            .strict_compile_recovery = Some(DependencyFingerprintCache::from_tree(tree.tree()));
         self.query_state.resolved.model_names = model_names;
         self.query_state.resolved.builds.strict_compile_recovery =
             Some(ResolutionPlanningArtifact {
@@ -560,6 +567,10 @@ impl Session {
                 diagnostics: diagnostics.iter().cloned().collect(),
                 source_map: Box::new(self.session_source_map()),
             })?;
+        self.query_state
+            .resolved
+            .dependency_fingerprints
+            .strict_compile_recovery = Some(DependencyFingerprintCache::from_tree(plan.tree()));
         self.resolve_strict_target_from_plan(model_name, plan)
     }
 
@@ -633,6 +644,8 @@ impl Session {
         let ResolutionPlanningTree::Complete(resolved) = tree else {
             return Err(diagnostics);
         };
+        self.query_state.resolved.dependency_fingerprints.standard =
+            Some(DependencyFingerprintCache::from_tree(resolved.inner()));
         self.query_state.resolved.model_names = model_names;
         self.query_state
             .resolved

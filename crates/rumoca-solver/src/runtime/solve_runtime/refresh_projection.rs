@@ -531,6 +531,15 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
             .map_err(Into::into)
     }
 
+    fn eval_implicit_residual_rows(
+        &self,
+        rows: &[usize],
+        point: (&[f64], &[f64], f64),
+        out: &mut [f64],
+    ) -> Result<bool, RuntimeSolveError> {
+        self.runtime.eval_compiled_residual_rows(rows, point, out)
+    }
+
     fn eval_implicit_residual_row(
         &self,
         row_idx: usize,
@@ -805,6 +814,16 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
         self.runtime.algebraic_newton_caches.get(index)
     }
 
+    fn implicit_row_static_gradient_parameters(&self, row_idx: usize) -> Option<&[usize]> {
+        let (program_idx, _) = self
+            .runtime
+            .implicit_scalar_rhs
+            .row_output_position(row_idx)?;
+        self.runtime
+            .implicit_scalar_rhs
+            .parameter_static_y_gradient_params(program_idx)
+    }
+
     fn solve_algebraic_newton_delta(
         &self,
         block_index: usize,
@@ -840,6 +859,24 @@ impl ImplicitProjectionModel for RefreshProjectionModel<'_> {
         else {
             return Ok(None);
         };
+        if let Some((compiled, selected)) = self.runtime.compiled_projection_target_values(
+            program_idx,
+            output_offset,
+            target_y_index,
+        )? {
+            return compiled
+                .call(selected, y, p, t, self.runtime.row_eval_context())
+                .map(Some)
+                .map_err(|error| {
+                    RuntimeSolveError::solve_ir_with_span(
+                        error,
+                        self.runtime
+                            .implicit_scalar_rhs
+                            .block()
+                            .program_span(program_idx),
+                    )
+                });
+        }
         if output_offset == 0
             && let Some(compiled) = self
                 .runtime

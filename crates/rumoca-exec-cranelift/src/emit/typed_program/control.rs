@@ -53,7 +53,10 @@ impl ProgramLowerer<'_, '_> {
         initial: &[solve::SolveRegisterId],
         captures: &[solve::SolveRegisterId],
         destinations: &[solve::SolveRegisterId],
-        transition: &solve::SolveProgramRegion,
+        (transition, continuation): (
+            &solve::SolveProgramRegion,
+            Option<&solve::SolveProgramRegion>,
+        ),
     ) -> Result<(), CompileError> {
         let carried_cells = self.register_cell_count(initial, "typed fold carried tuple")?;
         let capture_cells = self.register_cell_count(captures, "typed fold captures")?;
@@ -71,6 +74,9 @@ impl ProgramLowerer<'_, '_> {
         self.pack_registers(initial, first)?;
         self.pack_registers_at(captures, first, carried_cells)?;
         self.pack_registers_at(captures, second, carried_cells)?;
+        let predicate = continuation
+            .map(|_| create_tape(self.builder, self.pointer_type, 1))
+            .transpose()?;
 
         let count = domain
             .scalar_count()
@@ -109,6 +115,24 @@ impl ProgramLowerer<'_, '_> {
 
         self.builder.switch_to_block(body);
         self.builder.seal_block(body);
+        // A bounded `while` fold tests its predicate on the current tuple
+        // before each pass and leaves with that tuple when it is false.
+        if let (Some(continuation), Some(predicate)) = (continuation, predicate) {
+            self.lower_region(continuation, current, predicate)?;
+            let value = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                predicate,
+                0,
+            );
+            let proceed = self.builder.ins().icmp_imm(IntCC::NotEqual, value, 0);
+            let pass = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(proceed, pass, &[], exit, &[current.into()]);
+            self.builder.switch_to_block(pass);
+            self.builder.seal_block(pass);
+        }
         self.store_domain_binders(
             domain,
             &extents,
@@ -206,6 +230,7 @@ impl ProgramLowerer<'_, '_> {
             tape,
             layout: &layout,
             functions: self.functions,
+            recursive_calls: self.recursive_calls,
             flags: self.flags,
         };
         nested.lower(region.body())
@@ -223,6 +248,18 @@ impl ProgramLowerer<'_, '_> {
                 context,
             )
         })
+    }
+
+    /// Copy registers, in order, into one fresh contiguous tape.
+    pub(super) fn packed_tape(
+        &mut self,
+        registers: &[solve::SolveRegisterId],
+        context: &str,
+    ) -> Result<Value, CompileError> {
+        let cells = self.register_cell_count(registers, context)?;
+        let tape = create_tape(self.builder, self.pointer_type, cells)?;
+        self.pack_registers(registers, tape)?;
+        Ok(tape)
     }
 
     fn pack_registers(

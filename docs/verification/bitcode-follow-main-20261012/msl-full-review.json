@@ -1,0 +1,332 @@
+{
+  "baseline_context_mismatch": {
+    "expected": "a96aa1a-cmake",
+    "actual": "OpenModelica 1.26.1"
+  },
+  "before_fmi_branch_counts": {
+    "cohort_models": 566,
+    "compared_models": 306,
+    "high": 306,
+    "near": 0,
+    "deviation": 0,
+    "fallback": 0,
+    "absent": 260,
+    "absent_by_reason": {
+      "excluded": 53,
+      "not_attempted": 143,
+      "reference_missing": 1,
+      "sim_failed": 63
+    }
+  },
+  "integration_counts": {
+    "cohort_models": 566,
+    "compared_models": 319,
+    "high": 318,
+    "near": 1,
+    "deviation": 0,
+    "fallback": 0,
+    "absent": 247,
+    "absent_by_reason": {
+      "excluded": 53,
+      "not_attempted": 131,
+      "reference_missing": 1,
+      "sim_failed": 62
+    }
+  },
+  "high_lost": [
+    {
+      "before": {
+        "model_name": "Modelica.Electrical.Analog.Examples.CauerLowPassSC",
+        "band": "high",
+        "compared_variables": 543,
+        "channel_high_count": 543,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0,
+        "max_channel_bounded_normalized_l1": 0.033816454552466804,
+        "mean_channel_bounded_normalized_l1": 0.007273968206405585,
+        "bounded_normalized_l1_score": 3.105435067732247e-08
+      },
+      "after": {
+        "model_name": "Modelica.Electrical.Analog.Examples.CauerLowPassSC",
+        "band": "absent",
+        "exit_reason": "sim_failed",
+        "exit_detail": "sim_solver_fail (timeout after 12.000s)",
+        "compared_variables": 0,
+        "channel_high_count": 0,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      }
+    }
+  ],
+  "high_gained": [
+    "Modelica.Electrical.Batteries.Examples.BatteryDischargeCharge",
+    "Modelica.Electrical.Batteries.Examples.CCCV_CellRC",
+    "Modelica.Electrical.Batteries.Examples.CCCVcharging",
+    "Modelica.Electrical.Batteries.Examples.ShowImpedance",
+    "Modelica.Electrical.Digital.Examples.BUF3S",
+    "Modelica.Electrical.Digital.Examples.INV3S",
+    "Modelica.Electrical.Digital.Examples.MUX2x1",
+    "Modelica.Electrical.Digital.Examples.NRXFER",
+    "Modelica.Electrical.Digital.Examples.NXFER",
+    "Modelica.Electrical.Digital.Examples.WiredX",
+    "Modelica.Electrical.Machines.Examples.ControlledDCDrives.PositionControlledDCPM",
+    "Modelica.Electrical.QuasiStatic.SinglePhase.Examples.SeriesBode",
+    "Modelica.Mechanics.Translational.Examples.Friction"
+  ],
+  "unclosed_counterexample": {
+    "model_name": "Modelica.Electrical.Machines.Examples.ControlledDCDrives.SpeedControlledDCPM",
+    "compared_variables": 352,
+    "samples_compared": 8865944,
+    "bounded_normalized_l1_score": 8.07612295759516e-08,
+    "mean_channel_bounded_normalized_l1": 0.005344858523025333,
+    "max_channel_bounded_normalized_l1": 0.5014712513531517,
+    "channel_high_count": 348,
+    "channel_minor_count": 0,
+    "channel_deviation_count": 4,
+    "channel_severe_count": 0,
+    "channel_high_percent": 0.9886363636363636,
+    "channel_minor_percent": 0.0,
+    "channel_deviation_percent": 0.011363636363636364,
+    "channel_severe_percent": 0.0,
+    "channel_violation_mass": 1.0812489530217548,
+    "initial_condition": {
+      "channels_compared": 352,
+      "high_count": 352,
+      "minor_count": 0,
+      "deviation_count": 0,
+      "severe_count": 0,
+      "high_percent": 1.0,
+      "minor_percent": 0.0,
+      "deviation_percent": 0.0,
+      "severe_percent": 0.0,
+      "violation_mass_total": 0.0,
+      "violation_mass_mean_per_channel": 0.0,
+      "mean_channel_bounded_normalized_error": 0.0,
+      "max_channel_bounded_normalized_error": 0.0
+    },
+    "worst_variables": [
+      {
+        "name": "currentController.addAntiWindup.u2",
+        "shape": "phase_time_shift",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 1.0059023731616086e-06,
+        "mean_abs_error": 1.0059023731616086e-06,
+        "normalization_scale": 1e-06,
+        "reference_range": 0.0,
+        "reference_magnitude": 0.0,
+        "normalized_l1_error": 1.0059023731616086,
+        "bounded_normalized_l1_error": 0.5014712513531517,
+        "normalized_max_abs_error": 464.88233065034024,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "currentController.addSat.y",
+        "shape": "phase_time_shift",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 1.0059023731616086e-06,
+        "mean_abs_error": 1.0059023731616086e-06,
+        "normalization_scale": 1e-06,
+        "reference_range": 0.0,
+        "reference_magnitude": 0.0,
+        "normalized_l1_error": 1.0059023731616086,
+        "bounded_normalized_l1_error": 0.5014712513531517,
+        "normalized_max_abs_error": 464.88233065034024,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "armatureInverter.idealDcDc.feedback.y",
+        "shape": "unknown",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 0.0006263417712830921,
+        "mean_abs_error": 0.0006263417712830921,
+        "normalization_scale": 0.0007999070535049668,
+        "reference_range": 0.0007999070535049668,
+        "reference_magnitude": 0.0006958812391530955,
+        "normalized_l1_error": 0.7830181875989708,
+        "bounded_normalized_l1_error": 0.4391532251577257,
+        "normalized_max_abs_error": 15.485106762447643,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "armatureInverter.idealDcDc.powerController.u",
+        "shape": "unknown",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 0.0006263417712830921,
+        "mean_abs_error": 0.0006263417712830921,
+        "normalization_scale": 0.0007999070535049668,
+        "reference_range": 0.0007999070535049668,
+        "reference_magnitude": 0.0006958812391530955,
+        "normalized_l1_error": 0.7830181875989708,
+        "bounded_normalized_l1_error": 0.4391532251577257,
+        "normalized_max_abs_error": 15.485106762447643,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "currentController.add3.u1",
+        "shape": "within_tolerance",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 1.5726839169529592e-05,
+        "mean_abs_error": 1.5726839169529592e-05,
+        "normalization_scale": 0.9668914246584899,
+        "reference_range": 0.9668914246584899,
+        "reference_magnitude": 0.8060277561193487,
+        "normalized_l1_error": 1.6265362137309656e-05,
+        "bounded_normalized_l1_error": 1.6265097579607325e-05,
+        "normalized_max_abs_error": 0.0007823478116752529,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "currentController.addAntiWindup.u1",
+        "shape": "within_tolerance",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 1.5726839169529592e-05,
+        "mean_abs_error": 1.5726839169529592e-05,
+        "normalization_scale": 0.9668914246584899,
+        "reference_range": 0.9668914246584899,
+        "reference_magnitude": 0.8060277561193487,
+        "normalized_l1_error": 1.6265362137309656e-05,
+        "bounded_normalized_l1_error": 1.6265097579607325e-05,
+        "normalized_max_abs_error": 0.0007823478116752529,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "currentController.controlError",
+        "shape": "within_tolerance",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 1.5726839169529592e-05,
+        "mean_abs_error": 1.5726839169529592e-05,
+        "normalization_scale": 0.9668914246584899,
+        "reference_range": 0.9668914246584899,
+        "reference_magnitude": 0.8060277561193487,
+        "normalized_l1_error": 1.6265362137309656e-05,
+        "bounded_normalized_l1_error": 1.6265097579607325e-05,
+        "normalized_max_abs_error": 0.0007823478116752529,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "currentController.feedback.y",
+        "shape": "within_tolerance",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 1.5726839169529592e-05,
+        "mean_abs_error": 1.5726839169529592e-05,
+        "normalization_scale": 0.9668914246584899,
+        "reference_range": 0.9668914246584899,
+        "reference_magnitude": 0.8060277561193487,
+        "normalized_l1_error": 1.6265362137309656e-05,
+        "bounded_normalized_l1_error": 1.6265097579607325e-05,
+        "normalized_max_abs_error": 0.0007823478116752529,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "dcpm.la.v",
+        "shape": "within_tolerance",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 8.608270562552907e-06,
+        "mean_abs_error": 8.608270562552907e-06,
+        "normalization_scale": 0.5833259388077039,
+        "reference_range": 0.5833259388077039,
+        "reference_magnitude": 0.4907325330437828,
+        "normalized_l1_error": 1.475722231750552e-05,
+        "bounded_normalized_l1_error": 1.4757004545108708e-05,
+        "normalized_max_abs_error": 0.002201368544428037,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      },
+      {
+        "name": "currentController.addAntiWindup.y",
+        "shape": "within_tolerance",
+        "samples": 26496,
+        "integral_duration": 1.0,
+        "integral_abs_error": 1.4054036092487195e-05,
+        "mean_abs_error": 1.4054036092487195e-05,
+        "normalization_scale": 0.9668914246584899,
+        "reference_range": 0.9668914246584899,
+        "reference_magnitude": 0.8060277561193487,
+        "normalized_l1_error": 1.4535278454301257e-05,
+        "bounded_normalized_l1_error": 1.4535067183052397e-05,
+        "normalized_max_abs_error": 0.0006226233988763754,
+        "initial_abs_error": 0.0,
+        "initial_bounded_normalized_error": 0.0
+      }
+    ],
+    "state_selection": {
+      "rumoca_state_count": 13,
+      "omc_state_count": 13,
+      "matching_state_count": 11,
+      "rumoca_only_state_count": 2,
+      "omc_only_state_count": 2,
+      "state_count_match": true,
+      "exact_state_set_match": false,
+      "rumoca_only_states": [
+        "dcpm.inertiaRotor.w",
+        "dcpm.phiMechanical"
+      ],
+      "omc_only_states": [
+        "dcpm.inertiaRotor.phi",
+        "loadInertia.w"
+      ]
+    },
+    "rumoca_sim_wall_seconds": 0.338158765,
+    "rumoca_sim_seconds": 0.338158765,
+    "rumoca_sim_build_seconds": 0.219037022,
+    "rumoca_sim_run_seconds": 0.100029617,
+    "omc_sim_system_seconds": 0.601660397,
+    "omc_total_system_seconds": 2.278118224,
+    "omc_wall_seconds": 2.491
+  },
+  "gate_status": "failed; baseline context mismatch and a new unexcepted non-high completion",
+  "merge_status": "user-authorized non-release integration checkpoint; SPEC_0033 section 6a quality gate remains failed and counterexample remains open",
+  "review_findings": {
+    "normalization": "Reference scale is based on 5th/95th percentiles, not raw minimum/maximum.",
+    "correction": "reference_range=0 and reference_magnitude=0 do not imply an identically zero raw signal.",
+    "raw_trace_checks": [
+      {
+        "channel": "currentController.addSat.y",
+        "alias": "currentController.addAntiWindup.u2",
+        "rumoca_alias_exact": true,
+        "omc_alias_exact": true,
+        "rumoca_raw_abs_peak": 19.61722146893733,
+        "rumoca_peak_time": 0.8087000000000001,
+        "omc_raw_abs_peak": 19.61702527133994
+      },
+      {
+        "channel": "armatureInverter.idealDcDc.feedback.y",
+        "alias": "armatureInverter.idealDcDc.powerController.u",
+        "rumoca_alias_exact": true,
+        "omc_alias_exact": true,
+        "rumoca_raw_abs_peak": 0.04263314349009306,
+        "rumoca_peak_time": 0.20070000000000002,
+        "omc_raw_abs_peak": 0.0447158472220508
+      }
+    ],
+    "status": "Scaling behavior established; numerical correctness and the source of the remaining differences are not established. No gate or baseline change."
+  },
+  "checkpoint_publication": {
+    "branch": "bitcode-follow-main-20261012",
+    "remote": "origin",
+    "authorized_on": "2026-10-12",
+    "authorization": "User explicitly requested push after review of the unresolved failures.",
+    "quality_gate_passed": false,
+    "counterexample_closed": false,
+    "existing_branches_updated": false
+  }
+}

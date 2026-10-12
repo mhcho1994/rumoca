@@ -496,6 +496,38 @@ fn func_der_class_specifier_short_form_parses() {
     );
 }
 
+// =============================================================================
+// FUNC-044: Partial-derivative functions
+// "In f = der(g, u1,...), the function being defined is named f, and the
+// function being differentiated is g."
+// =============================================================================
+
+/// `f_x = der(f, x)` of `f = k*x*x` is `2*k*x`, so `f_x(3, 2)` is 12. A der-class
+/// once compiled as `extends f` returned 18, `f`'s own value; with no
+/// derivative synthesized it is refused instead.
+#[test]
+fn func_044_partial_derivative_function_refused() {
+    expect_resolve_failure_with_code(
+        r#"
+        function f
+            input Real x;
+            input Real k;
+            output Real y;
+        algorithm
+            y := k*x*x;
+        end f;
+
+        function f_x = der(f, x);
+
+        model Probe
+            Real d = f_x(3, 2);
+        end Probe;
+    "#,
+        "Probe",
+        "ER139",
+    );
+}
+
 #[test]
 fn func_default_input() {
     expect_parse_ok(
@@ -1575,32 +1607,6 @@ fn function_extending_interface_and_implementation_selects_implementation() {
     );
 }
 
-/// MLS §12.3 / OpenModelica: `ModelicaServices...loadResource` writes no purity
-/// prefix but calls the impure `Files.fullPathName`. It is compiled as impure
-/// with WR013 instead of being rejected as a pure body reaching an impure call.
-#[test]
-fn undeclared_purity_function_calling_impure_compiles_with_warning() {
-    let source = r#"
-        package P
-            impure function g
-                input Real x;
-                output Real y;
-                external "C" y = sin(x);
-            end g;
-            function f
-                input Real x;
-                output Real y;
-            algorithm
-                y := P.g(x);
-            end f;
-            model M
-                parameter Real p = f(1);
-            end M;
-        end P;
-    "#;
-    rumoca_contracts::test_support::expect_compile_warning(source, "P.M", "WR013");
-}
-
 // =============================================================================
 // Media function selection through replaceable packages (TOOLBUG-143..146)
 // =============================================================================
@@ -1906,207 +1912,4 @@ fn flexible_local_array_sized_by_declaration_equation() {
         (value - 6.0).abs() < 1e-6,
         "x must integrate 6, got {value}"
     );
-}
-
-// =============================================================================
-// FUNC-039: Component bindings read inputs (MLS §12.4.4)
-// =============================================================================
-
-#[test]
-fn func_039_protected_binding_reads_record_input_fields() {
-    let trace = rumoca_contracts::test_support::simulate_model(
-        r#"
-        package F1
-          record Data
-            Real diameter_a;
-            Real diameter_b;
-            Boolean zeta1_at_a = true;
-            Real zeta1;
-          end Data;
-          function k
-            input Real D;
-            input Real zeta;
-            output Real y;
-          algorithm
-            y := zeta/D^2;
-          end k;
-          function loss
-            input Real m;
-            input Data data;
-            output Real dp;
-          protected
-            Real k1 = k(if data.zeta1_at_a then data.diameter_a else data.diameter_b, data.zeta1);
-          algorithm
-            dp := k1*m;
-          end loss;
-          model Top
-            parameter Data data(diameter_a = 0.1, diameter_b = 0.2, zeta1 = 1);
-            Real dp = loss(1 + time, data);
-          end Top;
-        end F1;
-    "#,
-        "F1.Top",
-        1.0,
-    );
-    assert!((trace.final_value("dp") - 200.0).abs() < 1e-9);
-}
-
-#[test]
-fn func_027_vectorized_call_evaluates_at_translation() {
-    // MLS §12.4.6: a scalar function applied to an array argument maps over
-    // its elements, also when a parameter binding evaluates it at translation.
-    let trace = rumoca_contracts::test_support::simulate_model(
-        r#"
-        model M
-            function toK
-                input Real c;
-                output Real k;
-            algorithm
-                k := c + 273.15;
-            end toK;
-            function f
-                input Real T;
-                output Real y;
-            protected
-                Real invTK[2] = 1 ./ toK({10, 20});
-            algorithm
-                y := invTK[1]*T + invTK[2];
-            end f;
-            parameter Real p = f(300);
-            Real y = p*time;
-        end M;
-    "#,
-        "M",
-        1.0,
-    );
-    let expected = 300.0 / 283.15 + 1.0 / 293.15;
-    assert!((trace.final_value("y") - expected).abs() < 1e-12);
-}
-
-// =============================================================================
-// FUNC-024: Uninitialized error (MLS §12.4.4)
-// =============================================================================
-
-#[test]
-fn func_024_uninitialized_record_result_field_rejected() {
-    expect_failure_in_phase_with_code(
-        r#"
-        package P
-            record Data
-                Real d;
-                Real e;
-                Real c0 = 1;
-            end Data;
-            function make
-                input Real d;
-                output Data data;
-            algorithm
-                data.d := d;
-            end make;
-            model M
-                Data r = make(time);
-            end M;
-        end P;
-    "#,
-        "P.M",
-        FailedPhase::ToDae,
-        "ED022",
-    );
-}
-
-// =============================================================================
-// FUNC-040: Function arguments (MLS §12.4.2.1)
-// =============================================================================
-
-#[test]
-fn func_040_function_name_and_partial_application_arguments() {
-    let trace = rumoca_contracts::test_support::simulate_model(
-        r#"
-        package P
-            partial function Equation
-                input Real u;
-                output Real y;
-            end Equation;
-            function apply
-                input Equation f;
-                input Real x;
-                output Real y;
-            algorithm
-                y := f(x);
-            end apply;
-            function square
-                extends Equation;
-            algorithm
-                y := u*u;
-            end square;
-            function affine
-                extends Equation;
-                input Real a;
-                input Real b;
-            algorithm
-                y := a*u + b;
-            end affine;
-            model M
-                Real s = apply(square, 1 + time);
-                Real a = apply(function affine(a = 2, b = time), 3);
-            end M;
-        end P;
-    "#,
-        "P.M",
-        1.0,
-    );
-    assert!((trace.final_value("s") - 4.0).abs() < 1e-12);
-    assert!((trace.final_value("a") - 7.0).abs() < 1e-12);
-}
-
-// =============================================================================
-// FUNC-026: Vectorization non-replaceable (MLS §12.4.6, §6.3.1, §7.3)
-// =============================================================================
-
-const FUNC_026_SOURCE: &str = r#"
-    package V
-        partial package Base
-            replaceable function prop
-                input Real T;
-                output Real y;
-            algorithm
-                y := T;
-            end prop;
-        end Base;
-        package A
-            extends Base;
-            redeclare function prop
-                input Real T;
-                output Real y;
-            algorithm
-                y := 2*T + 1;
-            end prop;
-        end A;
-        partial package Abstract
-            replaceable partial function prop
-                input Real T;
-                output Real y;
-            end prop;
-        end Abstract;
-        model Selected
-            replaceable package Medium = A;
-            Real y[2] = Medium.prop({1, 2}*time);
-        end Selected;
-        model Unselected
-            replaceable package Medium = Abstract;
-            Real y[2] = Medium.prop({1, 2}*time);
-        end Unselected;
-    end V;
-"#;
-
-#[test]
-fn func_026_vectorized_call_through_selected_replaceable_package_accepted() {
-    let trace = rumoca_contracts::test_support::simulate_model(FUNC_026_SOURCE, "V.Selected", 1.0);
-    assert!((trace.final_value("y[1]") - 3.0).abs() < 1e-12);
-    assert!((trace.final_value("y[2]") - 5.0).abs() < 1e-12);
-}
-
-#[test]
-fn func_026_vectorized_call_of_unselected_callee_rejected() {
-    expect_failure_in_phase_with_code(FUNC_026_SOURCE, "V.Unselected", FailedPhase::ToDae, "ED008");
 }

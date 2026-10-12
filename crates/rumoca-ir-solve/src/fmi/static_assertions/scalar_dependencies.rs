@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use crate::{LinearOp as Op, ScalarProgramBlock, SolvePureCallTable, TensorInputKind};
 
 pub(super) fn outputs(
@@ -240,12 +243,9 @@ fn tensor_update_outputs(op: &Op, registers: &[bool], frame: Frame<'_>) -> Optio
     for update in updates {
         let mut elements = 1;
         for (subscript, extent) in update.subscripts.iter().zip(dimensions) {
-            match subscript {
-                crate::TensorSubscript::Whole => elements *= *extent as usize,
-                crate::TensorSubscript::Index(crate::TensorIndex::Runtime(index)) => {
-                    stable &= registers[*index as usize]
-                }
-                crate::TensorSubscript::Index(crate::TensorIndex::Constant(_)) => {}
+            elements *= subscript.value_extent(*extent)?;
+            if let Some((start, count)) = subscript.runtime_registers() {
+                stable &= range_stable(registers, start, count)?;
             }
         }
         stable &= update
@@ -322,7 +322,7 @@ fn transfer(
                 })
                 .collect::<Option<Vec<_>>>()?;
             let owner = table.owner(site.owner())?;
-            let values = super::typed_dependencies::outputs(table, owner.body(), &inputs);
+            let values = super::typed_dependencies::owner_outputs(table, owner, &inputs);
             let mut start = *dst_start as usize;
             for (value, output) in values.iter().zip(owner.outputs()) {
                 let end = start + output.value_type().scalar_count() as usize;
@@ -375,19 +375,8 @@ fn transfer(
         } => {
             r[*dst as usize] = indexed(r, *base as usize, *stride, dimensions, indices, r)?;
         }
-        Op::MatrixMultiply {
-            dst_start,
-            lhs_start,
-            rhs_start,
-            rows,
-            inner,
-            columns,
-            lanes,
-        } => {
-            let stable = range_stable(r, *lhs_start, rows * inner * lanes)?
-                && range_stable(r, *rhs_start, inner * columns * lanes)?;
-            r.get_mut(*dst_start as usize..*dst_start as usize + rows * columns * lanes)?
-                .fill(stable);
+        Op::MatrixMultiply { .. } | Op::TensorCross { .. } | Op::TensorConcatenate { .. } => {
+            tensor_kernel(op, r)?
         }
         Op::TensorTranspose {
             dst_start,
@@ -400,25 +389,6 @@ fn transfer(
             let count = rows * columns * element_width * lanes;
             let stable = range_stable(r, *src_start, count)?;
             r.get_mut(*dst_start as usize..*dst_start as usize + count)?
-                .fill(stable);
-        }
-        Op::TensorConcatenate {
-            dst_start,
-            sources,
-            lanes,
-            ..
-        } => {
-            let mut stable = true;
-            for source in sources {
-                let count = source
-                    .dimensions
-                    .iter()
-                    .map(|n| *n as usize)
-                    .product::<usize>()
-                    * lanes;
-                stable &= range_stable(r, source.start, count)?;
-            }
-            r.get_mut(*dst_start as usize..*dst_start as usize + op.dst_register_count())?
                 .fill(stable);
         }
         Op::StoreOutput { src } => outputs.push(r[*src as usize]),
@@ -436,6 +406,74 @@ fn transfer(
             r.get_mut(dst..dst + op.dst_register_count())?.fill(false);
         }
     }
+    Some(())
+}
+
+/// Whole-tensor kernels: every result element is settled exactly when every
+/// element of every operand range is.
+fn tensor_kernel(op: &Op, r: &mut [bool]) -> Option<()> {
+    match op {
+        Op::MatrixMultiply {
+            dst_start,
+            lhs_start,
+            rhs_start,
+            rows,
+            inner,
+            columns,
+            lanes,
+        } => {
+            let sources = [
+                (*lhs_start, rows * inner * lanes),
+                (*rhs_start, inner * columns * lanes),
+            ];
+            settle_from_ranges(r, &sources, *dst_start, rows * columns * lanes)
+        }
+        Op::TensorCross {
+            dst_start,
+            lhs_start,
+            rhs_start,
+            lanes,
+        } => {
+            let sources = [(*lhs_start, 3 * lanes), (*rhs_start, 3 * lanes)];
+            settle_from_ranges(r, &sources, *dst_start, 3 * lanes)
+        }
+        Op::TensorConcatenate {
+            dst_start,
+            sources,
+            dimensions,
+            lanes,
+            ..
+        } => {
+            let extent = |dimensions: &[u32]| {
+                dimensions
+                    .iter()
+                    .fold(*lanes, |count, extent| count * *extent as usize)
+            };
+            let ranges = sources
+                .iter()
+                .map(|source| (source.start, extent(&source.dimensions)))
+                .collect::<Vec<_>>();
+            settle_from_ranges(r, &ranges, *dst_start, extent(dimensions))
+        }
+        _ => None,
+    }
+}
+
+/// Mark `count` registers from `dst` settled exactly when every register of
+/// every `(start, count)` source range is settled.
+fn settle_from_ranges(
+    r: &mut [bool],
+    sources: &[(crate::Reg, usize)],
+    dst: crate::Reg,
+    count: usize,
+) -> Option<()> {
+    let mut settled = true;
+    for (start, width) in sources {
+        let start = *start as usize;
+        settled &= r.get(start..start + width)?.iter().all(|value| *value);
+    }
+    let dst = dst as usize;
+    r.get_mut(dst..dst + count)?.fill(settled);
     Some(())
 }
 
@@ -550,6 +588,17 @@ fn fold_frame_outputs(
     }
     // Conservative meet over a finite Boolean lattice, independent of loop length.
     loop {
+        let frame = Frame {
+            carried: &carried,
+            captures,
+            conditional: &[],
+        };
+        let continuing = match &program.continuation {
+            Some(continuation) => region_outputs(table, &continuation.ops, y, p, frame)?
+                .iter()
+                .all(|value| *value),
+            None => true,
+        };
         let next = region_outputs(
             table,
             &program.update,
@@ -567,7 +616,7 @@ fn fold_frame_outputs(
         let next = carried
             .iter()
             .zip(next)
-            .map(|(a, b)| *a && b)
+            .map(|(a, b)| continuing && *a && b)
             .collect::<Vec<_>>();
         if next == carried {
             return Some(carried);

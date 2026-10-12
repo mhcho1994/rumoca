@@ -1403,6 +1403,7 @@ fn define_variables<'dae>(
             unit: attributes.unit.clone(),
             state_select: attributes.state_select,
             description: attributes.description.clone(),
+            enumeration: attributes.enumeration.clone(),
             causality: attributes.causality,
             declared_causality: attributes.declared_causality,
             is_tunable: attributes.is_tunable,
@@ -1624,6 +1625,12 @@ fn reconstruct_events<'dae>(
                 action.provenance,
             ),
             EventActionKindWire::Terminate { message } => events.terminate(
+                trigger,
+                guard,
+                mapped(&ids.expressions, message, "expression", action.provenance)?,
+                action.provenance,
+            ),
+            EventActionKindWire::Print { message } => events.print(
                 trigger,
                 guard,
                 mapped(&ids.expressions, message, "expression", action.provenance)?,

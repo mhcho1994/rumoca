@@ -207,10 +207,19 @@ fn advance_torn_newton<M: ImplicitProjectionModel>(
     let Some(jacobian) = reduced_jacobian(model, (&*y, p, t), block, certify_coordinates)? else {
         return Ok(TornStep::Decline);
     };
+    crate::diagnostics::projection(
+        "torn-projection",
+        t,
+        &tearing.residual_rows,
+        &tearing.tear_y_indices,
+        residual,
+        &jacobian.residual,
+    );
     let row_scales =
         jacobian_row_scales(&jacobian.residual, variable_scales, variable_scales, None);
     let converged = scaled_residual_converged(residual, &row_scales, tol);
     let delta = scaled_newton_delta(ScaledNewtonSystem {
+        revision: None,
         jacobian: &jacobian.residual,
         residual,
         row_scales: &row_scales,
@@ -322,7 +331,7 @@ fn all_finite(values: &[f64]) -> bool {
 }
 
 struct ReducedJacobian {
-    residual: DMatrix<f64>,
+    residual: super::BlockJacobian,
     recovered: DMatrix<f64>,
 }
 
@@ -441,7 +450,7 @@ fn tangent_reduced_jacobian(
             .column_iter()
             .any(|column| column.iter().all(|value| *value == 0.0));
     (!vanished).then(|| ReducedJacobian {
-        residual,
+        residual: super::BlockJacobian::dense(residual),
         recovered: DMatrix::from_row_slice(recovered_rows, columns, recovered),
     })
 }

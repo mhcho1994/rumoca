@@ -30,6 +30,7 @@ import that path.
 | `expressions_semantically_equal`, `Expression::semantically_eq_ignoring_spans` | `rumoca-core` | Shared Flat/DAE expression identity. This is structural identity only; evaluation stays in `rumoca-eval-*`. |
 | `modelica_sign`, `escape_modelica_string` | `rumoca-core` | MLS `sign` and source-string escaping. |
 | `row_major_coordinates`, `flatten_coordinates`, `row_major_strides`, `checked_product` | `rumoca-core::structured_domain` | Checked row-major tensor address and extent arithmetic shared by DAE projection, Solve lowering, and backend views. |
+| `Progression`, `IndexBox`, `IndexUnion`, `IndexAxis`, `SetAnswer`, `image`, `solve_point`, `IntegerInterval` | `rumoca-core::structured_domain` | Exact strided index and binder-region sets, affine subscript images, exact point solutions, and half-bounded Integer intervals shared by function-loop definedness and DAE dependency projection. Cost follows the number of boxes and offsets, never an array extent or a domain's point count; a form without an exact box description is a declared superset the caller handles. |
 | nearest named tool-config discovery and `ToolConfigError` | `rumoca-core::tool_config` | One parent-directory walk and one typed read/parse error shape shared by fmt/lint; each tool owns only its accepted filenames and config schema. |
 | `eval_ast_integer_binary` | `rumoca-core` | Checked MLS integer arithmetic shared by AST/Flat structural evaluators; `/` folds only when its Real result is exactly integral. |
 | AST scalar constant evaluation (`AstScalarContext`, `eval_integer`, `eval_real`, `eval_boolean`) | `rumoca-eval-ast::ast_scalar` | One syntax dispatch; compiler phases provide lookup, function-call, coercion, and diagnostic policy through adapters. |
@@ -37,8 +38,13 @@ import that path.
 | Checked DAE function substitution and static branch selection (`FunctionCallContext`) | `rumoca-eval-dae::function_context` | Value and differentiation proofs share exact caller substitutions and selected source expressions. Selection follows literal/constant scalar selectors with exact Integer arithmetic; tunable parameters and runtime coordinates remain unknown. Tensor projections borrow existing source elements without enumeration, and source calls/assertions remain owned by the DAE. |
 | DAE scalar dependency projection | `rumoca-eval-dae::projection` | One query visits a shared model expression once per scalar, record field, and lexical domain point. Query-local visitation cannot suppress a later query; function summaries and actual argument environments remain distinct. |
 | Declared scalar-component dimensions | `rumoca-eval-ast::eval::DeclaredDimensions` | Typecheck and Flatten share value-independent declaration proofs and universal scalar facts over the current overlay; every prefix must prove a namespace or scalar component. An array occurrence (including an empty one) or unapplied redeclaration vetoes a universal scalar fact. |
+| Constant declarations by declaration identity (`DeclaredConstants`, `ConstantWalk`) | `rumoca-eval-ast::declared_constants` | Typecheck and Flatten evaluate a constant a dimension names in the constant's own lexical scope (MLS 5.3): the `DefId` Resolve attached to the reference selects the binding, aliases and expressions evaluate recursively, and a constant under evaluation is never re-entered. |
+| Implicit record-constructor call (`RecordConstructorRef`) | `rumoca-core` | Every site that synthesizes a constructor call (MLS 12.6) builds it from the collected constructor's name, declaration, and resolved function instance, so no constructor call lacks the metadata DAE construction requires. |
 | AST/Flat array-constructor dimension compatibility for fully known operand extents | `rumoca-core::ArrayConstructor::checked_dimensions` | Local shape construction validates element uniformity, promoted concatenation, and extent arithmetic; phase owners supply operand shapes and retain unknown-shape policy. Canonical DAE builtin construction independently checks its typed operands. |
 | `dependency_first_sccs`, `DependencyScc` | `rumoca-core::dependency_graph` | Deterministic, iterative dependency-first SCC decomposition shared by checked recursive-owner construction. |
+| `NativeBody` catalog, its interface signatures, its `ForeignStateCell`s, and its definitional evaluators | `rumoca-core::native_body` | One source for the SPEC_0040 DAE-C30 entry-point identity, the DAE interface proof, the Solve `Native` operation signature, and the value every evaluator and backend computes. |
+| `TranslationRead` catalog of foreign file readers, its interfaces and evaluators, MAT-file reading, and MLS §13.5 resource URIs (`ResourceRoots`) | `rumoca-eval-flat::translation_reads` | One source for the SPEC_0040 FLAT-C06 entry-point identity and the value both translation evaluators (Flatten structural values and the FLAT-C01 fold) compute; only the translation interpreter executes it. |
+| Terminal print call identity (`ModelicaInternal_print` interface) | `rumoca-phase-dae::construction::terminal_print` | One predicate for SPEC_0040 DAE-C31 shared by model-algorithm validation, call planning, and lowering. |
 | `InstanceId` | `rumoca-core` | Compact concrete-occurrence identity shared by Instanced and Flat reference vocabulary; source declarations continue to use `DefId`. |
 | UTF-8 byte offset ↔ UTF-16 text position/range helpers | `rumoca-core::text_position` | Protocol-neutral `TextPosition`/`TextRange`; LSP crates convert to/from `lsp_types` locally. No `rumoca-lsp-position` micro-crate. |
 | `INTERNAL_SAMPLE_FUNCTION_NAME`, `source_temporal_function_name`, `source_temporal_function_short_name`, `source_dae_forbidden_builtin_name` | `rumoca-core` | Single source for typed source temporal/synchronous operator vocabulary shared by DAE and Solve boundary validation. |
@@ -56,6 +62,7 @@ import that path.
 | `MeSimulationSession`, `MeComponentHost`, common batch/live drivers | `rumoca-solver::fmi_me::{session,driver}` | FMI ME master-algorithm owners. |
 | `MeIntegratorBackend`, `MeAdvanceRequest`, `MeAcceptedStep`, host-private `MeRootSearchPolicy`, accepted-interval roundoff and containment helpers | `rumoca-solver::fmi_me::{integrator,root}` | FMI ME numerical and host-root contract owners; every plugin imports the same host-issued accepted-interval containment rule. |
 | `MeTraceRecorder`, `TraceObservationRole` | `rumoca-solver::fmi_me::trace` | ME trace-construction owners. |
+| `SessionCommand`, `SessionEvent`, `SimulationSession::apply`, `serve_session`, `SESSION_PROTOCOL_VERSION` | `rumoca-sim::session_protocol` | Sole definition of the externally driven session semantics; the WASM binding and `rumoca sim --serve-stdio` dispatch through `apply`, so no binding re-implements a command. |
 | Component-side Modelica event-boundary helpers | `rumoca-solver::fmi_me::kernel` | FMI component Event Mode implementation. |
 | Solver pre-parameter snapshot helpers (`write_pre_params_from_sources`, `update_slot`, `commit_pre_params_after_event`) | `rumoca-solver::runtime::pre_params` | Shared `pre(...)` snapshot mechanics. |
 | Component-private algebraic settle helpers (`project_algebraics`, `project_algebraics_and_detect_changes`, `project_initial_*`) | `rumoca-solver::runtime::projection` | Used only while evaluating or initializing the FMI component; numerical plugins cannot import this policy. |
@@ -83,6 +90,12 @@ import that path.
 | file summaries, declaration indexes | flat-IR artifacts |
 | package-membership / namespace state | DAE-IR artifacts |
 | model names, class dependency graphs, dependency fingerprints | solve-IR artifacts |
+
+Persisted cache types (parsed `rumoca-ir-ast` artifacts, `rumoca-compile`
+persisted summaries, source maps) are decoded positionally and MUST NOT omit
+fields by value (`skip_serializing_if`): a positional reader cannot detect the
+omission. Format-specific omission belongs in an explicit `Serialize` keyed on
+`is_human_readable`, as `rumoca-ir-solve` does for its human-readable wire.
 
 ### 4. Layering Ownership Catalog (SPEC_0029 §12)
 
@@ -171,7 +184,7 @@ process allocator (row in §1).
 ### 7. Analysis Pass Ownership Catalog (SPEC_0029 §3)
 
 Crate placement for the pass framework governed by
-[SPEC_0052](SPEC_0052_MODEL_ANALYSIS_PASSES.md).
+[SPEC_0055](SPEC_0055_MODEL_ANALYSIS_PASSES.md).
 
 | Owner | Tier | Owns | MUST NOT |
 |---|---|---|---|

@@ -111,15 +111,21 @@ fn program_supports_directional(
                 program_supports_directional(body.body(), available)
             }
             SolveOperation::BroadcastBinary {
+                operator: SolveBinaryOperator::Divide,
+                scalar_on_lhs: true,
+                ..
+            }
+            | SolveOperation::BroadcastBinary {
                 operator:
-                    SolveBinaryOperator::Divide
-                    | SolveBinaryOperator::IntegerQuotient
+                    SolveBinaryOperator::IntegerQuotient
                     | SolveBinaryOperator::Power
                     | SolveBinaryOperator::Atan2
                     | SolveBinaryOperator::Min
                     | SolveBinaryOperator::Max
                     | SolveBinaryOperator::And
-                    | SolveBinaryOperator::Or,
+                    | SolveBinaryOperator::Or
+                    | SolveBinaryOperator::IntegerModulo
+                    | SolveBinaryOperator::IntegerRemainder,
                 ..
             } => false,
             SolveOperation::Reduce {
@@ -130,14 +136,22 @@ fn program_supports_directional(
                 ..
             } => false,
             SolveOperation::Call { owner, .. } => available.get(owner.index() as usize).is_some(),
+            SolveOperation::Native { .. } => true,
             SolveOperation::Conditional {
                 if_true, if_false, ..
             } => {
                 program_supports_directional(if_true.body(), available)
                     && program_supports_directional(if_false.body(), available)
             }
-            SolveOperation::Fold { transition, .. } => {
+            SolveOperation::Fold {
+                transition,
+                continuation,
+                ..
+            } => {
                 program_supports_directional(transition.body(), available)
+                    && continuation.as_ref().is_none_or(|predicate| {
+                        program_supports_directional(predicate.body(), available)
+                    })
             }
             SolveOperation::Unary {
                 destination,
@@ -212,7 +226,9 @@ fn program_supports_directional(
                     | SolveBinaryOperator::Multiply
                     | SolveBinaryOperator::IntegerQuotient
                     | SolveBinaryOperator::And
-                    | SolveBinaryOperator::Or,
+                    | SolveBinaryOperator::Or
+                    | SolveBinaryOperator::IntegerModulo
+                    | SolveBinaryOperator::IntegerRemainder,
                 ..
             }
             | SolveOperation::BroadcastBinary {
@@ -220,6 +236,11 @@ fn program_supports_directional(
                     SolveBinaryOperator::Add
                     | SolveBinaryOperator::Subtract
                     | SolveBinaryOperator::Multiply,
+                ..
+            }
+            | SolveOperation::BroadcastBinary {
+                operator: SolveBinaryOperator::Divide,
+                scalar_on_lhs: false,
                 ..
             }
             | SolveOperation::Reduce {
@@ -535,12 +556,13 @@ impl<'primal, 'program> DirectionalBuilder<'primal, 'program> {
                 captures,
                 destinations,
                 transition,
+                continuation,
             } => self.derive_fold(
                 domain,
                 initial,
                 captures,
                 destinations,
-                transition,
+                (transition, continuation.as_deref()),
                 provenance,
             ),
             SolveOperation::Map {
@@ -708,6 +730,11 @@ impl<'primal, 'program> DirectionalBuilder<'primal, 'program> {
                 arguments,
                 destinations,
             } => self.derive_call(*owner, arguments, destinations, provenance),
+            SolveOperation::Native {
+                body,
+                operands,
+                destinations,
+            } => self.derive_native(*body, operands, destinations, provenance),
         }
     }
 
@@ -1001,7 +1028,9 @@ impl<'primal, 'program> DirectionalBuilder<'primal, 'program> {
             // A truncated Integer quotient is piecewise constant, like a Boolean.
             SolveBinaryOperator::IntegerQuotient
             | SolveBinaryOperator::And
-            | SolveBinaryOperator::Or => self.zero(value_type, provenance)?,
+            | SolveBinaryOperator::Or
+            | SolveBinaryOperator::IntegerModulo
+            | SolveBinaryOperator::IntegerRemainder => self.zero(value_type, provenance)?,
         };
         Ok(Directional {
             primal,
@@ -1275,17 +1304,23 @@ impl<'primal, 'program> DirectionalBuilder<'primal, 'program> {
         initial: &[SolveRegisterId],
         captures: &[SolveRegisterId],
         destinations: &[SolveRegisterId],
-        transition: &SolveProgramRegion,
+        (transition, continuation): (&SolveProgramRegion, Option<&SolveProgramRegion>),
         provenance: Span,
     ) -> Result<(), SolveProgramConstructionError> {
         let initial = self.expanded_registers(initial, provenance)?;
         let captures = self.expanded_registers(captures, provenance)?;
         let transition = derive_region(transition, self.available)?;
+        // The predicate decides control flow only; over the expanded tuple it
+        // reads the primal values and stops primal and tangent together.
+        let continuation = continuation
+            .map(|predicate| derive_region(predicate, self.available))
+            .transpose()?;
         let values = self.builder.fold_from_region(
             domain.clone(),
             &initial,
             &captures,
             transition,
+            continuation,
             provenance,
         )?;
         self.bind_expanded(destinations, &values, provenance)
@@ -1391,6 +1426,33 @@ impl<'primal, 'program> DirectionalBuilder<'primal, 'program> {
                     .scale(aggregate.primal, scalar_tangent, provenance)?;
                 self.builder
                     .binary(SolveBinaryOperator::Add, first, second, provenance)?
+            }
+            // `a / s`: the scalar quotient rule of `derive_quotient` per
+            // element, `da / s - (a / s²) ds`.
+            SolveBinaryOperator::Divide if !scalar_on_lhs => {
+                let first = self.builder.broadcast_binary(
+                    SolveBinaryOperator::Divide,
+                    aggregate_tangent,
+                    scalar.primal,
+                    false,
+                    provenance,
+                )?;
+                let square = self.builder.binary(
+                    SolveBinaryOperator::Multiply,
+                    scalar.primal,
+                    scalar.primal,
+                    provenance,
+                )?;
+                let partial = self.builder.broadcast_binary(
+                    SolveBinaryOperator::Divide,
+                    aggregate.primal,
+                    square,
+                    false,
+                    provenance,
+                )?;
+                let second = self.builder.scale(partial, scalar_tangent, provenance)?;
+                self.builder
+                    .binary(SolveBinaryOperator::Subtract, first, second, provenance)?
             }
             _ => {
                 return Err(SolveProgramConstructionError::InvalidTensorAlgebra { provenance });
@@ -1822,6 +1884,30 @@ impl<'primal, 'program> DirectionalBuilder<'primal, 'program> {
         let arguments = self.expanded_registers(arguments, provenance)?;
         let values = self.builder.call(owner, &arguments, provenance)?;
         self.bind_expanded(destinations, &values, provenance)
+    }
+
+    /// A native body reads only Integer operands, so none carries a tangent
+    /// and every Real result has the zero tangent.
+    fn derive_native(
+        &mut self,
+        body: NativeBody,
+        operands: &[SolveRegisterId],
+        destinations: &[SolveRegisterId],
+        provenance: Span,
+    ) -> Result<(), SolveProgramConstructionError> {
+        let operands = operands
+            .iter()
+            .map(|operand| self.get(*operand, provenance).map(|value| value.primal))
+            .collect::<Result<Vec<_>, _>>()?;
+        let values = self.builder.native(body, &operands, provenance)?;
+        for (destination, primal) in destinations.iter().zip(values) {
+            let value_type = self.primal.register_types()[destination.index()].clone();
+            let tangent = is_real(&value_type)
+                .then(|| self.zero(&value_type, provenance))
+                .transpose()?;
+            self.bind(*destination, Directional { primal, tangent }, provenance)?;
+        }
+        Ok(())
     }
 }
 

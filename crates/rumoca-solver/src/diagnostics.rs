@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod tests;
 
-use nalgebra::DMatrix;
+use crate::runtime::projection::BlockJacobian;
 use serde_json::{Value, json};
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
@@ -88,15 +88,16 @@ pub(crate) fn projection(
     rows: &[usize],
     columns: &[usize],
     residual: &[f64],
-    jacobian: &DMatrix<f64>,
+    jacobian: &BlockJacobian,
 ) {
     record(|| {
         let bounded = rows.len() <= MATRIX_LIMIT && columns.len() <= MATRIX_LIMIT;
+        let values = bounded.then(|| jacobian.as_dense().as_slice().to_vec());
         json!({"kind": "projection", "phase": phase, "time": time,
             "rows": if bounded { Some(rows) } else { None },
             "columns": if bounded { Some(columns) } else { None },
             "residual": if bounded { Some(residual) } else { None },
-            "jacobian_column_major": if bounded { Some(jacobian.as_slice()) } else { None },
+            "jacobian_column_major": values,
             "row_count": rows.len(), "column_count": columns.len(),
             "values_omitted": !bounded})
     });

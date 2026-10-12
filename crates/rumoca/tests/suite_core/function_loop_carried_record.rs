@@ -220,38 +220,61 @@ fn a_record_carry_with_an_array_field_keeps_its_last_write() {
 }
 
 #[test]
-fn a_nested_record_carry_is_rejected_by_a_coded_and_spanned_diagnostic() {
-    let compiled = Compiler::new()
-        .model("ObserveNestedRecordCarry")
-        .compile_str(NESTED_RECORD_CARRY, "ObserveNestedRecordCarry.mo")
-        .expect("a nested loop-carried record must reach Solve lowering");
-    let error = simulate_dae_with_diagnostics(
-        &compiled.dae,
-        &SimOptions {
-            t_end: 1.0,
-            ..SimOptions::default()
-        },
-    )
-    .expect_err("a nested loop-carried record is outside per-field projection");
+fn a_nested_record_carry_keeps_its_last_write() {
+    // The carried record's inner field is projected through its enclosing
+    // record: y = r[4] + (r[4] + 1) with r[4] = x + 3 = 4.
+    let y = simulated_output(
+        NESTED_RECORD_CARRY,
+        "ObserveNestedRecordCarry",
+        "ObserveNestedRecordCarry.mo",
+    );
+    assert!(
+        (y - 9.0).abs() < 1.0e-12,
+        "expected 9.0 from the last iteration's nested record, got {y}"
+    );
+}
+
+/// `p` is rebuilt field by field on every iteration, which is one record
+/// assembly per iteration rather than a whole assignment, and read only after
+/// the loop. With `x = 1` the last iteration stores `a = 4`, `b = 5` and
+/// OpenModelica evaluates `y` to `9.0`.
+const ASSEMBLED_RECORD_CARRY: &str = r#"
+model ObserveAssembledRecordCarry
+  record P
+    Real a;
+    Real b;
+  end P;
+
+  function acc
+    input Real r[4];
+    output Real y;
+  protected
+    P p;
+  algorithm
+    p := P(-1, -1);
+    for i in 1:4 loop
+      p.a := r[i];
+      p.b := r[i] + 1;
+    end for;
+    y := p.a + p.b;
+  end acc;
+
+  Real x(start = 1.0, fixed = true);
+  Real y;
+equation
+  der(x) = 0;
+  y = acc({x, 2 * x, 3 * x, 4 * x});
+end ObserveAssembledRecordCarry;
+"#;
+
+#[test]
+fn a_record_assembled_field_by_field_in_a_loop_keeps_its_last_assembly() {
     assert_eq!(
-        error.diagnostic_code(),
-        "EL005",
-        "the rejection must carry its stable SPEC_0008 code: {error}"
-    );
-    let message = error.to_string();
-    assert!(
-        message.contains("Inner.u"),
-        "the rejection must name the field it could not read: {message}"
-    );
-    assert!(
-        message.contains("a field of an enclosing record"),
-        "the rejection must name the construct it could not look through: {message}"
-    );
-    let span = error
-        .source_span()
-        .expect("the rejection must point at source, not at compiler internals");
-    assert!(
-        !span.is_dummy(),
-        "the rejection must carry an honest source span"
+        simulated_output(
+            ASSEMBLED_RECORD_CARRY,
+            "ObserveAssembledRecordCarry",
+            "ObserveAssembledRecordCarry.mo",
+        ),
+        9.0
     );
 }

@@ -19,6 +19,16 @@ impl<'dae> ValueTypes<'_, 'dae> {
         self.storage.intern_flat_type(flat_type, ty, provenance)
     }
 
+    /// Read an interned value type.
+    pub fn value_type(
+        &self,
+        id: ValueTypeId<'dae>,
+        provenance: DaeProvenance,
+    ) -> Result<ValueType, DaeConstructionError> {
+        check_provenance(self.source_map, provenance)?;
+        self.storage.value_type_at(id.index(), provenance).cloned()
+    }
+
     pub fn derived(
         &mut self,
         ty: ValueType,
@@ -70,6 +80,48 @@ impl<'dae> ValueTypes<'_, 'dae> {
             ValueType::record_array(name, fields, dimensions),
             provenance,
         )
+    }
+
+    /// The declared type of record field `field` of the scalar record type
+    /// `record`, so a nested record value assembled field by field is built
+    /// at exactly the type its parent declares.
+    pub fn record_field(
+        &mut self,
+        record: ValueTypeId<'dae>,
+        field: &VarName,
+        provenance: DaeProvenance,
+    ) -> Result<ValueTypeId<'dae>, DaeConstructionError> {
+        check_provenance(self.source_map, provenance)?;
+        let record = self.storage.value_type_at(record.index(), provenance)?;
+        let field_type = (0..record.record_field_count())
+            .find(|ordinal| record.record_field_name(*ordinal) == Some(field))
+            .and_then(|ordinal| record.record_field_type(ordinal))
+            .filter(|_| record.dimensions().is_empty())
+            .ok_or(DaeConstructionError::ShapeMismatch {
+                span: provenance.span(),
+            })?;
+        let field_type = self.storage.value_type_at(field_type, provenance)?.clone();
+        self.storage.intern_type(field_type, provenance)
+    }
+
+    /// The element type of the record array type `record_array`: the same
+    /// record layout with no array extents.
+    pub fn record_element(
+        &mut self,
+        record_array: ValueTypeId<'dae>,
+        provenance: DaeProvenance,
+    ) -> Result<ValueTypeId<'dae>, DaeConstructionError> {
+        check_provenance(self.source_map, provenance)?;
+        let record = self
+            .storage
+            .value_type_at(record_array.index(), provenance)?;
+        if !record.is_record() {
+            return Err(DaeConstructionError::ShapeMismatch {
+                span: provenance.span(),
+            });
+        }
+        let element = record.with_dimensions(Vec::<u32>::new());
+        self.storage.intern_type(element, provenance)
     }
 
     pub fn expect_record_layout(

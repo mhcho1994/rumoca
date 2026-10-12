@@ -54,6 +54,9 @@ pub(super) struct ReservedVariable<'dae> {
     pub(super) value_alias: Option<ValueAlias<'dae>>,
     /// STRUCT-T10(a): every read of this parameter is replaced by its value.
     pub(super) folded: Option<std::sync::Arc<super::evaluable_parameters::FoldedValue>>,
+    /// STRUCT-T04: this demoted state's derivative reads rebuild as the zero
+    /// of its shape.
+    pub(super) inert_derivative: bool,
     pub(super) formal_derivatives: Vec<dae::AlgebraicId<'dae>>,
     reservation: Option<dae::VariableReservation<'dae>>,
 }
@@ -143,6 +146,7 @@ fn reserve_variable<'target>(
         derivative_alias: None,
         value_alias: None,
         folded: None,
+        inert_derivative: false,
         formal_derivatives: Vec::new(),
         reservation: Some(reservation),
     })
@@ -229,6 +233,7 @@ fn define_variable<'target>(
         unit: source.unit().map(str::to_owned),
         state_select: source.state_select(),
         description: source.description().map(str::to_owned),
+        enumeration: source.enumeration().cloned(),
         causality: source.causality(),
         declared_causality: source.declared_causality(),
         is_tunable: source.is_tunable(),

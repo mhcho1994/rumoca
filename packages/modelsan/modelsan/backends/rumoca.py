@@ -121,8 +121,10 @@ class RumocaBackend:
         self.t_end = t_end
         self.timeout = timeout
         roots = source_roots if source_roots is not None else (
-            "target/msl/ModelicaStandardLibrary-4.1.0",
-            "target/corpus/ModelicaStandardLibrary-4.1.0")
+            root for root in (
+                "target/msl/ModelicaStandardLibrary-4.1.0",
+                "target/corpus/ModelicaStandardLibrary-4.1.0")
+            if Path(root).is_dir())
         self.source_roots = tuple(str(Path(root).resolve()) for root in roots)
         self.cache_dir = str(Path(cache_dir).resolve()) if cache_dir is not None else None
         self.dt = dt

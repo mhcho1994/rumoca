@@ -1,8 +1,11 @@
 use super::*;
 
+#[cfg(test)]
+mod storage_tests;
+
 /// The structured families of one Flat equation partition.
 pub(super) struct PartitionFamilies<'flat> {
-    pub(super) families: &'flat [flat::StructuredEquationFamily],
+    pub(super) families: SelectedFamilies<'flat>,
     /// The rows of the owning Flat equation partition.
     pub(super) equations: &'flat [flat::Equation],
     /// Whether the partition is the initialization system. MLS 3.7 §8.6 solves
@@ -44,7 +47,7 @@ pub(super) fn validate_structured_families(
                 family.span,
             ));
         }
-        if !family.interiors_materialized && family.template.is_none() {
+        if !family.interiors_materialized() && family.template.is_none() {
             return Err(ToDaeError::unsupported_flat(
                 "structured equation family",
                 "a non-materialized family requires its canonical comprehension template",
@@ -58,15 +61,15 @@ pub(super) fn validate_structured_families(
                 family.span,
             ));
         }
-        if materialized_discrete_real_family(family, runtime_roles)
+        if materialized_discrete_real_family(&family, runtime_roles)
             || (!partition.initialization
-                && materialized_discrete_value_rows(family, partition.equations, runtime_roles))
+                && materialized_discrete_value_rows(&family, partition.equations, runtime_roles))
         {
             // Its materialized rows are discrete definitions; each row keeps
             // its own ordinary owner.
             continue;
         }
-        if let Some(template) = &family.template {
+        if let Some(template) = family.template {
             // A materialized element-assignment family is validated together
             // with all other element rows for its target. The aggregate pass
             // derives exact declared-shape coverage and overlap evidence; the
@@ -74,25 +77,34 @@ pub(super) fn validate_structured_families(
             // Materialized initialization rows are ordinary initial equations,
             // validated row by row like every scalar initial equation.
             let materialized_initialization =
-                partition.initialization && family.interiors_materialized;
+                partition.initialization && family.interiors_materialized();
             if !materialized_initialization
-                && (!family.interiors_materialized
+                && (!family.interiors_materialized()
                     || !structured_discrete_element_assignments(&template.body, runtime_roles))
             {
                 structured_discrete_assignments(&template.body, runtime_roles, family.span)?;
             }
         }
-        let represented_rows = match &family.template {
+        let represented_rows = match family.template {
             Some(template) => represented_template_rows(
                 template,
-                family,
+                &family,
                 domain_count,
                 expression_roles,
                 states,
                 record_array_fields,
                 model_values,
             )?,
-            None => checked_materialized_rows(family, domain_count)?,
+            None => family
+                .materialized_rows()
+                .map(|rows| rows.len())
+                .ok_or_else(|| {
+                    ToDaeError::unsupported_flat(
+                        "structured equation family",
+                        "the materialized row range overflows usize",
+                        family.span,
+                    )
+                })?,
         };
         let end = family
             .first_equation_index
@@ -132,7 +144,7 @@ pub(in crate::construction) fn materialized_discrete_real_family(
     let Some(template) = family.template.as_ref() else {
         return false;
     };
-    family.interiors_materialized
+    family.interiors_materialized()
         && !template.body.is_empty()
         && template.body.iter().all(|body| {
             matches!(
@@ -169,7 +181,7 @@ pub(in crate::construction) fn materialized_discrete_value_rows(
     // A component-array slice equation `split.set = fill(v, n)` is one
     // materialized row `{split[1].set, ...} = e` whose element equations
     // define each element (MLS 3.7 §10.6.1); its template is that same row.
-    if family.interiors_materialized
+    if family.interiors_materialized()
         && family.template.as_ref().is_some_and(|template| {
             !template.body.is_empty()
                 && template
@@ -186,7 +198,7 @@ pub(in crate::construction) fn materialized_discrete_value_rows(
     else {
         return false;
     };
-    if !family.interiors_materialized {
+    if !family.interiors_materialized() {
         return false;
     }
     let Some(template) = &family.template else {
@@ -239,6 +251,8 @@ fn represented_template_rows(
         .iter()
         .map(|binder| VarName::new(&binder.display_name))
         .collect::<HashSet<_>>();
+    let scoped_values =
+        super::super::affine_slices::scoped_shapes(model_values, &family.domain, family.span)?;
     for body in &template.body {
         validate_expression_scoped_with_record_array_fields(
             body,
@@ -246,7 +260,7 @@ fn represented_template_rows(
             states,
             &binders,
             record_array_fields,
-            model_values,
+            &scoped_values,
         )?;
     }
     match template.scalar_view {
@@ -325,7 +339,7 @@ fn materialized_family_rows(
     family: &flat::StructuredEquationFamily,
 ) -> Option<std::ops::Range<usize>> {
     let template = family.template.as_ref()?;
-    if !family.interiors_materialized {
+    if !family.interiors_materialized() {
         return None;
     }
     let count = match template.scalar_view {

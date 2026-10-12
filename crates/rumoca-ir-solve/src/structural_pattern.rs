@@ -1,21 +1,32 @@
 // SPEC_0021 file-size exception - split plan: split the derivation walk by construction owner (scalar-JVP derivation into structural_pattern/scalar_jvp.rs, seed/output dependency derivation into structural_pattern/dependency.rs, wire records into structural_pattern/wire.rs), leaving construction + provenance here; tracked as the pattern-authority follow-up slice (SPEC_0021 follow-up).
-use std::cmp::Reverse;
-use std::collections::BTreeSet;
-
-use rumoca_core::{Span, StructuredIndexDomain};
-use serde::{Deserialize, Deserializer, Serialize};
-
-use crate::{
-    AffineStencilLoadStride, BinaryOp, LinearOp, Reg, ScalarProgramBlock, TensorOutputMap,
-};
-
 mod state_jacobian;
 mod tensor_update;
 
 #[cfg(test)]
 mod state_jacobian_tests;
+
 #[cfg(test)]
 mod tensor_update_tests;
+
+#[cfg(test)]
+mod shared_dependency_tests;
+
+use std::cmp::Reverse;
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use rumoca_core::{Span, StructuredIndexDomain};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::{
+    AffineStencilLoadStride, BinaryOp, IndexIntervals, LinearOp, Reg, ScalarProgramBlock,
+    TensorOutputMap,
+};
+
+mod stacked;
+
+#[cfg(test)]
+mod stacked_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -162,6 +173,9 @@ enum PatternRepresentation {
         row_start: u32,
         column_maps: Box<[AffineColumnMap]>,
     },
+    Stacked {
+        segments: Box<[stacked::PatternSegment]>,
+    },
 }
 
 /// One seed coordinate propagated affinely across a compact tensor domain.
@@ -189,6 +203,9 @@ pub enum StructuralPatternView<'pattern> {
     Affine {
         domain_rank: usize,
         access_count: usize,
+    },
+    Stacked {
+        segments: usize,
     },
 }
 
@@ -527,15 +544,16 @@ impl StructuralPattern {
                 Some(owner_span),
             ));
         };
-        let DependencyState::Known(dependencies) = dependencies;
-        let mut column_maps = derive_affine_column_maps(
-            dependencies,
-            &seed_positions,
-            base_ops,
-            load_strides,
-            domain.binders.len(),
-            owner_span,
-        )?;
+        let mut column_maps = dependencies.with_set(|dependencies| {
+            derive_affine_column_maps(
+                dependencies,
+                &seed_positions,
+                base_ops,
+                load_strides,
+                domain.binders.len(),
+                owner_span,
+            )
+        })?;
         column_maps.sort_by(|lhs, rhs| {
             (lhs.start, lhs.strides.as_ref()).cmp(&(rhs.start, rhs.strides.as_ref()))
         });
@@ -630,6 +648,9 @@ impl StructuralPattern {
                 domain_rank: domain.binders.len(),
                 access_count: column_maps.len(),
             },
+            PatternRepresentation::Stacked { segments } => StructuralPatternView::Stacked {
+                segments: segments.len(),
+            },
         }
     }
 
@@ -667,6 +688,7 @@ impl StructuralPattern {
                 column_maps,
             } => affine_columns_for_row(domain, *row_start, column_maps, row as usize)
                 .is_some_and(|columns| columns.binary_search(&(column as usize)).is_ok()),
+            PatternRepresentation::Stacked { segments } => stacked::contains(segments, row, column),
         }
     }
 
@@ -692,6 +714,7 @@ impl StructuralPattern {
                 column_maps,
                 ..
             } => domain.scalar_count().ok()?.checked_mul(column_maps.len()),
+            PatternRepresentation::Stacked { segments } => stacked::nonzero_upper_bound(segments),
         }
     }
 
@@ -752,6 +775,9 @@ impl StructuralPattern {
                 {
                     columns.into_iter().for_each(&mut *visitor);
                 }
+            }
+            PatternRepresentation::Stacked { segments } => {
+                stacked::visit_row_columns(segments, row, visitor);
             }
         }
     }
@@ -821,6 +847,25 @@ impl StructuralPattern {
 
     /// Exact solver-`Y` dependencies of every output of one checked scalar
     /// program, in output order.
+    /// The union of the solver-`Y` dependencies of every output of one
+    /// checked scalar program. Outputs that share one dependency set are
+    /// counted once, so a wide program costs its distinct sets, not its width.
+    pub fn derive_y_dependency_union(
+        program: &[LinearOp],
+        span: Option<Span>,
+    ) -> Result<BTreeSet<usize>, StructuralPatternError> {
+        output_dependency_union(program, span, DependencySource::SolverY)
+    }
+
+    /// The union of the solver-`P` dependencies of every output of one checked
+    /// scalar program; see [`Self::derive_y_dependency_union`].
+    pub fn derive_p_dependency_union(
+        program: &[LinearOp],
+        span: Option<Span>,
+    ) -> Result<BTreeSet<usize>, StructuralPatternError> {
+        output_dependency_union(program, span, DependencySource::SolverP)
+    }
+
     pub fn derive_output_y_dependencies(
         program: &[LinearOp],
         span: Option<Span>,
@@ -848,10 +893,7 @@ impl StructuralPattern {
             DependencySource::SolverP,
         )?
         .into_iter()
-        .map(|dependencies| {
-            let DependencyState::Known(indices) = dependencies;
-            Ok(indices)
-        })
+        .map(|dependencies| Ok(dependencies.into_set()))
         .collect()
     }
 
@@ -863,10 +905,7 @@ impl StructuralPattern {
     ) -> Result<Vec<BTreeSet<usize>>, StructuralPatternError> {
         program_output_dependencies(program, span)?
             .into_iter()
-            .map(|dependencies| {
-                let DependencyState::Known(indices) = dependencies;
-                Ok(indices)
-            })
+            .map(|dependencies| Ok(dependencies.into_set()))
             .collect()
     }
 
@@ -1015,6 +1054,9 @@ impl StructuralPattern {
                     self.visit_row_columns(row, &mut |column| columns[column].push(row));
                 }
             }
+            PatternRepresentation::Stacked { segments } => {
+                stacked::append_column_rows(&mut columns, segments);
+            }
         }
         columns
     }
@@ -1052,26 +1094,35 @@ impl StructuralPattern {
                     *upper_bandwidth,
                 );
             }
-            PatternRepresentation::Csr { .. } | PatternRepresentation::Affine { .. } => {}
+            PatternRepresentation::Csr { .. }
+            | PatternRepresentation::Affine { .. }
+            | PatternRepresentation::Stacked { .. } => {}
         }
         let column_rows = self.column_rows();
         let mut order: Vec<usize> = (0..column_rows.len()).collect();
         order.sort_by_key(|column| (Reverse(column_rows[*column].len()), *column));
 
+        // Greedy distance-2 coloring: each column joins the first group none
+        // of its rows already occupies. The groups a row occupies are kept per
+        // row, so a column's choice costs its rows' groups, not every group.
         let mut groups: Vec<Vec<u32>> = Vec::new();
-        let mut occupied_rows: Vec<BTreeSet<usize>> = Vec::new();
-        for column in order {
+        let mut row_groups: Vec<Vec<usize>> = vec![Vec::new(); self.rows as usize];
+        let mut blocked_by: Vec<usize> = Vec::new();
+        for (stamp, column) in order.into_iter().enumerate() {
             let rows = &column_rows[column];
-            if let Some((group_index, occupied)) = occupied_rows
-                .iter_mut()
-                .enumerate()
-                .find(|(_, occupied)| rows.iter().all(|row| !occupied.contains(row)))
-            {
-                groups[group_index].push(column as u32);
-                occupied.extend(rows);
-            } else {
-                groups.push(vec![column as u32]);
-                occupied_rows.push(rows.iter().copied().collect());
+            for &group in rows.iter().flat_map(|row| &row_groups[*row]) {
+                blocked_by[group] = stamp + 1;
+            }
+            let group = (0..groups.len())
+                .find(|group| blocked_by[*group] != stamp + 1)
+                .unwrap_or_else(|| {
+                    groups.push(Vec::new());
+                    blocked_by.push(0);
+                    groups.len() - 1
+                });
+            groups[group].push(column as u32);
+            for row in rows {
+                row_groups[*row].push(group);
             }
         }
         for group in &mut groups {
@@ -1248,12 +1299,6 @@ fn derive_scalar_jvp_row_dependencies(
     columns: usize,
     owner_span: Span,
 ) -> Result<Vec<Vec<usize>>, StructuralPatternError> {
-    if owner_span.is_dummy() {
-        return Err(dependency_error(
-            "Jacobian sparsity requires source-backed owner provenance",
-            None,
-        ));
-    }
     if block.output_count() != rows {
         return Err(dependency_error(
             format!(
@@ -1263,13 +1308,44 @@ fn derive_scalar_jvp_row_dependencies(
             Some(owner_span),
         ));
     }
-
     let mut row_dependencies = vec![None; rows];
+    fill_scalar_jvp_rows(
+        block,
+        block.output_indices(),
+        columns,
+        owner_span,
+        &mut row_dependencies,
+    )?;
+    Ok(row_dependencies
+        .into_iter()
+        // An interior hole is explicitly identified by the checked sparse
+        // output map and therefore has no producing operation or edge.
+        .map(Option::unwrap_or_default)
+        .collect())
+}
+
+/// Write the seed dependencies of every output of `block` into the slot of the
+/// row `output_indices` names for it, refusing a row produced twice, a row
+/// outside `slots`, or a seed outside `columns`.
+fn fill_scalar_jvp_rows(
+    block: &ScalarProgramBlock,
+    output_indices: &[usize],
+    columns: usize,
+    owner_span: Span,
+    slots: &mut [Option<Vec<usize>>],
+) -> Result<(), StructuralPatternError> {
+    if owner_span.is_dummy() {
+        return Err(dependency_error(
+            "Jacobian sparsity requires source-backed owner provenance",
+            None,
+        ));
+    }
+    let rows = slots.len();
     let mut output_ordinal = 0usize;
     for (program_index, program) in block.programs().iter().enumerate() {
         let span = block.program_span(program_index).or(Some(owner_span));
         for dependencies in program_output_dependencies(program, span)? {
-            let output_index = *block.output_indices().get(output_ordinal).ok_or_else(|| {
+            let output_index = *output_indices.get(output_ordinal).ok_or_else(|| {
                 dependency_error(
                     format!(
                         "Jacobian sparsity output {output_ordinal} has no checked output identity"
@@ -1277,7 +1353,7 @@ fn derive_scalar_jvp_row_dependencies(
                     span,
                 )
             })?;
-            let slot = row_dependencies.get_mut(output_index).ok_or_else(|| {
+            let slot = slots.get_mut(output_index).ok_or_else(|| {
                 dependency_error(
                     format!("Jacobian sparsity output index {output_index} is outside 0..{rows}"),
                     span,
@@ -1302,21 +1378,16 @@ fn derive_scalar_jvp_row_dependencies(
             })?;
         }
     }
-    if output_ordinal != block.output_indices().len() {
+    if output_ordinal != output_indices.len() {
         return Err(dependency_error(
             format!(
                 "Jacobian emitted {output_ordinal} outputs but carries {} output identities",
-                block.output_indices().len()
+                output_indices.len()
             ),
             Some(owner_span),
         ));
     }
-    Ok(row_dependencies
-        .into_iter()
-        // An interior hole is explicitly identified by the checked sparse
-        // output map and therefore has no producing operation or edge.
-        .map(Option::unwrap_or_default)
-        .collect())
+    Ok(())
 }
 
 fn append_checked_columns(
@@ -1469,9 +1540,26 @@ fn banded_nonzero_count(
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), derive(Clone))]
 enum DependencyState {
-    Known(BTreeSet<usize>),
+    Empty,
+    Singleton(usize),
+    Known(Arc<IndexIntervals>),
+}
+
+#[cfg(test)]
+impl Clone for DependencyState {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Empty => Self::Empty,
+            Self::Singleton(index) => Self::Singleton(*index),
+            Self::Known(indices) if shared_dependency_tests::legacy_enabled() => {
+                Self::from_set(indices.to_set())
+            }
+            Self::Known(indices) => Self::Known(Arc::clone(indices)),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1490,34 +1578,104 @@ fn derive_output_dependency_presence(
 ) -> Result<Vec<bool>, StructuralPatternError> {
     program_output_dependencies_with_fold(program, span, None, None, None, source)?
         .into_iter()
-        .map(|dependencies| {
-            let DependencyState::Known(indices) = dependencies;
-            Ok(!indices.is_empty())
-        })
+        .map(|dependencies| Ok(!dependencies.is_empty()))
         .collect()
 }
 
 impl DependencyState {
     fn empty() -> Self {
-        Self::Known(BTreeSet::new())
+        Self::Empty
     }
 
     fn singleton(index: usize) -> Self {
-        Self::Known(BTreeSet::from([index]))
+        Self::Singleton(index)
+    }
+
+    fn from_set(indices: BTreeSet<usize>) -> Self {
+        Self::from_intervals(IndexIntervals::of(indices))
+    }
+
+    /// The dependency on every index of `start..end`, held as one interval.
+    fn from_range(start: usize, end: usize) -> Self {
+        Self::from_intervals(IndexIntervals::range(start, end))
+    }
+
+    fn from_intervals(indices: IndexIntervals) -> Self {
+        match indices.len() {
+            0 => Self::Empty,
+            1 => indices.iter().next().map_or(Self::Empty, Self::Singleton),
+            _ => Self::Known(Arc::new(indices)),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn elements(&self) -> impl Iterator<Item = usize> + '_ {
+        let singleton = match self {
+            Self::Singleton(index) => Some(*index),
+            _ => None,
+        };
+        let shared = match self {
+            Self::Known(indices) => Some(indices),
+            _ => None,
+        };
+        singleton
+            .into_iter()
+            .chain(shared.into_iter().flat_map(|indices| indices.iter()))
+    }
+
+    fn with_set<T>(&self, use_set: impl FnOnce(&BTreeSet<usize>) -> T) -> T {
+        use_set(&self.clone().into_set())
     }
 
     fn union(self, other: Self) -> Self {
+        #[cfg(test)]
+        if shared_dependency_tests::legacy_enabled() {
+            let mut lhs = self.into_set();
+            lhs.extend(other.into_set());
+            return Self::from_set(lhs);
+        }
         match (self, other) {
-            (Self::Known(mut lhs), Self::Known(rhs)) => {
-                lhs.extend(rhs);
-                Self::Known(lhs)
+            (Self::Empty, rhs) | (rhs, Self::Empty) => rhs,
+            (Self::Singleton(lhs), Self::Singleton(rhs)) if lhs == rhs => Self::Singleton(lhs),
+            (Self::Singleton(lhs), Self::Singleton(rhs)) => {
+                Self::from_set(BTreeSet::from([lhs, rhs]))
+            }
+            (Self::Known(mut indices), Self::Singleton(index))
+            | (Self::Singleton(index), Self::Known(mut indices)) => {
+                if !indices.contains(index) {
+                    Arc::make_mut(&mut indices).insert(index);
+                }
+                Self::Known(indices)
+            }
+            (Self::Known(lhs), Self::Known(rhs)) => {
+                if Arc::ptr_eq(&lhs, &rhs) || rhs.is_subset(&lhs) {
+                    Self::Known(lhs)
+                } else if lhs.is_subset(&rhs) {
+                    Self::Known(rhs)
+                } else {
+                    Self::Known(Arc::new(lhs.union(&rhs)))
+                }
             }
         }
     }
 
+    fn into_shared(self) -> Arc<IndexIntervals> {
+        match self {
+            Self::Known(indices) => indices,
+            Self::Singleton(index) => Arc::new(IndexIntervals::singleton(index)),
+            Self::Empty => Arc::new(IndexIntervals::default()),
+        }
+    }
+
     fn into_set(self) -> BTreeSet<usize> {
-        let Self::Known(indices) = self;
-        indices
+        match self {
+            Self::Empty => BTreeSet::new(),
+            Self::Singleton(index) => BTreeSet::from([index]),
+            Self::Known(indices) => indices.to_set(),
+        }
     }
 }
 
@@ -1535,8 +1693,7 @@ fn scalar_row_seed_dependencies(
             None,
         ));
     };
-    let DependencyState::Known(indices) = dependencies;
-    Ok(indices.iter().copied().collect())
+    Ok(dependencies.elements().collect())
 }
 
 fn program_output_dependencies(
@@ -1544,6 +1701,20 @@ fn program_output_dependencies(
     span: Option<Span>,
 ) -> Result<Vec<DependencyState>, StructuralPatternError> {
     program_output_dependencies_with_fold(program, span, None, None, None, DependencySource::Seed)
+}
+
+fn output_dependency_union(
+    program: &[LinearOp],
+    span: Option<Span>,
+    source: DependencySource,
+) -> Result<BTreeSet<usize>, StructuralPatternError> {
+    let outputs = program_output_dependencies_with_fold(program, span, None, None, None, source)?;
+    // Outputs whose sets overlap (every lane of a call over whole inputs)
+    // are united interval by interval, so the union costs their structure.
+    let union = outputs
+        .into_iter()
+        .fold(DependencyState::empty(), DependencyState::union);
+    Ok(union.into_set())
 }
 
 fn program_output_y_dependencies(
@@ -1559,10 +1730,7 @@ fn program_output_y_dependencies(
         DependencySource::SolverY,
     )?
     .into_iter()
-    .map(|dependencies| {
-        let DependencyState::Known(indices) = dependencies;
-        Ok(indices)
-    })
+    .map(|dependencies| Ok(dependencies.into_set()))
     .collect()
 }
 
@@ -1571,7 +1739,7 @@ fn program_output_y_dependencies(
 /// consumed fail-closed by refresh construction.
 pub(crate) fn program_register_y_dependencies(
     program: &[LinearOp],
-) -> Result<Vec<Option<BTreeSet<usize>>>, StructuralPatternError> {
+) -> Result<Vec<Option<Arc<IndexIntervals>>>, StructuralPatternError> {
     let mut walk = DependencyWalk {
         registers: Vec::new(),
         outputs: Vec::new(),
@@ -1584,10 +1752,19 @@ pub(crate) fn program_register_y_dependencies(
     for operation in program {
         apply_dependency_op(&mut walk, operation)?;
     }
+    // Registers that share one dependency set keep sharing it: a wide
+    // operation whose lanes all read one input owns one set, not one a lane,
+    // and every register that reads nothing shares the one empty set.
+    let empty = Arc::new(IndexIntervals::default());
     Ok(walk
         .registers
         .into_iter()
-        .map(|dependencies| dependencies.map(|DependencyState::Known(indices)| indices))
+        .map(|dependencies| {
+            dependencies.map(|state| match state {
+                DependencyState::Empty => Arc::clone(&empty),
+                other => other.into_shared(),
+            })
+        })
         .collect())
 }
 
@@ -1877,7 +2054,7 @@ impl DependencyWalk<'_> {
         let mut dependencies = self.get(index)?;
         if matches!(self.source, DependencySource::SolverP) {
             let end = checked_indexed_seed_end(base, count, self.span)?;
-            dependencies = dependencies.union(DependencyState::Known((base..end).collect()));
+            dependencies = dependencies.union(DependencyState::from_range(base, end));
         }
         self.set(dst, dependencies);
         Ok(())
@@ -2046,7 +2223,7 @@ impl DependencyWalk<'_> {
         let mut dependencies = self.get(index)?;
         if matches!(self.source, DependencySource::Seed) {
             let end = checked_indexed_seed_end(base, count, self.span)?;
-            dependencies = dependencies.union(DependencyState::Known((base..end).collect()));
+            dependencies = dependencies.union(DependencyState::from_range(base, end));
         }
         self.set(dst, dependencies);
         Ok(())
@@ -2481,25 +2658,40 @@ impl DependencyWalk<'_> {
         output: &crate::SolvePureCallOutput,
         summary: &[crate::SolveCallDependency],
     ) -> Result<Reg, StructuralPatternError> {
+        // A summary of whole inputs is the same for every element, so its union
+        // is formed once and shared instead of rebuilt per element.
+        let whole = summary
+            .iter()
+            .all(crate::SolveCallDependency::is_whole_input)
+            .then(|| self.pure_call_output_element(inputs, output, summary, 0))
+            .transpose()?;
         for element in 0..output.value_type().scalar_count() as usize {
-            let dependency =
-                summary
-                    .iter()
-                    .try_fold(DependencyState::empty(), |dependency, source| {
-                        let source = self.pure_call_input_dependency(
-                            source,
-                            inputs,
-                            output.value_type(),
-                            element,
-                        )?;
-                        Ok::<_, StructuralPatternError>(dependency.union(source))
-                    })?;
+            let dependency = match &whole {
+                Some(dependency) => dependency.clone(),
+                None => self.pure_call_output_element(inputs, output, summary, element)?,
+            };
             self.set(destination, dependency);
             destination = destination
                 .checked_add(1)
                 .ok_or_else(|| dependency_error("pure-call output width overflows", self.span))?;
         }
         Ok(destination)
+    }
+
+    fn pure_call_output_element(
+        &self,
+        inputs: &PureCallInputDependencies<'_>,
+        output: &crate::SolvePureCallOutput,
+        summary: &[crate::SolveCallDependency],
+        element: usize,
+    ) -> Result<DependencyState, StructuralPatternError> {
+        summary
+            .iter()
+            .try_fold(DependencyState::empty(), |dependency, source| {
+                let source =
+                    self.pure_call_input_dependency(source, inputs, output.value_type(), element)?;
+                Ok(dependency.union(source))
+            })
     }
 
     fn pure_call_input_dependency(
@@ -2602,16 +2794,8 @@ impl DependencyWalk<'_> {
         update: &crate::FoldTensorUpdate,
         lanes: usize,
     ) -> Result<DependencyState, StructuralPatternError> {
-        let value_count = dimensions
-            .iter()
-            .zip(update.subscripts.iter())
-            .try_fold(1usize, |count, (&extent, subscript)| {
-                if matches!(subscript, crate::TensorSubscript::Whole) {
-                    count.checked_mul(extent as usize)
-                } else {
-                    Some(count)
-                }
-            })
+        let value_count = update
+            .value_count(dimensions)
             .ok_or_else(|| dependency_error("tensor update value extent overflow", self.span))?;
         if let Some(condition) = update.condition {
             update_dependency = update_dependency.union(self.get(condition)?);
@@ -2622,11 +2806,13 @@ impl DependencyWalk<'_> {
                 update_dependency = update_dependency.union(self.get(update.value_start + offset)?);
             }
         }
-        for subscript in &update.subscripts {
-            if let crate::TensorSubscript::Index(crate::TensorIndex::Runtime(register_id)) =
-                subscript
-            {
-                update_dependency = update_dependency.union(self.get(*register_id)?);
+        for (start, count) in update
+            .subscripts
+            .iter()
+            .filter_map(crate::TensorUpdateSubscript::runtime_registers)
+        {
+            for offset in 0..count {
+                update_dependency = update_dependency.union(self.get(start + offset as Reg)?);
             }
         }
         Ok(update_dependency)
@@ -2808,11 +2994,28 @@ fn function_fold_dependencies(
                 span,
             ));
         }
+        // A bounded `while` predicate decides whether each pass applies, so
+        // every carried value depends on what it reads.
+        let control = match &program.continuation {
+            Some(continuation) => program_output_dependencies_with_fold(
+                &continuation.ops,
+                span,
+                Some(&carried),
+                Some(captures),
+                None,
+                source,
+            )?
+            .pop(),
+            None => None,
+        };
         let next = carried
             .iter()
             .cloned()
             .zip(updates)
-            .map(|(old, new)| old.union(new))
+            .map(|(old, new)| match &control {
+                Some(control) => old.union(new).union(control.clone()),
+                None => old.union(new),
+            })
             .collect::<Vec<_>>();
         if next == carried {
             return Ok(carried);
@@ -3111,6 +3314,9 @@ enum PatternRepresentationWire {
         row_start: u32,
         column_maps: Box<[AffineColumnMap]>,
     },
+    Stacked {
+        segments: Box<[stacked::PatternSegmentWire]>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -3164,6 +3370,16 @@ impl StructuralPatternWire {
                 domain,
                 row_start,
                 column_maps,
+                provenance,
+            ),
+            PatternRepresentationWire::Stacked { segments } => StructuralPattern::checked_stacked(
+                rows,
+                columns,
+                segments
+                    .into_vec()
+                    .into_iter()
+                    .map(stacked::PatternSegmentWire::replay)
+                    .collect::<Result<_, _>>()?,
                 provenance,
             ),
         }

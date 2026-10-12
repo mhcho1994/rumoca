@@ -135,6 +135,7 @@ impl TypeChecker {
         self.populate_operator_record_capabilities(tree);
         self.function_signatures = function_signatures::build_function_signatures(tree);
         self.eval_ctx = rumoca_eval_ast::eval::TypeCheckEvalContext::new();
+        self.eval_ctx.declared_constants = rumoca_ir_ast::DeclaredConstants::from_tree(tree);
         let (type_table, type_ids_by_def_id) = match self.build_type_context(tree) {
             Ok(context) => context,
             Err(error) => {
@@ -236,6 +237,19 @@ impl TypeChecker {
         for instance_data in overlay.components.values() {
             let path = instance_data.qualified_name.to_component_path();
             let name = path.to_flat_string();
+            if !instance_data.dims.is_empty() {
+                self.eval_ctx.add_dimensions(
+                    &name,
+                    instance_data.dims.iter().map(|&d| d as usize).collect(),
+                );
+            }
+            // MLS §10.1 / §8.6: an initial value is not a structural constant.
+            if !matches!(
+                instance_data.variability,
+                rumoca_core::Variability::Parameter(_) | rumoca_core::Variability::Constant(_)
+            ) {
+                continue;
+            }
             let binding_scope = Self::instance_binding_scope_name(instance_data);
             let start_scope = Self::instance_attribute_scope_name(instance_data, "start");
 
@@ -304,13 +318,6 @@ impl TypeChecker {
             {
                 self.eval_ctx.enums.insert(name.clone(), value);
             }
-
-            if !instance_data.dims.is_empty() {
-                self.eval_ctx.add_dimensions(
-                    &name,
-                    instance_data.dims.iter().map(|&d| d as usize).collect(),
-                );
-            }
         }
     }
 
@@ -324,18 +331,45 @@ impl TypeChecker {
             self.emit_typecheck_error(*error);
             return false;
         }
-        Self::collect_import_constants(tree, &mut self.eval_ctx);
         Self::collect_model_extends_redeclare_constants(tree, model_name, &mut self.eval_ctx);
         Self::collect_nested_class_constants(tree, model_name, &mut self.eval_ctx);
         Self::collect_model_extends_redeclare_constants(tree, model_name, &mut self.eval_ctx);
         Self::collect_component_type_nested_constants(tree, overlay, &mut self.eval_ctx);
-        Self::collect_component_type_enclosing_constants(tree, overlay, &mut self.eval_ctx);
-        Self::collect_enclosing_class_constants(tree, model_name, &mut self.eval_ctx);
         Self::collect_function_defs(tree, &mut self.eval_ctx);
         Self::collect_component_extends_redeclare_constants(tree, overlay, &mut self.eval_ctx);
         Self::collect_instance_class_override_constants(tree, overlay, &mut self.eval_ctx);
         Self::seed_dimension_reference_classes(tree, overlay, &mut self.eval_ctx);
+        self.expose_constants_through_enclosing_packages(tree, overlay, model_name);
         true
+    }
+
+    /// Read each enclosing package's extends-modified constants as that package
+    /// exposes them (MLS 7.2): the packages enclosing the component types first,
+    /// the model's own enclosing package last so it takes precedence.
+    fn expose_constants_through_enclosing_packages(
+        &mut self,
+        tree: &ClassTree,
+        overlay: &InstanceOverlay,
+        model_name: &str,
+    ) {
+        let mut type_names: Vec<&str> = overlay
+            .components
+            .values()
+            .filter_map(|data| tree.def_map.get(&data.type_def_id?).map(String::as_str))
+            .collect();
+        type_names.sort_unstable();
+        type_names.dedup();
+        for name in type_names.into_iter().chain([model_name]) {
+            let Some(package) = tree
+                .enclosing_class_names_of(name)
+                .next()
+                .and_then(|enclosing| tree.get_class_by_qualified_name(enclosing))
+            else {
+                continue;
+            };
+            self.eval_ctx.declared_constants =
+                self.eval_ctx.declared_constants.exposed_by(tree, package);
+        }
     }
 
     /// Check equation compatibility for a specific instanced model.

@@ -412,15 +412,16 @@ fn guarded_output_loop_requires_a_fallthrough_value() {
     let error = Compiler::new()
         .model("PartialGuardedOutput")
         .compile_str(PARTIAL_GUARDED_OUTPUT_MODEL, "PartialGuardedOutput.mo")
-        .expect_err("predicate pushdown must not invent an output value on the false path");
+        .expect_err("a guarded loop must not invent an output value on the false path");
     // The one diagnostic this shape owns, not "any of three". The other two
     // messages the old disjunction accepted belong to different rejections,
     // so accepting them here meant a regression that swapped one cause for
-    // another stayed green.
+    // another stayed green. The join keeps `values` for a later path that
+    // selects `enabled`; none follows, so the return is where it is refused.
     assert!(
-        error.to_string().contains(
-            "`guardedFill` requires assignments or nested conditionals in every checked branch"
-        ),
+        error
+            .to_string()
+            .contains("`guardedFill` returns `values` without defining every declared element"),
         "unexpected diagnostic: {error}"
     );
 }

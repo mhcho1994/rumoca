@@ -416,8 +416,10 @@ pub struct ExternalFunction {
     /// Annotation arguments attached to the external clause (MLS §12.9.4).
     ///
     /// These remain syntax-preserving AST expressions so annotations such as
-    /// `Library` and `Include` are not collapsed into rendered strings.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// `Library` and `Include` are not collapsed into rendered strings. The
+    /// field is always written: the parsed-artifact cache decodes this type
+    /// positionally, so no field may be omitted by value.
+    #[serde(default)]
     pub annotation: Vec<Expression>,
 }
 
@@ -511,6 +513,24 @@ pub struct ClassDef {
     /// External function declaration (MLS §12.9).
     /// Only meaningful for function classes.
     pub external: Option<ExternalFunction>,
+    /// Partial-derivative definition `f = der(g, u1, ...)` (MLS §12.7.2).
+    ///
+    /// A class carrying this has no body of its own: its meaning is the
+    /// derivative of `g`, never `g` itself.
+    #[serde(default)]
+    pub partial_derivative: Option<PartialDerivative>,
+}
+
+/// MLS §12.7.2: the right-hand side of a der-class specifier.
+///
+/// `function f = der(g, u1, u2)` names the differentiated function `g` and the
+/// inputs `u1, u2`, applied in that order (`d/du2 d/du1 g`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PartialDerivative {
+    /// The differentiated function, looked up as in a short class definition.
+    pub function: Name,
+    /// The differentiated inputs, in application order.
+    pub inputs: Vec<Token>,
 }
 
 impl Default for ClassDef {
@@ -555,6 +575,7 @@ impl Default for ClassDef {
             constrainedby: None,
             array_subscripts: Vec::new(),
             external: None,
+            partial_derivative: None,
         }
     }
 }

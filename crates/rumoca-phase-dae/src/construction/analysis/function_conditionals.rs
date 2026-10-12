@@ -172,42 +172,37 @@ pub(super) fn resolve_function_conditional(
             definitions,
         );
     }
-    // A conditional that only asserts defines no value but still owns the
-    // guarded actions of its branches.
-    let owns_actions = branches
+    // A conditional that only asserts defines no value; it owns the guarded
+    // actions of its branches, or nothing when every assertion is proven.
+    let carries_assertions = branches
         .iter()
         .map(Vec::as_slice)
         .chain(fallback_plans.as_deref().map(Vec::as_slice))
-        .any(plans_carry_runtime_assertion);
-    let mut branch_states = Vec::with_capacity(branches.len() + 1);
-    let mut completing_states = Vec::with_capacity(branches.len() + 1);
-    let mut ordered = Vec::new();
-    for (block, plans) in blocks.iter().zip(branches.iter_mut()) {
-        definitions.require_readable(&block.cond, context, span)?;
-        let mut state = definitions.clone();
-        state.enter_guard(&block.cond, context);
-        resolve_conditional_branch(&block.stmts, plans, context, &mut state)?;
-        collect_branch_targets(plans, &mut ordered);
-        if !branch_never_completes(&block.stmts) {
-            completing_states.push(state.clone());
-        }
-        branch_states.push(state);
-    }
-    let exhaustive = match (fallback_statements, fallback_plans) {
-        (Some(statements), Some(plans)) => {
-            let mut state = definitions.clone();
-            resolve_conditional_branch(statements, plans, context, &mut state)?;
-            collect_branch_targets(plans, &mut ordered);
-            if !branch_never_completes(statements) {
-                completing_states.push(state.clone());
-            }
-            branch_states.push(state);
-            true
-        }
-        (None, None) => false,
-        _ => unreachable!("a planned function conditional keeps its source fallback shape"),
-    };
-    if ordered.is_empty() && owns_actions {
+        .any(plans_carry_assertion);
+    let writes_before = definitions.folds.write_count();
+    let resolved = resolve_reachable_branches(
+        (blocks, fallback_statements),
+        (branches, fallback_plans),
+        span,
+        context,
+        definitions,
+    )?;
+    let ResolvedBranches {
+        states: branch_states,
+        completing: completing_states,
+        ordered,
+        exhaustive,
+        first_reached,
+        pruned,
+    } = resolved;
+    // A conditional whose reachable branches write nothing has no effect at
+    // the binder values that reach it; its other branches never run. The
+    // paths still rejoin, so the facts after it hold on every path through it
+    // and not only on the fall-through.
+    if branch_states.is_empty() || (ordered.is_empty() && (carries_assertions || pruned)) {
+        let conditions = blocks.iter().map(|block| &block.cond).collect::<Vec<_>>();
+        let fallthrough = definitions.fallthrough_facts(&conditions, context);
+        definitions.join_facts(&branch_states, exhaustive, &fallthrough);
         return Ok(ordered);
     }
     if ordered.is_empty() {
@@ -221,37 +216,160 @@ pub(super) fn resolve_function_conditional(
     } else {
         &completing_states
     };
+    let remembers_guard =
+        !exhaustive && blocks.len() == 1 && is_immutable_guard(&blocks[0].cond, context);
+    let prior = remembers_guard.then(|| definitions.guarded_proofs(&ordered));
+    let conditions = blocks.iter().map(|block| &block.cond).collect::<Vec<_>>();
     let joined = definitions.join_branches(
         joined_states,
-        exhaustive,
+        (exhaustive, &conditions),
         &ordered,
         &admit_path_partial,
         context,
         span,
     )?;
-    if !exhaustive && blocks.len() == 1 && is_immutable_guard(&blocks[0].cond, context) {
-        definitions.remember_guarded_branch(&blocks[0].cond, &branch_states[0], &ordered, span);
+    let branch_folds = branch_states
+        .iter()
+        .map(|state| &state.folds)
+        .collect::<Vec<_>>();
+    definitions
+        .folds
+        .absorb_branch_writes(writes_before, &branch_folds, exhaustive);
+    if let Some(prior) = prior.filter(|_| first_reached) {
+        definitions.remember_guarded_branch(
+            (&blocks[0].cond, prior),
+            &branch_states[0],
+            &ordered,
+            context,
+            span,
+        );
     }
     Ok(joined)
 }
 
-/// Whether a runtime branch hands at least one assertion to its action owner.
-fn plans_carry_runtime_assertion(plans: &[FunctionStatementPlan]) -> bool {
+/// The resolved branches of one runtime conditional.
+struct ResolvedBranches {
+    states: Vec<FunctionDefinitions>,
+    completing: Vec<FunctionDefinitions>,
+    ordered: Vec<VarName>,
+    exhaustive: bool,
+    first_reached: bool,
+    /// Some branch is reached by no binder value and was not resolved.
+    pruned: bool,
+}
+
+/// Resolve every branch some binder value reaches.
+///
+/// Inside a generic loop iteration a branch runs at the binder values its
+/// condition, and the failure of every earlier one, select (MLS §11.2.6). A
+/// branch no binder value reaches is never executed and is not resolved. A
+/// value an earlier iteration certainly defined is defined on a path whose
+/// binder values all have an earlier iteration, including the fall-through.
+fn resolve_reachable_branches(
+    (blocks, fallback_statements): (
+        &[rumoca_core::StatementBlock],
+        Option<&[rumoca_core::Statement]>,
+    ),
+    (branches, fallback_plans): (
+        &mut [Vec<FunctionStatementPlan>],
+        Option<&mut Vec<FunctionStatementPlan>>,
+    ),
+    span: Span,
+    context: FunctionValidationContext<'_>,
+    definitions: &mut FunctionDefinitions,
+) -> Result<ResolvedBranches, ToDaeError> {
+    let mut resolved = ResolvedBranches {
+        states: Vec::with_capacity(branches.len() + 1),
+        completing: Vec::with_capacity(branches.len() + 1),
+        ordered: Vec::new(),
+        exhaustive: false,
+        first_reached: false,
+        pruned: false,
+    };
+    let conditions = blocks.iter().map(|block| &block.cond).collect::<Vec<_>>();
+    // Value facts may show that no execution reaches a branch, or that every
+    // execution reaching the conditional takes one; the binder region of a
+    // certain branch is then the whole region.
+    let reachable = definitions.reachable_paths(&conditions, context);
+    let mut remaining = definitions.folds.clone();
+    for (ordinal, (block, plans)) in blocks.iter().zip(branches.iter_mut()).enumerate() {
+        definitions.require_readable(&block.cond, context, span)?;
+        let mut state = definitions.clone();
+        let certain = reachable[ordinal + 1..].iter().all(|reaches| !reaches);
+        let reached = if certain {
+            state.folds = remaining.clone();
+            state.folds.reaches()
+        } else {
+            state.folds.assume_from(&remaining, &block.cond, context)
+        };
+        remaining.assume(&block.cond, false, context);
+        if !reached || !reachable[ordinal] {
+            resolved.pruned = true;
+            continue;
+        }
+        resolved.first_reached |= ordinal == 0;
+        state.enter_guard(&block.cond, context);
+        state.enter_path(&conditions, ordinal, context);
+        resolve_conditional_branch(&block.stmts, plans, context, &mut state)?;
+        resolved.push(state, &block.stmts, plans);
+    }
+    let falls_through = remaining.reaches() && reachable[conditions.len()];
+    resolved.exhaustive = match (fallback_statements, fallback_plans) {
+        (Some(statements), Some(plans)) => {
+            if falls_through {
+                let mut state = definitions.clone();
+                state.folds = remaining.clone();
+                state.enter_path(&conditions, conditions.len(), context);
+                resolve_conditional_branch(statements, plans, context, &mut state)?;
+                resolved.push(state, statements, plans);
+            }
+            resolved.pruned |= !falls_through;
+            true
+        }
+        (None, None) => !falls_through,
+        _ => unreachable!("a planned function conditional keeps its source fallback shape"),
+    };
+    let ordered = resolved.ordered.clone();
+    for state in resolved.states.iter_mut().chain(&mut resolved.completing) {
+        state.define_from_earlier_iterations(&ordered);
+    }
+    if !resolved.exhaustive {
+        definitions.enter_path(&conditions, conditions.len(), context);
+        let fallthrough = std::mem::replace(&mut definitions.folds, remaining);
+        definitions.define_from_earlier_iterations(&ordered);
+        definitions.folds = fallthrough;
+    }
+    Ok(resolved)
+}
+
+impl ResolvedBranches {
+    fn push(
+        &mut self,
+        state: FunctionDefinitions,
+        statements: &[rumoca_core::Statement],
+        plans: &[FunctionStatementPlan],
+    ) {
+        collect_branch_targets(plans, &mut self.ordered);
+        if !branch_never_completes(statements) {
+            self.completing.push(state.clone());
+        }
+        self.states.push(state);
+    }
+}
+
+/// Whether a runtime branch carries at least one assertion: a runtime one is
+/// handed to the action owner, a proven one (MLS §8.3.7, established `true` by
+/// the specialization) is erased and leaves the branch with no value to define.
+fn plans_carry_assertion(plans: &[FunctionStatementPlan]) -> bool {
     plans.iter().any(|plan| match plan {
-        FunctionStatementPlan::RuntimeAssertion => true,
+        FunctionStatementPlan::RuntimeAssertion | FunctionStatementPlan::ProvenAssertion => true,
         FunctionStatementPlan::If {
             branches, fallback, ..
         } => {
-            branches
-                .iter()
-                .any(|branch| plans_carry_runtime_assertion(branch))
-                || fallback
-                    .as_deref()
-                    .is_some_and(plans_carry_runtime_assertion)
+            branches.iter().any(|branch| plans_carry_assertion(branch))
+                || fallback.as_deref().is_some_and(plans_carry_assertion)
         }
-        FunctionStatementPlan::ProvenBranch { statements, .. } => {
-            plans_carry_runtime_assertion(statements)
-        }
+        FunctionStatementPlan::ProvenBranch { statements, .. } => plans_carry_assertion(statements),
         _ => false,
     })
 }
@@ -333,7 +451,7 @@ fn resolve_static_loop_branch(
     Ok(ordered)
 }
 
-fn static_boolean_expression(
+pub(super) fn static_boolean_expression(
     expression: &Expression,
     context: FunctionValidationContext<'_>,
 ) -> Result<Option<bool>, ToDaeError> {
@@ -458,12 +576,20 @@ fn static_boolean_expression_at_depth(
     }
 }
 
-fn is_immutable_guard(condition: &Expression, context: FunctionValidationContext<'_>) -> bool {
+pub(super) fn is_immutable_guard(
+    condition: &Expression,
+    context: FunctionValidationContext<'_>,
+) -> bool {
     let mut references = Vec::new();
     condition.collect_var_refs(&mut references);
     !references.is_empty()
         && references.iter().all(|target| {
             context.static_integers.contains_key(target)
+                || context
+                    .function
+                    .inputs
+                    .iter()
+                    .any(|input| input.name == target.as_str())
                 || context
                     .generated_booleans
                     .iter()
@@ -536,14 +662,14 @@ fn validate_conditional_branch_shape(
             }
             _ => {}
         }
-        let span = required_statement_span(statement, "function conditional branch statement")?;
-        return Err(ToDaeError::unsupported_flat(
+        return Err(unsupported_statement(
+            statement,
+            "function conditional branch statement",
             "function conditional",
             format!(
                 "`{}` requires assignments or nested conditionals in every checked branch",
                 context.function.name
             ),
-            span,
         ));
     }
     Ok(())

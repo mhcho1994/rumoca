@@ -50,6 +50,9 @@ pub fn export(
     model.validate().map_err(|e| e.to_string())?;
     let p = &model.problem;
     check_profile(model)?;
+    if p.initialization.projection_plan().iterates_discretes {
+        return Err("execution profile does not support iterative discrete initialization".into());
+    }
     let storage = export_storage(model)?;
     let mut observations = Vec::new();
     for (trace_point, variable_id, name) in requested {
@@ -404,6 +407,7 @@ fn restore_programs(
         residual: block(&public.initialization, y, p, span)?,
         row_roles: vec![s::InitializationRowRole::Solved; public.initialization.len()],
         projection_plan: s::InitializationProjectionPlan {
+            iterates_discretes: false,
             blocks: public
                 .initial_blocks
                 .iter()
@@ -453,6 +457,7 @@ fn fmi_input(
         tunable: false,
         evaluable: false,
         text_start: None,
+        enumeration: None,
         declaration: span,
     }
 }

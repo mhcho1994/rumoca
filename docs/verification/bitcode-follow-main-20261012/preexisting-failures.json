@@ -1,0 +1,42 @@
+{
+  "source_commit": "4b4a31c0ea5eab5ef948a2616969768a2204b5f0",
+  "baseline_command": "cargo test -p rumoca-phase-flatten -p rumoca-contracts -p rumoca-sim --no-fail-fast",
+  "baseline_failures": [
+    "eqn_matrix_constructor_equation_counts_every_element",
+    "redeclare_function_extends_short_alias_does_not_recurse",
+    "inst_040_each_on_scalar_component_rejected",
+    "type_022_nominal_subclass_with_replaceable_member_accepted",
+    "functions::tests::test_convert_component_to_param_preserves_constant_shape_identity",
+    "captured_array_extent_refers_to_the_corresponding_captured_integer",
+    "explicitly_qualified_base_constant_keeps_the_base_binding",
+    "inherited_array_dimensions_are_materialized_per_package",
+    "inherited_default_arguments_keep_their_concrete_package_binding",
+    "package_aliases_keep_distinct_modified_and_default_bindings",
+    "proven_true_assert_over_a_final_parameter_is_kept_for_the_pass",
+    "proven_true_assert_over_an_evaluate_parameter_is_kept_for_the_pass",
+    "solve_lowering::tests::index_reduction_differentiates_elementary_and_piecewise_definitions",
+    "solve_lowering::tests::index_reduction_differentiates_through_a_function_body_with_an_if_statement",
+    "solve_lowering::tests::summed_derivatives::boolean_equation_reads_a_state_derivative_through_its_definition"
+  ],
+  "integration_failures": [
+    "redeclare_function_extends_short_alias_does_not_recurse",
+    "eqn_matrix_constructor_equation_counts_every_element",
+    "type_022_nominal_subclass_with_replaceable_member_accepted",
+    "captured_array_extent_refers_to_the_corresponding_captured_integer",
+    "explicitly_qualified_base_constant_keeps_the_base_binding",
+    "inherited_array_dimensions_are_materialized_per_package",
+    "inherited_default_arguments_keep_their_concrete_package_binding",
+    "package_aliases_keep_distinct_modified_and_default_bindings",
+    "proven_true_assert_over_a_final_parameter_is_kept_for_the_pass",
+    "proven_true_assert_over_an_evaluate_parameter_is_kept_for_the_pass",
+    "solve_lowering::tests::index_reduction_differentiates_elementary_and_piecewise_definitions",
+    "solve_lowering::tests::index_reduction_differentiates_through_a_function_body_with_an_if_statement",
+    "solve_lowering::tests::summed_derivatives::boolean_equation_reads_a_state_derivative_through_its_definition"
+  ],
+  "new_failures_against_baseline": [],
+  "notes": [
+    "The original v1 Instantiate unit tests additionally fail to compile at three outdated helper calls; integration updates those test calls.",
+    "All remaining failures are v1-added tests, not tests introduced by upstream main. They remain enabled."
+  ],
+  "remaining_tests_present_in_upstream": []
+}

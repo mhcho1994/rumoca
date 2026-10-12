@@ -243,7 +243,7 @@
             inherit src;
             cargoRoot = ".";
             name = "rumoca-${rumocaVersion}-cargo-vendor";
-            hash = "sha256-SpoMApRQ/q34H5dbyW3bV2b5S/UxUBU48OrJZmXP9NY=";
+            hash = "sha256-B5PW7S5V39iqq/AXkvvUNdddswMb04Zju4O5AStA5/Y=";
           };
           nativeBuildInputs = [
             rustToolchain
@@ -309,7 +309,7 @@
         commonDevShellArgs = {
           buildInputs = commonArgs.buildInputs;
           shellHook = ''
-            export PATH="''${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+            export PATH="${rustToolchain}/bin:''${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
           '';
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (

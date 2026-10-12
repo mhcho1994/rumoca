@@ -1,7 +1,8 @@
-//! Template view of the regions of a checked function-conditional program.
+//! Template view of the regions of checked function-conditional and
+//! function-fold programs.
 //!
-//! Each arm condition, arm result, and the fallback is its own scalar program
-//! with a private register file. A region's `StoreOutput`/`StoreOutputRange`
+//! Each arm condition, arm result, conditional fallback, and fold update is its
+//! own scalar program with a private register file. A region's `StoreOutput`/`StoreOutputRange`
 //! write the region's outputs in order, so each is attached to its local
 //! output ordinals, and every region operation is viewed exactly as a block
 //! operation is.
@@ -75,34 +76,76 @@ pub(super) fn region_value(
     program: &Arc<solve::FunctionConditionalProgram>,
     part: RegionPart,
 ) -> Value {
-    let region = PlanRegionValue {
-        program: Arc::clone(program),
-        part,
-    };
+    planned(RegionSource::Conditional(Arc::clone(program), part))
+}
+
+/// The template view of the one-iteration update region of a fold `program`;
+/// its stores write the next carried tuple in order.
+pub(super) fn fold_update_value(program: &Arc<solve::FunctionFoldProgram>) -> Value {
+    planned(RegionSource::FoldUpdate(Arc::clone(program)))
+}
+
+/// The template view of a bounded `while` fold's continuation region, or
+/// none; its one store is the predicate checked before each pass.
+pub(super) fn fold_continuation_value(program: &Arc<solve::FunctionFoldProgram>) -> Value {
+    if program.continuation.is_none() {
+        return Value::from(());
+    }
+    planned(RegionSource::FoldContinuation(Arc::clone(program)))
+}
+
+fn planned(source: RegionSource) -> Value {
+    let region = PlanRegionValue { source };
     let targets = local_output_targets(region.ops());
     Value::from_object(region.with_targets(targets))
 }
 
 #[derive(Debug)]
+enum RegionSource {
+    Conditional(Arc<solve::FunctionConditionalProgram>, RegionPart),
+    FoldUpdate(Arc<solve::FunctionFoldProgram>),
+    FoldContinuation(Arc<solve::FunctionFoldProgram>),
+}
+
+#[derive(Debug)]
 struct PlanRegionValue {
-    program: Arc<solve::FunctionConditionalProgram>,
-    part: RegionPart,
+    source: RegionSource,
 }
 
 impl PlanRegionValue {
     fn ops(&self) -> &[solve::LinearOp] {
-        match self.part {
-            RegionPart::Condition(arm) => &self.program.arms[arm].condition,
-            RegionPart::Result(arm) => &self.program.arms[arm].result,
-            RegionPart::Fallback => &self.program.fallback,
+        match &self.source {
+            RegionSource::Conditional(program, RegionPart::Condition(arm)) => {
+                &program.arms[*arm].condition
+            }
+            RegionSource::Conditional(program, RegionPart::Result(arm)) => {
+                &program.arms[*arm].result
+            }
+            RegionSource::Conditional(program, RegionPart::Fallback) => &program.fallback,
+            RegionSource::FoldUpdate(program) => &program.update,
+            RegionSource::FoldContinuation(program) => program
+                .continuation
+                .as_ref()
+                .map_or(&[], |continuation| continuation.ops.as_slice()),
         }
     }
 
     fn register_count(&self) -> usize {
-        match self.part {
-            RegionPart::Condition(arm) => self.program.arms[arm].condition_register_count,
-            RegionPart::Result(arm) => self.program.arms[arm].result_register_count,
-            RegionPart::Fallback => self.program.fallback_register_count,
+        match &self.source {
+            RegionSource::Conditional(program, RegionPart::Condition(arm)) => {
+                program.arms[*arm].condition_register_count
+            }
+            RegionSource::Conditional(program, RegionPart::Result(arm)) => {
+                program.arms[*arm].result_register_count
+            }
+            RegionSource::Conditional(program, RegionPart::Fallback) => {
+                program.fallback_register_count
+            }
+            RegionSource::FoldUpdate(program) => program.register_count,
+            RegionSource::FoldContinuation(program) => program
+                .continuation
+                .as_ref()
+                .map_or(0, |continuation| continuation.register_count),
         }
     }
 
@@ -202,7 +245,9 @@ fn local_output_targets(ops: &[solve::LinearOp]) -> Vec<Option<Box<[usize]>>> {
                 | solve::LinearOp::StoreOutputFunctionFold { count, .. } => *count,
                 solve::LinearOp::StoreOutputFoldTensorUpdate {
                     dimensions, lanes, ..
-                } => dimensions.iter().map(|n| *n as usize).product::<usize>() * lanes,
+                } => dimensions
+                    .iter()
+                    .fold(*lanes, |count, extent| count * *extent as usize),
                 _ => return None,
             };
             let targets = (next..next + count).collect::<Box<[usize]>>();
@@ -210,43 +255,6 @@ fn local_output_targets(ops: &[solve::LinearOp]) -> Vec<Option<Box<[usize]>>> {
             Some(targets)
         })
         .collect()
-}
-
-/// Checked fold updates use the same operation view as conditional regions.
-pub(super) fn fold_update_value(program: &Arc<solve::FunctionFoldProgram>) -> Value {
-    let targets = local_output_targets(&program.update);
-    Value::from_iter((0..program.update.len()).map(|index| {
-        Value::from_object(PlanFoldOpValue {
-            program: Arc::clone(program),
-            index,
-            targets: targets[index].clone(),
-        })
-    }))
-}
-
-#[derive(Debug)]
-struct PlanFoldOpValue {
-    program: Arc<solve::FunctionFoldProgram>,
-    index: usize,
-    targets: Option<Box<[usize]>>,
-}
-
-impl Object for PlanFoldOpValue {
-    fn repr(self: &Arc<Self>) -> ObjectRepr {
-        ObjectRepr::Map
-    }
-    fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
-        super::scalar_program_plan::op_field(
-            &self.program.update[self.index],
-            self.targets.as_deref(),
-            key.as_str()?,
-        )
-    }
-    fn enumerate(self: &Arc<Self>) -> Enumerator {
-        Enumerator::Str(super::scalar_program_plan::op_keys(
-            &self.program.update[self.index],
-        ))
-    }
 }
 
 #[cfg(test)]

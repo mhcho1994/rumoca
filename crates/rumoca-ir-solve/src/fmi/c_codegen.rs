@@ -40,37 +40,49 @@ pub struct FmiCCodegenView {
 impl FmiCodegenView {
     pub fn try_c(self) -> Result<FmiCCodegenView, FmiCCodegenError> {
         validate_variables(&self.metadata)?;
+        refuse_recursive_groups(&self.model.pure_calls)?;
         let (update_order, update_levels) =
             super::parameter_updates::validate(&self.model.problem, &self.model.pure_calls)
                 .map_err(FmiCCodegenError)?;
-        if !self.event_indicators.sources().is_empty() {
-            let events = super::scalar_events::validate(&self.model).map_err(FmiCCodegenError)?;
-            return Ok(FmiCCodegenView {
-                profile: Profile::ScalarEvents(self, Box::new(events)),
-                update_order,
-                update_levels,
-                discrete_order: super::static_assertions::DiscreteOrder::default(),
-            });
-        }
-        if crate::solve_event_class(&self.model.problem).is_none() {
-            return self
-                .try_event_free()
-                .map(|value| FmiCCodegenView {
-                    profile: Profile::EventFree(value),
-                    update_order,
-                    update_levels,
-                    discrete_order: super::static_assertions::DiscreteOrder::default(),
-                })
-                .map_err(|_| FmiCCodegenError("event-free narrowing failed"));
-        }
-        let discrete_order =
-            super::static_assertions::validate(&self.model).map_err(FmiCCodegenError)?;
+        let (profile, discrete_order) = self.profile()?;
         Ok(FmiCCodegenView {
-            profile: Profile::StaticAssertions(self),
+            profile,
             update_order,
             update_levels,
             discrete_order,
         })
+    }
+
+    /// The narrowest profile that executes the component's events: none,
+    /// events fixed between parameter changes, or the event iteration.
+    fn profile(
+        self,
+    ) -> Result<(Profile, super::static_assertions::DiscreteOrder), FmiCCodegenError> {
+        let no_order = super::static_assertions::DiscreteOrder::default;
+        if !self.event_indicators.sources().is_empty() {
+            return self.scalar_events().map(|profile| (profile, no_order()));
+        }
+        if crate::solve_event_class(&self.model.problem).is_none() {
+            return self
+                .try_event_free()
+                .map(|value| (Profile::EventFree(value), no_order()))
+                .map_err(|_| FmiCCodegenError("event-free narrowing failed"));
+        }
+        match super::static_assertions::validate(&self.model) {
+            Ok(order) => Ok((Profile::StaticAssertions(self), order)),
+            // Events that follow time, states, or inputs, and the discrete
+            // rows that follow them, run through the event iteration even
+            // when no continuous indicator monitors them.
+            Err(super::static_assertions::StaticRefusal::EventIteration(_)) => {
+                self.scalar_events().map(|profile| (profile, no_order()))
+            }
+            Err(refusal) => Err(FmiCCodegenError(refusal.message())),
+        }
+    }
+
+    fn scalar_events(self) -> Result<Profile, FmiCCodegenError> {
+        let events = super::scalar_events::validate(&self.model).map_err(FmiCCodegenError)?;
+        Ok(Profile::ScalarEvents(self, Box::new(events)))
     }
 }
 
@@ -78,6 +90,7 @@ impl TryFrom<FmiEventFreeCodegenView> for FmiCCodegenView {
     type Error = FmiCCodegenError;
     fn try_from(value: FmiEventFreeCodegenView) -> Result<Self, Self::Error> {
         validate_variables(&value.metadata)?;
+        refuse_recursive_groups(value.pure_calls())?;
         let (update_order, update_levels) =
             super::parameter_updates::validate(value.problem(), value.pure_calls())
                 .map_err(FmiCCodegenError)?;
@@ -90,9 +103,22 @@ impl TryFrom<FmiEventFreeCodegenView> for FmiCCodegenView {
     }
 }
 
+/// The C profile emits no recursive call or depth-carrying frame, so a
+/// SOLVE-C62 recursive owner group is refused before any C is generated.
+fn refuse_recursive_groups(table: &crate::SolvePureCallTable) -> Result<(), FmiCCodegenError> {
+    if table.recursive_groups().is_empty() {
+        Ok(())
+    } else {
+        Err(FmiCCodegenError(
+            "recursive function calls (SOLVE-C62 recursive owner groups) are not supported by the C FMI profile",
+        ))
+    }
+}
+
 /// Every public variable has one FMI value type the generated component
-/// reads and writes through its storage: Real as Float64, Integer and
-/// enumeration ordinals as Int32 (FMI 2 Integer), Boolean as Boolean, all
+/// reads and writes through its storage: Real as Float64, Integer as Int32
+/// (FMI 2 Integer), an enumeration ordinal as Int64 (FMI 2 Integer; the
+/// ordinal range is its type's literal count), Boolean as Boolean, all
 /// held in the numeric storage run; a String parameter or constant as its
 /// literal text, which no numeric program reads.
 fn validate_variables(metadata: &FmiMetadata) -> Result<(), FmiCCodegenError> {
@@ -187,13 +213,14 @@ impl FmiCCodegenView {
 impl Serialize for FmiCCodegenView {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let metadata = self.metadata();
-        let mut entries = serializer.serialize_map(Some(13))?;
+        let mut entries = serializer.serialize_map(Some(14))?;
         entries.serialize_entry("initial_y", &self.model().initial_y)?;
         entries.serialize_entry("initial_parameters", &self.model().parameters)?;
         entries.serialize_entry(
             "variables",
             &super::metadata::SerializedFmiVariables::borrowing(metadata.variables()),
         )?;
+        entries.serialize_entry("enumerations", &metadata.enumerations())?;
         entries.serialize_entry("state_variable_indices", metadata.state_variable_indices())?;
         entries.serialize_entry(
             "derivative_value_reference_base_fmi3",

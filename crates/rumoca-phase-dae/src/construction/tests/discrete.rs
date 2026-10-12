@@ -1298,18 +1298,27 @@ fn b1c_classification_ignores_discrete_guards_inside_a_continuous_value() {
 #[test]
 fn b1c_classification_rejects_mixed_discrete_and_continuous_if_branches() {
     let source = TestSource::new(
-        "model M Boolean m; Real y; equation if true then m = true; else y = 2.0; end if; end M;",
+        "model M Boolean m; Real y; equation if time > 0.5 then m = true; else y = 2.0; end if; end M;",
     );
     let mut model = test_model();
     add_primitive_variable(&mut model, &source, "m", "Boolean m", 8, Vec::new(), true);
     add_primitive_variable(&mut model, &source, "y", "Real y", 9, Vec::new(), false);
-    let owner = source.span("if true then m = true; else y = 2.0; end if", 0);
+    let owner = source.span("if time > 0.5 then m = true; else y = 2.0; end if", 0);
     model.add_equation(flat::Equation::new(
         Expression::If {
             branches: vec![(
-                Expression::Literal {
-                    value: Literal::Boolean(true),
-                    span: source.span("true", 0),
+                Expression::Binary {
+                    op: OpBinary::Gt,
+                    lhs: Box::new(Expression::VarRef {
+                        name: Reference::new("time"),
+                        subscripts: Vec::new(),
+                        span: source.span("time", 0),
+                    }),
+                    rhs: Box::new(Expression::Literal {
+                        value: Literal::Real(0.5),
+                        span: source.span("0.5", 0),
+                    }),
+                    span: source.span("time > 0.5", 0),
                 },
                 Expression::Binary {
                     op: OpBinary::Sub,
@@ -1320,7 +1329,7 @@ fn b1c_classification_rejects_mixed_discrete_and_continuous_if_branches() {
                     }),
                     rhs: Box::new(Expression::Literal {
                         value: Literal::Boolean(true),
-                        span: source.span("true", 1),
+                        span: source.span("true", 0),
                     }),
                     span: owner,
                 },
@@ -1814,8 +1823,11 @@ fn initial_pre_equation_uses_checked_discrete_initial_value_owner() {
     });
 }
 
+/// MLS 3.7 §8.6 lets the initial value of `d` read an input, which the
+/// environment supplies before initialization, so the initial equation is the
+/// coordinate's initial-value definition rather than a numeric row.
 #[test]
-fn coupled_initial_discrete_real_definition_remains_a_numeric_initialization_row() {
+fn initial_discrete_real_definition_from_an_input_is_a_definition() {
     let source = TestSource::new(
         "model M discrete Real d; input Real u; initial equation d = u; equation d = u; end M;",
     );
@@ -1879,8 +1891,8 @@ fn coupled_initial_discrete_real_definition_remains_a_numeric_initialization_row
 
     let dae = construct(&model, source.map).unwrap();
     dae.inspect(|view| {
-        assert_eq!(view.initial_discrete_value_count(), 0);
-        assert_eq!(view.initialization_owner_count(), 1);
+        assert_eq!(view.initial_discrete_value_count(), 1);
+        assert_eq!(view.initialization_owner_count(), 0);
     });
 }
 

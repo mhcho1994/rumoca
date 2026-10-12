@@ -136,15 +136,7 @@ impl Declarer<'_> {
             } => {
                 // Keep a name only when the exposing package is the declaration's
                 // original owner. Redeclarations remain occurrence-specific.
-                let Some(package_name) = self.ctx.target_def_names.get(&package) else {
-                    return Ok(None);
-                };
-                let Some(declaration_name) = self.ctx.target_def_names.get(&declaration) else {
-                    return Ok(None);
-                };
-                if declaration_name.rsplit_once('.').map(|(parent, _)| parent)
-                    != Some(package_name.as_str())
-                {
+                if self.ctx.declaration_owners.get(&declaration) != Some(&package) {
                     return Ok(None);
                 }
                 declaration

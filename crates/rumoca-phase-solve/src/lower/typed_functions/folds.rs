@@ -32,6 +32,8 @@ struct FoldTransition<'dae> {
     parameter_definitions: Vec<dae::FunctionDefinitionId<'dae>>,
     /// Definition identity of each end-of-iteration update.
     update_definitions: Vec<dae::FunctionDefinitionId<'dae>>,
+    /// A bounded `while` fold's predicate over the carried state.
+    continuation: Option<dae::ExprId<'dae>>,
     domain: dae::DomainId<'dae>,
 }
 
@@ -39,6 +41,7 @@ struct FoldTransition<'dae> {
 type CarriedLayout<'dae> = Vec<(u32, dae::ValueTypeId<'dae>, Range<usize>)>;
 
 /// Everything one iteration of a fold needs that is fixed before it runs.
+#[derive(Clone, Copy)]
 struct FoldIteration<'a, 'dae> {
     fold: dae::FunctionFoldId<'dae>,
     transition: &'a FoldTransition<'dae>,
@@ -86,9 +89,11 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             .iter()
             .copied()
             .chain(body.conditions.iter().copied())
+            .chain(transition.continuation)
             .collect::<Vec<_>>();
         let pending = self.pending_predicates(roots.iter().copied());
         if transition.initial_definitions.is_empty()
+            && transition.continuation.is_none()
             && pending.is_empty()
             && body.conditions.iter().all(|condition| {
                 super::assertions::assertion_is_map_independent(self.view, *condition)
@@ -140,15 +145,7 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             body: &body,
             provenance,
         };
-        let destinations = self.builder.fold(
-            domain,
-            &initial_flat,
-            &captures,
-            provenance,
-            move |builder, carried, captures, binders, outputs| {
-                iteration.lower(builder, carried, captures, binders, outputs)
-            },
-        )?;
+        let destinations = iteration.build(self.builder, domain, &initial_flat, &captures)?;
         for (offset, slot) in assertions.slots.iter().enumerate() {
             let value = destinations
                 .get(assertions.start + offset)
@@ -243,10 +240,7 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
     }
 }
 
-/// Check one DAE fold record into a transition, or report it vacuous.
-///
-/// `Ok(None)` is the loop that carries nothing: it has no entry value, no
-/// update, and no target, so it publishes no value and needs no region.
+/// Check one DAE fold record, including loops whose only effect is an assertion.
 fn checked_transition<'dae>(
     view: dae::DaeView<'dae>,
     fold: dae::FunctionFoldId<'dae>,
@@ -295,10 +289,72 @@ fn checked_transition<'dae>(
         parameter_definitions,
         update_definitions,
         domain: fold_view.domain(),
+        continuation: fold_view.continuation(),
     })
 }
 
 impl<'dae> FoldIteration<'_, 'dae> {
+    fn build<'program>(
+        self,
+        builder: &mut solve::TypedProgramBuilder<'program>,
+        domain: rumoca_core::StructuredIndexDomain,
+        initial: &[solve::ProgramRegister<'program>],
+        captures: &[solve::ProgramRegister<'program>],
+    ) -> Result<Vec<solve::ProgramRegister<'program>>, solve::SolveProgramConstructionError> {
+        match self.transition.continuation {
+            Some(continuation) => builder.fold_while(
+                domain,
+                initial,
+                captures,
+                self.provenance,
+                move |builder, carried, captures, outputs| {
+                    self.lower_continuation(builder, continuation, (carried, captures), outputs)
+                },
+                move |builder, carried, captures, binders, outputs| {
+                    self.lower(builder, carried, captures, binders, outputs)
+                },
+            ),
+            None => builder.fold(
+                domain,
+                initial,
+                captures,
+                self.provenance,
+                move |builder, carried, captures, binders, outputs| {
+                    self.lower(builder, carried, captures, binders, outputs)
+                },
+            ),
+        }
+    }
+
+    /// Build a bounded `while` fold's predicate region over the carried
+    /// tuple and the captures.
+    fn lower_continuation<'region>(
+        self,
+        builder: &mut solve::TypedProgramBuilder<'region>,
+        continuation: dae::ExprId<'dae>,
+        (carried, captures): (
+            &[solve::ProgramSlot<'region>],
+            &[solve::ProgramSlot<'region>],
+        ),
+        outputs: &[solve::ProgramSlot<'region>],
+    ) -> Result<(), solve::SolveProgramConstructionError> {
+        let mut lowerer = load_region_lowerer(
+            builder,
+            captures,
+            self.environment,
+            self.context,
+            self.provenance,
+        )?;
+        self.seed_carried_values(&mut lowerer, carried)?;
+        let value = lowerer.expression(continuation)?;
+        match (value.leaves.as_slice(), outputs) {
+            ([predicate], [output]) => lowerer.builder.store(*output, *predicate, self.provenance),
+            _ => Err(solve::SolveProgramConstructionError::InvalidFold {
+                provenance: self.provenance,
+            }),
+        }
+    }
+
     /// Build one iteration of the transition region.
     fn lower<'region>(
         self,

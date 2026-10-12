@@ -1329,7 +1329,7 @@ fn unsupported_expandable_duplicate_sources_fail_closed() {
     "#,
         "M",
         FailedPhase::Flatten,
-        "EF033",
+        "EF037",
     );
 }
 

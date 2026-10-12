@@ -21,10 +21,35 @@ struct ProjectionScratch {
 }
 
 impl CompiledProjectionJacobian {
-    pub(crate) fn new(
+    /// Prepare every application into the shared projection module, which is
+    /// finalized once for all of them.
+    pub(crate) fn new_all(
+        prepared: Vec<(Rc<CompiledJacobianRows>, ProjectionJacobianApplication)>,
+        shared: &super::SharedProjectionModule,
+    ) -> Result<Vec<Self>, CompileError> {
+        let pure_calls = prepared
+            .first()
+            .and_then(|(jit, _)| jit._pure_calls.clone());
+        let applications = prepared
+            .iter()
+            .map(|(_, application)| application)
+            .collect::<Vec<_>>();
+        let batches = super::projection_batch::ProjectionBatch::compile_all(
+            &applications,
+            pure_calls.as_ref(),
+            shared,
+        )?;
+        prepared
+            .into_iter()
+            .zip(batches)
+            .map(|((jit, application), batch)| Self::with_batch(jit, application, batch))
+            .collect()
+    }
+
+    fn with_batch(
         jit: Rc<CompiledJacobianRows>,
         application: ProjectionJacobianApplication,
-        shared: &super::SharedProjectionModule,
+        batch: super::projection_batch::ProjectionBatch,
     ) -> Result<Self, CompileError> {
         let output_count = program_output_capacity(&jit, &application)?;
         let required_y_len = application
@@ -35,11 +60,6 @@ impl CompiledProjectionJacobian {
             .map_or(Some(0), |index| index.checked_add(1))
             .ok_or_else(|| CompileError::Input("projection seed extent overflows".into()))?;
         let seed_len = required_y_len.max(jit.input_requirements.seed_len);
-        let batch = super::projection_batch::ProjectionBatch::compile(
-            &application,
-            jit._pure_calls.as_ref(),
-            shared,
-        )?;
         let validate = application.colors().iter().any(|color| {
             color.outputs().programs().iter().any(|program| {
                 let row = &jit.rows[program.program()];
@@ -49,7 +69,7 @@ impl CompiledProjectionJacobian {
         let scratch = RefCell::new(ProjectionScratch {
             seed: vec![0.0; seed_len],
             program_output: vec![0.0; output_count],
-            matrix: vec![0.0; application.output_len()],
+            matrix: vec![0.0; application.compact_layout().len()],
         });
         Ok(Self {
             jit,
@@ -61,6 +81,8 @@ impl CompiledProjectionJacobian {
         })
     }
 
+    /// Write the block Jacobian at `(y, p, t)` into `out` in the application's
+    /// compact pattern layout, one value per pattern entry.
     pub fn call(
         &self,
         y: &[f64],
@@ -69,7 +91,7 @@ impl CompiledProjectionJacobian {
         external_tables: &[ExternalTableData],
         out: &mut [f64],
     ) -> Result<(), CompileError> {
-        if out.len() != self.application.output_len() || y.len() < self.required_y_len {
+        if out.len() != self.application.compact_layout().len() || y.len() < self.required_y_len {
             return Err(CompileError::Input(
                 "projection Jacobian extent mismatch".into(),
             ));
@@ -81,8 +103,9 @@ impl CompiledProjectionJacobian {
         let mut registers = self.jit.regs_scratch.try_borrow_mut().map_err(|_| {
             CompileError::Input("Jacobian register workspace is already in use".into())
         })?;
-        scratch.seed.fill(0.0);
-        with_active_external_tables(external_tables, || {
+        // The seed is all zero between calls: every color sets and clears its
+        // own seed entries, and a failed call clears the whole seed below.
+        let called = with_active_external_tables(external_tables, || {
             let expected = if self.validate {
                 self.evaluate(&mut scratch, &mut registers, y, p, t, external_tables)?;
                 Some(scratch.matrix.clone())
@@ -96,7 +119,11 @@ impl CompiledProjectionJacobian {
                 validate_matrix(matrix, &expected)?;
             }
             Ok::<_, CompileError>(())
-        })?;
+        });
+        if let Err(error) = called {
+            scratch.seed.fill(0.0);
+            return Err(error);
+        }
         out.copy_from_slice(&scratch.matrix);
         Ok(())
     }
@@ -150,8 +177,12 @@ impl CompiledProjectionJacobian {
                 context,
                 output,
             )?;
-            for &(offset, target) in program.placements() {
-                matrix[target] = output[offset];
+            let placements = super::projection_batch::compact_placements(
+                &self.application,
+                program.placements(),
+            )?;
+            for (offset, slot) in placements {
+                matrix[slot] = output[offset];
             }
         }
         Ok(())

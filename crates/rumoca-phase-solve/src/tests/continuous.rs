@@ -394,6 +394,10 @@ fn nested_comprehension_binders_lower_through_lexical_domain_scopes() {
     };
     assert_eq!(rows.row_count(), 1);
     assert_eq!(rows.stored_output_count(), 6);
+    let mut actual = [0.0; 6];
+    rumoca_eval_solve::eval_scalar_program_block(rows, &[0.0; 6], &[], 0.0, None, &mut actual)
+        .unwrap();
+    assert_eq!(actual, [-2.0, -3.0, -4.0, -3.0, -4.0, -5.0]);
 }
 
 #[test]

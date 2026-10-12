@@ -1,4 +1,24 @@
-//! Conservative Integer interval proofs for compact function domains.
+//! Conservative Integer interval proofs for compact function domains, and
+//! exact range extents whose bounds share an unproven Integer term.
+//!
+//! MLS §10.4.1 defines the elements of `a:b` and `a:s:b` from the bounds, so
+//! the number of elements depends only on the step and on `b - a`. A slice
+//! such as `state[i - 2:i - 1]` inside `for i in 3:2:n loop` has a loop
+//! variable in both bounds: neither bound is a translation-time value, yet
+//! their difference is the exact Integer `1` for every value of `i`, which is
+//! what MLS §12.2 needs from a function-local extent. [`exact_range_distance`]
+//! proves that difference by cancelling the shared terms of two affine forms.
+
+#[cfg(test)]
+mod affine_tests;
+mod finite_for;
+mod flow;
+mod operations;
+#[cfg(test)]
+mod tests;
+
+pub(in crate::construction) use finite_for::infer_finite_for_counter_bounds;
+pub(in crate::construction) use rumoca_core::IntegerInterval;
 
 use super::*;
 
@@ -9,50 +29,64 @@ impl ShapeEnvironment {
         &self,
         expression: &Expression,
     ) -> Option<(i64, i64)> {
-        if let Some(ProvenValue::Integer(value)) = eval_expr(expression, &self.values)
+        self.proven_integer_interval(expression).bounds()
+    }
+
+    /// The Integer interval this scope proves for `expression`, each endpoint
+    /// proven separately. Settled values, binder bounds and guard facts are its
+    /// sources; checked arithmetic combines them.
+    pub(in crate::construction) fn proven_integer_interval(
+        &self,
+        expression: &Expression,
+    ) -> IntegerInterval {
+        if let Some(ProvenValue::Integer(value)) = eval_expr(expression, &self.shape_aware_values())
             .ok()
             .as_ref()
             .and_then(ProvenValue::from_settled)
         {
-            return Some((value, value));
+            return IntegerInterval::exact(value);
         }
         match expression {
             Expression::Literal {
                 value: Literal::Integer(value),
                 ..
-            } => Some((*value, *value)),
+            } => IntegerInterval::exact(*value),
             Expression::VarRef {
                 name, subscripts, ..
-            } if subscripts.is_empty() => self.integer_bounds.get(name.var_name()).copied(),
-            Expression::Unary { op, rhs, .. } => {
-                let (lower, upper) = self.proven_integer_bounds(rhs)?;
-                match op {
-                    OpUnary::Plus => Some((lower, upper)),
-                    OpUnary::Minus => Some((upper.checked_neg()?, lower.checked_neg()?)),
-                    _ => None,
-                }
-            }
+            } if subscripts.is_empty() => self
+                .integer_bounds
+                .get(name.var_name())
+                .copied()
+                .unwrap_or(IntegerInterval::UNBOUNDED),
+            Expression::Unary { op, rhs, .. } => match op {
+                OpUnary::Plus => self.proven_integer_interval(rhs),
+                OpUnary::Minus => self.proven_integer_interval(rhs).negate(),
+                _ => IntegerInterval::UNBOUNDED,
+            },
             Expression::Binary { op, lhs, rhs, .. } => {
-                let (lhs_lower, lhs_upper) = self.proven_integer_bounds(lhs)?;
-                let (rhs_lower, rhs_upper) = self.proven_integer_bounds(rhs)?;
+                let lhs = self.proven_integer_interval(lhs);
+                let rhs = self.proven_integer_interval(rhs);
                 match op {
-                    OpBinary::Add | OpBinary::AddElem => Some((
-                        lhs_lower.checked_add(rhs_lower)?,
-                        lhs_upper.checked_add(rhs_upper)?,
-                    )),
-                    OpBinary::Sub | OpBinary::SubElem => Some((
-                        lhs_lower.checked_sub(rhs_upper)?,
-                        lhs_upper.checked_sub(rhs_lower)?,
-                    )),
-                    _ => None,
+                    OpBinary::Add | OpBinary::AddElem => lhs.plus(rhs),
+                    OpBinary::Sub | OpBinary::SubElem => lhs.minus(rhs),
+                    OpBinary::Mul | OpBinary::MulElem => lhs.times(rhs),
+                    _ => IntegerInterval::UNBOUNDED,
                 }
             }
-            _ => None,
+            Expression::BuiltinCall { function, args, .. } => {
+                operations::builtin(self, *function, args)
+            }
+            _ => IntegerInterval::UNBOUNDED,
         }
     }
 
     /// Bounds of the values produced by one ascending or descending Integer
     /// range. Empty ranges have no binder value and therefore return `None`.
+    ///
+    /// An exact start and step give the exact first and last values. A
+    /// dependent range (`column + 1:n` inside `for column`) has a start known
+    /// only by its bounds; its values still lie between start and end, so the
+    /// envelope of the endpoint bounds bounds them for a step of known sign.
     pub(in crate::construction) fn proven_range_bounds(
         &self,
         expression: &Expression,
@@ -69,8 +103,15 @@ impl ShapeEnvironment {
             .map(|step| self.proven_integer_bounds(step))
             .unwrap_or(Some((1, 1)))?;
         let (end_lower, end_upper) = self.proven_integer_bounds(end)?;
-        if start_lower != start_upper || step_lower != step_upper || step_lower == 0 {
+        if step_lower == 0 || step_upper == 0 || (step_lower < 0) != (step_upper < 0) {
             return None;
+        }
+        if start_lower != start_upper || step_lower != step_upper {
+            return if step_lower > 0 {
+                (end_upper >= start_lower).then_some((start_lower, end_upper))
+            } else {
+                (end_lower <= start_upper).then_some((end_lower, start_upper))
+            };
         }
         let start = start_lower;
         let step = step_lower;
@@ -102,23 +143,35 @@ pub(in crate::construction) fn infer_function_integer_bounds(
     statements: &[rumoca_core::Statement],
     shapes: &mut ShapeEnvironment,
 ) {
+    let mut invalidated = flow::invalidated_integer_targets(statements);
+    for target in &invalidated {
+        shapes.integer_bounds.remove(target);
+        shapes.values.remove_parameter(target.as_str());
+    }
+    infer_acyclic_integer_bounds(statements, shapes, &mut invalidated);
+    for target in invalidated {
+        shapes.integer_bounds.remove(&target);
+        shapes.values.remove_parameter(target.as_str());
+    }
+}
+
+fn infer_acyclic_integer_bounds(
+    statements: &[rumoca_core::Statement],
+    shapes: &mut ShapeEnvironment,
+    invalidated: &mut HashSet<VarName>,
+) {
     for statement in statements {
         match statement {
             rumoca_core::Statement::Assignment { comp, value, .. } => {
-                if let Some(target) = integer_assignment_target(comp)
-                    && let Some((lower, upper)) = shapes.proven_integer_bounds(value)
-                {
-                    shapes.merge_integer_bounds(target, lower, upper);
-                }
+                infer_integer_assignment(comp, value, shapes, invalidated);
             }
             rumoca_core::Statement::For {
                 indices, equations, ..
             } => {
-                bind_loop_integer_bounds(indices, shapes);
-                infer_function_integer_bounds(equations, shapes);
+                infer_loop_integer_bounds(indices, equations, shapes, invalidated);
             }
             rumoca_core::Statement::While { block, .. } => {
-                infer_function_integer_bounds(&block.stmts, shapes);
+                infer_acyclic_integer_bounds(&block.stmts, shapes, invalidated);
             }
             rumoca_core::Statement::If {
                 cond_blocks,
@@ -126,10 +179,10 @@ pub(in crate::construction) fn infer_function_integer_bounds(
                 ..
             } => {
                 for block in cond_blocks {
-                    infer_function_integer_bounds(&block.stmts, shapes);
+                    infer_acyclic_integer_bounds(&block.stmts, shapes, invalidated);
                 }
                 if let Some(fallback) = else_block {
-                    infer_function_integer_bounds(fallback, shapes);
+                    infer_acyclic_integer_bounds(fallback, shapes, invalidated);
                 }
             }
             _ => {}
@@ -137,12 +190,50 @@ pub(in crate::construction) fn infer_function_integer_bounds(
     }
 }
 
+fn infer_integer_assignment(
+    component: &rumoca_core::ComponentReference,
+    value: &Expression,
+    shapes: &mut ShapeEnvironment,
+    invalidated: &mut HashSet<VarName>,
+) {
+    let Some(target) = integer_assignment_target(component) else {
+        return;
+    };
+    if invalidated.contains(&target) {
+        return;
+    }
+    if let Some((lower, upper)) = shapes.proven_integer_bounds(value) {
+        shapes.merge_integer_bounds(target, lower, upper);
+    } else {
+        shapes.integer_bounds.remove(&target);
+        shapes.values.remove_parameter(target.as_str());
+        invalidated.insert(target);
+    }
+}
+
+fn infer_loop_integer_bounds(
+    indices: &[rumoca_core::ForIndex],
+    statements: &[rumoca_core::Statement],
+    shapes: &mut ShapeEnvironment,
+    invalidated: &mut HashSet<VarName>,
+) {
+    let mut scoped_shapes = shapes.clone();
+    bind_loop_integer_bounds(indices, &mut scoped_shapes);
+    infer_acyclic_integer_bounds(statements, &mut scoped_shapes, invalidated);
+    for target in flow::written_integer_targets(statements) {
+        if let Some((lower, upper)) = scoped_shapes
+            .integer_bounds
+            .get(&target)
+            .and_then(|interval| interval.bounds())
+        {
+            shapes.merge_integer_bounds(target, lower, upper);
+        }
+    }
+}
+
 fn bind_loop_integer_bounds(indices: &[rumoca_core::ForIndex], shapes: &mut ShapeEnvironment) {
     for index in indices {
-        let Some((lower, upper)) = shapes.proven_range_bounds(&index.range) else {
-            continue;
-        };
-        shapes.bind_integer_bounds(VarName::new(&index.ident), lower, upper);
+        shapes.bind_range_binder(VarName::new(&index.ident), &index.range);
     }
 }
 
@@ -151,4 +242,202 @@ fn integer_assignment_target(component: &rumoca_core::ComponentReference) -> Opt
         return None;
     };
     part.subs.is_empty().then(|| component.to_var_name())
+}
+
+/// `constant + sum(coefficient * term)` over Integer scalars whose values
+/// this scope does not prove. Terms are kept in first-seen order and compared
+/// by their exact Flat name, never hashed.
+struct AffineInteger {
+    constant: i64,
+    terms: Vec<(VarName, i64)>,
+}
+
+impl AffineInteger {
+    fn constant(value: i64) -> Self {
+        Self {
+            constant: value,
+            terms: Vec::new(),
+        }
+    }
+
+    fn term(name: VarName) -> Self {
+        Self {
+            constant: 0,
+            terms: vec![(name, 1)],
+        }
+    }
+
+    fn scaled(mut self, factor: i64) -> Option<Self> {
+        self.constant = self.constant.checked_mul(factor)?;
+        for (_, coefficient) in &mut self.terms {
+            *coefficient = coefficient.checked_mul(factor)?;
+        }
+        Some(self)
+    }
+
+    fn plus(mut self, other: Self) -> Option<Self> {
+        self.constant = self.constant.checked_add(other.constant)?;
+        for (name, coefficient) in other.terms {
+            match self
+                .terms
+                .iter_mut()
+                .find(|(existing, _)| *existing == name)
+            {
+                Some((_, existing)) => *existing = existing.checked_add(coefficient)?,
+                None => self.terms.push((name, coefficient)),
+            }
+        }
+        Some(self)
+    }
+
+    /// The value when every term cancels.
+    fn exact(&self) -> Option<i64> {
+        self.terms
+            .iter()
+            .all(|(_, coefficient)| *coefficient == 0)
+            .then_some(self.constant)
+    }
+}
+
+/// The affine form of an Integer expression: proven values fold to constants
+/// and an unproven unsubscripted Integer reference becomes a term.
+fn affine_integer(
+    expression: &Expression,
+    values: &ShapeEnvironment,
+    choices: &[(&Expression, bool)],
+) -> Option<AffineInteger> {
+    if let Ok(value) = evaluate_shape_integer(expression, values) {
+        return Some(AffineInteger::constant(value));
+    }
+    match expression {
+        Expression::Literal {
+            value: Literal::Integer(value),
+            ..
+        } => Some(AffineInteger::constant(*value)),
+        Expression::VarRef {
+            name, subscripts, ..
+        } if subscripts.is_empty() => Some(AffineInteger::term(name.var_name().clone())),
+        Expression::Unary {
+            op: OpUnary::Plus,
+            rhs,
+            ..
+        } => affine_integer(rhs, values, choices),
+        Expression::Unary {
+            op: OpUnary::Minus,
+            rhs,
+            ..
+        } => affine_integer(rhs, values, choices)?.scaled(-1),
+        Expression::Binary { op, lhs, rhs, .. } => match op {
+            OpBinary::Add | OpBinary::AddElem => {
+                affine_integer(lhs, values, choices)?.plus(affine_integer(rhs, values, choices)?)
+            }
+            OpBinary::Sub | OpBinary::SubElem => affine_integer(lhs, values, choices)?
+                .plus(affine_integer(rhs, values, choices)?.scaled(-1)?),
+            OpBinary::Mul | OpBinary::MulElem => {
+                let lhs = affine_integer(lhs, values, choices)?;
+                let rhs = affine_integer(rhs, values, choices)?;
+                match (lhs.exact(), rhs.exact()) {
+                    (Some(factor), _) => rhs.scaled(factor),
+                    (None, Some(factor)) => lhs.scaled(factor),
+                    (None, None) => None,
+                }
+            }
+            _ => None,
+        },
+        Expression::If {
+            branches,
+            else_branch,
+            ..
+        } => {
+            for (condition, arm) in branches {
+                if choice_of(condition, choices)? {
+                    return affine_integer(arm, values, choices);
+                }
+            }
+            affine_integer(else_branch, values, choices)
+        }
+        _ => None,
+    }
+}
+
+/// The exact `end - start` of a range whose bounds differ by a proven
+/// Integer, or `None` when the unproven terms do not cancel.
+pub(in crate::construction) fn exact_range_distance(
+    start: &Expression,
+    end: &Expression,
+    values: &ShapeEnvironment,
+) -> Option<i64> {
+    let mut conditions = Vec::new();
+    selection_conditions(start, &mut conditions);
+    selection_conditions(end, &mut conditions);
+    if conditions.len() > MAX_SELECTION_CONDITIONS {
+        return None;
+    }
+    // Each assignment of the selecting conditions is one subdomain on which
+    // both bounds are affine; the extent is proven when the distance is the
+    // same constant on every one of them.
+    let mut distance = None;
+    for assignment in 0..(1_u32 << conditions.len()) {
+        let choices = conditions
+            .iter()
+            .enumerate()
+            .map(|(ordinal, condition)| (*condition, assignment >> ordinal & 1 == 1))
+            .collect::<Vec<_>>();
+        let found = selected_distance(start, end, values, &choices)?;
+        if *distance.get_or_insert(found) != found {
+            return None;
+        }
+    }
+    distance
+}
+
+fn selected_distance(
+    start: &Expression,
+    end: &Expression,
+    values: &ShapeEnvironment,
+    choices: &[(&Expression, bool)],
+) -> Option<i64> {
+    let start = affine_integer(start, values, choices)?;
+    let end = affine_integer(end, values, choices)?;
+    end.plus(start.scaled(-1)?)?.exact()
+}
+
+/// The value `choices` assigns to `condition`.
+fn choice_of(condition: &Expression, choices: &[(&Expression, bool)]) -> Option<bool> {
+    choices
+        .iter()
+        .find(|(known, _)| rumoca_core::expressions_semantically_equal(known, condition))
+        .map(|(_, value)| *value)
+}
+
+/// The most distinct conditions of if-expressions a range distance is proven
+/// over (each doubles the cases).
+const MAX_SELECTION_CONDITIONS: usize = 6;
+
+/// The distinct conditions of the if-expressions in an Integer expression.
+fn selection_conditions<'a>(expression: &'a Expression, found: &mut Vec<&'a Expression>) {
+    match expression {
+        Expression::Unary { rhs, .. } => selection_conditions(rhs, found),
+        Expression::Binary { lhs, rhs, .. } => {
+            selection_conditions(lhs, found);
+            selection_conditions(rhs, found);
+        }
+        Expression::If {
+            branches,
+            else_branch,
+            ..
+        } => {
+            for (condition, arm) in branches {
+                let known = found
+                    .iter()
+                    .any(|known| rumoca_core::expressions_semantically_equal(known, condition));
+                if !known {
+                    found.push(condition);
+                }
+                selection_conditions(arm, found);
+            }
+            selection_conditions(else_branch, found);
+        }
+        _ => {}
+    }
 }

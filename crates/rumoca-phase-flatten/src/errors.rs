@@ -261,7 +261,7 @@ pub enum FlattenError {
         "expandable connector member `{member}` has {sources} sources; exactly one is required"
     )]
     #[diagnostic(
-        code(rumoca::flatten::EF033),
+        code(rumoca::flatten::EF037),
         help(
             "MLS §9.1.3 with §9.3: an augmented member is an ordinary signal, so exactly one connection may drive it"
         )
@@ -528,7 +528,7 @@ pub enum FlattenError {
     /// is outside the actual array. This code never reports an unsupported fold.
     #[error("constant evaluation proves array index out of bounds: index {index}, size {size}")]
     #[diagnostic(
-        code(rumoca::flatten::EF036),
+        code(rumoca::flatten::EF038),
         help("the declared binding accesses outside the supplied array")
     )]
     ConstantIndexOutOfBounds {
@@ -537,12 +537,33 @@ pub enum FlattenError {
         #[label("out-of-bounds access during pure constant evaluation")]
         span: Span,
     },
+
+    /// A stateful foreign entry point is reached where the order of its
+    /// library-state accesses is unspecified (SPEC_0040 FLAT-C05).
+    #[error("unordered foreign library state: {description}")]
+    #[diagnostic(
+        code(rumoca::flatten::EF036),
+        help(
+            "MLS 3.7 §12.3 allows an impure function only where its calls are ordered; library state is threaded only through one algorithm section and one parameter binding"
+        )
+    )]
+    UnorderedForeignState {
+        description: String,
+        #[label("unordered library-state access")]
+        span: Span,
+    },
 }
 
 impl FlattenError {
     error_constructor!(
         invalid_derivative_annotation,
         InvalidDerivativeAnnotation { reason: String }
+    );
+    error_constructor!(
+        unordered_foreign_state,
+        UnorderedForeignState {
+            description: String
+        }
     );
     /// Create a StructuralAssertionFailed error.
     pub fn structural_assertion_failed(message: impl Into<String>, span: Span) -> Self {
@@ -883,6 +904,7 @@ impl PhaseError for FlattenError {
             | Self::NonUniformParameterFixed { span, .. }
             | Self::ConflictingExposedConstant { span, .. }
             | Self::MultipleFunctionBodies { span, .. }
+            | Self::UnorderedForeignState { span, .. }
             | Self::UnsupportedExpandableConnectorAugmentation { span, .. }
             | Self::ExpandableMemberSourceCount { span, .. }
             | Self::CyclicConstantBinding { span, .. }

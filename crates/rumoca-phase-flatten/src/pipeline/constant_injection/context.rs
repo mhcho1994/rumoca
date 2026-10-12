@@ -19,6 +19,8 @@ impl ConstantOccurrenceId {
 /// Context for flattening.
 pub(crate) struct Context {
     pub(crate) declared_dimensions: std::sync::Arc<rumoca_eval_ast::eval::DeclaredDimensions>,
+    /// Constant declarations by declaration identity, indexed on first use.
+    pub(crate) declared_constants: std::cell::OnceCell<rumoca_ir_ast::DeclaredConstants>,
     /// Parameter values for evaluating for-equation ranges (name -> integer value).
     pub parameter_values: rustc_hash::FxHashMap<String, i64>,
     /// Real parameter values for evaluating function arguments (name -> real value).
@@ -27,6 +29,13 @@ pub(crate) struct Context {
     pub boolean_parameter_values: rustc_hash::FxHashMap<String, bool>,
     /// Enumeration parameter values (name -> qualified enum literal string).
     pub enum_parameter_values: rustc_hash::FxHashMap<String, String>,
+    /// String and array parameter values (MLS §10.1): a dimension or a
+    /// function result shape reads them whole or by element.
+    pub(crate) aggregate_parameter_values:
+        rustc_hash::FxHashMap<String, rumoca_eval_flat::constant::Value>,
+    /// The directory of each loaded top-level package, against which a
+    /// foreign file reader resolves MLS §13.5 URIs (SPEC_0040 FLAT-C06).
+    pub(crate) resource_roots: rumoca_eval_flat::translation_reads::ResourceRoots,
     /// General constant expression values (scalars/arrays) extracted from
     /// class/package constants and redeclare/extends modifications.
     pub constant_values: rustc_hash::FxHashMap<String, rumoca_core::Expression>,
@@ -72,6 +81,8 @@ pub(crate) struct Context {
     /// Root class occurrence, which is its own semantic owner because it has no
     /// containing component occurrence.
     pub(crate) root_class_instance: Option<rumoca_core::InstanceId>,
+    /// Direct lexical owner of each resolved declaration.
+    pub(crate) declaration_owners: rustc_hash::FxHashMap<rumoca_core::DefId, rumoca_core::DefId>,
     /// Qualified declaration names keyed by semantic target DefId.
     pub target_def_names: rustc_hash::FxHashMap<rumoca_core::DefId, String>,
     /// Exact Resolve identity of the predefined `String` declaration.
@@ -154,11 +165,14 @@ pub(crate) struct Context {
     /// Mirror of `FlattenOptions::materialize_structured_families`. When false, a
     /// regular elementwise for-family materializes only its corner cells (base + one
     /// neighbor per binder) with full bodies; interior cells get a cheap placeholder
-    /// body and the family is marked `interiors_materialized = false` so downstream
-    /// phases reconstruct interior incidence/strides from the corners.
+    /// body and the family records which owner reads its template instead
+    /// (`flat::FamilyInteriors`).
     pub materialize_structured_families: bool,
     /// Checked occurrence-scoped evidence for parameter-variability families. Its
     /// private representation prevents equation lowering from manufacturing a proof
     /// from display names.
     pub param_variability_families: crate::param_variability::ParameterVariabilityFamilies,
+    /// Checked occurrence-scoped evidence for continuous algebraic family
+    /// targets (SPEC_0043 §6c).
+    pub continuous_algebraic_targets: crate::continuous_algebraic::ContinuousAlgebraicTargets,
 }

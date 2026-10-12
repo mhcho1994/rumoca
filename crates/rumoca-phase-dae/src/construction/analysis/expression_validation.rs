@@ -157,6 +157,28 @@ pub(super) fn validate_specialized_expression(
     .validate(expression)
 }
 
+/// Validate an expression a model algorithm statement evaluates: a field of an
+/// array-of-records element reads the coordinate or member projection its
+/// record-array field plan proves, exactly as in a model equation.
+pub(super) fn validate_model_algorithm_expression(
+    expression: &Expression,
+    roles: &HashMap<VarName, PlannedRole>,
+    states: &HashSet<VarName>,
+    model_values: &ShapeEnvironment,
+) -> Result<(), ToDaeError> {
+    let binders = HashSet::new();
+    ExpressionValidator {
+        roles,
+        states,
+        binders: &binders,
+        record_array_fields: model_values.record_array_fields(),
+        enumeration_literals: None,
+        values: None,
+        when_clause: PreContext::Continuous,
+    }
+    .validate(expression)
+}
+
 /// Validate a model-algorithm range with the same translation-time value proof
 /// used by model equation ranges.
 ///
@@ -459,13 +481,9 @@ impl<'a> ExpressionValidator<'a> {
 
 fn unsupported_record_field(expression: &Expression, span: Span) -> ToDaeError {
     let detail = match expression {
-        Expression::FieldAccess {
-            field,
-            field_def_id,
-            ..
-        } => format!(
-            "record-field `{field}` declaration {} requires its typed semantic owner",
-            field_def_id.index()
+        Expression::FieldAccess { field, .. } => format!(
+            "record field `{field}` read here selects no record-array coordinate, member \
+             projection or declared record field of its base"
         ),
         _ => "record-field lowering requires its typed semantic owner".to_string(),
     };
@@ -932,9 +950,25 @@ impl ExpressionValidator<'_> {
                         *span,
                     ));
                 }
-                Subscript::Expr { expr, .. } => self.validate(expr)?,
+                Subscript::Expr { expr, .. } => self.validate_subscript_expression(expr)?,
                 Subscript::Index { .. } | Subscript::Colon { .. } => {}
             }
+        }
+        Ok(())
+    }
+
+    fn validate_subscript_expression(self, expression: &Expression) -> Result<(), ToDaeError> {
+        let eligible = self
+            .values
+            .is_some_and(|values| super::super::affine_slices::plan(expression, values).is_some());
+        if !eligible {
+            return self.validate(expression);
+        }
+        // The shared proof validates complete original Integer prefixes;
+        // normal validation still checks every operand's provenance and
+        // lexical/reference ownership in the original source order.
+        for operand in expression_children(expression) {
+            self.validate(operand)?;
         }
         Ok(())
     }
@@ -1017,9 +1051,25 @@ pub(super) fn require_integer_literal(
     {
         return Ok(*value);
     }
+    let mut reads = Vec::new();
+    expression.collect_var_refs(&mut reads);
+    let reads = if reads.is_empty() {
+        "no named value".to_string()
+    } else {
+        reads
+            .iter()
+            .map(|name| format!("`{}`", name.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     Err(ToDaeError::unsupported_flat(
         owner,
-        "the canonical compact range requires an integer literal bound",
+        format!(
+            "the canonical compact range requires an integer literal bound or one settled at \
+             translation time; this bound reads {reads}; a run-time value or a tunable \
+             parameter stays settable and is never folded, so declare the parameter final \
+             or Evaluate = true"
+        ),
         expression_span(expression)?,
     ))
 }
@@ -1049,6 +1099,39 @@ mod tests {
             subscripts: Vec::new(),
             span,
         }
+    }
+
+    #[test]
+    fn a_refused_range_bound_names_the_values_it_reads_and_its_function() {
+        let mut sources = SourceMap::new();
+        let source = sources.add("range.mo", "1:problem.nodeCount");
+        let span = Span::from_offsets(source, 2, 19);
+        let bound = Expression::VarRef {
+            name: rumoca_core::Reference::generated("problem.nodeCount"),
+            subscripts: Vec::new(),
+            span,
+        };
+        let error = require_integer_literal(&bound, "range end")
+            .expect_err("a run-time value is no literal bound")
+            .within_function("Pkg.Correct");
+        let ToDaeError::UnsupportedFlatSemantics {
+            feature,
+            detail,
+            span: reported,
+        } = error
+        else {
+            panic!("a refused bound is an unsupported semantic owner");
+        };
+        assert_eq!(feature, "range end");
+        assert!(
+            detail.starts_with("in function `Pkg.Correct`: "),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("this bound reads `problem.nodeCount`"),
+            "{detail}"
+        );
+        assert_eq!(reported, span);
     }
 
     #[test]

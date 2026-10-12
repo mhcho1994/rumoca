@@ -243,6 +243,7 @@ fn project_statements(
                     domain: fold.domain,
                     targets: fold.targets.clone(),
                     iteration_locals: fold.iteration_locals.clone(),
+                    continuation: fold.continuation,
                     statements: project_statements(function, folds, statements),
                     begin_provenance: fold.provenance,
                     finish_provenance: *provenance,
@@ -456,6 +457,7 @@ enum ReplayOp<'wire> {
     AssignGroup(AssignmentGroupInput<'wire>),
     Assert(AssertionInput),
     BeginFold(FoldInput<'wire>),
+    Continue(ContinuationInput),
     EndFold(FoldEnd),
 }
 
@@ -485,6 +487,13 @@ struct FoldInput<'wire> {
     domain: u32,
     targets: &'wire [u32],
     iteration_locals: &'wire [u32],
+    continuation: Option<u32>,
+    provenance: DaeProvenance,
+}
+
+#[derive(Clone, Copy)]
+struct ContinuationInput {
+    condition: u32,
     provenance: DaeProvenance,
 }
 
@@ -556,6 +565,7 @@ fn flatten_operations(
                 domain,
                 targets,
                 iteration_locals,
+                continuation,
                 statements,
                 begin_provenance,
                 finish_provenance,
@@ -565,6 +575,7 @@ fn flatten_operations(
                     domain: *domain,
                     targets,
                     iteration_locals,
+                    continuation: *continuation,
                     provenance: *begin_provenance,
                 },
                 statements,
@@ -582,6 +593,12 @@ fn push_fold_operations<'wire>(
     finish: DaeProvenance,
 ) -> Result<(), DaeConstructionError> {
     operations.push(ReplayOp::BeginFold(begin));
+    if let Some(condition) = begin.continuation {
+        operations.push(ReplayOp::Continue(ContinuationInput {
+            condition,
+            provenance: begin.provenance,
+        }));
+    }
     for statement in statements {
         match statement {
             FunctionStatementInput::Assignment { .. } => {
@@ -603,6 +620,7 @@ fn push_fold_operations<'wire>(
                 domain,
                 targets,
                 iteration_locals,
+                continuation,
                 statements,
                 begin_provenance,
                 finish_provenance,
@@ -612,6 +630,7 @@ fn push_fold_operations<'wire>(
                     domain: *domain,
                     targets,
                     iteration_locals,
+                    continuation: *continuation,
                     provenance: *begin_provenance,
                 },
                 statements,
@@ -681,8 +700,12 @@ fn replay_function_quotient<'dae>(
     let lhs = mapped(&ids.expressions, lhs, "expression", provenance)?;
     let rhs = mapped(&ids.expressions, rhs, "expression", provenance)?;
     let state = function_state_mut(functions, function_raw, provenance)?;
-    let Some(ReplayCapability::Body(body)) = state.capability.as_ref() else {
-        return Err(malformed("expressions.nodes.function_quotient_owner"));
+    let body = match state.capability.as_ref() {
+        Some(ReplayCapability::Body(body)) => body,
+        Some(ReplayCapability::Fold(loop_body)) => loop_body.body(),
+        Some(ReplayCapability::External(_)) | None => {
+            return Err(malformed("expressions.nodes.function_quotient_owner"));
+        }
     };
     let quotient = dae.function_runtime_quotient(body, builtin, [lhs, rhs], provenance)?;
     if quotient.index() as usize != ids.expressions.len() {
@@ -832,6 +855,12 @@ fn apply_next_ready_operation<'dae>(
             let function = checked_u32(state.function_index, "function", input.provenance)?;
             enter_loop(wire, dae, ids, state, function, input)?;
         }
+        ReplayOp::Continue(input) => {
+            if input.condition as usize >= ids.expressions.len() {
+                return Ok(false);
+            }
+            apply_continuation(dae, ids, state, input)?;
+        }
         ReplayOp::EndFold(input) => {
             if input.target_count != 0 {
                 return Ok(false);
@@ -852,6 +881,21 @@ fn apply_ready_operations<'dae>(
 ) -> Result<(), DaeConstructionError> {
     while apply_next_ready_operation(wire, dae, ids, state)? {}
     Ok(())
+}
+
+fn apply_continuation<'dae>(
+    dae: &mut DaeConstruction<'dae>,
+    ids: &WireIds<'dae>,
+    state: &mut FunctionReplay<'_, '_, 'dae>,
+    input: ContinuationInput,
+) -> Result<(), DaeConstructionError> {
+    let condition = mapped_expression(ids, input.condition, input.provenance)?;
+    match state.capability.as_mut() {
+        Some(ReplayCapability::Fold(loop_body)) => dae.functions(|functions| {
+            functions.continue_loop_while(loop_body, condition, input.provenance)
+        }),
+        _ => Err(malformed("functions.statements.continuation")),
+    }
 }
 
 fn apply_assertion<'dae>(

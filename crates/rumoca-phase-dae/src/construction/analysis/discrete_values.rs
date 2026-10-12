@@ -89,13 +89,14 @@ fn require_target_occurrence(
 
 pub(super) fn analyze_discrete_value_topology(
     flat: &flat::Model,
+    templates: &TemplateSelection,
     roles: &HashMap<VarName, PlannedRole>,
-    connection_ranks: &HashMap<VarName, usize>,
+    connection_ranks: &DiscreteConnectionRanks,
     aggregate_connections: &AggregateDiscreteConnections,
     record_equations: &HashMap<usize, RecordEquationPlan>,
 ) -> Result<DiscreteValueTopologyPlan, ToDaeError> {
     let mut owners = Vec::new();
-    let reads = LazyModelReads::new(flat);
+    let reads = LazyModelReads::new(flat, templates);
     let mut observed = HashSet::new();
     collect_binding_owners(flat, roles, &reads, &mut observed, &mut owners)?;
     collect_record_equation_owners(flat, roles, record_equations, &mut owners);
@@ -200,7 +201,7 @@ fn collect_binding_owners(
 fn collect_equation_owners(
     flat: &flat::Model,
     roles: &HashMap<VarName, PlannedRole>,
-    connection_ranks: &HashMap<VarName, usize>,
+    connection_ranks: &DiscreteConnectionRanks,
     aggregate_connections: &AggregateDiscreteConnections,
     reads: &LazyModelReads<'_>,
     observed: &mut HashSet<VarName>,
@@ -220,7 +221,6 @@ fn collect_equation_owners(
             EquationPartition::MultiOutput { receivers, call } => {
                 let targets = receivers
                     .iter()
-                    .copied()
                     .filter(|receiver| {
                         matches!(roles.get(*receiver), Some(PlannedRole::DiscreteValue))
                     })
@@ -276,16 +276,16 @@ fn collect_equation_owners(
 fn push_multi_output_owner(
     equation: &flat::Equation,
     call: &Expression,
-    receivers: &[&VarName],
+    receivers: &[VarName],
     roles: &HashMap<VarName, PlannedRole>,
     owners: &mut Vec<SourceOwner>,
 ) {
     let dependencies = current_discrete_dependencies(call, roles);
     let targets = receivers
         .iter()
-        .filter(|receiver| matches!(roles.get(**receiver), Some(PlannedRole::DiscreteValue)))
+        .filter(|receiver| matches!(roles.get(*receiver), Some(PlannedRole::DiscreteValue)))
         .map(|receiver| SourceTarget {
-            name: (*receiver).clone(),
+            name: receiver.clone(),
             dependencies: dependencies.clone(),
             span: equation.span,
             ordered_scalar_self_dependencies: false,

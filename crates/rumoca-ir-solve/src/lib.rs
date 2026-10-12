@@ -11,9 +11,11 @@ mod certificate;
 #[cfg(test)]
 mod certificate_tests;
 mod chart_delta;
+mod compact_pattern;
 #[cfg(test)]
 mod compute_block_tests;
 mod continuous_wire;
+mod event_writes;
 pub mod execution;
 mod feature_query;
 pub mod fmi;
@@ -21,13 +23,16 @@ mod initialization;
 mod layout;
 mod linear_op;
 mod model;
+mod parameter_classification;
 mod parameter_reads;
 mod refresh;
 mod root_search;
 mod scalar_program_outputs;
 #[cfg(test)]
 mod scalar_program_tests;
+mod sensitivity;
 mod shape_error;
+mod static_parameters;
 mod tangent_lanes;
 mod typed_program;
 mod variable_bounds;
@@ -47,6 +52,8 @@ pub use certificate::{
     derive_runtime_assignment_roles,
 };
 pub use chart_delta::{ChartDeltaError, ChartPlanDelta};
+pub use compact_pattern::CompactPatternLayout;
+pub use event_writes::{EventWrites, event_writes};
 pub use feature_query::{
     SolveEventClass, solve_event_class, solve_has_clocks, solve_has_events,
     solve_has_initialization, solve_has_runtime_events,
@@ -58,25 +65,33 @@ pub use layout::{
 };
 pub use linear_op::{
     AssignmentProgram, CappedValue, SHARED_VALUE_REGISTER_CAP, SharedValueError,
-    SharedValueSegment, SharedValueSegments, share_program_values, shared_value_proof_failures,
+    SharedValueSegment, SharedValueSegments, real_extremum, share_program_values,
+    shared_value_proof_failures,
 };
 pub use linear_op::{
-    BinaryOp, BlockResidualSplit, BlockResidualSplitError, CompareOp, FoldInitialSource,
-    FoldTensorNode, FoldTensorUpdate, FoldTensorUpdateStore, FunctionConditionalArmProgram,
-    FunctionConditionalOwnerId, FunctionConditionalProgram, FunctionFoldProgram, LinearOp,
-    MAX_TENSOR_LANES, MatrixProductShape, RandomGenerator, Reg, ScalarProgramRegisterError,
-    ScalarProgramRegisterFlow, StridedOperand, TargetAssignmentShape, TensorConcatenateSource,
-    TensorIndex, TensorInputKind, TensorSubscript, TensorUpdateSubscript, UnaryOp,
+    BinaryOp, BlockResidualSplit, BlockResidualSplitError, CompareOp, FoldContinuation,
+    FoldInitialSource, FoldTensorNode, FoldTensorUpdate, FoldTensorUpdateStore,
+    FunctionConditionalArmProgram, FunctionConditionalOwnerId, FunctionConditionalProgram,
+    FunctionFoldProgram, LinearOp, MAX_TENSOR_LANES, MatrixProductShape, RandomGenerator, Reg,
+    ScalarProgramRegisterError, ScalarProgramRegisterFlow, StridedOperand, TargetAssignmentShape,
+    TensorConcatenateSource, TensorIndex, TensorInputKind, TensorUpdateSubscript, UnaryOp,
     prune_dead_constants, resolve_indexed_slot,
 };
 pub use model::*;
-pub use parameter_reads::read_parameter_slots;
+pub use parameter_classification::{ExcludedParameter, ExclusionReason, ParameterClassification};
+pub use parameter_reads::{read_continuous_parameter_slots, read_parameter_slots};
 pub use refresh::*;
 pub use root_search::{RootSearchPlan, RootSearchRole, TimeRootSign, root_neighborhoods};
+pub use sensitivity::{
+    AdmittedRelation, CheckpointPolicy, InitialSensitivityPlan, RelationOperand, SensitivityLayout,
+    SensitivityParameter, SensitivityProblem, SensitivityRefusal, SettlePolicy, SwitchingValueNote,
+    updates_read_algebraics,
+};
 pub use shape_error::{AffineTensorNodeKind, SolveProblemShapeContractError};
+pub use static_parameters::ContinuousStaticParameters;
 pub use tangent_lanes::{
-    ColoredLaneCall, ColoredTangentPlan, TangentLaneError, TangentLaneProgram, TangentRowSource,
-    TornTangentPlan, TornTangentResidual, TornTangentStep, tensor_lanes,
+    ColoredLaneCall, ColoredTangentPlan, TangentLaneCatalog, TangentLaneError, TangentLaneProgram,
+    TangentRowSource, TornTangentPlan, TornTangentResidual, TornTangentStep, tensor_lanes,
 };
 pub use typed_program::*;
 pub use visitor::{
@@ -86,7 +101,7 @@ pub use visitor::{
 
 pub use initialization::{InitializationSolveSystem, InitializationSystemInput};
 
-pub const SOLVE_SCHEMA_VERSION: u16 = 71;
+pub const SOLVE_SCHEMA_VERSION: u16 = 74;
 
 pub fn source_span_from_offsets(source: u64, start: usize, end: usize) -> Span {
     Span::from_offsets(SourceId(source), start, end)
@@ -350,6 +365,13 @@ impl ScalarProgramBlock {
     }
 
     /// Exact register capacity proved when this program entered the block.
+    /// Whether both blocks are clones of one construction, sharing every
+    /// program.
+    #[must_use]
+    pub fn shares_programs_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+    }
+
     pub fn program_register_count(&self, index: usize) -> Option<usize> {
         self.data.program_register_counts.get(index).copied()
     }
@@ -399,6 +421,12 @@ impl ScalarProgramBlock {
     /// `output_indices` may be sparse, so this first maps the output slot to
     /// its stored-output ordinal and then finds the owning program.
     pub fn program_index_for_output(&self, output: usize) -> Option<usize> {
+        self.output_position(output).map(|(program, _)| program)
+    }
+
+    /// The program that produces dense output slot `output` and the position
+    /// of that output among the program's own stored outputs.
+    pub fn output_position(&self, output: usize) -> Option<(usize, usize)> {
         let mut remaining = self
             .data
             .output_indices
@@ -407,7 +435,7 @@ impl ScalarProgramBlock {
         for (idx, program) in self.data.programs.iter().enumerate() {
             let count = Self::program_output_count(program);
             if remaining < count {
-                return Some(idx);
+                return Some((idx, remaining));
             }
             remaining -= count;
         }
@@ -622,7 +650,7 @@ fn validate_function_conditional_owners(
                 LinearOp::FunctionFold { program, .. }
                 | LinearOp::GuardedFunctionFold { program, .. }
                 | LinearOp::StoreOutputFunctionFold { program, .. } => {
-                    visit(&program.update, owners)
+                    program.regions().find_map(|region| visit(region, owners))
                 }
                 _ => None,
             };
@@ -686,6 +714,8 @@ fn validate_function_conditional_owners(
     Ok(())
 }
 
+mod index_intervals;
+pub use index_intervals::{IndexIntervals, SettledIntervals};
 mod structural_pattern;
 pub use structural_pattern::{
     ColumnColoring, PatternDerivation, PatternProvenance, StructuralPattern,
@@ -797,6 +827,8 @@ impl<'de> Deserialize<'de> for SolveProblem {
             .rebuild_exact_assignment_programs(&problem.continuous.implicit_rhs)
             .map_err(serde::de::Error::custom)?;
         problem.validate().map_err(serde::de::Error::custom)?;
+        // The native value schedule is issued from the checked canonical rows.
+        issue_native_assignment_schedule(&mut problem);
         Ok(problem)
     }
 }

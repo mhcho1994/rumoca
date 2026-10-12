@@ -53,12 +53,30 @@ pub fn build_identity() -> Option<&'static str> {
     BUILD_IDENTITY
 }
 
+/// The short parents of the built commit when it is a merge, first parent
+/// first; empty for an ordinary commit and `None` when git cannot say.
+///
+/// A pull-request build compiles a synthetic merge of the request head into
+/// its base. [`build_identity`] is that merge commit, which exists only on the
+/// hosting service; the parents name the head and base it combines, so a
+/// report can state both what was built and which head it came from.
+#[must_use]
+pub fn build_merge_parents() -> Option<&'static [&'static str]> {
+    BUILD_MERGE_PARENTS
+}
+
+#[cfg(test)]
+mod build_identity_tests;
+
 pub mod dependency_graph;
 mod effective_type;
+mod enumeration_declaration;
 mod expression_rewriter;
 mod expression_visitor;
+mod generated_function_locals;
 mod ir_primitives;
 mod modelica_builtins;
+pub mod native_body;
 mod source_map;
 mod statement_rewriter;
 mod structured_domain;
@@ -71,16 +89,22 @@ pub use clock_lattice::{
 };
 pub use dependency_graph::{DependencyGraphError, DependencyScc, dependency_first_sccs};
 pub use effective_type::{EffectiveType, EffectiveTypeError};
+pub use enumeration_declaration::EnumerationDeclaration;
 pub use expression_rewriter::{ExpressionRewriter, FallibleExpressionRewriter};
 pub use expression_visitor::{ExpressionScope, ExpressionVisitor, FallibleExpressionVisitor};
+pub use generated_function_locals::{
+    GeneratedBooleanLocal, GeneratedFunctionLocalCatalog, GeneratedFunctionLocalKey,
+    GeneratedFunctionLocals, GeneratedLocalError,
+};
 pub use ir_primitives::*;
 pub use modelica_builtins::*;
 pub use source_map::{SourceMap, placeholder_source_name, source_id_for_name};
 pub use statement_rewriter::{FallibleStatementRewriter, StatementRewriter};
 pub use structured_domain::{
-    AffineForm, ArrayAccess, ComprehensionScalarView, ComprehensionTemplate, RegularForFamily,
+    AffineForm, ArrayAccess, ComprehensionScalarView, ComprehensionTemplate, IndexAxis, IndexBox,
+    IndexUnion, IntegerInterval, Progression, RealInterval, RegularForFamily, SetAnswer,
     StructuredIndexBinder, StructuredIndexDomain, StructuredIndexDomainError, checked_product,
-    flatten_coordinates, row_major_coordinates, row_major_strides,
+    flatten_coordinates, image, row_major_coordinates, row_major_strides, solve_point,
 };
 pub use subscript::Subscript;
 

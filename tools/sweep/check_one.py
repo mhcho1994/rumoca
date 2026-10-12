@@ -59,7 +59,8 @@ def compile_model(path: str, model: str, artifact: Path, keep_chains: bool):
     command = [RUMOCA, "compile", path, "--model", model,
                "--emit-bitcode", str(artifact)]
     for root in ROOTS:
-        command += ["--source-root", root]
+        if Path(root).is_dir():
+            command += ["--source-root", root]
     if keep_chains:
         # Without this a derived parameter binding is folded to its value, so
         # a finding names `d` (which a user cannot set) rather than `k` (which

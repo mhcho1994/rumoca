@@ -164,6 +164,24 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'ALG-019'
+category = 'Algorithm'
+name = 'If-statement branch selection'
+mls_ref = '§11.2.6'
+requirement = 'One or zero of the bodies of the if-, elseif- and else-clauses is selected, by evaluating the conditions sequentially until a condition evaluates to true'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'ALG-020'
+category = 'Algorithm'
+name = 'For range with runtime bounds'
+mls_ref = '§11.2.2'
+requirement = 'The expression of a for-loop shall be a vector expression evaluated once before entering the loop'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'ANN-001'
 category = 'Annotation'
 name = 'Forbidden constructs'
@@ -709,6 +727,24 @@ category = 'Array'
 name = 'der and pre element-wise shape'
 mls_ref = '§3.7.4, §3.7.5'
 requirement = 'der(expr) and pre(y) of an array apply to every element, so the result has the operand shape; an equation between zero-sized operands has no scalar equations'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'ARR-045'
+category = 'Array'
+name = 'zeros/ones are Integer arrays'
+mls_ref = '§10.3.3'
+requirement = 'zeros(n1, ...) and ones(n1, ...) return Integer arrays, which a Real context converts'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'ARR-046'
+category = 'Array'
+name = 'size of an array expression'
+mls_ref = '§10.3.1'
+requirement = 'size(A, i) returns the size of dimension i of the array expression A, which its type fixes, so A is not evaluated for it'
 status = 'Implemented'
 tier = 1
 
@@ -1851,7 +1887,16 @@ id = 'EQN-040'
 category = 'Equation'
 name = 'Initial discrete definitions'
 mls_ref = '§8.6'
-requirement = 'An initial equation pre(m) = e or m = e determines the initialization value of discrete m from the initialization solution: for a discrete-valued m, e may read parameters, time, inputs, states, and algebraics, and is applied after the projection that settles them once its read cone is proven free of discrete values'
+requirement = 'An initial equation pre(m) = e or m = e determines the initialization value of discrete m from the initialization solution: e may read parameters, time, inputs, states, and algebraics, and is applied after the projection that settles them once its read cone is proven free of discrete values not settled before the projection'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'EQN-041'
+category = 'Equation'
+name = 'Mixed initialization system'
+mls_ref = '§8.6'
+requirement = 'An initialization row that reads a discrete determined from continuous values is solved with that discrete held, alternating the projection with the discrete assignments until the discrete values stop changing; an iteration that does not settle is refused'
 status = 'Implemented'
 tier = 1
 
@@ -2589,6 +2634,51 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'FUNC-041'
+category = 'Function'
+name = 'Element definedness through comprehensions'
+mls_ref = '§12.4.4, §10.4.2'
+requirement = 'An element-written function local is readable inside a comprehension exactly when every element the iterator values name is defined'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'FUNC-042'
+category = 'Function'
+name = 'Text in pure-call interfaces'
+mls_ref = '§4.9.4, §12.4'
+requirement = 'A String value carries no numeric value; a call passing a record with a String field evaluates its numeric fields, and numeric use of text is rejected'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'FUNC-043'
+category = 'Function'
+name = 'Recursive functions'
+mls_ref = '§12.2'
+requirement = 'A function can be recursive; each call evaluates in its own frame, bounded by the execution profile recursion depth limit'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'FUNC-044'
+category = 'Function'
+name = 'Partial-derivative functions'
+mls_ref = '§12.7.2'
+requirement = 'f = der(g, u1, ...) defines the partial derivative of the function g with respect to its scalar Real inputs ui, applied in increasing order of i'
+status = 'NotImplemented'
+tier = 1
+
+[[contracts]]
+id = 'FUNC-045'
+category = 'Function'
+name = 'Nested record field assignment'
+mls_ref = '§11.2.1, §12.4.4'
+requirement = 'A record result or local may be defined through nested field paths; each record-typed field is assembled from writes to its own fields or assigned whole'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'INST-001'
 category = 'Instantiation'
 name = 'Modification context'
@@ -3111,6 +3201,15 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'INST-059'
+category = 'Instantiation'
+name = 'Predefined function names'
+mls_ref = '§5.3.1, §5.3.3'
+requirement = 'A predefined function name is looked up like any other name: an import or enclosing declaration of it shadows the predefined function, and a leading-dot name is looked up in the global scope alone'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'LEX-001'
 category = 'Lexical'
 name = 'ASCII identifiers'
@@ -3327,6 +3426,15 @@ status = 'Implemented'
 tier = 1
 
 [[contracts]]
+id = 'OPREC-012'
+category = 'OperatorRecord'
+name = 'Operator resolution'
+mls_ref = '§14.2-14.5'
+requirement = 'An operator on an operator-record operand denotes a call of the matching operator function'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
 id = 'PKG-001'
 category = 'Package'
 name = 'Unique import names'
@@ -3431,6 +3539,15 @@ category = 'Package'
 name = 'Import not modifiable'
 mls_ref = '§13.2.2'
 requirement = 'Import-clauses are not named elements and cannot be modified or redeclared'
+status = 'Implemented'
+tier = 1
+
+[[contracts]]
+id = 'PKG-013'
+category = 'Package'
+name = 'Record constant members through packages'
+mls_ref = '§7.1, §7.3, §12.6'
+requirement = 'A member of a record constant exposed by a selected package takes the field value of the constant binding'
 status = 'Implemented'
 tier = 1
 

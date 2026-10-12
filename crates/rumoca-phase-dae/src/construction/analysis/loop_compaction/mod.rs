@@ -1,6 +1,11 @@
+#[cfg(test)]
+mod accumulator_order_tests;
 mod accumulator_reductions;
+mod affine_slice_ranges;
 mod bounded_while;
 mod dependent_domains;
+#[cfg(test)]
+mod finite_counter_tests;
 /// Dataflow liveness over the function statement tree, and the store-deletion
 /// evidence built from it.
 ///
@@ -28,7 +33,7 @@ mod loop_local_substitution;
 /// written and once as [`compact_function_loops`] rewrites it, and requires the
 /// two executions to agree on the function's outputs.
 #[cfg(test)]
-mod preservation_corpus;
+pub(super) mod preservation_corpus;
 #[cfg(test)]
 mod preservation_differential_tests;
 #[cfg(test)]
@@ -38,7 +43,8 @@ mod preservation_programs;
 #[cfg(test)]
 mod preservation_values;
 
-use accumulator_reductions::compact_accumulator_loops;
+use accumulator_reductions::{compact_accumulator_loops, ordered_accumulators};
+use affine_slice_ranges::AffineSliceRanges;
 use dependent_domains::{integer_range, rectangularize_dependent_loops};
 use loop_local_substitution::{
     LocalSubstitution, compact_perfect_inner_element_loops, expression_dependencies_change,
@@ -47,9 +53,9 @@ use loop_local_substitution::{
 };
 pub(super) use loop_local_substitution::{statements_partially_assign_name, statements_read_name};
 
+use super::guard_facts::{GuardFacts, ValueKinds};
 use super::*;
 use rumoca_core::{ExpressionRewriter, Reference, StatementRewriter, Subscript};
-use std::collections::BTreeMap;
 
 /// Normalize function loops without materializing their scalar iterations.
 ///
@@ -63,7 +69,6 @@ pub(super) fn compact_function_loops(
     shapes: &ShapeEnvironment,
     function: &rumoca_core::Function,
     flat: &flat::Model,
-    has_certified_output_seeds: bool,
 ) -> Result<Vec<rumoca_core::Statement>, ToDaeError> {
     let output_names = function
         .outputs
@@ -100,7 +105,7 @@ pub(super) fn compact_function_loops(
         })
         .cloned()
         .collect::<HashSet<_>>();
-    let affine_slices = AffineSliceRanges.rewrite_statements(statements);
+    let affine_slices = AffineSliceRanges::new(shapes).rewrite_statements(statements);
     let settled = inline_settled_shape_integer_locals(
         &affine_slices,
         static_integers,
@@ -108,32 +113,33 @@ pub(super) fn compact_function_loops(
         function,
         flat,
     )?;
-    let settled =
-        bounded_while::bound_while_loops(&settled, shapes, &bounded_while::entry_values(function));
+    let kinds = ValueKinds::of(function, flat);
+    let settled = bounded_while::bound_while_loops(
+        &settled,
+        kinds.scope(shapes),
+        GuardFacts::function_entry(function, kinds.scope(shapes)),
+    );
     let mut bounded_shapes = shapes.clone();
     infer_function_integer_bounds(&settled, &mut bounded_shapes);
+    infer_declared_finite_counters(&settled, &mut bounded_shapes, function, flat);
     let settled = rectangularize_bounded_slice_assignments(&settled, &bounded_shapes);
     let settled = compact_exhaustive_loop_conditionals(&settled, false);
-    let compacted = compact_accumulator_loops(&settled, &bounded_shapes);
+    let compacted = compact_accumulator_loops(
+        &settled,
+        &bounded_shapes,
+        &ordered_accumulators(function, flat),
+    );
     let compacted =
         inline_dead_loop_scalar_locals(&compacted, &local_value_names, &branch_local_names);
     let compacted = inline_loop_local_prefixes(&compacted, &local_value_names, &output_names);
     let compacted = distribute_partitioned_outer_loops(&compacted);
-    let defined_outputs = if has_certified_output_seeds {
-        output_names.clone()
-    } else {
-        HashSet::new()
-    };
-    let compacted =
-        push_invariant_conditions_to_fixpoint(compacted, &output_names, &defined_outputs);
     let compacted = compact_perfect_inner_element_loops(&compacted, &bounded_shapes);
     let compacted = BoundedReductionComprehensions {
         shapes: &bounded_shapes,
     }
     .rewrite_statements(&compacted);
-    let compacted = rectangularize_dependent_loops(&compacted, static_integers, &bounded_shapes)?;
     let compacted =
-        push_invariant_conditions_to_fixpoint(compacted, &output_names, &defined_outputs);
+        rectangularize_dependent_loops(&compacted, static_integers, &bounded_shapes, &kinds)?;
     let Some(span) = first_dependent_loop_range(&compacted, static_integers, &bounded_shapes)?
     else {
         return Ok(compacted);
@@ -141,216 +147,39 @@ pub(super) fn compact_function_loops(
     Err(ToDaeError::unsupported_flat(
         "function loop domain",
         format!(
-            "`{}` requires a compact dependent-domain transition; scalar statement expansion is prohibited",
+            "`{}` requires a compact dependent-domain transition; scalar statement expansion is prohibited. The loop range {UNBOUNDED_LOOP_DOMAIN}",
             function.name
         ),
         span,
     ))
 }
 
-struct AffineSliceRanges;
+/// Why a function loop has no translation-time domain, and how to give it one.
+pub(super) const UNBOUNDED_LOOP_DOMAIN: &str = "reads a value no translation-time constant or guard bounds (a run-time value, or a tunable parameter passed to the function, which stays settable, MLS 11.2.2); bound it with a guard, or declare the parameter final or Evaluate = true";
 
-impl ExpressionRewriter for AffineSliceRanges {
-    fn rewrite_subscript(&mut self, subscript: &Subscript) -> Subscript {
-        let Subscript::Expr { expr, span } = subscript else {
-            return subscript.clone();
-        };
-        let rewritten = self.rewrite_expression(expr);
-        affine_slice_subscript(&rewritten, *span).unwrap_or(Subscript::Expr {
-            expr: Box::new(rewritten),
-            span: *span,
+fn infer_declared_finite_counters(
+    statements: &[rumoca_core::Statement],
+    shapes: &mut ShapeEnvironment,
+    function: &rumoca_core::Function,
+    flat: &flat::Model,
+) {
+    let counters = function
+        .locals
+        .iter()
+        .filter(|local| {
+            local.effective_type.dimensions().is_empty()
+                && effective_function_scalar_type(flat, local) == Some(dae::ScalarType::Integer)
         })
-    }
-}
-
-fn affine_slice_subscript(rewritten: &Expression, span: Span) -> Option<Subscript> {
-    let Expression::Range {
-        start,
-        step,
-        end,
-        span: range_span,
-    } = &rewritten
-    else {
-        return None;
-    };
-    let mut references = Vec::new();
-    start.collect_var_refs(&mut references);
-    end.collect_var_refs(&mut references);
-    if references.is_empty() {
-        return None;
-    }
-    let step_value = match step.as_deref() {
-        None => 1,
-        Some(Expression::Literal {
-            value: Literal::Integer(value),
-            ..
-        }) if *value != 0 => *value,
-        _ => {
-            return None;
-        }
-    };
-    let distance = affine_integer_difference(end, start)?;
-    if distance.checked_rem(step_value) != Some(0) {
-        return None;
-    }
-    let extent = distance
-        .checked_div(step_value)
-        .and_then(|value| value.checked_add(1))?;
-    if extent <= 0 {
-        return None;
-    }
-    let binder = rumoca_core::affine_slice_binder_name(range_span.start.0);
-    let binder_reference = || Expression::VarRef {
-        name: Reference::generated(&binder),
-        subscripts: Vec::new(),
-        span: *range_span,
-    };
-    let coordinate = Expression::Binary {
-        op: OpBinary::Add,
-        lhs: start.clone(),
-        rhs: Box::new(Expression::Binary {
-            op: OpBinary::Mul,
-            lhs: Box::new(Expression::Binary {
-                op: OpBinary::Sub,
-                lhs: Box::new(binder_reference()),
-                rhs: Box::new(Expression::Literal {
-                    value: Literal::Integer(1),
-                    span: *range_span,
-                }),
-                span: *range_span,
-            }),
-            rhs: Box::new(Expression::Literal {
-                value: Literal::Integer(step_value),
-                span: *range_span,
-            }),
-            span: *range_span,
-        }),
-        span: *range_span,
-    };
-    Some(Subscript::Expr {
-        expr: Box::new(Expression::ArrayComprehension {
-            expr: Box::new(coordinate),
-            indices: vec![rumoca_core::ComprehensionIndex {
-                name: binder,
-                range: integer_range(1, extent, *range_span),
-            }],
-            filter: None,
-            span: *range_span,
-        }),
-        span,
-    })
-}
-
-impl StatementRewriter for AffineSliceRanges {}
-
-#[derive(Default)]
-struct AffineInteger {
-    constant: i64,
-    terms: BTreeMap<VarName, i64>,
-}
-
-fn affine_integer_difference(end: &Expression, start: &Expression) -> Option<i64> {
-    let mut difference = affine_integer(end)?;
-    difference.add_scaled(affine_integer(start)?, -1)?;
-    difference
-        .terms
-        .values()
-        .all(|coefficient| *coefficient == 0)
-        .then_some(difference.constant)
-}
-
-fn affine_integer(expression: &Expression) -> Option<AffineInteger> {
-    match expression {
-        Expression::Literal {
-            value: Literal::Integer(value),
-            ..
-        } => Some(AffineInteger {
-            constant: *value,
-            terms: BTreeMap::new(),
-        }),
-        Expression::VarRef {
-            name, subscripts, ..
-        } if subscripts.is_empty() => Some(AffineInteger {
-            constant: 0,
-            terms: BTreeMap::from([(name.var_name().clone(), 1)]),
-        }),
-        Expression::Unary {
-            op: OpUnary::Plus,
-            rhs,
-            ..
-        } => affine_integer(rhs),
-        Expression::Unary {
-            op: OpUnary::Minus,
-            rhs,
-            ..
-        } => {
-            let mut value = affine_integer(rhs)?;
-            value.scale(-1)?;
-            Some(value)
-        }
-        Expression::Binary { op, lhs, rhs, .. }
-            if matches!(
-                op,
-                OpBinary::Add | OpBinary::AddElem | OpBinary::Sub | OpBinary::SubElem
-            ) =>
-        {
-            let mut value = affine_integer(lhs)?;
-            let scale = if matches!(op, OpBinary::Sub | OpBinary::SubElem) {
-                -1
-            } else {
-                1
-            };
-            value.add_scaled(affine_integer(rhs)?, scale)?;
-            Some(value)
-        }
-        Expression::Binary {
-            op: OpBinary::Mul | OpBinary::MulElem,
-            lhs,
-            rhs,
-            ..
-        } => {
-            if let Expression::Literal {
-                value: Literal::Integer(scale),
-                ..
-            } = lhs.as_ref()
-            {
-                let mut value = affine_integer(rhs)?;
-                value.scale(*scale)?;
-                return Some(value);
-            }
-            let Expression::Literal {
-                value: Literal::Integer(scale),
-                ..
-            } = rhs.as_ref()
-            else {
-                return None;
-            };
-            let mut value = affine_integer(lhs)?;
-            value.scale(*scale)?;
-            Some(value)
-        }
-        _ => None,
-    }
-}
-
-impl AffineInteger {
-    fn scale(&mut self, scale: i64) -> Option<()> {
-        self.constant = self.constant.checked_mul(scale)?;
-        for coefficient in self.terms.values_mut() {
-            *coefficient = coefficient.checked_mul(scale)?;
-        }
-        Some(())
-    }
-
-    fn add_scaled(&mut self, mut other: Self, scale: i64) -> Option<()> {
-        other.scale(scale)?;
-        self.constant = self.constant.checked_add(other.constant)?;
-        for (name, coefficient) in other.terms {
-            let owned = self.terms.entry(name).or_default();
-            *owned = owned.checked_add(coefficient)?;
-        }
-        Some(())
-    }
+        .filter_map(|local| local.def_id.map(|id| (VarName::new(&local.name), id)))
+        .collect::<Vec<_>>();
+    let inputs = function
+        .inputs
+        .iter()
+        .filter_map(|input| input.def_id.map(|id| (VarName::new(&input.name), id)))
+        .collect::<Vec<_>>();
+    crate::construction::function_shapes::infer_finite_for_counter_bounds(
+        statements, shapes, &counters, &inputs,
+    );
 }
 
 struct BoundedReductionComprehensions<'shape> {
@@ -509,7 +338,10 @@ fn rectangularize_bounded_slice_assignments(
                 span,
             } => rumoca_core::Statement::For {
                 indices: indices.clone(),
-                equations: rectangularize_bounded_slice_assignments(equations, shapes),
+                equations: rectangularize_bounded_slice_assignments(
+                    equations,
+                    &loop_body_shapes(indices, shapes),
+                ),
                 span: *span,
             },
             rumoca_core::Statement::If {
@@ -1123,6 +955,30 @@ fn statement_incoming_value_flow(
                 definitely_defined,
             }
         }
+        // MLS §11.2.1.1: a multiple-output call reads its arguments, then
+        // assigns each output; a whole scalar output defines its value. The
+        // subscripts selecting the callable are reads where the call runs.
+        rumoca_core::Statement::FunctionCall {
+            comp,
+            args,
+            outputs,
+            ..
+        } => IncomingValueFlow {
+            read: comp
+                .component_ref()
+                .is_some_and(|callable| component_subscripts_read_name(callable, name))
+                || args
+                    .iter()
+                    .any(|argument| expression_reads_name(argument, name))
+                || outputs
+                    .iter()
+                    .flatten()
+                    .any(|output| component_subscripts_read_name(output, name)),
+            definitely_defined: outputs
+                .iter()
+                .flatten()
+                .any(|output| scalar_assignment_target(output).as_ref() == Some(name)),
+        },
         _ => IncomingValueFlow {
             read: statements_read_name(std::slice::from_ref(statement), name),
             definitely_defined: false,
@@ -1413,282 +1269,6 @@ fn scalar_integer_local_definition(
     .then(|| (target, value.clone()))
 }
 
-fn push_invariant_conditions_to_fixpoint(
-    mut statements: Vec<rumoca_core::Statement>,
-    protected: &HashSet<VarName>,
-    defined_protected: &HashSet<VarName>,
-) -> Vec<rumoca_core::Statement> {
-    loop {
-        let lowered =
-            push_invariant_conditions_into_loops(&statements, protected, defined_protected);
-        if lowered == statements {
-            return lowered;
-        }
-        statements = lowered;
-    }
-}
-
-fn push_invariant_conditions_into_loops(
-    statements: &[rumoca_core::Statement],
-    protected: &HashSet<VarName>,
-    inherited_definitions: &HashSet<VarName>,
-) -> Vec<rumoca_core::Statement> {
-    let mut lowered = Vec::new();
-    let mut defined_protected = inherited_definitions.clone();
-    for statement in statements {
-        let statement = push_conditions_in_statement(statement, protected, &defined_protected);
-        if let Some(split) =
-            split_invariant_conditional_sequence(&statement, protected, &defined_protected)
-        {
-            lowered.extend(split);
-            continue;
-        }
-        let rumoca_core::Statement::If {
-            cond_blocks,
-            else_block: None,
-            span,
-        } = &statement
-        else {
-            remember_whole_protected_assignment(&statement, protected, &mut defined_protected);
-            lowered.push(statement);
-            continue;
-        };
-        let [block] = cond_blocks.as_slice() else {
-            lowered.push(statement.clone());
-            continue;
-        };
-        if block.stmts.is_empty()
-            || !block
-                .stmts
-                .iter()
-                .any(|nested| matches!(nested, rumoca_core::Statement::For { .. }))
-        {
-            lowered.push(statement.clone());
-            continue;
-        }
-        let mut assigned = HashSet::new();
-        collect_assigned_values(&block.stmts, &mut assigned);
-        if !protected_assignments_have_fallthrough_values(&assigned, protected, &defined_protected)
-            || expression_reads_any_name(&block.cond, &assigned)
-        {
-            lowered.push(statement.clone());
-            remember_whole_protected_assignment(&statement, protected, &mut defined_protected);
-            continue;
-        }
-        lowered.extend(block.stmts.iter().map(|nested| match nested {
-            rumoca_core::Statement::For {
-                indices,
-                equations,
-                span: loop_span,
-            } => rumoca_core::Statement::For {
-                indices: indices.clone(),
-                equations: vec![rumoca_core::Statement::If {
-                    cond_blocks: vec![rumoca_core::StatementBlock {
-                        cond: block.cond.clone(),
-                        stmts: equations.clone(),
-                    }],
-                    else_block: None,
-                    span: *span,
-                }],
-                span: *loop_span,
-            },
-            _ => rumoca_core::Statement::If {
-                cond_blocks: vec![rumoca_core::StatementBlock {
-                    cond: block.cond.clone(),
-                    stmts: vec![nested.clone()],
-                }],
-                else_block: None,
-                span: *span,
-            },
-        }));
-        remember_whole_protected_assignment(&statement, protected, &mut defined_protected);
-    }
-    lowered
-}
-
-fn split_invariant_conditional_sequence(
-    statement: &rumoca_core::Statement,
-    protected: &HashSet<VarName>,
-    defined_protected: &HashSet<VarName>,
-) -> Option<Vec<rumoca_core::Statement>> {
-    let rumoca_core::Statement::If {
-        cond_blocks,
-        else_block,
-        span,
-    } = statement
-    else {
-        return None;
-    };
-    if cond_blocks.len() < 2
-        || !cond_blocks
-            .iter()
-            .flat_map(|block| &block.stmts)
-            .chain(else_block.iter().flat_map(|branch| branch.iter()))
-            .any(|nested| matches!(nested, rumoca_core::Statement::For { .. }))
-    {
-        return None;
-    }
-    let mut all_assigned = HashSet::new();
-    for block in cond_blocks {
-        collect_assigned_values(&block.stmts, &mut all_assigned);
-    }
-    if let Some(fallback) = else_block {
-        collect_assigned_values(fallback, &mut all_assigned);
-    }
-    if !protected_assignments_have_fallthrough_values(&all_assigned, protected, defined_protected) {
-        return None;
-    }
-    for block in cond_blocks {
-        let mut assigned = HashSet::new();
-        collect_assigned_values(&block.stmts, &mut assigned);
-        if expression_reads_any_name(&block.cond, &assigned) {
-            return None;
-        }
-    }
-    if let Some(fallback) = else_block {
-        let mut assigned = HashSet::new();
-        collect_assigned_values(fallback, &mut assigned);
-        if cond_blocks
-            .iter()
-            .any(|block| expression_reads_any_name(&block.cond, &assigned))
-        {
-            return None;
-        }
-    }
-    let mut prior_false: Option<Expression> = None;
-    let mut split = Vec::new();
-    for block in cond_blocks {
-        let guard = match &prior_false {
-            Some(prior) => Expression::Binary {
-                op: OpBinary::And,
-                lhs: Box::new(prior.clone()),
-                rhs: Box::new(block.cond.clone()),
-                span: *span,
-            },
-            None => block.cond.clone(),
-        };
-        split.extend(
-            block
-                .stmts
-                .iter()
-                .map(|nested| guarded_statement(guard.clone(), nested.clone(), *span)),
-        );
-        let not_condition = Expression::Unary {
-            op: OpUnary::Not,
-            rhs: Box::new(block.cond.clone()),
-            span: *span,
-        };
-        prior_false = Some(match prior_false {
-            Some(prior) => Expression::Binary {
-                op: OpBinary::And,
-                lhs: Box::new(prior),
-                rhs: Box::new(not_condition),
-                span: *span,
-            },
-            None => not_condition,
-        });
-    }
-    if let (Some(fallback), Some(guard)) = (else_block, prior_false) {
-        split.extend(
-            fallback
-                .iter()
-                .map(|nested| guarded_statement(guard.clone(), nested.clone(), *span)),
-        );
-    }
-    Some(split)
-}
-
-/// Predicate pushdown retains the pre-conditional value on every false arm.
-/// An output may therefore move under a compact loop only after a whole-value
-/// assignment has already established that fall-through value. Protected
-/// locals need no extra condition because construction can own their dead
-/// initial seed; declared outputs cannot acquire such a value by inference.
-fn protected_assignments_have_fallthrough_values(
-    assigned: &HashSet<VarName>,
-    protected: &HashSet<VarName>,
-    defined_protected: &HashSet<VarName>,
-) -> bool {
-    assigned
-        .intersection(protected)
-        .all(|target| defined_protected.contains(target))
-}
-
-fn remember_whole_protected_assignment(
-    statement: &rumoca_core::Statement,
-    protected: &HashSet<VarName>,
-    defined_protected: &mut HashSet<VarName>,
-) {
-    let rumoca_core::Statement::Assignment { comp, .. } = statement else {
-        return;
-    };
-    let [part] = comp.parts() else {
-        return;
-    };
-    let target = comp.to_var_name();
-    if part.subs.is_empty() && protected.contains(&target) {
-        defined_protected.insert(target);
-    }
-}
-
-fn guarded_statement(
-    guard: Expression,
-    statement: rumoca_core::Statement,
-    span: Span,
-) -> rumoca_core::Statement {
-    rumoca_core::Statement::If {
-        cond_blocks: vec![rumoca_core::StatementBlock {
-            cond: guard,
-            stmts: vec![statement],
-        }],
-        else_block: None,
-        span,
-    }
-}
-
-fn push_conditions_in_statement(
-    statement: &rumoca_core::Statement,
-    protected: &HashSet<VarName>,
-    defined_protected: &HashSet<VarName>,
-) -> rumoca_core::Statement {
-    match statement {
-        rumoca_core::Statement::For {
-            indices,
-            equations,
-            span,
-        } => rumoca_core::Statement::For {
-            indices: indices.clone(),
-            equations: push_invariant_conditions_into_loops(
-                equations,
-                protected,
-                defined_protected,
-            ),
-            span: *span,
-        },
-        rumoca_core::Statement::If {
-            cond_blocks,
-            else_block,
-            span,
-        } => rumoca_core::Statement::If {
-            cond_blocks: cond_blocks
-                .iter()
-                .map(|block| rumoca_core::StatementBlock {
-                    cond: block.cond.clone(),
-                    stmts: push_invariant_conditions_into_loops(
-                        &block.stmts,
-                        protected,
-                        defined_protected,
-                    ),
-                })
-                .collect(),
-            else_block: else_block.as_ref().map(|branch| {
-                push_invariant_conditions_into_loops(branch, protected, defined_protected)
-            }),
-            span: *span,
-        },
-        _ => statement.clone(),
-    }
-}
-
 fn expression_reads_any_name(expression: &Expression, names: &HashSet<VarName>) -> bool {
     struct Finder<'a> {
         names: &'a HashSet<VarName>,
@@ -1867,4 +1447,17 @@ fn subscripts_read_binder(subscripts: &[Subscript], binder: &str) -> bool {
         Subscript::Expr { expr, .. } => expression_reads_name(expr, &VarName::new(binder)),
         Subscript::Index { .. } | Subscript::Colon { .. } => false,
     })
+}
+
+/// The shapes inside a loop body, where each binder takes its proven range
+/// bounds (a dependent range such as `column + 1:n` through `column`).
+fn loop_body_shapes(
+    indices: &[rumoca_core::ForIndex],
+    shapes: &ShapeEnvironment,
+) -> ShapeEnvironment {
+    let mut scoped = shapes.clone();
+    for index in indices {
+        scoped.bind_range_binder(VarName::new(&index.ident), &index.range);
+    }
+    scoped
 }

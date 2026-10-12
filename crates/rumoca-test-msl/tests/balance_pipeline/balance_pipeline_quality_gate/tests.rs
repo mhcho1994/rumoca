@@ -1,6 +1,7 @@
 use super::*;
 
 mod gate_hole;
+mod timing_margin;
 use serde_json::Value;
 use serde_json::json;
 use std::any::Any;
@@ -137,6 +138,7 @@ fn baseline_quality_template() -> MslQualityBaseline {
         runtime_ratio_stats: None,
         runtime_ratio_cohort_models: None,
         certified_strict_high_models: IndexSet::new(),
+        timing_margin_models: IndexMap::new(),
         unexcepted_non_high_models: IndexSet::new(),
         trace_exceptions_sha256: None,
         evidence_provenance: None,
@@ -1674,11 +1676,11 @@ fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi
     .expect("load checked baseline");
     assert_eq!(baseline.quality_gate_version, MSL_QUALITY_GATE_VERSION);
     assert_eq!(baseline.sim_timeout_seconds, SIM_TIMEOUT_SECS);
-    assert_eq!(baseline.flatten_models, 494);
+    assert_eq!(baseline.flatten_models, 542);
     assert_eq!(baseline.partial_models, 13);
     assert_eq!(baseline.partial_model_names, reviewed_partial_model_names());
     assert_eq!(baseline.tensor_preservation.report_errors, 0);
-    assert_eq!(baseline.certified_strict_high_models.len(), 194);
+    assert_eq!(baseline.certified_strict_high_models.len(), 303);
     assert_eq!(baseline.unexcepted_non_high_models.len(), 1);
     assert_eq!(
         baseline.trace_exceptions_sha256.as_deref(),
@@ -1700,8 +1702,9 @@ fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi
             .trace_accuracy_stats
             .as_ref()
             .map(|trace| trace.agreement_high),
-        Some(baseline.certified_strict_high_models.len())
+        Some(baseline.certified_strict_high_models.len() + baseline.timing_margin_models.len())
     );
+    assert_eq!(baseline.timing_margin_models.len(), 4);
 
     let migration = baseline
         .metric_schema_migration
@@ -1723,18 +1726,30 @@ fn checked_quality_baseline_has_versioned_oracle_policy_migration_and_tensor_kpi
         .reference_boundary_migration
         .expect("reviewed v4-to-v8 boundary chain");
     assert_eq!(reference, reviewed_reference_boundary_migration());
+    // The v14 boundary is a comparator-policy change: angle and power-factor
+    // channels compare under the SPEC_0050 phasor rule, which makes the six
+    // QuasiStatic angle comparator-limitation rows strict-high and retires
+    // them from the v13 file; it adds no row.
     assert_eq!(
-        reference.metric.strict_high_before,
+        reference.metric.strict_high_before + 6,
         reference.metric.strict_high_after
     );
-    // The typed-exception boundary types every reviewed row and removes none;
-    // the v11 boundary adds the AST_BatchPlant TwoTanks comparator-limitation
-    // row to the v10 file.
     assert_eq!(
-        reference.policy_excluded_before + 1,
-        reference.metric.policy_excluded_after
+        reference.policy_excluded_before,
+        reference.metric.policy_excluded_after + 6
     );
     assert_eq!(reference.metric.excluded_strict_high_before, 0);
+    // The v13 boundary types every reviewed row and removes none: it adds the
+    // Digital Counter and three FundamentalWave reference-failure rows, three
+    // QuasiStatic comparator-limitation rows (Electrical BalancingStar and
+    // Rectifier, FluxTubes QuadraticCoreAirgap) and the FluidHeatFlow
+    // TestOpenTank model-issue row to the v12 file.
+    let v13 = reference.previous.as_deref().expect("checked v13 boundary");
+    assert_eq!(v13.metric.strict_high_before, v13.metric.strict_high_after);
+    assert_eq!(
+        v13.policy_excluded_before + 8,
+        v13.metric.policy_excluded_after
+    );
 
     let partial_migration = baseline
         .partial_classification_migration
@@ -1888,8 +1903,8 @@ fn quality_context_rejects_baseline_partial_roster_drift() {
 }
 
 /// A roster addition must name its defect and be in the roster it adds to;
-/// the v8 boundary's LogicalSample addition is reviewed and the v9, v10 and
-/// v11 boundaries add none (SPEC_0050).
+/// the v8 boundary's LogicalSample addition is reviewed and the v9 to v14
+/// boundaries add none (SPEC_0050).
 #[test]
 fn roster_additions_name_their_defect_and_join_the_roster() {
     let baseline =
@@ -1898,9 +1913,15 @@ fn roster_additions_name_their_defect_and_join_the_roster() {
     let head = baseline
         .reference_boundary_migration
         .as_ref()
-        .expect("checked v11 boundary");
+        .expect("checked v14 boundary");
     assert!(head.roster_additions.is_empty());
-    let v10 = head.previous.as_deref().expect("checked v10 boundary");
+    let v13 = head.previous.as_deref().expect("checked v13 boundary");
+    assert!(v13.roster_additions.is_empty());
+    let v12 = v13.previous.as_deref().expect("checked v12 boundary");
+    assert!(v12.roster_additions.is_empty());
+    let v11 = v12.previous.as_deref().expect("checked v11 boundary");
+    assert!(v11.roster_additions.is_empty());
+    let v10 = v11.previous.as_deref().expect("checked v10 boundary");
     assert!(v10.roster_additions.is_empty());
     let v9 = v10.previous.as_deref().expect("checked v9 boundary");
     assert!(v9.roster_additions.is_empty());
@@ -1918,6 +1939,9 @@ fn roster_additions_name_their_defect_and_join_the_roster() {
         .and_then(|migration| migration.previous.as_mut())
         .and_then(|migration| migration.previous.as_mut())
         .and_then(|migration| migration.previous.as_mut())
+        .and_then(|migration| migration.previous.as_mut())
+        .and_then(|migration| migration.previous.as_mut())
+        .and_then(|migration| migration.previous.as_mut())
         .unwrap()
         .roster_additions[0]
         .cause = " ".to_string();
@@ -1927,6 +1951,9 @@ fn roster_additions_name_their_defect_and_join_the_roster() {
     let mut outside = baseline;
     outside.reference_boundary_migration = outside
         .reference_boundary_migration
+        .and_then(|migration| migration.previous.map(|previous| *previous))
+        .and_then(|migration| migration.previous.map(|previous| *previous))
+        .and_then(|migration| migration.previous.map(|previous| *previous))
         .and_then(|migration| migration.previous.map(|previous| *previous))
         .and_then(|migration| migration.previous.map(|previous| *previous))
         .and_then(|migration| migration.previous.map(|previous| *previous));

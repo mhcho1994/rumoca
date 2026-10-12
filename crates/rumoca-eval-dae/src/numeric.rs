@@ -448,15 +448,43 @@ where
             self.function_fold_values.push((fold, values));
             self.domain_points.push((fold_view.domain(), point));
             self.scoped_expression_values.push(FxHashMap::default());
-            let next = self.function_loop_iteration(fold_view, statements.clone());
+            // MLS §11.2.3: a bounded `while` stops before the first pass whose
+            // condition is false, with the values that pass would have read.
+            let next = match fold_view.continuation() {
+                Some(condition) => {
+                    self.expression(condition)
+                        .and_then(|value| match value.as_slice() {
+                            [0.0] => Ok(None),
+                            [1.0] => self
+                                .function_loop_iteration(fold_view, statements.clone())
+                                .map(Some),
+                            _ => Err(failure(
+                                NumericEvaluationErrorKind::InvalidValue,
+                                "while condition is not scalar Boolean",
+                                span,
+                            )),
+                        })
+                }
+                None => self
+                    .function_loop_iteration(fold_view, statements.clone())
+                    .map(Some),
+            };
             self.scoped_expression_values.pop();
             self.domain_points.pop();
             let (_, previous) = self
                 .function_fold_values
                 .pop()
                 .expect("active function fold stack remains balanced");
-            values = next?;
-            debug_assert_eq!(values.len(), previous.len());
+            match next? {
+                Some(next) => {
+                    debug_assert_eq!(next.len(), previous.len());
+                    values = next;
+                }
+                None => {
+                    values = previous;
+                    break;
+                }
+            }
         }
         Ok(values)
     }
@@ -487,10 +515,22 @@ where
             )
         })?;
         // MLS §12.9 external bodies are foreign code. Numeric evaluation owns
-        // no runtime that can execute one, so it fails with the call's exact
-        // provenance instead of substituting a plausible value.
+        // no runtime that can execute one: only a SPEC_0040 DAE-C30 native
+        // body executes, and any other external body fails with the call's
+        // exact provenance instead of substituting a plausible value.
         if let Some(external) = definition.external() {
-            return Err(external_function_failure(definition.name(), external, span));
+            let Some(binding) = external.native_body() else {
+                return Err(external_function_failure(definition.name(), external, span));
+            };
+            self.function_arguments.push((function, arguments));
+            self.scoped_expression_values.push(FxHashMap::default());
+            let inputs = binding
+                .inputs()
+                .map(|input| self.expression(input))
+                .collect::<Result<Vec<_>, _>>();
+            self.scoped_expression_values.pop();
+            self.function_arguments.pop();
+            return native_function_call(binding, &inputs?, output, span);
         }
         let result = definition
             .result_values()
@@ -1855,4 +1895,50 @@ fn failure(
         message: message.into(),
         span,
     }
+}
+
+/// Evaluate one result of a SPEC_0040 DAE-C30 native body through its one
+/// definitional evaluator. Integer arguments are exact in binary64.
+fn native_function_call(
+    binding: dae::NativeBodyView<'_>,
+    inputs: &[Vec<f64>],
+    output: u32,
+    span: Span,
+) -> Result<Vec<f64>, NumericEvaluationError> {
+    use rumoca_core::native_body::{NativeBodyError, NativeElement, NativeScalar};
+    let body = binding.body();
+    let inputs = inputs
+        .iter()
+        .zip(body.inputs())
+        .map(|(values, input)| {
+            values
+                .iter()
+                .map(|value| match input.element {
+                    NativeElement::Integer => NativeScalar::Integer(*value as i64),
+                    NativeElement::Real => NativeScalar::Real(*value),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let inputs = inputs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let outputs = body.evaluate(&inputs).map_err(|error| {
+        let kind = match error {
+            NativeBodyError::Failure { .. } => NumericEvaluationErrorKind::AssertionFailed,
+            NativeBodyError::OperandMismatch { .. } => NumericEvaluationErrorKind::InvalidValue,
+        };
+        failure(kind, error.to_string(), span)
+    })?;
+    let position = binding
+        .results()
+        .iter()
+        .position(|result| *result == output)
+        .ok_or_else(|| function_result_error(span))?;
+    Ok(outputs[position]
+        .iter()
+        .copied()
+        .map(|value| match value {
+            NativeScalar::Integer(value) => value as f64,
+            NativeScalar::Real(value) => value,
+        })
+        .collect())
 }

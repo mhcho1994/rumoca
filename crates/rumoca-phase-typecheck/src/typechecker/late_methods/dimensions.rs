@@ -219,6 +219,12 @@ impl TypeChecker {
         let mut progress = false;
 
         for (_def_id, instance_data) in &overlay.components {
+            if !matches!(
+                instance_data.variability,
+                rumoca_core::Variability::Parameter(_) | rumoca_core::Variability::Constant(_)
+            ) {
+                continue;
+            }
             let name_path = Self::instance_component_path(&instance_data.qualified_name);
             let name = name_path.to_flat_string();
             let binding_scope = Self::instance_binding_scope_name(instance_data);
@@ -268,6 +274,12 @@ impl TypeChecker {
         let mut progress = false;
 
         for (_def_id, instance_data) in &overlay.components {
+            if !matches!(
+                instance_data.variability,
+                rumoca_core::Variability::Parameter(_) | rumoca_core::Variability::Constant(_)
+            ) {
+                continue;
+            }
             let name_path = Self::instance_component_path(&instance_data.qualified_name);
             let name = name_path.to_flat_string();
 

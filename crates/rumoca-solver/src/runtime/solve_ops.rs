@@ -69,6 +69,16 @@ pub enum RuntimeSolveError {
         "[EX004] algebraic block over {unknowns} is singular in its active branch combination {mode}; the model has no unique solution there"
     )]
     SingularActiveMode { unknowns: String, mode: String },
+
+    /// A source operation faulted on the values it read: an array index that
+    /// is not an Integer inside the declared extent. Within the event
+    /// iteration of MLS Appendix B the fault belongs to the iterate that
+    /// produced it, and it is reported only if the iteration settles with it.
+    #[error("solve-IR evaluation failed: {message}{}", span_suffix(*.span))]
+    SourceFault {
+        message: String,
+        span: Option<rumoca_core::Span>,
+    },
 }
 
 fn span_suffix(span: Option<rumoca_core::Span>) -> String {
@@ -95,7 +105,8 @@ impl RuntimeSolveError {
             Self::SolveIr { span, .. }
             | Self::RefreshTargetUnassignable { span, .. }
             | Self::RefreshTargetSingular { span, .. }
-            | Self::NonFiniteValue { span, .. } => *span,
+            | Self::NonFiniteValue { span, .. }
+            | Self::SourceFault { span, .. } => *span,
             _ => None,
         }
     }
@@ -254,7 +265,7 @@ fn op_reads_solver_or_time(op: &solve::LinearOp) -> bool {
         solve::LinearOp::FunctionFold { program, .. }
         | solve::LinearOp::GuardedFunctionFold { program, .. }
         | solve::LinearOp::StoreOutputFunctionFold { program, .. } => {
-            row_reads_solver_or_time(&program.update)
+            program.regions().any(row_reads_solver_or_time)
         }
         solve::LinearOp::FunctionConditional { program, .. } => {
             program.arms.iter().any(|arm| {
@@ -309,7 +320,22 @@ pub fn event_eval_params_for_pre_mode(
 /// The compiler reserves exactly one hidden lane per periodic clock and the
 /// Solve shape contract proves the two dense arrays agree. This function only
 /// projects the schedule at `t`; it does not create another timing owner.
+///
+/// A tick at the start instant is the first event after initialization (MLS
+/// §3.7.5 `sample` is a time event, and `when` clauses other than `initial()`
+/// are inactive during initialization, §8.6), so while the `initial()` flag is
+/// set every lane reads cleared.
 pub fn write_clock_activation_params(model: &solve::SolveModel, p: &mut [f64], t: f64) {
+    let initializing = model
+        .problem
+        .solve_layout
+        .initial_event_parameter_index
+        .and_then(|index| p.get(index))
+        .is_some_and(|flag| *flag != 0.0);
+    if initializing {
+        write_observation_clock_activation_params(model, p);
+        return;
+    }
     for (schedule, &index) in model
         .problem
         .clocks
@@ -390,6 +416,8 @@ pub fn convert_variable_meta(meta: &[solve::SolveVariableMeta]) -> Vec<SimVariab
             nominal: item.nominal.clone(),
             fixed: item.fixed,
             description: item.description.clone(),
+            state_coordinate: item.state_coordinate.clone(),
+            phasor: item.phasor.clone(),
         })
         .collect()
 }

@@ -647,6 +647,8 @@ impl<'dae> VariableView<'dae> {
         fn state_select -> StateSelect = |view| view.attributes().state_select;
         fn description -> Option<&'dae str> =
             |view| view.attributes().description.as_deref();
+        fn enumeration -> Option<&'dae rumoca_core::EnumerationDeclaration> =
+            |view| view.attributes().enumeration.as_ref();
         fn causality -> VariableCausality = |view| view.attributes().causality;
         fn declared_causality -> DeclaredCausality =
             |view| view.attributes().declared_causality;
@@ -727,12 +729,19 @@ impl<'dae> VariableView<'dae> {
         if subscripts.is_empty() {
             return Some(self.entry.name.to_string());
         }
-        let indices = subscripts
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        Some(format!("{}[{indices}]", self.entry.name))
+        use std::fmt::Write as _;
+        let base = self.entry.name.as_str();
+        let mut name = String::with_capacity(base.len() + 4 * subscripts.len() + 2);
+        name.push_str(base);
+        name.push('[');
+        for (position, index) in subscripts.iter().enumerate() {
+            if position > 0 {
+                name.push(',');
+            }
+            write!(name, "{index}").ok()?;
+        }
+        name.push(']');
+        Some(name)
     }
 
     fn attributes(self) -> &'dae VariableAttributesWire {
@@ -900,6 +909,15 @@ impl<'dae> ExternalFunctionView<'dae> {
         fn argument_count -> usize = |view| view.entry.arguments.len();
     }
 
+    /// The SPEC_0040 DAE-C30 compiler-defined body construction proved this
+    /// interface matches, if any.
+    pub fn native_body(self) -> Option<NativeBodyView<'dae>> {
+        self.entry
+            .native
+            .as_ref()
+            .map(|binding| NativeBodyView { binding })
+    }
+
     /// Output bound by the MLS §12.9 `output = symbol(...)` return form.
     pub fn result(self) -> Option<FunctionValueId<'dae>> {
         self.entry
@@ -921,6 +939,30 @@ impl<'dae> ExternalFunctionView<'dae> {
                     FunctionValueId::from_raw(function.index(), *value),
                 ),
             })
+    }
+}
+
+/// Read-only view of one proven SPEC_0040 DAE-C30 native body binding.
+#[derive(Clone, Copy)]
+pub struct NativeBodyView<'dae> {
+    binding: &'dae NativeBodyBinding,
+}
+
+impl<'dae> NativeBodyView<'dae> {
+    pub const fn body(self) -> rumoca_core::native_body::NativeBody {
+        self.binding.body
+    }
+
+    /// The argument expression each catalog input reads, in interface order;
+    /// each is closed over the function's own parameters.
+    pub fn inputs(self) -> impl ExactSizeIterator<Item = ExprId<'dae>> {
+        self.binding.inputs.iter().map(|raw| ExprId::from_raw(*raw))
+    }
+
+    /// The function result position each catalog output writes, in interface
+    /// order.
+    pub fn results(self) -> &'dae [u32] {
+        &self.binding.results
     }
 }
 
@@ -1207,6 +1249,12 @@ impl<'dae> FunctionFoldView<'dae> {
     /// is how the entry itself stores it.
     pub fn parent_ordinal(self) -> Option<u32> {
         self.entry.parent
+    }
+
+    /// The Boolean predicate a bounded `while` fold evaluates on its carried
+    /// state before each pass; the first false value ends the fold.
+    pub fn continuation(self) -> Option<ExprId<'dae>> {
+        self.entry.continuation.map(ExprId::from_raw)
     }
 
     pub fn targets(self) -> impl ExactSizeIterator<Item = FunctionValueId<'dae>> {

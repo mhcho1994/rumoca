@@ -89,6 +89,8 @@ enum SolveOperationWire {
         captures: Box<[SolveRegisterId]>,
         destinations: Box<[SolveRegisterId]>,
         transition: Box<SolveProgramRegionWire>,
+        #[serde(default)]
+        continuation: Option<Box<SolveProgramRegionWire>>,
     },
     Scale {
         destination: SolveRegisterId,
@@ -194,6 +196,11 @@ enum SolveOperationWire {
         destination: SolveRegisterId,
         matrix: SolveRegisterId,
         rhs: SolveRegisterId,
+    },
+    Native {
+        body: NativeBody,
+        operands: Box<[SolveRegisterId]>,
+        destinations: Box<[SolveRegisterId]>,
     },
 }
 
@@ -406,6 +413,7 @@ fn replay_operation<'program>(
             captures,
             destinations,
             transition,
+            continuation,
         } => {
             let initial = initial
                 .iter()
@@ -416,8 +424,18 @@ fn replay_operation<'program>(
                 .map(|capture| register_at(registers, *capture))
                 .collect::<Result<Vec<_>, _>>()?;
             let transition = replay_region(transition, builder.available_calls)?;
-            let actual =
-                builder.fold_from_region(domain.clone(), &initial, &captures, transition, at)?;
+            let continuation = continuation
+                .as_ref()
+                .map(|predicate| replay_region(predicate, builder.available_calls))
+                .transpose()?;
+            let actual = builder.fold_from_region(
+                domain.clone(),
+                &initial,
+                &captures,
+                transition,
+                continuation,
+                at,
+            )?;
             require_destinations(&actual, destinations, registers, wire)?;
             return Ok(actual);
         }
@@ -729,6 +747,19 @@ fn replay_operation<'program>(
                 .map(|argument| register_at(registers, *argument))
                 .collect::<Result<Vec<_>, _>>()?;
             let actual = builder.call(*owner, &arguments, at)?;
+            require_destinations(&actual, destinations, registers, wire)?;
+            return Ok(actual);
+        }
+        SolveOperationWire::Native {
+            body,
+            operands,
+            destinations,
+        } => {
+            let operands = operands
+                .iter()
+                .map(|operand| register_at(registers, *operand))
+                .collect::<Result<Vec<_>, _>>()?;
+            let actual = builder.native(*body, &operands, at)?;
             require_destinations(&actual, destinations, registers, wire)?;
             return Ok(actual);
         }

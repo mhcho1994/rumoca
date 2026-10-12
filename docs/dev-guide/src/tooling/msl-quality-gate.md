@@ -60,13 +60,60 @@ On pull requests, CI also generates
 publishes it as a sticky PR comment. The comment embeds the package pass-rate,
 MLS contract coverage, and OMC trace-accuracy markdown tables so reviewers can
 inspect the MSL gate without downloading artifacts first. Its top summary also
-shows deltas against the resolved MSL quality baseline. Forked pull requests
+shows deltas against the resolved MSL quality baseline.
+
+The **Simulation Outcomes** table under the summary splits the completed
+simulations (`Simulated`) into verified (strict-high against OMC), excepted (a
+typed trace exception, counted by kind), and unclassified (the soundness roster),
+and states how many compiled models did not complete a simulation. The split
+comes from the band table and must sum to the completed count; the comment says
+so when it does not. `Simulated` always counts completed runs and never a parity
+rate; strict-high parity is the `High` column. Every table defines its columns
+in a legend directly under it, rendered from the same column list as the header. Forked pull requests
 receive the uploaded artifacts from the read-only CI run, then a separate
 `workflow_run` publisher comments from the artifact using repository write
 permissions.
 
 When a full main CI run improves every ratcheted metric without regressions, the
 MSL Baseline Ratchet workflow publishes the new baseline to that release asset.
+The ratchet (`.github/scripts/msl-baseline-ratchet.mjs`) reads the quality
+schema from the checked-in baseline of the same commit and refuses a snapshot
+under any other schema. A promoted asset at an older schema is crossed only
+through the reviewed reference boundary chain the gate resolves it through: the
+snapshot's `reference_boundary_migration` must equal the checked-in chain, the
+chain must step down one boundary at a time to exactly the asset's version, and
+the asset must declare the boundary the chain names for that version. A crossing
+lowers no floor, so every ratcheted metric is still compared against the asset.
+
+Initial-condition deviations, state-set disagreements, and runtime speedups
+accrue on every compared model whatever its trace band, so a run that compares
+more models raises those totals and moves those medians without any model
+getting worse. The ratchet therefore compares them over the models both the
+asset and the run measured:
+
+| Metric | Compared over |
+|---|---|
+| initial-condition deviation and severe channels, violation mass | models compared by both, from `trace_model_evidence` |
+| state-set rumoca-only and OMC-only states, exact matches | models with a state-set comparison in both |
+| runtime system and wall speedup medians | the asset's `runtime_ratio_cohort_models`, from the run's `runtime_model_ratios`; at least 90% of that cohort must still be timed and the median may fall at most 35%, the quality gate's own rule |
+
+Every snapshot records `trace_model_evidence` (per compared model) and
+`runtime_model_ratios`; a snapshot whose per-model records do not sum to its own
+totals, or do not give its own medians, is refused. An asset from before those
+records existed is read through its `certified_strict_high_models` when that
+roster is its compared set: the run must then hold every one of those models and
+is compared against the asset's totals. Any other combination compares the
+recorded totals and whole-run medians, as before. Strict-high trace channels
+carry no deviations, so trace channel totals, trace violation mass, and every
+higher-is-better count stay raw: a newly compared model can only raise them by
+being non-high, which the unexcepted roster already refuses. A model that leaves
+the compared set is refused by the gate's certified-roster check before the
+ratchet runs. The baseline resolver applies the same rule when a checked-in
+baseline replaces an older promoted asset, and both implementations read the
+shared cases in `.github/scripts/msl-baseline-cohort-cases.json`.
+
+`node --test .github/scripts/*.test.mjs` runs the ratchet's tests, including one
+that crosses from every version the tracked baseline's chain reaches.
 Do not promote focused subsets or one-off explicit target files as the baseline.
 Promotion requires a full-run snapshot with non-empty `omc_version` metadata.
 
@@ -132,9 +179,9 @@ under schema `msl_trace_exceptions_v2`. Every row is typed and evidenced:
 | `comparator_limitation` | the comparator cannot identify the channels; `retired_by` names the improvement that retires the row |
 
 A `comparator_limitation` row names one of `near_zero_channel_scaling`,
-`event_instant_alignment`, `aggregate_tolerance_at_annotation_scale`, or
-`angle_branch_aware_comparison`. The end state is fewer exceptions through a
-better comparator.
+`event_instant_alignment`, or `aggregate_tolerance_at_annotation_scale`. Angle
+and power-factor channels compare under the phasor rule (SPEC_0050) and need no
+row. The end state is fewer exceptions through a better comparator.
 
 The loader refuses an unknown kind, an empty reason, evidence with no stated
 fact, a malformed commit (at least seven hex digits), a repository artifact
@@ -278,13 +325,12 @@ so only matching results are timed:
   per model, x = scalar equations, y = compile seconds, rumoca vs OMC) rendered
   with the same embedded uPlot backend as `plot-compare`. Open it in a browser.
 
-The plot is rendered two ways from that one JSON:
+Speed is reported in two places:
 
 - **Local**: `omc-simulation-reference` writes `msl_speed_scaling.html` (uPlot).
-- **PR comment**: `cargo xtask repo msl pr-comment` reads the JSON and renders the table
-  plus a mermaid `xychart`. GitHub cannot execute JS, so the PR plot is mermaid,
-  not the uPlot viewer — and it is produced only by `pr-comment`, not on every
-  OMC run.
+- **PR comment**: `cargo xtask repo msl pr-comment` renders the **Speed vs OMC**
+  section from the run's results, OMC reference, and band table: totals, time to
+  runnable (JIT vs C toolchain), and simulation, each by system size.
 
 ### Fast local subset
 

@@ -1,0 +1,64 @@
+{
+  "scope": "partial fixed 20-model canary",
+  "before_commit": "0b249f0f725431613c25bb56e40fbbe0df54c4d2",
+  "after_working_tree_digest": "3ccd12b0acaf6c9bcefeadd8d92070eb9051cfea56dfda762124a90ac7fb154b",
+  "before_counts": {
+    "cohort_models": 20,
+    "compared_models": 14,
+    "high": 14,
+    "near": 0,
+    "deviation": 0,
+    "fallback": 0,
+    "absent": 6,
+    "absent_by_reason": {
+      "excluded": 1,
+      "not_attempted": 3,
+      "sim_failed": 2
+    }
+  },
+  "after_counts": {
+    "cohort_models": 20,
+    "compared_models": 14,
+    "high": 14,
+    "near": 0,
+    "deviation": 0,
+    "fallback": 0,
+    "absent": 6,
+    "absent_by_reason": {
+      "excluded": 1,
+      "not_attempted": 3,
+      "sim_failed": 2
+    }
+  },
+  "model_deltas": [
+    {
+      "model": "Modelica.Electrical.Analog.Examples.OpAmps.Comparator",
+      "before": {
+        "model_name": "Modelica.Electrical.Analog.Examples.OpAmps.Comparator",
+        "band": "high",
+        "compared_variables": 45,
+        "channel_high_count": 45,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0,
+        "max_channel_bounded_normalized_l1": 7.108312623821254e-07,
+        "mean_channel_bounded_normalized_l1": 6.35009263007541e-08,
+        "bounded_normalized_l1_score": 0.0
+      },
+      "after": {
+        "model_name": "Modelica.Electrical.Analog.Examples.OpAmps.Comparator",
+        "band": "high",
+        "compared_variables": 45,
+        "channel_high_count": 45,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0,
+        "max_channel_bounded_normalized_l1": 7.108312623821254e-07,
+        "mean_channel_bounded_normalized_l1": 6.35009262998264e-08,
+        "bounded_normalized_l1_score": 0.0
+      }
+    }
+  ],
+  "band_channel_deltas": [],
+  "numeric_difference_note": "OpAmps.Comparator remains high with all 45 channels high; mean normalized L1 differs by approximately 9.28e-19. All classifications, channel counts, maximum errors and exit reasons match upstream."
+}

@@ -35,6 +35,7 @@ equation
     reinit(x, 1.0);
   end when;
   assert(x < 10, "x grew", AssertionLevel.warning);
+  assert(x < 20, "x exceeded its limit");
   when time > 0.25 then
     terminate("done");
   end when;
@@ -168,7 +169,9 @@ class TypedTables(unittest.TestCase):
     def test_assert_and_terminate_expose_their_message(self):
         kinds = {event.kind: event for event in self.events.events}
         self.assertIsNotNone(kinds["assert"].message)
-        self.assertIsNotNone(kinds["assert"].level)
+        self.assertIsNone(kinds["assert"].level)
+        self.assertIsNotNone(kinds["warning"].message)
+        self.assertIsNotNone(kinds["warning"].condition)
         self.assertIsNotNone(kinds["terminate"].message)
         self.assertIsNotNone(kinds["reinitialize"].state)
         for event in self.events.events:

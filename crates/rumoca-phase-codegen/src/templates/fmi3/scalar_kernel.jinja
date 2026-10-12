@@ -1,4 +1,3 @@
-{%- from "fmi-typed-arithmetic.jinja" import integer %}
 {%- macro scalar_const(op) -%}
 {%- if op.value_class == "finite" -%}{{ op.value }}
 {%- elif op.value_class == "positive_infinity" -%}INFINITY
@@ -30,8 +29,8 @@
 {%- elif operator == "And" -%}((r[{{ lhs }}] != 0.0 && r[{{ rhs }}] != 0.0) ? 1.0 : 0.0)
 {%- elif operator == "Or" -%}((r[{{ lhs }}] != 0.0 || r[{{ rhs }}] != 0.0) ? 1.0 : 0.0)
 {%- elif operator == "Atan2" -%}atan2(r[{{ lhs }}], r[{{ rhs }}])
-{%- elif operator == "Min" -%}fmin(r[{{ lhs }}], r[{{ rhs }}])
-{%- elif operator == "Max" -%}fmax(r[{{ lhs }}], r[{{ rhs }}])
+{%- elif operator == "Min" -%}rumoca_real_min(r[{{ lhs }}], r[{{ rhs }}])
+{%- elif operator == "Max" -%}rumoca_real_max(r[{{ lhs }}], r[{{ rhs }}])
 {%- else -%}{{ fail("unsupported-feature:scalar.binary." ~ operator) }}
 {%- endif -%}
 {%- endmacro %}
@@ -64,13 +63,7 @@
 
 {%- macro scalar_op(op, output="m->derivative", error_status="fmi3Error", targets=none) %}
 {%- if op.kind == "Const" %}    r[{{ op.dst }}] = {{ scalar_const(op) }};
-{%- elif op.kind == "LoadFoldCarried" %}    r[{{ op.dst }}] = ff_carried[{{ op.index }}];
-{%- elif op.kind == "LoadFoldCapture" %}    r[{{ op.dst }}] = ff_captures[{{ op.index }}];
-{%- elif op.kind == "LoadFoldIndex" %}    r[{{ op.dst }}] = ff_indices[{{ op.dimension }}];
-{%- elif op.kind in ["LoadIndexedFoldCarried", "LoadIndexedFoldCapture", "LoadIndexedRegister"] %}{{ indexed_fold_load(op) }}
-{%- elif op.kind in ["FunctionFold", "GuardedFunctionFold", "StoreOutputFunctionFold"] %}{{ function_fold(op, output, error_status) }}
-{%- elif op.kind == "StoreOutputFoldTensorUpdate" %}{{ fold_tensor_update(op, output) }}
-{%- elif op.kind == "LoadTime" %}    r[{{ op.dst }}] = m->time;
+{%- elif op.kind == "LoadTime" %}    r[{{ op.dst }}] = rmc_now(m);
 {%- elif op.kind == "LoadY" %}    r[{{ op.dst }}] = m->y[{{ op.index }}];
 {%- elif op.kind == "LoadP" %}    r[{{ op.dst }}] = m->p[{{ op.index }}];
 {%- elif op.kind == "LoadSeed" %}    r[{{ op.dst }}] = seed[{{ op.index }}];
@@ -226,6 +219,159 @@
 {%- endfor %}
         }
         for (size_t k=0; k<{{ op.result_count }}; ++k) fc_outer[{{ op.dst }}+k] = fc_out[k];
+    }
+{#- Function folds follow `eval_function_fold`: the carried tuple starts from
+    its seed, every point of the rectangular row-major domain runs the update
+    region in its own register file and writes the complete next tuple, and
+    the folded tuple is the result. Update loads read the innermost fold's
+    `fold_carried`, `fold_index` and `fold_capture`; a nested fold shadows them
+    for its own block only. A guarded fold keeps its seed when inactive. A
+    nested fold (`StoreOutputFunctionFold`) seeds from enclosing registers and
+    the parent's carried tuple and writes `count` consecutive outputs of the
+    parent's next tuple: its folded values, or, when its condition selects the
+    parent, the parent's carried values at those same outputs. -#}
+{%- elif op.kind in ["FunctionFold", "GuardedFunctionFold", "StoreOutputFunctionFold"] %}{% set nested = op.kind == "StoreOutputFunctionFold" %}    {
+        double fold_seed[{{ [op.carried_count, 1]|max }}];
+        double fold_capture_seed[{{ [op.capture_count, 1]|max }}];
+{%- if nested %}
+        size_t fold_cursor = 0;
+{%- for source in op.initial %}
+{%- if source.Registers is defined %}
+        {%- if source.Registers.count > 0 %}
+        for (size_t k=0; k<{{ source.Registers.count }}; ++k) fold_seed[fold_cursor++] = r[{{ source.Registers.start }}+k];
+        {%- endif %}
+{%- else %}
+        {%- if source.ParentCarried.count > 0 %}
+        for (size_t k=0; k<{{ source.ParentCarried.count }}; ++k) fold_seed[fold_cursor++] = fold_carried[{{ source.ParentCarried.base }}+k];
+        {%- endif %}
+{%- endif %}
+{%- endfor %}
+        (void)fold_cursor;
+{%- else %}
+        {%- if op.carried_count > 0 %}
+        for (size_t k=0; k<{{ op.carried_count }}; ++k) fold_seed[k] = r[{{ op.initial_start }}+k];
+        {%- endif %}
+{%- endif %}
+        {%- if op.capture_count > 0 %}
+        for (size_t k=0; k<{{ op.capture_count }}; ++k) fold_capture_seed[k] = r[{{ op.capture_start }}+k];
+        {%- endif %}
+        (void)fold_capture_seed;
+{%- if nested and op.condition is defined and op.condition is not none %}
+        if ((r[{{ op.condition }}] != 0.0) != {{ 1 if op.nested_when_true else 0 }}) {
+            {%- if op.count > 0 %}
+            for (size_t k=0; k<{{ op.count }}; ++k) {{ output }}[{{ op.output_start }}+k] = fold_carried[{{ op.output_start }}+k];
+            {%- endif %}
+        } else
+{%- endif %}
+        {
+            double fold_carried[{{ [op.carried_count, 1]|max }}];
+            const double *const fold_capture = fold_capture_seed;
+            int64_t fold_index[{{ [op.domain.binders|length, 1]|max }}];
+            (void)fold_capture; (void)fold_index;
+            {%- if op.carried_count > 0 %}
+            for (size_t k=0; k<{{ op.carried_count }}; ++k) fold_carried[k] = fold_seed[k];
+            {%- endif %}
+            int fold_done = 0; (void)fold_done;
+{%- if op.kind == "GuardedFunctionFold" %}
+            if (r[{{ op.activation }}] != 0.0)
+{%- endif %}
+            {
+{%- for binder in op.domain.binders %}{% set directed = (binder.upper - binder.lower) * binder.step %}{% set count = 0 if directed < 0 else directed // (binder.step * binder.step) + 1 %}
+            for (int64_t i{{ loop.index0 }}=0; i{{ loop.index0 }}<{{ count }} && !fold_done; ++i{{ loop.index0 }}) {
+            fold_index[{{ loop.index0 }}] = {{ binder.lower }} + i{{ loop.index0 }}*({{ binder.step }});
+{%- endfor %}
+{%- if op.continuation is not none %}
+            {
+                double fold_predicate[1];
+                double r[{{ [op.continuation.register_count, 1]|max }}]; (void)r;
+{%- for continuation_op in op.continuation.ops %}
+{{ scalar_op(continuation_op, "fold_predicate", error_status) }}
+{%- endfor %}
+                fold_done = fold_predicate[0] == 0.0;
+            }
+{%- endif %}
+            if (!fold_done) {
+            double fold_next[{{ [op.carried_count, 1]|max }}];
+            {
+                double r[{{ [op.update.register_count, 1]|max }}]; (void)r;
+{%- for update_op in op.update.ops %}
+{{ scalar_op(update_op, "fold_next", error_status) }}
+{%- endfor %}
+            }
+            {%- if op.carried_count > 0 %}
+            for (size_t k=0; k<{{ op.carried_count }}; ++k) fold_carried[k] = fold_next[k];
+            {%- endif %}
+            }
+{%- for binder in op.domain.binders %}
+            }
+{%- endfor %}
+            }
+{%- if nested %}
+            {%- if op.count > 0 %}
+            for (size_t k=0; k<{{ op.count }}; ++k) {{ output }}[{{ op.output_start }}+k] = fold_carried[{{ op.result_base }}+k];
+            {%- endif %}
+{%- else %}
+            {%- if op.carried_count > 0 %}
+            for (size_t k=0; k<{{ op.carried_count }}; ++k) r[{{ op.dst }}+k] = fold_carried[k];
+            {%- endif %}
+{%- endif %}
+        }
+    }
+{%- elif op.kind == "LoadFoldCarried" %}    r[{{ op.dst }}] = fold_carried[{{ op.index }}];
+{%- elif op.kind == "LoadFoldCapture" %}    r[{{ op.dst }}] = fold_capture[{{ op.index }}];
+{%- elif op.kind == "LoadFoldIndex" %}    r[{{ op.dst }}] = (double)fold_index[{{ op.dimension }}];
+{#- An indexed load from registers, the fold carried tuple, or the fold
+    captures: every runtime coordinate must be an exact in-range Integer. -#}
+{%- elif op.kind in ["LoadIndexedRegister", "LoadIndexedFoldCarried", "LoadIndexedFoldCapture"] %}    {
+        size_t fold_offset = 0;
+{%- for extent in op.dimensions %}{% set index = op.indices[loop.index0] %}
+{%- if index.Constant is defined %}
+        fold_offset = fold_offset*{{ extent }} + {{ index.Constant }};
+{%- else %}
+        { double v = r[{{ index.Runtime }}]; if (!(isfinite(v) && trunc(v) == v && v >= 1.0 && v <= {{ extent }}.0)) return {{ error_status }}; fold_offset = fold_offset*{{ extent }} + (size_t)v - 1; }
+{%- endif %}
+{%- endfor %}
+        r[{{ op.dst }}] = {{ {"LoadIndexedRegister": "r", "LoadIndexedFoldCarried": "fold_carried", "LoadIndexedFoldCapture": "fold_capture"}[op.kind] }}[{{ op.base }}+fold_offset*{{ op.stride }}];
+    }
+{#- Aggregate update of the carried tensor: for every element and lane, the
+    node graph starts from the carried source (node 0); an update node takes
+    its patch value when the patch is enabled and its subscripts select this
+    element, else its base node; a select node picks between earlier nodes. -#}
+{%- elif op.kind == "StoreOutputFoldTensorUpdate" %}    for (size_t e=0; e<{{ op.dimensions|product }}; ++e) {
+        long long tu_offset[{{ [op.updates|length, 1]|max }}]; (void)tu_offset;
+{%- for update in op.updates %}
+        {
+            size_t rest = e; long long value_offset = 0; int selected = 1;
+{%- for i in range(op.dimensions|length)|reverse %}
+            size_t c{{ i }} = rest % {{ op.dimensions[i] }}; rest /= {{ op.dimensions[i] }};
+{%- endfor %}
+{%- for subscript in update.subscripts %}{% set extent = op.dimensions[loop.index0] %}
+{%- if subscript == "Whole" %}
+            value_offset = value_offset*{{ extent }} + (long long)c{{ loop.index0 }};
+{%- elif subscript.Slice is defined %}{% set slice_count = subscript.Slice.dimensions|product %}
+            { long long found = -1; for (size_t s=0; s<{{ slice_count }}; ++s) { double v = r[{{ subscript.Slice.start }}+s]; if (isfinite(v) && round(v) == v && v >= 1.0 && (size_t)v - 1 == c{{ loop.index0 }}) { found = (long long)s; break; } }
+              if (found < 0) selected = 0; else value_offset = value_offset*{{ slice_count }} + found; }
+{%- elif subscript.Index.Constant is defined %}
+            if (c{{ loop.index0 }} != {{ subscript.Index.Constant }}) selected = 0;
+{%- else %}
+            { double v = r[{{ subscript.Index.Runtime }}]; if (!(isfinite(v) && round(v) == v && v >= 1.0 && v <= {{ extent }}.0) || (size_t)v - 1 != c{{ loop.index0 }}) selected = 0; }
+{%- endif %}
+{%- endfor %}
+            tu_offset[{{ loop.index0 }}] = selected ? value_offset : -1;
+        }
+{%- endfor %}
+        for (size_t l=0; l<{{ op.lanes }}; ++l) {
+            double tu_value[{{ op.nodes|length + 1 }}];
+            tu_value[0] = fold_carried[{{ op.source_base }}+e*{{ op.source_stride }}+l];
+{%- for node in op.nodes %}
+{%- if node.Update is defined %}{% set update = op.updates[node.Update.update] %}
+            tu_value[{{ loop.index }}] = ({% if update.condition is not none %}r[{{ update.condition }}] != 0.0 && {% endif %}tu_offset[{{ node.Update.update }}] >= 0) ? r[{{ update.value_start }}+tu_offset[{{ node.Update.update }}]*{{ update.value_stride }}+l] : tu_value[{{ node.Update.base }}];
+{%- else %}
+            tu_value[{{ loop.index }}] = r[{{ node.Select.condition }}] != 0.0 ? tu_value[{{ node.Select.if_true }}] : tu_value[{{ node.Select.if_false }}];
+{%- endif %}
+{%- endfor %}
+            {{ output }}[{{ op.output_start }}+e*{{ op.lanes }}+l] = tu_value[{{ op.result }}];
+        }
     }
 {%- else %}{{ fail("unsupported-feature:scalar.op." ~ op.kind) }}
 {%- endif %}
@@ -423,6 +569,19 @@ static {{ prefix }}Status settle_values(ModelInstance* m) {
     if (refresh_algebraics(m) != {{ prefix }}OK) return {{ prefix }}Error;
     return m->assertions_initialized ? check_assertions(m) : {{ prefix }}OK;
 }
+{%- if scalar_events %}
+static {{ prefix }}Status rmc_observe(ModelInstance* m);
+{%- endif %}
+/* The values a public read observes: settled, then the rows a public
+   observation recomputes. */
+static {{ prefix }}Status settle_public_values(ModelInstance* m) {
+    if (settle_values(m) != {{ prefix }}OK) return {{ prefix }}Error;
+{%- if scalar_events %}
+    return rmc_observe(m);
+{%- else %}
+    return {{ prefix }}OK;
+{%- endif %}
+}
 static {{ prefix }}Status settle_derivative_values(ModelInstance* m) {
     if (refresh_derivative_values(m) != {{ prefix }}OK) return {{ prefix }}Error;
     return m->assertions_initialized ? check_assertions(m) : {{ prefix }}OK;
@@ -453,8 +612,10 @@ static {{ prefix }}Status settle_assertion_event(ModelInstance* m) {
 
 {#- The FMI value type of one inventory entry: Real is Float64, Integer and
     enumeration ordinals are Int32, Boolean is Boolean, String is String. -#}
-{%- macro rmc_kind(variable) -%}
-{%- if variable.value_kind == "Real" %}RMC_KIND_FLOAT64{% elif variable.value_kind in ["Integer", "Enumeration"] %}RMC_KIND_INT32{% elif variable.value_kind == "Boolean" %}RMC_KIND_BOOLEAN{% elif variable.value_kind == "String" %}RMC_KIND_STRING{% else %}{{ fail("unsupported-feature:fmi.c.value-kind " ~ variable.value_kind) }}{% endif -%}
+{#- `enumeration_kind` is the kind an importer reads an enumeration with:
+    FMI 2 Integer, FMI 3 Int64 (FMI 3.0.2 section 2.4.7.1). -#}
+{%- macro rmc_kind(variable, enumeration_kind="RMC_KIND_INT32") -%}
+{%- if variable.value_kind == "Real" %}RMC_KIND_FLOAT64{% elif variable.value_kind == "Enumeration" %}{{ enumeration_kind }}{% elif variable.value_kind == "Integer" %}RMC_KIND_INT32{% elif variable.value_kind == "Boolean" %}RMC_KIND_BOOLEAN{% elif variable.value_kind == "String" %}RMC_KIND_STRING{% else %}{{ fail("unsupported-feature:fmi.c.value-kind " ~ variable.value_kind) }}{% endif -%}
 {%- endmacro %}
 
 {#- Instance storage of the String texts: the current text of every String
@@ -633,101 +794,4 @@ static {{ prefix }}Status {{ cs_integrator(fmi) }}(ModelInstance* m, double star
 {#- Instance storage of the warning sites already reported. -#}
 {%- macro warning_fields(solve, fmi) -%}
 {%- if fmi.assertions and (solve.events.actions | selectattr("kind", "equalto", "Warning") | list | length > 0) %} bool rmc_warned[{{ solve.events.actions|length }}];{% endif -%}
-{%- endmacro %}
-
-{%- macro tensor_index(index) -%}
-{%- if index.Constant is defined -%}{{ index.Constant }}
-{%- else -%}(r[{{ index.Runtime }}] - 1.0){%- endif -%}
-{%- endmacro %}
-
-{%- macro indexed_fold_load(op) %}
-    { size_t offset = 0; int valid = 1;
-{%- for index in op.indices %}
-{%- set extent = op.dimensions[loop.index0] %}
-        { double coordinate = {{ tensor_index(index) }};
-          if (!isfinite(coordinate) || coordinate != floor(coordinate) || coordinate < 0 || coordinate >= {{ extent }}) valid = 0;
-          else offset = offset * {{ extent }} + (size_t)coordinate; }
-{%- endfor %}
-        r[{{ op.dst }}] = valid ? {% if op.kind == "LoadIndexedFoldCapture" %}ff_captures{% elif op.kind == "LoadIndexedFoldCarried" %}ff_carried{% else %}r{% endif %}[{{ op.base }} + offset * {{ op.stride }}] : NAN;
-    }
-{%- endmacro %}
-
-{%- macro function_fold(op, output, error_status) %}
-    {
-        double *const ff_outer = r;
-{%- if op.kind == "StoreOutputFunctionFold" %}
-        double *const ff_result = {{ output }};
-{%- endif %}
-        double ff_state[{{ op.carried_count if op.carried_count else 1 }}], ff_next[{{ op.carried_count if op.carried_count else 1 }}];
-{%- if op.kind == "StoreOutputFunctionFold" %}{% set cursor = namespace(value=0) %}
-{%- for source in op.initial %}
-{%- if source.Registers is defined %}{% set src = source.Registers %}
-        for (size_t k=0; k<{{ src.count }}; ++k) ff_state[{{ cursor.value }}+k] = r[{{ src.start }}+k];
-{%- else %}{% set src = source.ParentCarried %}
-        for (size_t k=0; k<{{ src.count }}; ++k) ff_state[{{ cursor.value }}+k] = ff_carried[{{ src.base }}+k];
-{%- endif %}{% set cursor.value = cursor.value + src.count %}
-{%- endfor %}
-{%- else %}
-        for (size_t k=0; k<{{ op.carried_count }}; ++k) ff_state[k] = r[{{ op.initial_start }}+k];
-{%- endif %}
-        const double *const ff_captures = r + {{ op.capture_start }};
-        (void)ff_captures; (void)ff_outer; (void)ff_next;
-{%- if op.kind == "GuardedFunctionFold" %}
-        if (r[{{ op.activation }}] != 0.0) {
-{%- elif op.kind == "StoreOutputFunctionFold" and op.condition is defined %}
-        if ((r[{{ op.condition }}] != 0.0) == {{ 1 if op.nested_when_true else 0 }}) {
-{%- endif %}
-{%- for binder in op.domain.binders %}
-{% set count = 0 if (binder.step > 0 and binder.lower > binder.upper) or (binder.step < 0 and binder.lower < binder.upper) else (binder.upper - binder.lower)//binder.step + 1 %}
-        int64_t ff_i{{ loop.index0 }}={{ integer(binder.lower) }};
-        for (size_t ff_n{{ loop.index0 }}=0; ff_n{{ loop.index0 }}<{{ count }}; ++ff_n{{ loop.index0 }}) {
-            if (ff_n{{ loop.index0 }}) ff_i{{ loop.index0 }} += {{ integer(binder.step) }};
-{%- endfor %}
-            const double ff_indices[] = { {% for binder in op.domain.binders %}(double)ff_i{{ loop.index0 }},{% else %}0.0{% endfor %} };
-            const double *const ff_carried = ff_state;
-            (void)ff_indices; (void)ff_carried;
-            {
-                double r[{{ op.register_count if op.register_count else 1 }}]; (void)r;
-{%- for update in op.update %}
-{{ scalar_op(update, "ff_next", error_status) }}
-{%- endfor %}
-            }
-            for (size_t k=0; k<{{ op.carried_count }}; ++k) ff_state[k] = ff_next[k];
-{%- for binder in op.domain.binders %}
-        }
-{%- endfor %}
-{%- if op.kind == "GuardedFunctionFold" or (op.kind == "StoreOutputFunctionFold" and op.condition is defined) %}
-        }
-{%- endif %}
-{%- if op.kind == "StoreOutputFunctionFold" %}
-        for (size_t k=0; k<{{ op.count }}; ++k) ff_result[{{ op.output_index }}+k] = ff_state[{{ op.result_base }}+k];
-{%- else %}
-        for (size_t k=0; k<{{ op.carried_count }}; ++k) ff_outer[{{ op.dst }}+k] = ff_state[k];
-{%- endif %}
-    }
-{%- endmacro %}
-
-{%- macro fold_tensor_update(op, output) %}
-    for (size_t e=0; e<{{ op.dimensions|product }}; ++e) for (size_t lane=0; lane<{{ op.lanes }}; ++lane) {
-        double nodes[{{ op.nodes|length + 1 }}];
-        nodes[0] = ff_carried[{{ op.source_base }}+e*{{ op.source_stride }}+lane];
-{%- for node in op.nodes %}{% set node_index=loop.index %}
-{%- if node.Update is defined %}{% set patch=op.updates[node.Update.update] %}
-        {
-            size_t value_offset = 0; int selected = {% if patch.condition is not none %}r[{{ patch.condition }}] != 0.0{% else %}1{% endif %};
-{%- for subscript in patch.subscripts %}{% set axis=loop.index0 %}{% set extent=op.dimensions[axis] %}{% set stride=op.dimensions[axis+1:]|product %}
-{%- if subscript == "Whole" %}
-            value_offset = value_offset * {{ extent }} + (e / {{ stride }}) % {{ extent }};
-{%- else %}
-            selected = selected && (double)((e / {{ stride }}) % {{ extent }}) == {{ tensor_index(subscript.Index) }};
-{%- endif %}
-{%- endfor %}
-            nodes[{{ node_index }}] = selected ? r[{{ patch.value_start }}+value_offset*{{ patch.value_stride }}+lane] : nodes[{{ node.Update.base }}];
-        }
-{%- else %}
-        nodes[{{ node_index }}] = r[{{ node.Select.condition }}] != 0.0 ? nodes[{{ node.Select.if_true }}] : nodes[{{ node.Select.if_false }}];
-{%- endif %}
-{%- endfor %}
-        {{ output }}[{{ op.output_index }}+e*{{ op.lanes }}+lane] = nodes[{{ op.result }}];
-    }
 {%- endmacro %}

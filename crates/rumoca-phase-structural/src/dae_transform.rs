@@ -25,9 +25,12 @@ mod auxiliary_blocks;
 mod builtin_profiles;
 mod candidate_choice;
 mod holonomic_attempt;
+mod loop_closures;
 #[cfg(test)]
 use holonomic_attempt::refused_holonomic_outcome;
 use holonomic_attempt::{HolonomicAttempt, attempt_holonomic_candidate};
+mod source_analysis;
+pub use source_analysis::{SourceStructuralAnalysis, prepare_for_solve_from_source};
 mod component_constraint;
 mod component_projection;
 mod constant_values;
@@ -46,6 +49,7 @@ mod expressions;
 mod formal_derivatives;
 mod function_derivatives;
 mod functions;
+mod inert_states;
 mod initial_pins;
 mod inline_calls;
 mod loop_guards;
@@ -54,7 +58,12 @@ mod observation;
 mod parameter_conditionals;
 mod reconstruction;
 mod runtime_quotients;
+mod selection_maps;
+pub use self::selection_maps::{
+    PreparedReducedChart, PreparedStateCoordinate, PreparedStateCoordinates, ReducedSelectionMaps,
+};
 mod semantic_owners;
+mod smooth_order;
 mod sortability;
 mod source;
 mod temporal;
@@ -99,35 +108,13 @@ pub use self::formal_derivatives::{
     FormalStageEquation, FormalStateCandidate, FormalStateCandidateView, FormalStateCoordinate,
     ReducedSelectionChart, StateSelection, construct_formal_derivatives,
 };
+pub use self::inert_states::demote_inert_states;
 pub use self::initial_pins::{InitialValuePin, InitialValueRole, PinTerm};
 pub use self::inline_calls::{inline_annotated_calls, inline_formal_calls};
 pub use self::observation::{
     ReductionCandidateGroup, ReductionIdentity, ReductionLane, ReductionOutcome, ReductionRecord,
     ReductionReport, ReductionSnapshot, ReductionStop, UnmatchedKind, UnmatchedName,
 };
-
-/// One admissible reduced state-selection chart, in the finalized transformed
-/// DAE's own variable-ordinal space.
-///
-/// The reduced state selection picks a Dependent/Independent split of a
-/// definitional first-integral coordinate group. A conserved first integral has
-/// no globally injective reduced chart, so the fixed primary split folds when a
-/// dependent coordinate passes through zero. This records one alternate split of
-/// that same group: the `dependent` coordinates are reconstructed and the
-/// `independent` coordinates are integrated. Each coordinate is a
-/// `(transformed variable ordinal, scalar)` pair naming a scalar of the finalized
-/// DAE that `PreparedDae::inspect` binds. The primary split is chart index zero.
-#[derive(Clone, Debug)]
-pub struct PreparedReducedChart {
-    pub dependent: Box<[(u32, u32)]>,
-    pub independent: Box<[(u32, u32)]>,
-    /// Reciprocal conditioning of this chart's dependent Jacobian at the
-    /// construction trial point, and the singular threshold it is measured
-    /// against. The mirror of a folding coordinate may sit at or below the
-    /// threshold here because it is regular at a different configuration.
-    pub trial_rcond: f64,
-    pub trial_singular_threshold: f64,
-}
 
 /// A finalized DAE ready for Solve lowering.
 pub enum PreparedDae<'source> {
@@ -145,10 +132,10 @@ pub enum PreparedDae<'source> {
         manifold_redundant: Box<[bool]>,
         pins: Box<[InitialValuePin]>,
         structural: PreparedStructuralAnalysis,
-        /// Admissible reduced state-selection charts issued by the
-        /// formal-derivative selection. Empty except on the reduced-selection
-        /// path that finalizes a folding definitional first-integral group.
-        charts: Box<[PreparedReducedChart]>,
+        /// The integrated state map and admissible reduced charts issued by
+        /// the formal-derivative selection. Empty except on the
+        /// reduced-selection path that finalizes a formal state candidate.
+        reduced: ReducedSelectionMaps,
     },
 }
 
@@ -178,17 +165,17 @@ impl PreparedDae<'_> {
     }
 
     pub fn inspect<R>(&self, inspect: impl for<'dae> FnOnce(PreparedSystem<'_, 'dae>) -> R) -> R {
-        let (manifold, pins, structural, charts) = match self {
+        let (manifold, pins, structural, reduced) = match self {
             Self::Borrowed {
                 pins, structural, ..
-            } => ([].as_slice(), pins, structural, [].as_slice()),
+            } => ([].as_slice(), pins, structural, None),
             Self::Transformed {
                 manifold,
                 pins,
                 structural,
-                charts,
+                reduced,
                 ..
-            } => (&**manifold, pins, structural, &**charts),
+            } => (&**manifold, pins, structural, Some(reduced)),
         };
         self.as_dae().inspect(|view| {
             let manifold = manifold
@@ -203,7 +190,8 @@ impl PreparedDae<'_> {
                 manifold: &manifold,
                 pins,
                 structural: structural.bind(view),
-                charts,
+                charts: reduced.map_or(&[], |reduced| &reduced.charts),
+                state_coordinates: reduced.and_then(|reduced| reduced.coordinates.as_ref()),
             })
         })
     }
@@ -231,6 +219,10 @@ pub struct PreparedSystem<'prepared, 'dae> {
     /// first-integral coordinate group, naming scalars of `view`. Empty for
     /// every prepared system without such a group.
     pub charts: &'prepared [PreparedReducedChart],
+    /// The integrated aggregate state of a formal state candidate and the
+    /// source scalar each of its scalars equals, naming variables of `view`;
+    /// `None` for every system no formal selection finalized.
+    pub state_coordinates: Option<&'prepared PreparedStateCoordinates>,
 }
 
 /// The structural analysis coupled to one prepared DAE root.
@@ -584,6 +576,13 @@ pub fn prepare_for_solve(model: &dae::Dae) -> Result<PreparedDae<'_>, Structural
     prepare_for_solve_with_observer(model, &mut ())
 }
 
+/// The source system's first structural analysis and the incidence its next
+/// round may reuse, as [`structural_analysis_capturing`] builds them.
+type SourceRound = (
+    Result<PreparedStructuralAnalysis, StructuralError>,
+    Option<crate::incidence::ReusableIncidence>,
+);
+
 /// The diagnostic inspection surface: the exact same reduction as
 /// [`prepare_for_solve`], paired with an owned [`ReductionReport`] of every
 /// round this call actually traversed.
@@ -608,9 +607,24 @@ fn prepare_for_solve_with_observer<'source>(
     model: &'source dae::Dae,
     observer: &mut impl ReductionObserver,
 ) -> Result<PreparedDae<'source>, StructuralError> {
+    prepare_with_source_round(model, None, observer)
+}
+
+/// [`prepare_for_solve_with_observer`] given the source system's first
+/// analysis when one is already built; it serves the first reduction round
+/// only when no requested state rebuilds the source.
+fn prepare_with_source_round<'source>(
+    model: &'source dae::Dae,
+    source_round: Option<SourceRound>,
+    observer: &mut impl ReductionObserver,
+) -> Result<PreparedDae<'source>, StructuralError> {
     let selected = match reconstruction::rebuild_requested_states(model) {
         Ok(Some(selected)) => selected,
-        Ok(None) => return reduce_for_solve_with_observer(model, observer),
+        Ok(None) => {
+            let first =
+                source_round.unwrap_or_else(|| structural_analysis_capturing(model, None, None));
+            return reduce_from_first_round(model, first, observer);
+        }
         Err(error) => return observed_failure(error, observer),
     };
     match reduce_for_solve_with_observer(&selected, observer)? {
@@ -622,7 +636,7 @@ fn prepare_for_solve_with_observer<'source>(
             manifold_redundant: Box::new([]),
             pins,
             structural,
-            charts: Box::new([]),
+            reduced: ReducedSelectionMaps::default(),
         }),
         PreparedDae::Transformed {
             dae,
@@ -630,14 +644,14 @@ fn prepare_for_solve_with_observer<'source>(
             manifold_redundant,
             pins,
             structural,
-            charts,
+            reduced,
         } => Ok(PreparedDae::Transformed {
             dae,
             manifold,
             manifold_redundant,
             pins,
             structural,
-            charts,
+            reduced,
         }),
     }
 }
@@ -646,7 +660,19 @@ fn reduce_for_solve_with_observer<'source>(
     model: &'source dae::Dae,
     observer: &mut impl ReductionObserver,
 ) -> Result<PreparedDae<'source>, StructuralError> {
-    let (singular, mut current_reusable) = match structural_analysis_capturing(model, None, None) {
+    reduce_from_first_round(
+        model,
+        structural_analysis_capturing(model, None, None),
+        observer,
+    )
+}
+
+fn reduce_from_first_round<'source>(
+    model: &'source dae::Dae,
+    first: SourceRound,
+    observer: &mut impl ReductionObserver,
+) -> Result<PreparedDae<'source>, StructuralError> {
+    let (singular, mut current_reusable) = match first {
         (Ok(structural), _) => return borrowed_with_observer(model, structural, observer),
         (Err(error @ StructuralError::Singular { .. }), reusable) => (error, reusable),
         (Err(StructuralError::EmptySystem), _) => {
@@ -830,7 +856,7 @@ fn transformed(
     model: dae::Dae,
     manifold: Vec<ManifoldEntry>,
     structural: PreparedStructuralAnalysis,
-    charts: Box<[PreparedReducedChart]>,
+    reduced: ReducedSelectionMaps,
 ) -> Result<PreparedDae<'static>, StructuralError> {
     let pins = model.inspect(transferred_initial_values)?;
     let (expressions, redundant): (Vec<u32>, Vec<bool>) = manifold
@@ -843,7 +869,7 @@ fn transformed(
         manifold_redundant: redundant.into_boxed_slice(),
         pins: pins.into_boxed_slice(),
         structural,
-        charts,
+        reduced,
     })
 }
 
@@ -853,7 +879,7 @@ fn transformed_with_observer(
     structural: PreparedStructuralAnalysis,
     observer: &mut impl ReductionObserver,
 ) -> Result<PreparedDae<'static>, StructuralError> {
-    let result = transformed(model, manifold, structural, Box::new([]))
+    let result = transformed(model, manifold, structural, ReducedSelectionMaps::default())
         .and_then(derivative_aliases::normalize);
     observer.observe(ReductionEvent::Stopped {
         outcome: match &result {
@@ -1348,6 +1374,10 @@ struct HolonomicReductionState {
     direct_round_number: u32,
     differentiated_owners: BTreeSet<HolonomicOwnerKey>,
     blocked: Option<DiscardedInitialValue>,
+    /// The incidence of the current system while its manifold is empty, so a
+    /// direct round reuses untouched rows and screens candidates exactly as
+    /// the outer direct lane does.
+    reusable: Option<crate::incidence::ReusableIncidence>,
 }
 
 impl HolonomicReductionState {
@@ -1361,6 +1391,7 @@ impl HolonomicReductionState {
             direct_round_number: 0,
             differentiated_owners: BTreeSet::new(),
             blocked: None,
+            reusable: None,
         }
     }
 
@@ -1378,10 +1409,31 @@ impl HolonomicReductionState {
         else {
             unreachable!("a sorted step completes the reduction immediately")
         };
+        self.reusable = None;
         self.reduced = Some(dae);
         self.manifold = manifold;
         self.residue = residue;
         self.current_error = error;
+    }
+
+    fn accept_demotion(&mut self, step: DemotionStep) {
+        let DemotionStep::Reduced {
+            dae,
+            manifold,
+            residue,
+            error,
+            reusable,
+        } = step
+        else {
+            unreachable!("a sorted demotion completes the reduction immediately")
+        };
+        self.accept_reduced(HolonomicStep::Reduced {
+            dae,
+            manifold,
+            residue,
+            error,
+        });
+        self.reusable = self.manifold.is_empty().then_some(reusable);
     }
 
     fn discard_stalled(&mut self, observer: &mut impl ReductionObserver) {
@@ -1431,7 +1483,7 @@ impl HolonomicReductionState {
             self.residue,
             &self.manifold,
             allow_held,
-            None,
+            self.reusable.as_ref(),
             observer,
         )?;
         self.blocked = self.blocked.take().or(round.blocked);
@@ -1450,7 +1502,7 @@ impl HolonomicReductionState {
                     manifold,
                     structural,
                 } => return sorted_holonomic_round(dae, manifold, structural).map(Some),
-                step @ DemotionStep::Reduced { .. } => self.accept_reduced(step.into()),
+                step @ DemotionStep::Reduced { .. } => self.accept_demotion(step),
             }
         }
         Ok(None)
@@ -1469,7 +1521,7 @@ impl HolonomicReductionState {
                 structural,
             }) => sorted_holonomic_round(dae, manifold, structural).map(Some),
             Some(step @ DemotionStep::Reduced { .. }) => {
-                self.accept_reduced(step.into());
+                self.accept_demotion(step);
                 Ok(None)
             }
             None => match held {
@@ -1485,28 +1537,6 @@ impl HolonomicReductionState {
                     }))
                 }
             },
-        }
-    }
-}
-
-impl From<DemotionStep> for HolonomicStep {
-    fn from(step: DemotionStep) -> Self {
-        match step {
-            DemotionStep::Reduced {
-                dae,
-                manifold,
-                residue,
-                error,
-                reusable: _,
-            } => Self::Reduced {
-                dae,
-                manifold,
-                residue,
-                error,
-            },
-            DemotionStep::Sorted { .. } => {
-                unreachable!("a sorted demotion completes before conversion")
-            }
         }
     }
 }
@@ -1570,8 +1600,9 @@ fn reduce_holonomic_constraint_with_observer(
     } else {
         None
     };
+    let mut reusable = None;
     if let Some(normalized) = &normalized {
-        outcome = structural_analysis(normalized);
+        (outcome, reusable) = structural_analysis_capturing(normalized, None, None);
     }
     let (residue, current_error) = match outcome {
         Ok(structural) => {
@@ -1595,6 +1626,7 @@ fn reduce_holonomic_constraint_with_observer(
     };
     let mut state = HolonomicReductionState::new(residue, current_error);
     state.reduced = normalized;
+    state.reusable = reusable;
     if state.reduced.is_some()
         && let Some(round) = state.exhaust_direct(model, observer)?
     {

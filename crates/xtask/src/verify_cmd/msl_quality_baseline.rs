@@ -1,3 +1,4 @@
+mod cohort;
 mod reference_boundary;
 #[cfg(test)]
 mod tests;
@@ -16,11 +17,12 @@ use reference_boundary::{ReferenceBoundaryMigration, validate_reference_boundary
 const MSL_QUALITY_BASELINE_ASSET_URL: &str = "https://github.com/CogniPilot/rumoca/releases/download/msl-quality-baseline/msl_quality_baseline.json";
 const MSL_QUALITY_BASELINE_FALLBACK_REL: &str =
     "crates/rumoca-test-msl/tests/msl_tests/msl_quality_baseline.json";
-const MSL_QUALITY_GATE_VERSION: u64 = 11;
-const PREVIOUS_REFERENCE_BOUNDARY_VERSION: u64 = 10;
-/// A reviewed boundary two versions behind the checked-in one.
-const SUPERSEDED_REFERENCE_BOUNDARY_VERSION: u64 = 9;
-/// The version of the promoted release asset, three reviewed boundaries behind.
+const MSL_QUALITY_GATE_VERSION: u64 = 14;
+/// The reviewed boundary just behind the checked-in one.
+const PREVIOUS_REFERENCE_BOUNDARY_VERSION: u64 = 13;
+/// The version of the promoted release asset, the oldest reviewed boundary a
+/// promoted source may carry; every reviewed boundary from it up to
+/// [`PREVIOUS_REFERENCE_BOUNDARY_VERSION`] resolves to its checked-in migration.
 const PROMOTED_REFERENCE_BOUNDARY_VERSION: u64 = 8;
 const PARTIAL_MIGRATION_TO_QUALITY_GATE_VERSION: u64 = 4;
 const PREVIOUS_MSL_QUALITY_GATE_VERSION: u64 = 3;
@@ -98,6 +100,18 @@ struct MslQualityBaselineHeader {
     sim_ok: usize,
     runtime_ratio_stats: RuntimeRatioStats,
     trace_accuracy_stats: TraceAccuracyStats,
+    #[serde(flatten)]
+    cohort: cohort::CohortEvidence,
+}
+
+impl MslQualityBaselineHeader {
+    fn cohort_snapshot(&self) -> cohort::CohortSnapshot<'_> {
+        cohort::CohortSnapshot {
+            evidence: &self.cohort,
+            trace: &self.trace_accuracy_stats,
+            runtime: &self.runtime_ratio_stats,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,6 +230,8 @@ struct TraceAccuracyStats {
 
 #[derive(Debug, Clone, Deserialize)]
 struct InitialConditionStats {
+    #[serde(default)]
+    models_compared: Option<usize>,
     deviation_channels_total: usize,
     severe_channels_total: usize,
     violation_mass_total: f64,
@@ -223,6 +239,8 @@ struct InitialConditionStats {
 
 #[derive(Debug, Clone, Deserialize)]
 struct StateSelectionStats {
+    #[serde(default)]
+    models_compared: Option<usize>,
     exact_state_set_match_models: usize,
     total_rumoca_only_states: usize,
     total_omc_only_states: usize,
@@ -760,7 +778,7 @@ fn validate_omc_dependent_metric_integrity(
             .saturating_sub(checked_trace.models_with_severe_channel),
     )?;
     validate_omc_error_metric_integrity(promoted_trace, checked_trace)?;
-    validate_runtime_metric_integrity(promoted, checked_in)
+    validate_cohort_metric_integrity(promoted, checked_in)
 }
 
 fn validate_omc_error_metric_integrity(
@@ -788,26 +806,6 @@ fn validate_omc_error_metric_integrity(
             promoted_trace.models_with_any_channel_deviation,
             checked_trace.models_with_any_channel_deviation,
         ),
-        (
-            "initial-condition deviation channels",
-            promoted_trace.initial_condition.deviation_channels_total,
-            checked_trace.initial_condition.deviation_channels_total,
-        ),
-        (
-            "initial-condition severe channels",
-            promoted_trace.initial_condition.severe_channels_total,
-            checked_trace.initial_condition.severe_channels_total,
-        ),
-        (
-            "state-set rumoca-only states",
-            promoted_trace.state_selection.total_rumoca_only_states,
-            checked_trace.state_selection.total_rumoca_only_states,
-        ),
-        (
-            "state-set OMC-only states",
-            promoted_trace.state_selection.total_omc_only_states,
-            checked_trace.state_selection.total_omc_only_states,
-        ),
     ] {
         ensure_not_raised(label, promoted_value, checked_in_value)?;
     }
@@ -815,37 +813,23 @@ fn validate_omc_error_metric_integrity(
         "trace violation mass",
         promoted_trace.violation_mass_total,
         checked_trace.violation_mass_total,
-    )?;
-    ensure_float_not_raised(
-        "initial-condition violation mass",
-        promoted_trace.initial_condition.violation_mass_total,
-        checked_trace.initial_condition.violation_mass_total,
     )
 }
 
-fn validate_runtime_metric_integrity(
+/// Initial-condition, state-set, and runtime figures accrue per compared
+/// model, so they are compared over the models both baselines measured.
+fn validate_cohort_metric_integrity(
     promoted: &MslQualityBaselineHeader,
     checked_in: &MslQualityBaselineHeader,
 ) -> Result<()> {
-    ensure_runtime_speedup_not_regressed(
-        "runtime system speedup median",
-        promoted
-            .runtime_ratio_stats
-            .system_ratio_both_success
-            .median,
-        checked_in
-            .runtime_ratio_stats
-            .system_ratio_both_success
-            .median,
-    )?;
-    ensure_runtime_speedup_not_regressed(
-        "runtime wall speedup median",
-        promoted.runtime_ratio_stats.wall_ratio_both_success.median,
-        checked_in
-            .runtime_ratio_stats
-            .wall_ratio_both_success
-            .median,
-    )
+    let verdict =
+        cohort::cohort_comparison(promoted.cohort_snapshot(), checked_in.cohort_snapshot())?;
+    ensure!(
+        verdict.regressions.is_empty(),
+        "MSL migration regresses unrelated cohort metrics: {}",
+        verdict.regressions.join("; ")
+    );
+    Ok(())
 }
 
 fn ensure_not_lowered(label: &str, promoted: usize, checked_in: usize) -> Result<()> {
@@ -868,14 +852,6 @@ fn ensure_float_not_raised(label: &str, promoted: f64, checked_in: f64) -> Resul
     ensure!(
         checked_in <= promoted + 1.0e-9,
         "MSL migration raises unrelated {label} (promoted={promoted:.6e}, checked-in={checked_in:.6e})"
-    );
-    Ok(())
-}
-
-fn ensure_runtime_speedup_not_regressed(label: &str, promoted: f64, checked_in: f64) -> Result<()> {
-    ensure!(
-        checked_in >= promoted * 0.65,
-        "MSL migration regresses unrelated {label} by more than 35% (promoted={promoted:.6e}, checked-in={checked_in:.6e})"
     );
     Ok(())
 }
@@ -907,10 +883,8 @@ fn load_baseline_header_for_source(
                 baseline.quality_gate_version,
                 PREVIOUS_MSL_QUALITY_GATE_VERSION
                     | PARTIAL_MIGRATION_TO_QUALITY_GATE_VERSION
-                    | PREVIOUS_REFERENCE_BOUNDARY_VERSION
-                    | SUPERSEDED_REFERENCE_BOUNDARY_VERSION
                     | PROMOTED_REFERENCE_BOUNDARY_VERSION
-                    | BRIDGED_PROMOTED_QUALITY_GATE_VERSION
+                    ..=PREVIOUS_REFERENCE_BOUNDARY_VERSION | BRIDGED_PROMOTED_QUALITY_GATE_VERSION
             ));
     ensure!(
         version_supported,

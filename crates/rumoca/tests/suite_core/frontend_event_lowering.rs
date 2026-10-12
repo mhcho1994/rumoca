@@ -104,9 +104,9 @@ fn get_instance_name_in_bindings_names_the_enclosing_instance() {
         "{}",
         binding("w1.insNam")
     );
-    assert!(binding("w1.fileName").contains("\"Top.w1\""));
+    assert!(binding("w1.fileName").contains("\"Top.w1.csv\""));
     assert!(
-        binding("w2.fileName").contains("\"Top\""),
+        binding("w2.fileName").contains("\"Top.txt\""),
         "a modifier is written in, and names, the enclosing instance: {}",
         binding("w2.fileName")
     );

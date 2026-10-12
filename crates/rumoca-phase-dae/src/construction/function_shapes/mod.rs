@@ -2,6 +2,8 @@ mod derivatives;
 mod expression_rules;
 mod integer_bounds;
 mod record_field_shapes;
+mod specialization_key;
+mod specialization_schedule;
 #[cfg(test)]
 mod tests;
 mod value_relevance;
@@ -13,9 +15,13 @@ pub(in crate::construction) use expression_rules::{
     call_free_expression_shape, call_free_target_shape,
 };
 use expression_rules::{expression_shape, reject_shape_call};
-pub(in crate::construction) use integer_bounds::infer_function_integer_bounds;
-use rumoca_core::{DefId, FunctionInstanceId};
+pub(in crate::construction) use integer_bounds::{
+    IntegerInterval, exact_range_distance, infer_finite_for_counter_bounds,
+    infer_function_integer_bounds,
+};
+use rumoca_core::{DefId, FunctionInstanceId, InstanceId};
 use rumoca_eval_flat::constant::{DeferredParameterSource, EvalEnvironment};
+pub(in crate::construction) use specialization_key::{KeyedArgumentReads, non_evaluable_parameter};
 use value_relevance::ValueReadInputs;
 pub(super) use value_relevance::{function_expressions, statement_expression_roots};
 
@@ -42,11 +48,13 @@ pub(super) type ValueShape = Vec<u32>;
 /// key repeats. The report states the bound it exceeded rather than claiming a
 /// proof that no fixed point exists, because this analysis does not decide that.
 ///
-/// **Owner.** `ShapeAnalyzer::ensure_specialization`, the only place a
-/// certificate is minted.
+/// **Owner.** `ShapeAnalyzer::ensure_specialization` in `specialization_schedule`,
+/// the only place a certificate is minted; it walks a chain this bound admits
+/// without growing the native stack with the chain.
 ///
 /// **Evidence.** `function_shapes/tests/value_proven_shapes.rs`:
-/// `value_recursion_without_a_fixed_point_is_bounded` (rejected),
+/// `value_recursion_without_a_fixed_point_is_bounded` (rejected, and on a
+/// 256 KiB stack in `value_recursion_bound_is_reported_on_a_small_stack`),
 /// `scalar_valued_recursion_reuses_one_specialization` and
 /// `converging_value_keyed_recursion_terminates` (accepted).
 const SPECIALIZATION_DEPTH_LIMIT: usize = 256;
@@ -96,7 +104,15 @@ pub(super) struct ShapeEnvironment {
     shapes: HashMap<VarName, ValueShape>,
     /// Conservative finite bounds for scalar Integer values whose exact value
     /// is not fixed at translation time (most notably compact loop binders).
-    integer_bounds: HashMap<VarName, (i64, i64)>,
+    integer_bounds: HashMap<VarName, IntegerInterval>,
+    /// Exact lexical compact-domain bounds, distinct from runtime value bounds.
+    slice_binders: HashMap<VarName, (i64, i64)>,
+    /// Settled scalar Integer declaration values, retaining their exact source
+    /// reference and occurrence. Lexical shadowing clears this authority.
+    slice_constants: HashMap<VarName, (rumoca_core::Reference, i64)>,
+    /// Canonical Flat class occurrences attached to lexical references. These
+    /// supplement name binding; they never create a lexical domain or bounds.
+    slice_class_scopes: Arc<HashSet<InstanceId>>,
     /// Flat literal names paired with the declaration identities proven to be
     /// enumeration types. Both sets are required before shape analysis treats
     /// a reference as an enumeration scalar; rendered spelling alone grants no
@@ -116,16 +132,18 @@ pub(super) struct ShapeEnvironment {
     /// `integer(...)` floor conversion, `mod`/`div`, enumeration ordinals — instead of
     /// a second rule set written for shapes alone.
     values: EvalContext,
+    /// The model's functions, which an extent may call (MLS §12.2: a
+    /// dimension of a function local is any Integer expression of the inputs,
+    /// such as `numberOfSymmetricBaseSystems(m)`). Shared by the model scope
+    /// and every specialization cloned from it.
+    functions: Option<Arc<EvalContext>>,
     /// Statically-known array extents per flat name, in dimension order.
     ///
     /// This is the shape proof's `shapes` restated as the `Integer` extents MLS
-    /// §10.3.1 `size(x, d)`/`size(x)`/`ndims(x)` read, and it is consulted *only*
-    /// when folding a conditional guard (MLS §3.6.5) to a Boolean. It is kept
-    /// apart from [`Self::values`] on purpose: the compact-domain proofs
-    /// (`proven_integer_bounds`, `proven_range_bounds`) evaluate a loop bound like
-    /// `1:size(A, 1)` through `values` and must keep `size(A, 1)` symbolic so the
-    /// domain stays a compact loop, not a constant-extent one. Folding `size`
-    /// there would collapse those domains; folding it in a guard never does.
+    /// §10.3.1 `size(x, d)`/`size(x)`/`ndims(x)` read. Conditional guards and
+    /// conservative Integer intervals may inspect these immutable extents.
+    /// They remain separate from [`Self::values`]: an interval proof never
+    /// publishes a settled value or materializes a compact loop's points.
     dimension_extents: HashMap<VarName, Vec<i64>>,
     /// Whether this scope is one function specialization rather than the model.
     ///
@@ -163,10 +181,14 @@ impl ShapeEnvironment {
         Self {
             shapes: HashMap::with_capacity(capacity),
             integer_bounds: HashMap::with_capacity(capacity),
+            slice_binders: HashMap::new(),
+            slice_constants: HashMap::new(),
+            slice_class_scopes: Arc::default(),
             enumeration_literals: Arc::default(),
             enumeration_type_declarations: Arc::default(),
             record_array_fields: None,
             values: EvalContext::with_capacity(capacity, 0, 0),
+            functions: None,
             dimension_extents: HashMap::with_capacity(capacity),
             specialized: false,
             attribute_scope: false,
@@ -253,6 +275,8 @@ impl ShapeEnvironment {
     /// extent is not statically known never reaches this scope with a concrete
     /// shape and so never folds.
     pub(super) fn insert(&mut self, name: VarName, shape: ValueShape) {
+        self.slice_binders.remove(&name);
+        self.slice_constants.remove(&name);
         self.values.remove_parameter(name.as_str());
         self.integer_bounds.remove(&name);
         self.record_dimension_extents(&name, &shape);
@@ -265,6 +289,8 @@ impl ShapeEnvironment {
     /// a value only for a scalar, so a bound value that disagreed with a
     /// non-scalar shape would be unrepresentable rather than merely wrong.
     pub(super) fn bind_scalar_value(&mut self, name: VarName, value: EvalValue) {
+        self.slice_binders.remove(&name);
+        self.slice_constants.remove(&name);
         self.integer_bounds.remove(&name);
         self.record_dimension_extents(&name, &[]);
         self.shapes.insert(name.clone(), Vec::new());
@@ -274,11 +300,119 @@ impl ShapeEnvironment {
     /// Bind a scalar Integer to a proved finite interval without pretending it
     /// has one translation-time value.
     pub(super) fn bind_integer_bounds(&mut self, name: VarName, lower: i64, upper: i64) {
+        self.slice_binders.remove(&name);
+        self.slice_constants.remove(&name);
         self.values.remove_parameter(name.as_str());
         self.record_dimension_extents(&name, &[]);
         self.shapes.insert(name.clone(), Vec::new());
         self.integer_bounds
+            .insert(name, IntegerInterval::finite(lower, upper));
+    }
+
+    /// Conjoin a path fact about a scalar Integer, such as an enclosing guard's
+    /// `radius <= 4`, with what this scope already proves about it.
+    pub(in crate::construction) fn refine_integer_interval(
+        &mut self,
+        name: VarName,
+        interval: IntegerInterval,
+    ) {
+        if interval.is_unbounded() {
+            return;
+        }
+        let refined = self
+            .integer_bounds
+            .get(&name)
+            .copied()
+            .unwrap_or(IntegerInterval::UNBOUNDED)
+            .meet(interval);
+        self.integer_bounds.insert(name, refined);
+    }
+
+    /// Bind one loop or comprehension binder over `range`: its proven value
+    /// bounds when the range has them, else an unknown scalar, so the binder
+    /// always shadows every outer fact about its name.
+    pub(in crate::construction) fn bind_range_binder(&mut self, name: VarName, range: &Expression) {
+        match self.proven_range_bounds(range) {
+            Some((lower, upper)) => self.bind_integer_bounds(name, lower, upper),
+            None => self.insert(name, Vec::new()),
+        }
+    }
+
+    pub(in crate::construction) fn bind_slice_binder(
+        &mut self,
+        name: VarName,
+        lower: i64,
+        upper: i64,
+    ) {
+        self.bind_integer_bounds(name.clone(), lower, upper);
+        self.slice_binders
             .insert(name, (lower.min(upper), lower.max(upper)));
+    }
+
+    pub(in crate::construction) fn slice_binder_bounds(
+        &self,
+        name: &VarName,
+    ) -> Option<(i64, i64)> {
+        self.slice_binders.get(name).copied()
+    }
+
+    pub(in crate::construction) fn slice_constant(
+        &self,
+        reference: &rumoca_core::Reference,
+    ) -> Option<i64> {
+        let (owned, value) = self.slice_constants.get(reference.var_name())?;
+        super::affine_slices::same_reference(owned, reference).then_some(*value)
+    }
+
+    pub(in crate::construction) fn bind_slice_constant(
+        &mut self,
+        flat: &flat::Model,
+        variable: &flat::Variable,
+        constants: &EvalContext,
+    ) {
+        self.slice_constants.remove(&variable.name);
+        if !matches!(
+            variable.variability,
+            Variability::Constant(_) | Variability::Parameter(_)
+        ) || !variable.dims.is_empty()
+            || flat
+                .effective_types
+                .get(&variable.type_id)
+                .map(|ty| ty.canonical_type())
+                != Some(flat.predefined_types.integer)
+            || matches!(variable.variability, Variability::Parameter(_))
+                && variable.fixed_uniform() == Some(false)
+        {
+            return;
+        }
+        let Some(EvalValue::Integer(value)) = constants.instance_value(variable.instance_id) else {
+            return;
+        };
+        let Some(path) = &variable.component_ref else {
+            return;
+        };
+        let reference = rumoca_core::Reference::with_component_reference(
+            variable.name.to_string(),
+            path.clone(),
+        )
+        .with_instance_id(variable.instance_id);
+        self.slice_constants
+            .insert(variable.name.clone(), (reference, *value));
+    }
+
+    pub(in crate::construction) fn slice_reference_scope(&self, instance: InstanceId) -> bool {
+        self.slice_class_scopes.contains(&instance)
+    }
+
+    pub(in crate::construction) fn bind_slice_class_scopes(&mut self, flat: &flat::Model) {
+        self.slice_class_scopes = Arc::new(
+            flat.instance_relations
+                .iter()
+                .filter_map(|(instance, relation)| {
+                    (relation.kind == flat::InstanceKind::Class).then_some(*instance)
+                })
+                .collect(),
+        );
     }
 
     /// Record `shape` as the dimensions a folded guard resolves `size`/`ndims`
@@ -294,10 +428,11 @@ impl ShapeEnvironment {
     }
 
     /// A read-only view of the proven values that also answers `size`/`ndims`
-    /// from the proven dimensions. Used only to fold a conditional guard.
+    /// from the proven dimensions for guards and conservative interval proofs.
     fn shape_aware_values(&self) -> ShapeAwareValues<'_> {
         ShapeAwareValues {
             values: &self.values,
+            functions: self.functions.as_deref(),
             dimension_extents: &self.dimension_extents,
         }
     }
@@ -307,8 +442,9 @@ impl ShapeEnvironment {
         let merged = self
             .integer_bounds
             .get(&name)
+            .and_then(|interval| interval.bounds())
             .map_or((lower, upper), |(owned_lower, owned_upper)| {
-                ((*owned_lower).min(lower), (*owned_upper).max(upper))
+                (owned_lower.min(lower), owned_upper.max(upper))
             });
         self.bind_integer_bounds(name, merged.0, merged.1);
     }
@@ -496,6 +632,7 @@ pub(in crate::construction) fn proven_conditional_branch(
 /// bounds through the value context directly and keep `size` symbolic.
 struct ShapeAwareValues<'a> {
     values: &'a EvalContext,
+    functions: Option<&'a EvalContext>,
     dimension_extents: &'a HashMap<VarName, Vec<i64>>,
 }
 
@@ -509,7 +646,9 @@ impl EvalEnvironment for ShapeAwareValues<'_> {
     }
 
     fn get_function(&self, name: &str) -> Option<&rumoca_core::Function> {
-        self.values.get_function(name)
+        self.values
+            .get_function(name)
+            .or_else(|| self.functions?.get_function(name))
     }
 
     fn get_array_dimensions(&self, name: &str) -> Option<&[i64]> {
@@ -606,9 +745,26 @@ pub(super) struct FunctionShapeAnalysis {
     /// a run-time branch but an arm's calls cannot be certified, so the guard
     /// is a structural selection (SPEC_0040 DAE-C22).
     structural_selections: HashSet<Span>,
+    /// Parameters with no translation-time value (MLS 3.7 §4.5, §18.6), closed
+    /// over the parameter bindings that read them; no key carries their value.
+    non_evaluable: HashSet<VarName>,
+    /// Ordinary parameters whose value is settable after translation; only a
+    /// position a callee's declared interface dimension reads is keyed on
+    /// their value.
+    tunable: HashSet<VarName>,
+    /// Model-scope calls whose key carries a value read from model variables.
+    keyed_argument_reads: Vec<KeyedArgumentReads>,
 }
 
 impl FunctionShapeAnalysis {
+    pub(super) fn use_record_array_field_plans(&mut self, plans: Arc<RecordArrayFieldPlans>) {
+        self.model_values.record_array_fields = Some(Arc::clone(&plans));
+        self.attribute_values.record_array_fields = Some(Arc::clone(&plans));
+        for certificate in &mut self.certificates {
+            certificate.values.record_array_fields = Some(Arc::clone(&plans));
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn analyze(flat: &flat::Model, constants: &EvalContext) -> Result<Self, ToDaeError> {
         Self::analyze_model(flat, constants, None)
@@ -622,8 +778,13 @@ impl FunctionShapeAnalysis {
         constants: &EvalContext,
         evaluable: Option<&std::collections::HashSet<VarName>>,
     ) -> Result<Self, ToDaeError> {
-        let record_array_fields = Arc::new(analysis::analyze_record_array_field_plans(flat)?);
+        let record_array_fields = Arc::new(analysis::analyze_record_array_field_plans(
+            flat,
+            SelectedFamilies::mandatory(&flat.structured_equations),
+            SelectedFamilies::mandatory(&flat.initial_structured_equations),
+        )?);
         let mut model_values = concrete_model_shapes(flat, constants)?;
+        model_values.functions = Some(Arc::new(function_table(constants)));
         model_values.evaluable = evaluable.map(|evaluable| Arc::new(evaluable.clone()));
         model_values.record_array_fields = Some(record_array_fields);
         let constructor_instances = flat
@@ -676,8 +837,14 @@ impl FunctionShapeAnalysis {
                 value_read_inputs,
                 derivatives: Vec::new(),
                 structural_selections: HashSet::new(),
+                non_evaluable: specialization_key::non_evaluable_closure(flat),
+                tunable: specialization_key::tunable_parameters(flat, evaluable),
+                keyed_argument_reads: Vec::new(),
             },
             active_specializations: Vec::new(),
+            chain_depths: Vec::new(),
+            pending_bodies: Vec::new(),
+            inline_base: 0,
         };
         analyzer.discover_model_calls()?;
         analyzer.discover_derivative_calls()?;
@@ -695,46 +862,8 @@ impl FunctionShapeAnalysis {
             .expect("function shape analysis owns the model projection plan")
     }
 
-    /// The proven argument values that identify one call's specialization.
-    ///
-    /// A position carries a value only when the callee's declared dimensions or
-    /// ranges actually read that input's value, and only when the argument is
-    /// evaluable at translation time. Every other position records `None`, which
-    /// keeps calls that differ only in a value no shape reads inside one shared
-    /// specialization — the property that both prevents duplicate DAE functions
-    /// and lets a recursive call repeat its key.
-    fn proven_input_values(
-        &self,
-        function: &VarName,
-        arguments: &[Expression],
-        values: &ShapeEnvironment,
-    ) -> Vec<Option<ProvenValue>> {
-        arguments
-            .iter()
-            .enumerate()
-            .map(|(ordinal, argument)| {
-                if self.value_read_inputs.reads_value(function, ordinal) {
-                    values.proven_value(argument)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     pub(super) fn model_values(&self) -> &ShapeEnvironment {
         &self.model_values
-    }
-
-    /// Record equation conditionals whose guard is not kept as a run-time
-    /// branch (SPEC_0040 DAE-C22), so every consumer folds them by the same
-    /// translation-time selection. The set only grows: a selection discovery
-    /// already recorded stays one.
-    pub(super) fn add_structural_selections(&mut self, spans: impl IntoIterator<Item = Span>) {
-        self.structural_selections.extend(spans);
-        let selections = Arc::new(self.structural_selections.clone());
-        self.model_values.structural_selections = Arc::clone(&selections);
-        self.attribute_values.structural_selections = selections;
     }
 
     /// Record the model's settled evaluable parameters in both model scopes.
@@ -934,14 +1063,22 @@ impl FunctionShapeAnalysis {
 
 struct DiscoveryCheckpoint {
     certificates: usize,
+    pending_bodies: usize,
     call_keys: HashSet<FunctionSpecializationKey>,
     constructor_keys: HashSet<FunctionSpecializationKey>,
+    keyed_argument_reads: usize,
 }
 
 struct ShapeAnalyzer<'flat> {
     flat: &'flat flat::Model,
     analysis: FunctionShapeAnalysis,
     active_specializations: Vec<usize>,
+    /// Length of the value-keyed call chain that minted each specialization.
+    chain_depths: Vec<usize>,
+    /// Specializations whose bodies wait for their walk root to drain them.
+    pending_bodies: Vec<specialization_schedule::PendingBody>,
+    /// `active_specializations` length where the current depth-first walk began.
+    inline_base: usize,
 }
 
 impl ShapeAnalyzer<'_> {
@@ -1029,6 +1166,9 @@ impl ShapeAnalyzer<'_> {
         {
             return self.discover_conditional_calls(branches, else_branch, *span, values);
         }
+        // MLS §10.4.1: the comprehension body and filter are evaluated in the
+        // scope its indices open, so their calls are shaped with each index
+        // bound as a scalar; the index ranges are read outside that scope.
         if let Expression::ArrayComprehension {
             expr,
             indices,
@@ -1094,7 +1234,8 @@ impl ShapeAnalyzer<'_> {
                 .iter()
                 .flat_map(|(condition, value)| [condition, value])
                 .chain(std::iter::once(else_branch))
-                .try_for_each(|arm| self.discover_calls(arm, values));
+                .try_for_each(|arm| self.discover_calls(arm, values))
+                .and_then(|()| self.drain_pending_bodies(checkpoint.pending_bodies));
             // A certified callee must also have a representable body.
             let representable = every_arm.is_ok()
                 && self.analysis.certificates[checkpoint.certificates..]
@@ -1170,9 +1311,7 @@ impl ShapeAnalyzer<'_> {
                 .map(|argument| self.discover_expression(argument, values))
                 .collect::<Result<Vec<_>, _>>()?;
             let function = name.var_name().clone();
-            let input_values = self
-                .analysis
-                .proven_input_values(&function, arguments, values);
+            let input_values = self.keyed_input_values(&function, arguments, values, span);
             let (index, prefix) =
                 self.certify_regular_call(name, function, inputs, input_values, span)?;
             self.analysis.certificates[index]
@@ -1355,9 +1494,7 @@ impl ShapeAnalyzer<'_> {
             fields.push(field);
         }
         let function = name.var_name().clone();
-        let input_values = self
-            .analysis
-            .proven_input_values(&function, arguments, values);
+        let input_values = self.keyed_input_values(&function, arguments, values, span);
         let key = FunctionSpecializationKey {
             function,
             inputs,
@@ -1376,57 +1513,6 @@ impl ShapeAnalyzer<'_> {
             ));
         }
         Ok(Vec::new())
-    }
-
-    fn ensure_specialization(
-        &mut self,
-        key: FunctionSpecializationKey,
-        call_span: Span,
-    ) -> Result<usize, ToDaeError> {
-        let caller = self.active_specializations.last().copied();
-        if let Some(index) = self.analysis.certificate_by_key.get(&key).copied() {
-            self.record_dependency(caller, index);
-            return Ok(index);
-        }
-        if self.active_specializations.len() >= SPECIALIZATION_DEPTH_LIMIT {
-            return Err(ToDaeError::unsupported_flat(
-                "function shape specialization",
-                format!(
-                    "`{}` needs more than {SPECIALIZATION_DEPTH_LIMIT} nested value-proven \
-                     specializations, which is the bound this analysis admits; no activation in \
-                     the chain repeated an earlier proven argument",
-                    key.function
-                ),
-                call_span,
-            ));
-        }
-        let function =
-            self.flat.functions.get(&key.function).ok_or_else(|| {
-                ToDaeError::unresolved_reference(key.function.as_str(), call_span)
-            })?;
-        let certificate = resolve_certificate(
-            self.flat,
-            function,
-            key.clone(),
-            call_span,
-            &self.analysis.model_values,
-        )?;
-        let index = self.analysis.certificates.len();
-        self.analysis.certificate_by_key.insert(key, index);
-        self.analysis.certificates.push(certificate);
-        self.analysis.dependencies.push(Vec::new());
-        self.record_dependency(caller, index);
-
-        let values = self.analysis.certificates[index].values.clone();
-        self.active_specializations.push(index);
-        let result = (|| {
-            self.discover_parameter_defaults(function, &values)?;
-            self.discover_statements(&function.body, &values)
-        })();
-        let completed = self.active_specializations.pop();
-        debug_assert_eq!(completed, Some(index));
-        result?;
-        Ok(index)
     }
 
     fn discover_parameter_defaults(
@@ -1449,6 +1535,7 @@ impl ShapeAnalyzer<'_> {
     fn checkpoint(&self) -> DiscoveryCheckpoint {
         DiscoveryCheckpoint {
             certificates: self.analysis.certificates.len(),
+            pending_bodies: self.pending_bodies.len(),
             call_keys: self.analysis.call_certificates.keys().cloned().collect(),
             constructor_keys: self
                 .analysis
@@ -1456,12 +1543,18 @@ impl ShapeAnalyzer<'_> {
                 .keys()
                 .cloned()
                 .collect(),
+            keyed_argument_reads: self.analysis.keyed_argument_reads.len(),
         }
     }
 
     fn restore(&mut self, checkpoint: DiscoveryCheckpoint) {
         let count = checkpoint.certificates;
         self.analysis.certificates.truncate(count);
+        self.chain_depths.truncate(count);
+        self.analysis
+            .keyed_argument_reads
+            .truncate(checkpoint.keyed_argument_reads);
+        self.pending_bodies.truncate(checkpoint.pending_bodies);
         self.analysis.dependencies.truncate(count);
         for dependencies in &mut self.analysis.dependencies {
             dependencies.retain(|&dependency| dependency < count);
@@ -1575,7 +1668,7 @@ impl ShapeAnalyzer<'_> {
                     return Ok(());
                 }
                 let function = comp.var_name().clone();
-                let input_values = self.analysis.proven_input_values(&function, args, values);
+                let input_values = self.keyed_input_values(&function, args, values, *span);
                 self.certify_regular_call(comp, function, inputs, input_values, *span)?;
                 Ok(())
             }
@@ -1685,11 +1778,7 @@ impl ShapeAnalyzer<'_> {
 }
 
 fn bind_discovered_loop_index(values: &mut ShapeEnvironment, index: &rumoca_core::ForIndex) {
-    let binder = VarName::new(&index.ident);
-    match values.proven_range_bounds(&index.range) {
-        Some((lower, upper)) => values.bind_integer_bounds(binder, lower, upper),
-        None => values.insert(binder, Vec::new()),
-    }
+    values.bind_range_binder(VarName::new(&index.ident), &index.range);
 }
 
 fn project_call_inputs(
@@ -1885,12 +1974,20 @@ fn reject_function_partial_application(
 /// INST-007). Reading it here is what makes `Real y[m]` provable for a model
 /// that declares `parameter Integer m = 3`: the extent is a parameter
 /// expression in the sense MLS §12.2 admits, and its value is already known.
+/// The function definitions of `constants`, without its parameter values.
+fn function_table(constants: &EvalContext) -> EvalContext {
+    let mut table = EvalContext::with_capacity(0, 0, constants.functions.len());
+    table.functions.clone_from(&constants.functions);
+    table
+}
+
 fn concrete_model_shapes(
     flat: &flat::Model,
     constants: &EvalContext,
 ) -> Result<ShapeEnvironment, ToDaeError> {
     let mut values =
         ShapeEnvironment::with_capacity(flat.variables.len() + flat.record_instances.len());
+    values.bind_slice_class_scopes(flat);
     values.enumeration_type_declarations = Arc::new(
         flat.type_ids_by_def_id
             .iter()
@@ -1906,6 +2003,7 @@ fn concrete_model_shapes(
         match constants.get(name.as_str()) {
             Some(value) if shape.is_empty() && is_scalar_value(value) => {
                 values.bind_scalar_value(name.clone(), value.clone());
+                values.bind_slice_constant(flat, variable, constants);
             }
             _ => values.insert(name.clone(), shape),
         }
@@ -2442,7 +2540,10 @@ pub(super) fn evaluate_shape_integer(
                         "function shape proof",
                         format!(
                             "extent depends on the value of scalar `{}`, which requires a \
-                             value-proven function specialization",
+                             value-proven function specialization; a call argument that is \
+                             a run-time value or reads a tunable parameter proves none (a \
+                             local dimension is sized when the function runs), so declare \
+                             the parameter final or Evaluate = true",
                             name.as_str()
                         ),
                         span,
@@ -2498,5 +2599,5 @@ fn checked_shape_arithmetic(
     })
 }
 
-// SPEC_0021 file-size exception: this file is 2237 lines, over the 2000-line
+// SPEC_0021 file-size exception: this file is 2448 lines, over the 2000-line
 // action threshold; split plan: extract the FunctionSpecializationKey construction and the per-shape provenance derivation into sibling modules under function_shapes/.

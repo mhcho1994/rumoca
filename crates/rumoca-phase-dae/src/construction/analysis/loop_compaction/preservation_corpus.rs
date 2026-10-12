@@ -38,7 +38,7 @@ const BOOLEAN_TYPE: TypeId = TypeId(3);
 const STRING_TYPE: TypeId = TypeId(4);
 const CLOCK_TYPE: TypeId = TypeId(5);
 
-pub(super) fn span() -> Span {
+pub(in crate::construction::analysis) fn span() -> Span {
     Span::from_offsets(SourceId::DUMMY, 0, 1)
 }
 
@@ -142,7 +142,7 @@ pub(super) fn compact(
     let function = harness_function(body.to_vec());
     let flat = harness_flat();
     let shapes = harness_shapes(&function);
-    compact_function_loops(body, &HashMap::new(), &shapes, &function, &flat, false)
+    compact_function_loops(body, &HashMap::new(), &shapes, &function, &flat)
 }
 
 /// One concrete assignment of entry values to every declared name.
@@ -247,7 +247,10 @@ impl EntryValues {
     }
 }
 
-pub(super) fn component(name: &str, subs: Vec<Subscript>) -> ComponentReference {
+pub(in crate::construction::analysis) fn component(
+    name: &str,
+    subs: Vec<Subscript>,
+) -> ComponentReference {
     ComponentReference::construct(
         false,
         span(),
@@ -261,7 +264,7 @@ pub(super) fn component(name: &str, subs: Vec<Subscript>) -> ComponentReference 
     .expect("the harness component reference has exact identity")
 }
 
-pub(super) fn var(name: &str) -> Expression {
+pub(in crate::construction::analysis) fn var(name: &str) -> Expression {
     Expression::VarRef {
         name: rumoca_core::Reference::new(name),
         subscripts: Vec::new(),
@@ -269,7 +272,7 @@ pub(super) fn var(name: &str) -> Expression {
     }
 }
 
-pub(super) fn element(name: &str, subscript: Expression) -> Expression {
+pub(in crate::construction::analysis) fn element(name: &str, subscript: Expression) -> Expression {
     Expression::VarRef {
         name: rumoca_core::Reference::new(name),
         subscripts: vec![Subscript::Expr {
@@ -280,14 +283,14 @@ pub(super) fn element(name: &str, subscript: Expression) -> Expression {
     }
 }
 
-pub(super) fn real(value: f64) -> Expression {
+pub(in crate::construction::analysis) fn real(value: f64) -> Expression {
     Expression::Literal {
         value: Literal::Real(value),
         span: span(),
     }
 }
 
-pub(super) fn integer(value: i64) -> Expression {
+pub(in crate::construction::analysis) fn integer(value: i64) -> Expression {
     Expression::Literal {
         value: Literal::Integer(value),
         span: span(),
@@ -301,7 +304,11 @@ pub(super) fn boolean(value: bool) -> Expression {
     }
 }
 
-pub(super) fn binary(op: OpBinary, lhs: Expression, rhs: Expression) -> Expression {
+pub(in crate::construction::analysis) fn binary(
+    op: OpBinary,
+    lhs: Expression,
+    rhs: Expression,
+) -> Expression {
     Expression::Binary {
         op,
         lhs: Box::new(lhs),
@@ -310,7 +317,10 @@ pub(super) fn binary(op: OpBinary, lhs: Expression, rhs: Expression) -> Expressi
     }
 }
 
-pub(super) fn assign(target: &str, value: Expression) -> rumoca_core::Statement {
+pub(in crate::construction::analysis) fn assign(
+    target: &str,
+    value: Expression,
+) -> rumoca_core::Statement {
     rumoca_core::Statement::Assignment {
         comp: component(target, Vec::new()),
         value,
@@ -318,7 +328,7 @@ pub(super) fn assign(target: &str, value: Expression) -> rumoca_core::Statement 
     }
 }
 
-pub(super) fn assign_element(
+pub(in crate::construction::analysis) fn assign_element(
     target: &str,
     subscript: Expression,
     value: Expression,
@@ -336,7 +346,7 @@ pub(super) fn assign_element(
     }
 }
 
-pub(super) fn for_loop(
+pub(in crate::construction::analysis) fn for_loop(
     binder: &str,
     count: i64,
     body: Vec<rumoca_core::Statement>,
@@ -356,7 +366,7 @@ pub(super) fn for_loop(
     }
 }
 
-pub(super) fn branch(
+pub(in crate::construction::analysis) fn branch(
     conditions: Vec<(Expression, Vec<rumoca_core::Statement>)>,
     fallback: Option<Vec<rumoca_core::Statement>>,
 ) -> rumoca_core::Statement {

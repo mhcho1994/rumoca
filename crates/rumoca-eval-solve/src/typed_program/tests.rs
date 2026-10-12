@@ -1,6 +1,7 @@
 mod directional_map;
-mod invocation_scope;
+mod immutable_payloads;
 mod linear_solve;
+mod recursion;
 
 use std::num::NonZeroU64;
 
@@ -14,10 +15,7 @@ use rumoca_ir_solve::{
     TypedProgramBuilder,
 };
 
-use super::{
-    TypedProgramEvalError, TypedValue, eval_pure_call, eval_pure_call_directional,
-    eval_pure_call_with_invocation_counts,
-};
+use super::{TypedProgramEvalError, TypedValue, eval_pure_call, eval_pure_call_directional};
 
 fn span(start: usize) -> Span {
     Span::from_offsets(
@@ -270,7 +268,7 @@ fn nested_call_evaluates_one_compact_aggregate_and_assertion_tuple() {
 }
 
 #[test]
-fn conditional_projections_share_one_issued_call_invocation() {
+fn conditional_projections_select_lazily_between_identical_calls() {
     let arithmetic = profile(SolveRealFormat::Binary64);
     let boolean = SolveValueType::scalar(SolveScalarType::Boolean);
     let real = SolveValueType::scalar(SolveScalarType::real(arithmetic));
@@ -314,18 +312,14 @@ fn conditional_projections_share_one_issued_call_invocation() {
     let value =
         TypedValue::construct(real, vec![real_kind(SolveRealFormat::Binary64, 3.0)]).unwrap();
 
-    let (active, active_counts) = eval_pure_call_with_invocation_counts(
+    let active = eval_pure_call(
         &table,
         table.owners()[1].id(),
         &[condition(true), value.clone()],
     )
     .unwrap();
-    let (inactive, inactive_counts) = eval_pure_call_with_invocation_counts(
-        &table,
-        table.owners()[1].id(),
-        &[condition(false), value],
-    )
-    .unwrap();
+    let inactive =
+        eval_pure_call(&table, table.owners()[1].id(), &[condition(false), value]).unwrap();
 
     assert_eq!(
         active[0].elements(),
@@ -335,8 +329,6 @@ fn conditional_projections_share_one_issued_call_invocation() {
         inactive[0].elements(),
         [real_kind(SolveRealFormat::Binary64, 6.0)]
     );
-    assert_eq!(active_counts[0], 1, "one exact child invocation is issued");
-    assert_eq!(inactive_counts[0], 0, "inactive child calls remain lazy");
 }
 
 #[test]
@@ -739,6 +731,67 @@ fn compact_fold_executes_one_transition_owner_over_the_checked_domain() {
             .count(),
         1
     );
+}
+
+#[test]
+fn a_continued_fold_ends_at_its_first_false_predicate() {
+    let arithmetic = profile(SolveRealFormat::Binary64);
+    let integer = SolveValueType::scalar(SolveScalarType::integer(arithmetic));
+    let domain = StructuredIndexDomain {
+        binders: vec![StructuredIndexBinder {
+            id: 7,
+            display_name: "i".into(),
+            lower: 1,
+            upper: 100,
+            step: 1,
+        }],
+    };
+    let table = SolvePureCallTable::construct(arithmetic, |table| {
+        table.add_owner(
+            identity(8),
+            Vec::new(),
+            vec![SolvePureCallOutput::result(integer.clone())],
+            span(70),
+            |builder, _inputs, outputs| {
+                let zero =
+                    builder.constant(SolveValue::integer(arithmetic, 0).unwrap(), span(71))?;
+                let sum = builder.fold_while(
+                    domain.clone(),
+                    &[zero],
+                    &[],
+                    span(72),
+                    |predicate, carried, _captures, outputs| {
+                        let sum = predicate.load(carried[0], span(72))?;
+                        let limit = predicate
+                            .constant(SolveValue::integer(arithmetic, 10).unwrap(), span(72))?;
+                        let below = predicate.compare(
+                            rumoca_ir_solve::SolveCompareOperator::Less,
+                            sum,
+                            limit,
+                            span(72),
+                        )?;
+                        predicate.store(outputs[0], below, span(72))
+                    },
+                    |transition, carried, _captures, binders, outputs| {
+                        let sum = transition.load(carried[0], span(72))?;
+                        let index = transition.load(binders[0], span(72))?;
+                        let next =
+                            transition.binary(SolveBinaryOperator::Add, sum, index, span(72))?;
+                        transition.store(outputs[0], next, span(72))
+                    },
+                )?;
+                builder.store(outputs[0], sum[0], span(73))
+            },
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    // The wire replays the continuation through the checked builder.
+    let json = serde_json::to_string(&table).unwrap();
+    let table: SolvePureCallTable = serde_json::from_str(&json).unwrap();
+    // 0, 1, 3, 6, 10: the fifth predicate is false.
+    let output = eval_pure_call(&table, table.owners()[0].id(), &[]).unwrap();
+    assert_eq!(output[0].elements(), [SolveValueKind::Integer(10)]);
 }
 
 #[test]
@@ -1185,4 +1238,59 @@ fn scalar_broadcast_power_evaluates_at_the_tensor_boundary() {
     let outputs = eval_pure_call(&table, table.owners()[0].id(), &[vector, exponent]).unwrap();
 
     assert_eq!(outputs[0].elements(), [4.0, 9.0, 16.0].map(real_value));
+}
+
+#[test]
+fn scalar_broadcast_quotient_carries_the_elementwise_quotient_rule() {
+    let arithmetic = profile(SolveRealFormat::Binary64);
+    let scalar = SolveValueType::scalar(SolveScalarType::real(arithmetic));
+    let vector = SolveValueType::tensor(SolveScalarType::real(arithmetic), vec![3]).unwrap();
+    let table = SolvePureCallTable::construct(arithmetic, |table| {
+        for (ordinal, scalar_on_lhs) in [false, true].into_iter().enumerate() {
+            table.add_owner(
+                identity(13 + ordinal as u64),
+                vec![vector.clone(), scalar.clone()],
+                vec![SolvePureCallOutput::result(vector.clone())],
+                span(130),
+                |builder, inputs, outputs| {
+                    let vector = builder.load(inputs[0], span(131))?;
+                    let divisor = builder.load(inputs[1], span(132))?;
+                    let quotient = builder.broadcast_binary(
+                        SolveBinaryOperator::Divide,
+                        vector,
+                        divisor,
+                        scalar_on_lhs,
+                        span(133),
+                    )?;
+                    builder.store(outputs[0], quotient, span(134))
+                },
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        table.owners()[1].directional().is_none(),
+        "a scalar dividend over an aggregate has no directional rule"
+    );
+    let owner = &table.owners()[0];
+    let real_value = |value| real_kind(SolveRealFormat::Binary64, value);
+    let typed = |value_type: &SolveValueType, values: &[f64]| {
+        TypedValue::construct(
+            value_type.clone(),
+            values.iter().copied().map(real_value).collect(),
+        )
+        .unwrap()
+    };
+    let arguments = [
+        typed(&vector, &[2.0, 4.0, 8.0]),
+        typed(&vector, &[1.0, 0.0, 0.0]),
+        typed(&scalar, &[2.0]),
+        typed(&scalar, &[1.0]),
+    ];
+
+    let outputs = eval_pure_call_directional(&table, owner.id(), &arguments).unwrap();
+
+    assert_eq!(outputs[0].elements(), [1.0, 2.0, 4.0].map(real_value));
+    assert_eq!(outputs[1].elements(), [0.0, -1.0, -2.0].map(real_value));
 }

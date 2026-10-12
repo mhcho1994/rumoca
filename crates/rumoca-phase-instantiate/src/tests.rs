@@ -267,7 +267,7 @@ fn test_extract_attributes_does_not_default_an_unresolved_outer_fixed() {
     let tree = ast::ClassTree::default();
     let effective_components = IndexMap::default();
     let eval_ctx = make_eval_ctx(&tree, &mod_env, &effective_components);
-    let error = extract_attributes(&comp, &mod_env, "x", &eval_ctx, &[])
+    let error = extract_attributes(&comp, &attribute_scope(&mod_env, "x"), &eval_ctx, &[])
         .expect_err("an overriding fixed expression must not use the local default");
     assert!(matches!(
         *error,
@@ -294,7 +294,7 @@ fn test_extract_attributes_preserves_nonuniform_fixed_values() {
     let mod_env = ast::ModificationEnvironment::new();
     let effective_components = IndexMap::default();
     let eval_ctx = make_eval_ctx(&tree, &mod_env, &effective_components);
-    let attrs = extract_attributes(&comp, &mod_env, "x", &eval_ctx, &[])
+    let attrs = extract_attributes(&comp, &attribute_scope(&mod_env, "x"), &eval_ctx, &[])
         .expect("a Boolean array fixed modifier is a valid per-element attribute");
     assert_eq!(attrs.fixed, Some(vec![true, false]));
 }

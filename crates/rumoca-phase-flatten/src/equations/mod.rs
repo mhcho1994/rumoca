@@ -3,6 +3,11 @@
 //! This module converts instance equations to flat equations in
 //! residual form (0 = residual).
 
+mod simple_expansion;
+use simple_expansion::{expand_array_assignment, expand_for_to_simple};
+
+mod template_conditionals;
+
 use std::{collections::HashSet, sync::Arc};
 
 mod shape_inference;
@@ -29,16 +34,20 @@ use crate::{Context, qualify_expression_imports_with_def_map_ctx};
 pub(crate) mod affine;
 pub(crate) mod array_family;
 mod assert_equations;
+mod cheapen;
 mod conditional_and_eval;
 mod der_divergent_branches;
 mod if_equation_alignment;
 mod parameter_selections;
+use cheapen::{CheapenPlan, build_cheapen_plan, cheapen_equation_bodies, placeholder_interiors};
 use der_divergent_branches::{branches_differ_in_der_targets, try_select_parameter_branch};
 pub(crate) use parameter_selections::parameter_branch_selection;
-use parameter_selections::{branches_structurally_equal, refuse_non_evaluable_range};
+use parameter_selections::refuse_non_evaluable_range;
 mod connections_graph;
 mod flattened_equations;
+mod scalar_loop_body;
 mod structured_domain;
+mod template_domains;
 mod zero_sized_reductions;
 use assert_equations::{
     AssertEquationLowering, flatten_assert_equation, flatten_assert_function_call,
@@ -53,7 +62,8 @@ pub(crate) use conditional_and_eval::{
 use connections_graph::{extract_vcg_data_from_function_call, is_side_effect_only_function};
 pub(crate) use flattened_equations::FlattenedEquations;
 use structured_domain::{
-    SourceStructuredIteration, compact_domain_from_iterations, lift_full_iteration_child_family,
+    SourceStructuredIteration, compact_domain_from_iterations, independent_for_bodies,
+    lift_full_iteration_child_family,
 };
 use zero_sized_reductions::{expand_reduction_over_array_ref, simplify_zero_sized_reductions};
 
@@ -600,8 +610,8 @@ fn make_residual(
 
 /// Expand array comprehensions in equation expressions when index ranges are structural.
 ///
-/// This preserves current scalar-count and ToDAE expectations for equation residuals
-/// while `ast::Expression::ArrayComprehension` support is rolled through downstream passes.
+/// Nonempty constructors retain their existing expansion. Empty constructors
+/// retain the source body for canonical element-type and shape checking.
 // SPEC_0021: Exception - exhaustive expression-tree rewrite over AST variants.
 #[allow(clippy::too_many_lines)]
 fn expand_array_comprehensions_in_expression(
@@ -616,14 +626,21 @@ fn expand_array_comprehensions_in_expression(
             indices,
             filter,
             ..
-        } => expand_array_comprehension_expression(
-            ctx,
-            body,
-            indices,
-            filter.as_deref(),
-            prefix,
-            span,
-        ),
+        } => {
+            let expanded = expand_array_comprehension_expression(
+                ctx,
+                body,
+                indices,
+                filter.as_deref(),
+                prefix,
+                span,
+            )?;
+            // MLS §10.3.4 and §10.7: an empty domain still owns its checked body type/shape.
+            if matches!(&expanded, ast::Expression::Array { elements, .. } if elements.is_empty()) {
+                return Ok(expr.clone());
+            }
+            Ok(expanded)
+        }
         ast::Expression::Binary { op, lhs, rhs, span } => Ok(ast::Expression::Binary {
             op: op.clone(),
             lhs: Arc::new(expand_array_comprehensions_in_expression(
@@ -815,6 +832,16 @@ fn expand_reduction_over_comprehension(
         return Ok(None);
     };
 
+    // Scalar reductions retain the checked reduction owner. Only an array
+    // value needs the element-wise iterator fold required by MLS §10.3.4.
+    let array_value = match shape_inference::infer_expression_shape(body, prefix, ctx) {
+        ExpressionShape::Vector(n) => n > 0,
+        ExpressionShape::Matrix(rows, columns) => rows > 0 && columns > 0,
+        _ => false,
+    };
+    if !array_value {
+        return Ok(None);
+    }
     let mut index_ranges: Vec<(String, Vec<i64>)> = Vec::new();
     for index in indices {
         let values = expand_range_indices(ctx, &index.range, prefix, span)?;
@@ -1158,10 +1185,8 @@ fn expand_for_equation(
     if indices.is_empty() {
         return flatten_equations_list(ctx, equations, prefix, span, origin, def_map);
     }
-    if equations.len() > 1 {
-        return expand_independent_for_bodies(
-            ctx, indices, equations, prefix, span, origin, def_map,
-        );
+    if let Some(bodies) = independent_for_bodies(equations) {
+        return expand_independent_for_bodies(ctx, indices, &bodies, prefix, span, origin, def_map);
     }
 
     // Classify regularity from the still-symbolic body BEFORE materializing, so the
@@ -1185,23 +1210,26 @@ fn expand_for_equation(
     //     per-cell bodies (`promote_parameter_variable`). A fail-early DAE guard
     //     rejects any cheapened algebraic family that promotion does not template-
     //     reconstruct, so cheapening to 0 here can never silently survive.
-    let cheapen_plan = if !ctx.materialize_structured_families
-        && regular.is_some()
-        && (is_state_derivative_body(equations)
-            || (template.is_some()
-                && ctx.current_class_instance_id.is_some_and(|owner| {
-                    crate::param_variability::is_proven_parameter_variability_assignment_body(
-                        owner,
-                        indices,
-                        equations,
-                        &ctx.param_variability_families,
-                    )
-                }))) {
-        build_cheapen_plan(ctx, indices, prefix, span)?
-    } else {
+    //   * CONTINUOUS ALGEBRAIC bodies with a captured template: the DAE lowers the
+    //     family from its template as one continuous owner (SPEC_0043 §6c); the
+    //     body need not be regular, since no consumer reads its cells.
+    let placeholder = placeholder_interiors(
+        ctx,
+        indices,
+        equations,
+        regular.is_some(),
+        template.as_ref(),
+    );
+    let cheapen_plan = if placeholder.materialized() {
         None
+    } else {
+        build_cheapen_plan(ctx, indices, prefix, span)?
     };
-    let interiors_materialized = cheapen_plan.is_none();
+    let interiors = if cheapen_plan.is_some() {
+        placeholder
+    } else {
+        flat::FamilyInteriors::Materialized
+    };
 
     let mut iterations = Vec::new();
     let mut result = FlattenedEquations::default();
@@ -1236,23 +1264,16 @@ fn expand_for_equation(
     if nested_family_lifted {
         return Ok(result);
     }
-    let Some(equations_per_point) = iterations
-        .first()
-        .map(|iteration| iteration.equation_count)
-        .filter(|count| *count > 0)
-        .filter(|count| {
-            iterations
-                .iter()
-                .all(|iteration| iteration.equation_count == *count)
-        })
-    else {
-        if cheapen_plan.is_some() {
+    let equations_per_point = match PointRows::of(&iterations) {
+        PointRows::None => return Ok(result),
+        PointRows::Uniform(count) => count,
+        PointRows::Mixed if cheapen_plan.is_some() => {
             return Err(FlattenError::unsupported_equation(
                 "cheapened structured equation family has a non-uniform body row count",
                 span,
             ));
         }
-        return Ok(result);
+        PointRows::Mixed => return Ok(result),
     };
     // A template is an optional compact rendering/evaluation aid; the emitted
     // scalar rows remain authoritative.  Some source bodies contain equations
@@ -1262,6 +1283,15 @@ fn expand_for_equation(
     // attach a misleading template to the family: downstream code must fall
     // back to the materialized rows rather than rendering the wrong kernel.
     let template = template.filter(|candidate| candidate.body.len() == equations_per_point);
+    if !interiors.materialized() && (template.is_none() || !result.structured_equations.is_empty())
+    {
+        // Placeholder rows are never authoritative: a family whose template
+        // cannot own its body must not reach a consumer.
+        return Err(FlattenError::unsupported_equation(
+            "cheapened structured equation family lost its comprehension template",
+            span,
+        ));
+    }
     if !result.structured_equations.is_empty() {
         // A child family that could not be lifted already owns part of this
         // row interval.  Keep its proven domain and leave uncovered rows as
@@ -1278,10 +1308,40 @@ fn expand_for_equation(
             origin: origin.clone(),
             regular,
             template,
-            interiors_materialized,
+            interiors,
         });
 
     Ok(result)
+}
+
+/// Rows a family body issues at its domain points.
+enum PointRows {
+    /// No point issues a row (a zero-size array equation, MLS 3.7 §10.3.1): the
+    /// body owns nothing, so no family exists.
+    None,
+    /// Every point issues this many rows.
+    Uniform(usize),
+    /// Points issue different counts.
+    Mixed,
+}
+
+impl PointRows {
+    fn of(iterations: &[SourceStructuredIteration]) -> Self {
+        let Some(first) = iterations.first().map(|iteration| iteration.equation_count) else {
+            return Self::None;
+        };
+        if !iterations
+            .iter()
+            .all(|iteration| iteration.equation_count == first)
+        {
+            return Self::Mixed;
+        }
+        if first == 0 {
+            Self::None
+        } else {
+            Self::Uniform(first)
+        }
+    }
 }
 
 fn classify_regular_for_body(
@@ -1332,9 +1392,10 @@ fn expand_independent_for_bodies(
 /// the binders, so the residual bodies plus the domain fully describe the family as
 /// `{ body(i, j) for i, j }`.
 ///
-/// Returns `None` when the body is not a flat list of simple `lhs = rhs` residual
-/// equations (e.g. nested `for`/`if`/`when`), leaving the historical materialized
-/// path in charge for those shapes.
+/// Returns `None` when no single symbolic body has a fixed shape: a nested
+/// reduction bound may depend on an outer index, or the body may contain an
+/// unsupported equation form. Exact static iterations then keep their existing
+/// materialized rows, whose enclosing binders have already been substituted.
 fn capture_comprehension_template(
     ctx: &Context,
     indices: &[ast::ForIndex],
@@ -1357,8 +1418,8 @@ fn capture_comprehension_template(
 /// Append the symbolic residual of every leaf `lhs = rhs` equation in `equations`
 /// to `body`, descending through nested `for` equations (a `for i for j` body).
 /// The inner binders are never substituted here, so they stay symbolic in the
-/// qualified residual. Returns `None` for any non-elementwise shape (`if`/`when`/
-/// function-call/connect), which falls back to the materialized path.
+/// qualified residual. Shape-equal conditional branches retain their lazy
+/// residual tuple; other unsupported forms keep the materialized path.
 fn collect_template_residuals(
     ctx: &Context,
     equations: &[ast::Equation],
@@ -1370,6 +1431,11 @@ fn collect_template_residuals(
     for equation in equations {
         match equation {
             ast::Equation::Simple { lhs, rhs } => {
+                if template_domains::has_binder_dependent_domain(lhs, locals)
+                    || template_domains::has_binder_dependent_domain(rhs, locals)
+                {
+                    return None;
+                }
                 body.push(make_residual(ctx, lhs, rhs, prefix, def_map, Some(locals)).ok()?);
             }
             ast::Equation::For {
@@ -1379,6 +1445,11 @@ fn collect_template_residuals(
                 let mut nested_locals = locals.clone();
                 nested_locals.extend(indices.iter().map(|index| index.ident.text.to_string()));
                 collect_template_residuals(ctx, inner, prefix, def_map, &nested_locals, body)?;
+            }
+            ast::Equation::If { .. } => {
+                body.extend(template_conditionals::capture(
+                    ctx, equation, prefix, def_map, locals,
+                )?);
             }
             _ => return None,
         }
@@ -1431,6 +1502,21 @@ fn collect_for_iterations(
     let range_values = expand_range_indices(env.ctx, &first_index.range, env.prefix, env.span)?;
     let index_name = &first_index.ident.text;
 
+    if remaining_indices.is_empty()
+        && cheapen_plan.is_none()
+        && scalar_loop_body::collect_prepared_iterations(
+            env,
+            first_index,
+            equations,
+            &range_values,
+            index_values,
+            iterations,
+            out,
+        )?
+    {
+        return Ok(());
+    }
+
     for value in range_values {
         let substituted: Vec<ast::Equation> = equations
             .iter()
@@ -1450,93 +1536,6 @@ fn collect_for_iterations(
     }
 
     Ok(())
-}
-
-/// Per-binder base and optional `+step` neighbor values used to identify a regular
-/// family's corner cells during materialization. A cell is a corner when its index
-/// tuple equals the base, or differs from the base in exactly one binder, at that
-/// binder's neighbor value.
-struct CheapenPlan {
-    binders: Vec<(i64, Option<i64>)>,
-}
-
-impl CheapenPlan {
-    fn is_corner(&self, index_values: &[i64]) -> bool {
-        let mut differing = false;
-        for (&(base, neighbor), &value) in self.binders.iter().zip(index_values) {
-            if value == base {
-                continue;
-            }
-            if differing || neighbor != Some(value) {
-                return false;
-            }
-            differing = true;
-        }
-        true
-    }
-}
-
-/// True when every equation in the body is a state-derivative assignment
-/// `der(x[...]) = ...`. Only these are safe to cheapen: solve reconstructs the
-/// derivative from the corner stencil at runtime, so the interior bodies are never
-/// read. Algebraic assignments are excluded -- their per-cell values feed
-/// compile-time derived-parameter promotion.
-fn is_state_derivative_body(equations: &[ast::Equation]) -> bool {
-    !equations.is_empty()
-        && equations.iter().all(|equation| match equation {
-            ast::Equation::Simple { lhs, .. } => is_der_call(lhs),
-            _ => false,
-        })
-}
-
-/// True when `expr` is a `der(...)` call.
-fn is_der_call(expr: &ast::Expression) -> bool {
-    matches!(
-        expr,
-        ast::Expression::FunctionCall { comp, .. }
-            if comp.parts.len() == 1 && comp.parts[0].ident.text.as_ref() == "der"
-    )
-}
-
-/// Build the corner predicate for a regular for-family by expanding each binder's
-/// range to read its base (first) and neighbor (second) values. `None` when any
-/// binder range is empty (the family has no cells, so nothing to cheapen).
-fn build_cheapen_plan(
-    ctx: &Context,
-    indices: &[ast::ForIndex],
-    prefix: &ast::QualifiedName,
-    span: rumoca_core::Span,
-) -> Result<Option<CheapenPlan>, FlattenError> {
-    let mut binders = Vec::with_capacity(indices.len());
-    for index in indices {
-        let values = expand_range_indices(ctx, &index.range, prefix, span)?;
-        let Some(&base) = values.first() else {
-            return Ok(None);
-        };
-        binders.push((base, values.get(1).copied()));
-    }
-    Ok(Some(CheapenPlan { binders }))
-}
-
-/// Replace each `Simple` equation's right-hand side with a real `0.0` literal,
-/// keeping the left-hand side. Used for a regular family's interior cells, whose
-/// real bodies are reconstructed downstream from the corner cells. Non-`Simple`
-/// equations are left unchanged (a regular family's body is `Simple`; this only
-/// guards against unexpected shapes).
-fn cheapen_equation_bodies(
-    equations: &[ast::Equation],
-    span: rumoca_core::Span,
-) -> Vec<ast::Equation> {
-    equations
-        .iter()
-        .map(|equation| match equation {
-            ast::Equation::Simple { lhs, .. } => ast::Equation::Simple {
-                lhs: lhs.clone(),
-                rhs: zero_sized_reductions::real_literal_expr(0.0, span),
-            },
-            other => other.clone(),
-        })
-        .collect()
 }
 
 #[derive(Clone)]
@@ -1569,28 +1568,10 @@ fn expand_if_equation(
         return flatten_equations_list(ctx, &selected_branch, prefix, span, origin, def_map);
     }
 
-    // A guard over an ordinary parameter stays a run-time branch only when its
-    // branches are structurally equal (SPEC_0040 DAE-C22); otherwise it is a
-    // structural selection made here, recorded so the parameter is fixed.
-    if cond_blocks
-        .iter()
-        .any(|block| reads_tunable_parameter(ctx, &block.cond, prefix))
-        && !branches_structurally_equal(ctx, cond_blocks, else_block, prefix, span)?
-        && let Some(selected_branch) =
-            try_select_parameter_branch(cond_blocks, else_block, ctx, prefix)
-    {
-        let mut flattened =
-            flatten_equations_list(ctx, &selected_branch, prefix, span, origin, def_map)?;
-        flattened
-            .parameter_branch_selections
-            .push(parameter_branch_selection(
-                flat::StructuralParameterUse::BranchSelection,
-                evaluated_conditions(ctx, cond_blocks, prefix),
-                prefix,
-                span,
-            ));
-        return Ok(flattened);
-    }
+    // Equal-count branches retain their ordinary parameter guard until DAE
+    // construction proves unknown incidence and call shapes (DAE-C22).
+    // AST reference/call names cannot establish that structure: external
+    // inputs are known coordinates and a call name is not an unknown.
 
     // MLS §8.3.4: branches that differ in which variables they differentiate
     // describe different DAEs, so the condition has to be resolved before state
@@ -1972,91 +1953,6 @@ fn expand_to_simple_equations(
                 // - FunctionCall: typically assert(), Modelica.Utilities.*, etc.
             }
         }
-    }
-
-    Ok(result)
-}
-
-/// Expand a simple equation with an array RHS into per-element equations.
-///
-/// For `x = {e1, e2, e3}` where x is a ast::ComponentReference, produces:
-/// `x[1] = e1, x[2] = e2, x[3] = e3`
-///
-/// Handles nested arrays recursively for multi-dimensional cases.
-/// Falls back to a single equation when the RHS is not an array.
-fn expand_array_assignment(lhs: &ast::Expression, rhs: &ast::Expression) -> Vec<SimpleEquation> {
-    // A named aggregate is one authoritative tensor equation. Preserve it so
-    // conditional branches such as `x = zeros(2)` and `x = {a, b}` have the
-    // same owner cardinality; scalar rows derive from that owner downstream.
-    if matches!(lhs, ast::Expression::ComponentReference(_)) {
-        return vec![SimpleEquation {
-            lhs: lhs.clone(),
-            rhs: rhs.clone(),
-        }];
-    }
-    let rhs_elements = match rhs {
-        ast::Expression::Array { elements, .. } if !elements.is_empty() => elements,
-        _ => {
-            return vec![SimpleEquation {
-                lhs: lhs.clone(),
-                rhs: rhs.clone(),
-            }];
-        }
-    };
-    expand_array_lhs_elements(lhs, rhs, rhs_elements)
-}
-
-/// Expand array assignment given the RHS elements extracted from an Array expression.
-fn expand_array_lhs_elements(
-    lhs: &ast::Expression,
-    rhs: &ast::Expression,
-    rhs_elements: &[ast::Expression],
-) -> Vec<SimpleEquation> {
-    match lhs {
-        ast::Expression::Array {
-            elements: lhs_elements,
-            ..
-        } => lhs_elements
-            .iter()
-            .zip(rhs_elements.iter())
-            .flat_map(|(l, r)| expand_array_assignment(l, r))
-            .collect(),
-        _ => vec![SimpleEquation {
-            lhs: lhs.clone(),
-            rhs: rhs.clone(),
-        }],
-    }
-}
-
-/// Expand a for-equation to simple equations.
-fn expand_for_to_simple(
-    ctx: &Context,
-    indices: &[ast::ForIndex],
-    equations: &[ast::Equation],
-    prefix: &ast::QualifiedName,
-    span: rumoca_core::Span,
-) -> Result<Vec<SimpleEquation>, FlattenError> {
-    if indices.is_empty() {
-        return expand_to_simple_equations(ctx, equations, prefix, span);
-    }
-
-    let first_index = &indices[0];
-    let remaining_indices = &indices[1..];
-
-    let index_values = expand_range_indices(ctx, &first_index.range, prefix, span)?;
-    let index_name = &first_index.ident.text;
-
-    let mut result = Vec::new();
-    for value in index_values {
-        // Substitute index variable in all equations
-        let substituted: Vec<ast::Equation> = equations
-            .iter()
-            .map(|eq| substitute_index_in_equation(eq, index_name, value))
-            .collect();
-
-        // Recursively expand remaining indices
-        let expanded = expand_for_to_simple(ctx, remaining_indices, &substituted, prefix, span)?;
-        result.extend(expanded);
     }
 
     Ok(result)

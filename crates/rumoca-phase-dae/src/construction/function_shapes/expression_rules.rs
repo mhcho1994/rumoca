@@ -38,9 +38,9 @@ pub(in crate::construction) fn call_free_target_shape(
     apply_subscripts(declared, &target.subs, values).ok()
 }
 
-/// Shape of one call's first result. The environment is the scope the call is
-/// written in, so a comprehension binder (MLS §10.4.2) or loop index read by an
-/// argument is visible to the argument's own shape proof.
+/// The result shape of one call, with its arguments shaped in `scope`: the
+/// environment of the call site, which inside an MLS §10.4.1 comprehension
+/// binds the comprehension indices.
 pub(super) type FunctionResultShape<'scope> = dyn FnMut(
         &rumoca_core::Reference,
         &[Expression],
@@ -141,7 +141,12 @@ pub(super) fn expression_shape(
         }
         Expression::Range {
             start, step, end, ..
-        } => range_expression_shape(start, step.as_deref(), end, values, span),
+        } => {
+            if let Some(plan) = super::super::affine_slices::plan(expression, values) {
+                return Ok(vec![plan.extent]);
+            }
+            range_expression_shape(start, step.as_deref(), end, values, span)
+        }
         Expression::ArrayComprehension {
             expr,
             indices,
@@ -407,20 +412,27 @@ fn range_expression_shape(
     values: &ShapeEnvironment,
     span: Span,
 ) -> Result<ValueShape, ToDaeError> {
-    let start = evaluate_shape_integer(start, values)?;
     let step = step
         .map(|step| evaluate_shape_integer(step, values))
         .transpose()?
         .unwrap_or(1);
-    let end = evaluate_shape_integer(end, values)?;
-    Ok(vec![range_cardinality(start, step, end, span)?])
+    let bounds = evaluate_shape_integer(start, values)
+        .and_then(|start| Ok((start, evaluate_shape_integer(end, values)?)));
+    match bounds {
+        Ok((start, end)) => Ok(vec![range_cardinality(start, step, end, span)?]),
+        // MLS §10.4.1: the element count depends only on `end - start` and the
+        // step, so bounds sharing an unproven term still have an exact extent.
+        Err(error) => super::integer_bounds::exact_range_distance(start, end, values)
+            .map(|distance| Ok(vec![range_cardinality(0, step, distance, span)?]))
+            .unwrap_or(Err(error)),
+    }
 }
 
 pub(super) fn reject_shape_call(
     name: &rumoca_core::Reference,
     _arguments: &[Expression],
     _is_constructor: bool,
-    _values: &ShapeEnvironment,
+    _scope: &ShapeEnvironment,
     span: Span,
 ) -> Result<ValueShape, ToDaeError> {
     Err(ToDaeError::unsupported_flat(
@@ -641,11 +653,7 @@ fn reduction_operand_shape(
             expression_shape(step, &scoped, function_result)?;
         }
         expression_shape(end, &scoped, function_result)?;
-        if let Some((lower, upper)) = scoped.proven_range_bounds(&index.range) {
-            scoped.bind_integer_bounds(VarName::new(&index.name), lower, upper);
-        } else {
-            scoped.insert(VarName::new(&index.name), Vec::new());
-        }
+        scoped.bind_range_binder(VarName::new(&index.name), &index.range);
     }
     if let Some(filter) = filter {
         expression_shape(filter, &scoped, function_result)?;

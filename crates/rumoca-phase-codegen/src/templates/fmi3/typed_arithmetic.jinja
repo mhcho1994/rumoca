@@ -52,7 +52,7 @@ for (size_t k=0; k<{{ ty.scalar_count }}; ++k) { if ({{ src }}[k] != 0.0 && {{ s
 {%- endmacro %}
 
 {%- macro binary(operator, a, b) -%}
-{%- if operator in ["power", "atan2", "min", "max"] -%}{{ {"power":"pow", "atan2":"atan2", "min":"fmin", "max":"fmax"}[operator] }}({{ a }},{{ b }})
+{%- if operator in ["power", "atan2", "min", "max"] -%}{{ {"power":"pow", "atan2":"atan2", "min":"rumoca_real_min", "max":"rumoca_real_max"}[operator] }}({{ a }},{{ b }})
 {%- elif operator in ["add", "subtract", "multiply", "divide", "and", "or"] -%}({{ a }} {{ {"add":"+", "subtract":"-", "multiply":"*", "divide":"/", "and":"&&", "or":"||"}[operator] }} {{ b }})
 {%- else -%}{{ fail("unsupported-feature:fmi.c.pure-call: binary " ~ operator) }}{% endif -%}
 {%- endmacro %}
@@ -67,6 +67,17 @@ if (({{ b }}<0 && {{ a }}>INT64_MAX+{{ b }}) || ({{ b }}>0 && {{ a }}<INT64_MIN+
 {% elif operator == "multiply" -%}
 if ({{ a }}>0 ? ({{ b }}>0 ? {{ a }}>INT64_MAX/{{ b }} : {{ b }}<INT64_MIN/{{ a }}) : ({{ a }}<0 ? ({{ b }}>0 ? {{ a }}<INT64_MIN/{{ b }} : ({{ b }}<0 && {{ a }}<INT64_MAX/{{ b }})) : 0)) return 1;
 {{ dst }} = {{ a }}*{{ b }};
+{% elif operator in ["integer_quotient", "integer_modulo", "integer_remainder"] -%}
+if ({{ b }} == 0) return 1;
+{% if operator == "integer_quotient" -%}
+if ({{ a }} == INT64_MIN && {{ b }} == -1) return 1;
+{{ dst }} = {{ a }}/{{ b }};
+{% else -%}
+{{ dst }} = {{ b }} == -1 ? 0 : {{ a }}%{{ b }};
+{% if operator == "integer_modulo" -%}
+if ({{ dst }} != 0 && (({{ dst }} < 0) != ({{ b }} < 0))) {{ dst }} += {{ b }};
+{% endif -%}
+{% endif -%}
 {% elif operator in ["min", "max"] -%}
 {{ dst }} = {{ a }} {{ "<" if operator == "min" else ">" }} {{ b }} ? {{ a }} : {{ b }};
 {% else %}{{ fail("unsupported-feature:fmi.c.pure-call: integer binary " ~ operator) }}{% endif -%}
@@ -98,9 +109,12 @@ for (size_t k=0; k<{{ ty.scalar_count }}; ++k) {
 if ({{ a }} == INT64_MIN) return 1;
 {% endif -%}
 {{ dst }}[k] = {{ unary(op.operator, a, ty) }};
-{% elif op.operation == "binary" -%}
-{% set a = "r" ~ op.lhs ~ "[k]" -%}
-{% set b = "r" ~ op.rhs ~ "[k]" -%}
+{% elif op.operation in ["binary", "broadcast_binary"] -%}
+{#- A broadcast reads its scalar operand at element zero for every element. -#}
+{% set element = "r" ~ op.aggregate ~ "[k]" if op.operation == "broadcast_binary" else "" -%}
+{% set broadcast = "r" ~ op.scalar ~ "[0]" if op.operation == "broadcast_binary" else "" -%}
+{% set a = "r" ~ op.lhs ~ "[k]" if op.operation == "binary" else (broadcast if op.scalar_on_lhs else element) -%}
+{% set b = "r" ~ op.rhs ~ "[k]" if op.operation == "binary" else (element if op.scalar_on_lhs else broadcast) -%}
 {% if ty.scalar.kind == "integer" -%}
 {{ integer_binary(op.operator, dst ~ "[k]", a, b) -}}
 {% else -%}

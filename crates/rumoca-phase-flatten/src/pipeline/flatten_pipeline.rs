@@ -929,6 +929,12 @@ pub(crate) fn prepare_context_for_equation_flattening(
     // declaration defaults (MLS §7.2.3/§7.2.4, §8.3.3 structural ranges).
     ctx.build_parameter_lookup(flat, tree);
     inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
+    // MLS 3.7 §5.3: a binding names a package constant through any enclosing
+    // scope, up to the unnamed top level. A package outside the model's own
+    // enclosing classes is injected only by the referenced-scope pass above,
+    // so the parameters reading it are evaluated again before a dimension
+    // reads them.
+    ctx.build_parameter_lookup(flat, tree);
     if ctx.recompute_symbolic_component_dimensions(flat, overlay, tree)? {
         ctx.build_parameter_lookup(flat, tree);
     }
@@ -941,6 +947,8 @@ pub(crate) fn prepare_context_for_equation_flattening(
     // array-natively from the comprehension template).
     ctx.param_variability_families =
         crate::param_variability::prove_parameter_variability_families(overlay);
+    ctx.continuous_algebraic_targets =
+        crate::continuous_algebraic::ContinuousAlgebraicTargets::prove(overlay, &tree.type_table);
 
     let vcg_data = vcg::pre_collect_vcg_data(overlay, ctx)?;
     let optional_edges = vcg::derive_optional_edges(overlay, &vcg_data)?;
@@ -1020,15 +1028,10 @@ pub(crate) fn finalize_flat_model(
     )?;
     crate::algorithm_events::hoist_algorithm_event_actions(flat);
 
-    seed_flat_functions_from_context(ctx, flat);
-    functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
-    rewrite_function_extends_aliases_in_flat_functions(flat, tree, class_index)?;
-    functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
-    // MLS §14.5: operator-record arithmetic denotes operator-function calls;
-    // the overloads are selected from the collected callees' result types.
-    if crate::postprocess::lower_operator_record_equations(flat, class_index) {
-        functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
-    }
+    collect_flat_functions(ctx, flat, overlay, tree, class_index, model_name)?;
+    mark_record_constructor_calls(flat, tree);
+    // Attach callable identity before the rewrite fixed point so rewritten
+    // calls retain the exact collected target.
     functions::canonicalize_collected_function_calls(flat, class_index)?;
     mark_record_constructor_calls(flat, tree);
     canonicalize_varrefs_via_record_aliases(flat, ctx);
@@ -1086,12 +1089,13 @@ pub(crate) fn finalize_flat_model(
     // must not be copied onto the scalar ABI parameters created below.
     functions::materialize_flat_function_call_args(flat)?;
     functions::specialize_function_arguments(flat)?;
+    functions::thread_foreign_state(flat)?;
     // Record parameter signatures and every call site must change together.
     // Run this only after the rewrite fixed point: earlier lowering allowed a
     // later rewrite to reintroduce source-shaped record arguments against an
     // already decomposed signature.
     functions::lower_record_function_params(flat)?;
-    functions::split_branch_assigned_records(flat);
+    functions::split_branch_assigned_records(flat)?;
     expand_record_array_field_projections_in_equations(flat);
     // Record ABI lowering introduces field projections at call sites. Resolve
     // those through the same occurrence owner as source-written projections.
@@ -1108,7 +1112,7 @@ pub(crate) fn finalize_flat_model(
     fold_time_invariant_derivatives(flat);
     crate::postprocess::rewrite_array_domain_comprehensions(flat)?;
     resolve_nested_constructor_field_access_bindings(flat);
-    crate::postprocess::fold_invariant_scalar_bindings(flat);
+    crate::postprocess::fold_invariant_bindings(flat, &ctx.resource_roots);
     functions::prune_unreachable_functions(flat);
     // Pure calls with settled inputs are folded by the `fold-pure-calls`
     // bitcode pass, not here; the frontend only proves their bindings in
@@ -1118,6 +1122,7 @@ pub(crate) fn finalize_flat_model(
     ctx.refresh_enum_parameter_lookup(flat);
     enum_literals::canonicalize_flat_enum_literals(flat, tree, &ctx.enum_parameter_values);
     flat.enum_literal_ordinals = collect_enum_literal_ordinals(tree);
+    flat.enumeration_declarations = enum_literals::collect_enumeration_declarations(tree, flat);
     if options.simplify_variable_names {
         name_simplify::simplify_flat_names(flat)?;
     }
@@ -1161,6 +1166,34 @@ fn substitute_constants_collecting_calls(
     functions::materialize_flat_function_call_args(flat)?;
     inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
     substitute_known_constants_in_flat(flat, ctx)
+}
+
+/// Collect the functions the model calls, resolving MLS §14 operator-record
+/// operators first. Operator functions called from collected bodies may
+/// themselves apply overloaded operators, so resolution and collection
+/// alternate until collection adds no function.
+fn collect_flat_functions(
+    ctx: &Context,
+    flat: &mut flat::Model,
+    overlay: &ast::InstanceOverlay,
+    tree: &ast::ClassTree,
+    class_index: &ast::ClassDefIndex<'_>,
+    model_name: &str,
+) -> Result<(), FlattenError> {
+    crate::operator_records::resolve_operator_overloads(flat, class_index)?;
+    seed_flat_functions_from_context(ctx, flat);
+    functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
+    rewrite_function_extends_aliases_in_flat_functions(flat, tree, class_index)?;
+    // Collection only adds functions declared in the class tree, so the
+    // alternation reaches a fixed point.
+    loop {
+        let collected = flat.functions.len();
+        crate::operator_records::resolve_operator_overloads(flat, class_index)?;
+        functions::collect_functions(flat, overlay, tree, class_index, Some(model_name))?;
+        if flat.functions.len() == collected {
+            return Ok(());
+        }
+    }
 }
 
 fn finalize_flat_connections(

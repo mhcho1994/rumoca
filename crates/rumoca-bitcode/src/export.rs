@@ -206,7 +206,7 @@ fn build(
     let clocks = clocks::export_clocks(view, &mut ctx);
     let clock_ownerships = clocks::export_ownerships(view, &mut ctx);
     let roots = export_roots(view, &mut ctx);
-    let events = export_events(view, &mut ctx);
+    let events = export_events(view, &mut ctx)?;
     let discrete_definitions = export_discrete_definitions(view, &mut ctx);
     let time_events = export_time_events(view, &mut ctx)?;
     let connections = export_connections(flat, &variables, &equations, &mut ctx);
@@ -1492,13 +1492,23 @@ fn export_roots(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcRoot> {
         .collect()
 }
 
-fn export_events(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcEventAction> {
+fn export_events(
+    view: dae::DaeView<'_>,
+    ctx: &mut Ctx<'_>,
+) -> Result<Vec<RbcEventAction>, ExportError> {
     use dae::EventActionOperation as Op;
     (0..view.event_action_count())
-        .filter_map(|index| {
-            let id = view.event_action_id(index)?;
-            let action = view.event_action(id)?;
+        .map(|index| {
+            let id = view
+                .event_action_id(index)
+                .ok_or_else(|| ExportError::Projection("event identity".into()))?;
+            let action = view
+                .event_action(id)
+                .ok_or_else(|| ExportError::Projection("event action".into()))?;
             let operation = match action.operation() {
+                Op::Print { .. } => {
+                    return Err(ExportError::UnsupportedOwner("terminal print actions"));
+                }
                 Op::Reinitialize { state, value } => RbcAction::Reinitialize {
                     state: VariableId(state.index()),
                     value: ExprId(value.index()),
@@ -1515,7 +1525,7 @@ fn export_events(view: dae::DaeView<'_>, ctx: &mut Ctx<'_>) -> Vec<RbcEventActio
                     message: ExprId(message.index()),
                 },
             };
-            Some(RbcEventAction {
+            Ok(RbcEventAction {
                 id: EventId(index as u32),
                 trigger: ConditionId(action.trigger().index()),
                 guard: ConditionId(action.guard().index()),

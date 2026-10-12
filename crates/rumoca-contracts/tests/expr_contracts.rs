@@ -1104,7 +1104,7 @@ fn der_of_parameter_is_zero() {
 }
 
 /// `der(u)` of a top-level input needs the input's derivative, which the DAE
-/// does not carry: a source diagnostic (ED022), not a panic.
+/// does not carry: a source diagnostic (ED024), not a panic.
 #[test]
 fn der_of_top_level_input_is_diagnosed() {
     expect_failure_in_phase_with_code(
@@ -1119,7 +1119,7 @@ fn der_of_top_level_input_is_diagnosed() {
     "#,
         "M",
         FailedPhase::ToDae,
-        "ED022",
+        "ED024",
     );
 }
 

@@ -8,6 +8,9 @@ use branch_assertions::{
 use path_definedness::lower_path_definedness;
 pub(super) use path_definedness::{DefinednessPredicates, PartialTarget};
 
+mod tuple_loop;
+use tuple_loop::lower_function_loop_multi_output_call;
+
 pub(super) fn lower_generated_boolean_assignment<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     symbols: FunctionSymbols<'_, 'dae>,
@@ -28,6 +31,45 @@ pub(super) fn lower_generated_boolean_assignment<'dae>(
     let provenance = dae::DaeProvenance::source(span)?;
     construction.functions(|functions| functions.assign(&mut body, target, lowered, provenance))?;
     Ok(body)
+}
+
+/// Lower one loop statement that defines no carried value of its own plan
+/// kind: an assertion, or a branch selection captured on every iteration of its
+/// enclosing loop at the selection's source position in that iteration.
+fn lower_loop_action_statement<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    symbols: FunctionSymbols<'_, 'dae>,
+    loop_body: &mut dae::FunctionLoop<'dae>,
+    binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
+    (statement, plan): (&rumoca_core::Statement, &FunctionStatementPlan),
+) -> Result<bool, dae::DaeConstructionError> {
+    let (target, value, span) = match plan {
+        FunctionStatementPlan::ProvenAssertion => return Ok(true),
+        FunctionStatementPlan::RuntimeAssertion => {
+            lower_function_loop_assertion(construction, symbols, loop_body, binders, statement)?;
+            return Ok(true);
+        }
+        FunctionStatementPlan::GeneratedBooleanAssignment {
+            target,
+            value,
+            span,
+        } => (target, value, *span),
+        _ => return Ok(false),
+    };
+    let lowered = lower_function_expression_scoped(
+        construction,
+        symbols.coordinates,
+        symbols.functions,
+        symbols.shapes,
+        loop_body.body(),
+        binders,
+        value,
+    )?;
+    let target = function_value_coordinate(symbols.coordinates, target);
+    let provenance = dae::DaeProvenance::source(span)?;
+    construction
+        .functions(|functions| functions.assign_loop(loop_body, target, lowered, provenance))?;
+    Ok(true)
 }
 
 pub(super) fn lower_integer_reduction<'dae>(
@@ -548,6 +590,7 @@ fn lower_conditional_statements<'dae>(
             construction,
             body,
             symbols,
+            binders,
             &statements[index..],
             &plans[index],
             &mut state.values,
@@ -671,6 +714,7 @@ fn lower_conditional_record_assembly<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     body: &dae::FunctionBody<'dae>,
     symbols: FunctionSymbols<'_, 'dae>,
+    binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
     statements: &[rumoca_core::Statement],
     plan: &FunctionStatementPlan,
     values: &mut HashMap<VarName, dae::ExprId<'dae>>,
@@ -679,8 +723,14 @@ fn lower_conditional_record_assembly<'dae>(
         return Ok(None);
     };
     let count = assembly.statement_count;
-    let (_, record, _) =
-        lower_function_record_value(construction, symbols, body, &statements[..count], assembly)?;
+    let (_, record, _) = lower_function_record_value(
+        construction,
+        symbols,
+        body,
+        binders,
+        &statements[..count],
+        assembly,
+    )?;
     values.insert(assembly.target.clone(), record);
     Ok(Some(count))
 }
@@ -740,13 +790,9 @@ fn lower_conditional_multi_output_call<'dae>(
     for ((_, output), mut value) in selected.into_iter().zip(results) {
         let target = function_value_coordinate(symbols.coordinates, output.target());
         if !output.subscripts().is_empty() {
-            let base = match values.get(output.target()).copied() {
-                Some(value) => Some(value),
-                None => output
-                    .seed()
-                    .map(|seed| lower_function_value_seed(construction, seed, call.span))
-                    .transpose()?,
-            };
+            // As for a branch assignment: the seed was assigned where the
+            // enclosing sequence or loop begins.
+            let base = values.get(output.target()).copied();
             value = lower_function_array_update(
                 construction,
                 FunctionArrayUpdate {
@@ -809,8 +855,18 @@ fn lower_conditional_assignment<'dae>(
         value,
         None,
     )?;
+    // A branch value stands in for the target until the join, so a read of it
+    // sees the declared type, as a read of the assigned target would.
+    if assignment.subscripts().is_empty() {
+        lowered = conform_to_declared_type(construction, target, lowered, provenance)?;
+    }
     let subscripts = assignment.subscripts();
-    let base = conditional_assignment_base(construction, assignment, span, values)?;
+    // A branch updates the value in scope: a write earlier in this branch, or
+    // else the enclosing definition. An element write's seed is assigned once
+    // where its enclosing sequence or compact loop begins
+    // (`collect_function_sequence_seeds`); reseeding inside a loop body would
+    // discard what earlier iterations wrote.
+    let base = values.get(assignment.target()).copied();
     if !subscripts.is_empty() {
         lowered = lower_function_array_update(
             construction,
@@ -834,22 +890,6 @@ fn lower_conditional_assignment<'dae>(
     }
     values.insert(assignment.target().clone(), lowered);
     Ok(())
-}
-
-fn conditional_assignment_base<'dae>(
-    construction: &mut dae::DaeConstruction<'dae>,
-    assignment: &FunctionAssignmentPlan,
-    span: Span,
-    values: &mut HashMap<VarName, dae::ExprId<'dae>>,
-) -> Result<Option<dae::ExprId<'dae>>, dae::DaeConstructionError> {
-    if assignment.subscripts().is_empty() {
-        return Ok(None);
-    }
-    if let Some(seed) = assignment.seed() {
-        let seeded = lower_function_value_seed(construction, seed, span)?;
-        values.insert(assignment.target().clone(), seeded);
-    }
-    Ok(values.get(assignment.target()).copied())
 }
 
 struct NestedFunctionConditional<'scope, 'statement, 'dae> {
@@ -1285,6 +1325,13 @@ pub(super) fn lower_function_fold<'dae>(
             input.owner,
         )
     })?;
+    continue_while_selected(
+        construction,
+        symbols,
+        &mut loop_body,
+        (input.binders, input.domain, input.owner),
+        (input.statements, input.plans),
+    )?;
     loop_body = lower_function_loop_statements(
         construction,
         symbols,
@@ -1313,6 +1360,7 @@ fn lower_function_loop_statements<'dae>(
                 construction,
                 symbols,
                 &mut loop_body,
+                binders,
                 &statements[index..index + count],
                 assembly,
             )?;
@@ -1340,11 +1388,13 @@ fn lower_one_function_loop_statement<'dae>(
     statement: &rumoca_core::Statement,
     plan: &FunctionStatementPlan,
 ) -> Result<dae::FunctionLoop<'dae>, dae::DaeConstructionError> {
-    if matches!(plan, FunctionStatementPlan::ProvenAssertion) {
-        return Ok(loop_body);
-    }
-    if matches!(plan, FunctionStatementPlan::RuntimeAssertion) {
-        lower_function_loop_assertion(construction, symbols, &mut loop_body, binders, statement)?;
+    if lower_loop_action_statement(
+        construction,
+        symbols,
+        &mut loop_body,
+        binders,
+        (statement, plan),
+    )? {
         return Ok(loop_body);
     }
     if lower_loop_multi_output_statement(
@@ -1511,69 +1561,6 @@ fn lower_loop_conditional<'dae>(
     Ok(loop_body)
 }
 
-fn lower_function_loop_multi_output_call<'dae>(
-    construction: &mut dae::DaeConstruction<'dae>,
-    symbols: FunctionSymbols<'_, 'dae>,
-    loop_body: &mut dae::FunctionLoop<'dae>,
-    binders: &HashMap<VarName, dae::DomainBinderId<'dae>>,
-    call: FunctionMultiOutputCall<'_>,
-) -> Result<(), dae::DaeConstructionError> {
-    let provenance = dae::DaeProvenance::source(call.span)?;
-    let operands = lower_call_operands(
-        construction,
-        LoweringSymbols {
-            coordinates: symbols.coordinates,
-            functions: symbols.functions,
-            shapes: symbols.shapes,
-            function_body: Some(loop_body.body()),
-            values: None,
-            owner_clock: None,
-        },
-        binders,
-        call.callee,
-        call.args,
-        provenance,
-    )?;
-    let selected = call
-        .outputs
-        .iter()
-        .enumerate()
-        .filter_map(|(ordinal, output)| output.as_ref().map(|output| (ordinal, output)))
-        .collect::<Vec<_>>();
-    let results = operands.results(
-        construction,
-        selected.iter().map(|(ordinal, _)| *ordinal),
-        provenance,
-    )?;
-    for ((_, output), mut value) in selected.into_iter().zip(results) {
-        let target = function_value_coordinate(symbols.coordinates, output.target());
-        if !output.subscripts().is_empty() {
-            value = lower_function_array_update(
-                construction,
-                FunctionArrayUpdate {
-                    symbols: LoweringSymbols {
-                        coordinates: symbols.coordinates,
-                        functions: symbols.functions,
-                        shapes: symbols.shapes,
-                        function_body: Some(loop_body.body()),
-                        values: None,
-                        owner_clock: None,
-                    },
-                    binders,
-                    base: None,
-                    target,
-                    subscripts: output.subscripts(),
-                    value,
-                    provenance,
-                },
-            )?;
-        }
-        construction
-            .functions(|functions| functions.assign_loop(loop_body, target, value, provenance))?;
-    }
-    Ok(())
-}
-
 fn lower_nested_function_loop<'dae>(
     construction: &mut dae::DaeConstruction<'dae>,
     symbols: FunctionSymbols<'_, 'dae>,
@@ -1649,6 +1636,14 @@ fn lower_nested_function_loop<'dae>(
             owner,
         )
     })?;
+    let mut child = child;
+    continue_while_selected(
+        construction,
+        child_symbols,
+        &mut child,
+        (&binders, child_domain, owner),
+        (child_statements, statements),
+    )?;
     let child = lower_function_loop_statements(
         construction,
         child_symbols,
@@ -1884,4 +1879,119 @@ fn join_branch_targets<'dae>(
         )?);
     }
     Ok((targets, branches, fallback))
+}
+
+/// The value `target` holds after assigning `value` (MLS 3.6 §10.6.13 converts
+/// an Integer expression assigned to a Real variable).
+fn conform_to_declared_type<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    target: dae::FunctionValueId<'dae>,
+    value: dae::ExprId<'dae>,
+    provenance: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let declared = construction.functions(|functions| functions.value_type(target, provenance))?;
+    let declared = construction.types(|types| types.value_type(declared, provenance))?;
+    if declared.scalar_type() != dae::ScalarType::Real {
+        return Ok(value);
+    }
+    let generated = dae::DaeProvenance::generated(
+        dae::DaeGeneration::FunctionConditionLowering,
+        provenance.span(),
+    )?;
+    super::expression::promote_integer_value_to_real(construction, value, generated)
+}
+
+/// End a fold at its first iteration whose body selection is false.
+///
+/// A fold whose body is one conditional without an else (optionally preceded
+/// by the generated capture of its condition) changes nothing on an iteration
+/// that does not select it. When the condition reads no binder of this loop
+/// and calls no function, every later iteration evaluates it on the same
+/// state, so it stays false: ending the fold there computes the same values
+/// and raises no error the remaining iterations would not (MLS §11.2.3; a
+/// bounded `while` loop is lowered to exactly this form, SPEC_0022 ALG-018).
+/// The conditional itself is kept, so the continuation is only the early
+/// exit.
+fn continue_while_selected<'dae>(
+    construction: &mut dae::DaeConstruction<'dae>,
+    symbols: FunctionSymbols<'_, 'dae>,
+    loop_body: &mut dae::FunctionLoop<'dae>,
+    (binders, domain, owner): (
+        &HashMap<VarName, dae::DomainBinderId<'dae>>,
+        dae::DomainId<'dae>,
+        dae::DaeProvenance,
+    ),
+    (statements, plans): (&[rumoca_core::Statement], &[FunctionStatementPlan]),
+) -> Result<(), dae::DaeConstructionError> {
+    let Some(condition) = selected_body_condition(statements, plans) else {
+        return Ok(());
+    };
+    let mut references = Vec::new();
+    condition.collect_var_refs(&mut references);
+    let reads_own_binder = references.iter().any(|reference| {
+        binders
+            .get(reference)
+            .is_some_and(|binder| binder.domain() == domain)
+    });
+    let calls = condition.contains_subexpression(|node| {
+        matches!(node, rumoca_core::Expression::FunctionCall { .. })
+    });
+    if reads_own_binder || calls {
+        return Ok(());
+    }
+    let continuation = lower_function_expression_scoped(
+        construction,
+        symbols.coordinates,
+        symbols.functions,
+        symbols.shapes,
+        loop_body.body(),
+        binders,
+        condition,
+    )?;
+    let provenance = match condition.span() {
+        Some(span) => dae::DaeProvenance::source(span)?,
+        None => owner,
+    };
+    construction
+        .functions(|functions| functions.continue_loop_while(loop_body, continuation, provenance))
+}
+
+/// The condition of a body that is exactly one conditional without an else,
+/// read through its generated capture when the capture is the statement
+/// before it.
+fn selected_body_condition<'s>(
+    statements: &'s [rumoca_core::Statement],
+    plans: &'s [FunctionStatementPlan],
+) -> Option<&'s rumoca_core::Expression> {
+    let (capture, selection) = match (statements, plans) {
+        ([selection], [_]) => (None, selection),
+        (
+            [_, selection],
+            [
+                FunctionStatementPlan::GeneratedBooleanAssignment { target, value, .. },
+                _,
+            ],
+        ) => (Some((target, value)), selection),
+        _ => return None,
+    };
+    let rumoca_core::Statement::If {
+        cond_blocks,
+        else_block: None,
+        ..
+    } = selection
+    else {
+        return None;
+    };
+    let [block] = cond_blocks.as_slice() else {
+        return None;
+    };
+    match capture {
+        None => Some(&block.cond),
+        Some((target, value)) => match &block.cond {
+            rumoca_core::Expression::VarRef {
+                name, subscripts, ..
+            } if subscripts.is_empty() && name.var_name() == target => Some(value),
+            _ => None,
+        },
+    }
 }

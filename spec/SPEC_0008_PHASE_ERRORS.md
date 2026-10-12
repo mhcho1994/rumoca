@@ -10,17 +10,8 @@ emits them. Errors are defined close to the code that produces them, not in a
 central location.
 
 ## Motivation
-A monolithic error enum has problems:
-- Grows unboundedly as features are added
-- Every phase depends on every error type
-- Hard to find which phase produces which error
-- Error codes become inconsistent
-
-Phase-local errors provide:
-- Errors next to the code that emits them
-- Clear ownership and responsibility
-- Independent evolution per phase
-- Consistent error code ranges
+Phase-local errors keep ownership explicit, codes consistent, and each phase
+independent. A central enum grows with every phase and obscures error origins.
 
 ## Specification
 
@@ -143,8 +134,8 @@ Error codes use mnemonic prefixes for readability:
 | EM0xx | class merge | **M**erge | Class-tree merge errors |
 | ES0xx | structural | **S**tructural | Matching/BLT/singularity (`ES001`-`ES002` warnings, `ES01x` errors) |
 | EL0xx | solve lowering | so**L**ve | DAE → Solve-IR lowering (`EL001`-`EL011` rows, `EL02x` assembly, `EL03x` overrides) |
-| EX0xx | sim runtime | e**X**ecution | Solver, runtime-preparation, parameter-override, singular active mode |
-| WX0xx | sim runtime | e**X**ecution | Non-aborting runtime diagnostics: `WX001` a violated warning-level assertion (MLS §8.3.7) |
+| EX0xx | sim runtime | e**X**ecution | Solver, runtime-preparation, overrides, singular-mode, session-protocol `EX010`-`EX012` |
+| WX0xx | sim runtime | e**X**ecution | Non-aborting diagnostics: `WX001` warning assertion (§8.3.7), `WX002` terminal print (§12.9) |
 | EG0xx | GALEC IR | **G**ALEC | GALEC IR parse/validation errors |
 | EGT0xx | GALEC target projection | **G**ALEC **T**arget | DAE-to-GALEC projection/export errors |
 | EFM0xx | eFMI packaging | e**FM**I | eFMI manifest/packaging errors |

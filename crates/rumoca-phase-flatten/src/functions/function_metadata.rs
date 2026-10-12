@@ -653,9 +653,119 @@ fn finish_function_param(
         )?);
     }
 
+    if param.default.is_none()
+        && let Some(default) = record_modification_default(
+            class_index,
+            component,
+            type_identity,
+            expressions,
+            imports,
+            locals,
+            param.span,
+        )?
+    {
+        param = param.with_default(default);
+    }
+
     apply_component_description(&mut param, component);
 
     Ok(param)
+}
+
+/// The value a record declaration's field modifications give it, as a call
+/// of the record's constructor (MLS 3.7 §12.6): `output Complex result(re =
+/// re, im = im)` is `result = Complex(re = re, im = im)`. The
+/// `Complex.'constructor'.fromReal` operator function is defined only by
+/// such a modifier.
+fn record_modification_default(
+    class_index: &ast::ClassDefIndex<'_>,
+    component: &ast::Component,
+    type_identity: ComponentTypeIdentity<'_>,
+    expressions: FunctionExpressionContext<'_>,
+    imports: &qualify::ImportMap,
+    locals: &HashSet<String>,
+    span: rumoca_core::Span,
+) -> Result<Option<rumoca_core::Expression>, FlattenError> {
+    let (Some(record_def), Some(record)) = (type_identity.def_id, type_identity.class_def) else {
+        return Ok(None);
+    };
+    if record.class_type != rumoca_core::ClassType::Record
+        || component.modifications.is_empty()
+        || !component.shape_expr.is_empty()
+        || !component
+            .modifications
+            .keys()
+            .all(|field| record.components.contains_key(field))
+    {
+        return Ok(None);
+    }
+    let mut args = Vec::with_capacity(component.modifications.len());
+    for (field, value) in &component.modifications {
+        // A nested modification `re(start = 0)` modifies the field's
+        // attributes, not its value, and `re(start = 0) = e` binds it to `e`
+        // (MLS 3.7 §7.2); only a binding is a constructor argument.
+        let value = match value {
+            ast::Expression::ClassModification { .. } => continue,
+            ast::Expression::Binary {
+                op: rumoca_core::OpBinary::Assign,
+                lhs,
+                rhs,
+                ..
+            } if matches!(**lhs, ast::Expression::ClassModification { .. }) => &**rhs,
+            value => value,
+        };
+        let qualified = qualify_function_expr(value, imports, locals);
+        let value = ast_lower::expression_from_ast_with_intrinsics(
+            &qualified,
+            expressions.predefined_intrinsics,
+        )?;
+        args.push(rumoca_core::Expression::FunctionCall {
+            name: rumoca_core::Reference::generated(format!(
+                "{}{field}",
+                rumoca_core::NAMED_FUNCTION_ARG_PREFIX
+            )),
+            args: vec![value],
+            is_constructor: true,
+            span,
+        });
+    }
+    let Some(name) = class_path_reference(class_index, record_def, span) else {
+        return Ok(None);
+    };
+    Ok(Some(rumoca_core::Expression::FunctionCall {
+        name,
+        args,
+        is_constructor: true,
+        span,
+    }))
+}
+
+/// A reference to class `def_id` by its qualified path, resolved part by part
+/// so function collection treats it like a source-written class reference.
+/// `None` when a class on the path has no name in the index.
+pub(crate) fn class_path_reference(
+    class_index: &ast::ClassDefIndex<'_>,
+    def_id: rumoca_core::DefId,
+    span: rumoca_core::Span,
+) -> Option<rumoca_core::Reference> {
+    let parts = class_index
+        .def_ancestry(def_id)
+        .into_iter()
+        .map(|def| {
+            Some(rumoca_core::ComponentRefPart {
+                ident: class_index.local_name(def)?.to_string(),
+                span,
+                subs: Vec::new(),
+                def_id: def,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let name = class_index.qualified_name(def_id)?.to_string();
+    let component_ref = rumoca_core::ComponentReference::construct(false, span, parts).ok()?;
+    Some(rumoca_core::Reference::with_component_reference(
+        name,
+        component_ref,
+    ))
 }
 
 fn function_shape_dim(subscript: &rumoca_core::Subscript) -> i64 {
@@ -676,7 +786,10 @@ pub(super) fn lower_function_shape_subscript(
     match subscript {
         ast::Subscript::Expression(expr) => {
             let span = expr.span();
-            if let Some(value) = resolve_compile_time_integer_expr(expr, class_index) {
+            if let Some(value) = rumoca_eval_ast::eval::eval_integer_of_declared_constants(
+                expr,
+                class_index.declared_constants(),
+            ) {
                 return Ok(rumoca_core::Subscript::index(value, span));
             }
             let qualified = qualify_function_expr(expr, imports, locals);
@@ -696,100 +809,6 @@ pub(super) fn lower_function_shape_subscript(
             .map_err(|err| FlattenError::missing_source_context(err.to_string()))?)
         }
     }
-}
-
-pub(super) fn resolve_compile_time_integer_expr(
-    expr: &ast::Expression,
-    class_index: &ast::ClassDefIndex<'_>,
-) -> Option<i64> {
-    let mut visiting = FxHashSet::default();
-    resolve_compile_time_integer_expr_inner(expr, class_index, &mut visiting)
-}
-
-pub(super) fn resolve_compile_time_integer_expr_inner(
-    expr: &ast::Expression,
-    class_index: &ast::ClassDefIndex<'_>,
-    visiting: &mut FxHashSet<rumoca_core::DefId>,
-) -> Option<i64> {
-    match expr {
-        ast::Expression::Terminal {
-            terminal_type: ast::TerminalType::UnsignedInteger,
-            token,
-            ..
-        } => token.text.parse().ok(),
-        ast::Expression::Unary {
-            op: rumoca_core::OpUnary::Plus | rumoca_core::OpUnary::DotPlus,
-            rhs,
-            ..
-        } => resolve_compile_time_integer_expr_inner(rhs, class_index, visiting),
-        ast::Expression::Unary {
-            op: rumoca_core::OpUnary::Minus | rumoca_core::OpUnary::DotMinus,
-            rhs,
-            ..
-        } => resolve_compile_time_integer_expr_inner(rhs, class_index, visiting)
-            .and_then(i64::checked_neg),
-        ast::Expression::Binary { op, lhs, rhs, .. } => {
-            let lhs = resolve_compile_time_integer_expr_inner(lhs, class_index, visiting)?;
-            let rhs = resolve_compile_time_integer_expr_inner(rhs, class_index, visiting)?;
-            match op {
-                rumoca_core::OpBinary::Add | rumoca_core::OpBinary::AddElem => lhs.checked_add(rhs),
-                rumoca_core::OpBinary::Sub | rumoca_core::OpBinary::SubElem => lhs.checked_sub(rhs),
-                rumoca_core::OpBinary::Mul | rumoca_core::OpBinary::MulElem => lhs.checked_mul(rhs),
-                rumoca_core::OpBinary::Div | rumoca_core::OpBinary::DivElem
-                    if rhs != 0 && lhs % rhs == 0 =>
-                {
-                    Some(lhs / rhs)
-                }
-                _ => None,
-            }
-        }
-        ast::Expression::ComponentReference(reference) => reference
-            .target_def_id()
-            .and_then(|def_id| resolve_component_constant_integer(def_id, class_index, visiting)),
-        _ => None,
-    }
-}
-
-pub(super) fn resolve_component_constant_integer(
-    def_id: rumoca_core::DefId,
-    class_index: &ast::ClassDefIndex<'_>,
-    visiting: &mut FxHashSet<rumoca_core::DefId>,
-) -> Option<i64> {
-    if !visiting.insert(def_id) {
-        return None;
-    }
-    let result = component_by_def_id(class_index, def_id)
-        .filter(|component| {
-            // MLS 3.7 §7.2: a public non-final declaration can be modified by
-            // the package that exposes it (`package M extends PM(nS = 2)`), so
-            // only a final or protected one (a protected element cannot be
-            // modified) fixes its value here; any other stays a shape
-            // expression that the exposing package settles (FLAT-C02).
-            (component.is_final || component.is_protected)
-                && matches!(
-                    component.variability,
-                    rumoca_core::Variability::Constant(_) | rumoca_core::Variability::Parameter(_)
-                )
-        })
-        .and_then(|component| component.binding.as_ref())
-        .and_then(|binding| {
-            resolve_compile_time_integer_expr_inner(binding, class_index, visiting)
-        });
-    visiting.remove(&def_id);
-    result
-}
-
-pub(super) fn component_by_def_id<'a>(
-    class_index: &'a ast::ClassDefIndex<'_>,
-    def_id: rumoca_core::DefId,
-) -> Option<&'a ast::Component> {
-    let parent_def_id = class_index.parent_def_id(def_id)?;
-    let local_name = class_index.local_name(def_id)?;
-    let parent = class_index.get(parent_def_id)?;
-    parent
-        .components
-        .get(local_name)
-        .filter(|component| component.def_id == Some(def_id))
 }
 
 const FUNCTION_QUALIFY_OPTS: qualify::QualifyOptions = qualify::QualifyOptions { skip_local: true };

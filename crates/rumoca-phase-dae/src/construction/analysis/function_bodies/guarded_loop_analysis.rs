@@ -1,22 +1,36 @@
 use super::*;
+use crate::construction::analysis::function_definitions::{
+    condition_implies_guard, reads_only_immutable,
+};
 
+/// Seed loop scratch that is written and read only under one guard, and return
+/// each seeded value with that guard. The seed is dead only while the guard
+/// selects every read; the caller owns that proof past the sequence.
+/// A guard that reads a value the function can write is never seeded: the
+/// proof would name the value the guard had at the guarded statement while a
+/// later read sees the value it has now, so such a conditional is left to the
+/// value-fact join, which forgets a fact when its value is written.
 pub(super) fn seed_guarded_sequence_scratch(
     statements: &[rumoca_core::Statement],
     plans: &mut [FunctionStatementPlan],
     context: FunctionValidationContext<'_>,
     definitions: &mut FunctionDefinitions,
-) -> Result<(), ToDaeError> {
+) -> Result<Vec<GuardedSeed>, ToDaeError> {
+    let mut seeded = Vec::new();
     for outer_index in 0..plans.len() {
         let Some((guard, branch)) = guarded_sequence(&statements[outer_index]) else {
             continue;
         };
+        if !reads_only_immutable(guard, context) {
+            continue;
+        }
         let Some(inner_len) = guarded_plan_len(&plans[outer_index]) else {
             continue;
         };
         for inner_index in 0..inner_len {
             let candidates = guarded_plan_targets(&plans[outer_index], inner_index);
             for target in candidates {
-                seed_guarded_candidate(
+                seeded.extend(seed_guarded_candidate(
                     (statements, branch),
                     (outer_index, inner_index),
                     &target,
@@ -24,11 +38,11 @@ pub(super) fn seed_guarded_sequence_scratch(
                     context,
                     definitions,
                     &mut plans[outer_index],
-                )?;
+                )?);
             }
         }
     }
-    Ok(())
+    Ok(seeded)
 }
 
 fn seed_guarded_candidate(
@@ -39,7 +53,7 @@ fn seed_guarded_candidate(
     context: FunctionValidationContext<'_>,
     definitions: &mut FunctionDefinitions,
     plan: &mut FunctionStatementPlan,
-) -> Result<(), ToDaeError> {
+) -> Result<Option<GuardedSeed>, ToDaeError> {
     let (statements, branch) = sources;
     if guarded_scratch_is_observable(
         statements,
@@ -50,13 +64,17 @@ fn seed_guarded_candidate(
         context,
         definitions,
     ) {
-        return Ok(());
+        return Ok(None);
     }
     let span = required_statement_span(&branch[indices.1], "guarded function-loop scratch")?;
     let seed = definitions.whole_loop_seed(target, context, span)?;
     attach_guarded_seed(plan, indices.1, target, seed);
     definitions.define_whole(target);
-    Ok(())
+    Ok(Some(GuardedSeed {
+        target: target.clone(),
+        guard: guard.clone(),
+        span: required_statement_span(&statements[indices.0], "guarded function-loop scratch")?,
+    }))
 }
 
 fn guarded_sequence(
@@ -112,7 +130,7 @@ fn guarded_scratch_is_observable(
         || guarded_prefix_reads_name(statements, indices.0, branch, indices.1, target)
         || statements
             .iter()
-            .any(|statement| has_unguarded_target_read(statement, target, guard, false))
+            .any(|statement| has_unguarded_target_read(statement, (target, guard), context, false))
 }
 
 fn attach_guarded_seed(
@@ -188,8 +206,8 @@ fn guarded_prefix_reads_name(
 
 fn has_unguarded_target_read(
     statement: &rumoca_core::Statement,
-    target: &VarName,
-    guard: &Expression,
+    (target, guard): (&VarName, &Expression),
+    context: FunctionValidationContext<'_>,
     guarded: bool,
 ) -> bool {
     match statement {
@@ -200,9 +218,9 @@ fn has_unguarded_target_read(
                 && indices
                     .iter()
                     .any(|index| expression_reads_target(&index.range, target)))
-                || equations
-                    .iter()
-                    .any(|statement| has_unguarded_target_read(statement, target, guard, guarded))
+                || equations.iter().any(|statement| {
+                    has_unguarded_target_read(statement, (target, guard), context, guarded)
+                })
         }
         rumoca_core::Statement::If {
             cond_blocks,
@@ -212,35 +230,29 @@ fn has_unguarded_target_read(
             cond_blocks.iter().any(|block| {
                 (!guarded && expression_reads_target(&block.cond, target))
                     || block.stmts.iter().any(|statement| {
-                        let branch_guarded = guarded || condition_implies_guard(&block.cond, guard);
-                        has_unguarded_target_read(statement, target, guard, branch_guarded)
+                        let branch_guarded =
+                            guarded || condition_implies_guard(&block.cond, guard, context, 0);
+                        has_unguarded_target_read(
+                            statement,
+                            (target, guard),
+                            context,
+                            branch_guarded,
+                        )
                     })
             }) || else_block.as_ref().is_some_and(|statements| {
-                statements
-                    .iter()
-                    .any(|statement| has_unguarded_target_read(statement, target, guard, guarded))
+                statements.iter().any(|statement| {
+                    has_unguarded_target_read(statement, (target, guard), context, guarded)
+                })
             })
         }
         _ => !guarded && statement_reads_target(statement, target),
     }
 }
 
-fn condition_implies_guard(condition: &Expression, guard: &Expression) -> bool {
-    if rumoca_core::expressions_semantically_equal(condition, guard) {
-        return true;
-    }
-    matches!(
-        condition,
-        Expression::Binary {
-            op: OpBinary::And,
-            lhs,
-            rhs,
-            ..
-        } if condition_implies_guard(lhs, guard) || condition_implies_guard(rhs, guard)
-    )
-}
-
-pub(super) fn statement_reads_target(statement: &rumoca_core::Statement, target: &VarName) -> bool {
+pub(in crate::construction::analysis) fn statement_reads_target(
+    statement: &rumoca_core::Statement,
+    target: &VarName,
+) -> bool {
     match statement {
         rumoca_core::Statement::Assignment { comp, value, .. } => {
             expression_reads_target(value, target) || component_subscripts_read_target(comp, target)
@@ -334,4 +346,64 @@ fn expression_reads_target(expression: &Expression, target: &VarName) -> bool {
     let mut references = Vec::new();
     expression.collect_var_refs(&mut references);
     references.iter().any(|reference| reference == target)
+}
+
+/// A dead seed issued for loop scratch that one guard both writes and reads.
+pub(super) struct GuardedSeed {
+    target: VarName,
+    guard: Expression,
+    /// The guarded conditional whose false path keeps the seed.
+    span: Span,
+}
+
+/// Confine each seed to the paths its guard selects once `statements` end.
+///
+/// MLS §12.4.4 leaves a function local undefined until it is assigned. The
+/// seed only gives the compact transition a carried slot; on the path where
+/// the guard is false it is no definition. Past the region a value no
+/// statement there writes outside the guard is therefore defined only under
+/// that guard, and an unguarded read of it is refused as an undefined read.
+pub(super) fn confine_guarded_seeds(
+    statements: &[rumoca_core::Statement],
+    seeds: Vec<GuardedSeed>,
+    context: FunctionValidationContext<'_>,
+    definitions: &mut FunctionDefinitions,
+) {
+    for seed in seeds {
+        let unguarded_write = statements.iter().any(|statement| {
+            has_unguarded_target_write(statement, (&seed.target, &seed.guard), context, false)
+        });
+        if !unguarded_write {
+            definitions.guard_seeded_value(&seed.target, seed.guard, seed.span);
+        }
+    }
+}
+
+fn has_unguarded_target_write(
+    statement: &rumoca_core::Statement,
+    (target, guard): (&VarName, &Expression),
+    context: FunctionValidationContext<'_>,
+    guarded: bool,
+) -> bool {
+    match statement {
+        rumoca_core::Statement::For { equations, .. } => equations.iter().any(|statement| {
+            has_unguarded_target_write(statement, (target, guard), context, guarded)
+        }),
+        rumoca_core::Statement::If {
+            cond_blocks,
+            else_block,
+            ..
+        } => {
+            cond_blocks.iter().any(|block| {
+                let branch_guarded =
+                    guarded || condition_implies_guard(&block.cond, guard, context, 0);
+                block.stmts.iter().any(|statement| {
+                    has_unguarded_target_write(statement, (target, guard), context, branch_guarded)
+                })
+            }) || else_block.iter().flatten().any(|statement| {
+                has_unguarded_target_write(statement, (target, guard), context, guarded)
+            })
+        }
+        _ => !guarded && statement_assigns_target(statement, target),
+    }
 }

@@ -63,6 +63,7 @@ pub(super) struct VariableAttributesInput {
     pub(super) unit: Option<String>,
     pub(super) state_select: rumoca_core::StateSelect,
     pub(super) description: Option<String>,
+    pub(super) enumeration: Option<rumoca_core::EnumerationDeclaration>,
     pub(super) causality: VariableCausality,
     pub(super) declared_causality: DeclaredCausality,
     pub(super) is_tunable: bool,
@@ -144,6 +145,9 @@ pub(super) enum FunctionStatementInput {
         domain: u32,
         targets: Vec<u32>,
         iteration_locals: Vec<u32>,
+        /// The fold's continuation predicate, when it is a bounded `while`.
+        #[serde(default)]
+        continuation: Option<u32>,
         statements: Vec<FunctionStatementInput>,
         #[serde(deserialize_with = "deserialize_provenance")]
         begin_provenance: DaeProvenance,
@@ -431,6 +435,7 @@ pub(super) enum EventActionKindWire {
     Assert { message: u32 },
     Warning { message: u32, condition: u32 },
     Terminate { message: u32 },
+    Print { message: u32 },
     Reinitialize { state: u32, value: u32 },
 }
 

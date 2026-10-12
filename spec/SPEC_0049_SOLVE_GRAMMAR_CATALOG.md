@@ -82,8 +82,8 @@ edit, so re-read before relying on it.
 
 **Authority split.** The DRAFT parent rule plus its bound row here define the
 INTENDED SEMANTIC CONTRACT. The `Status` column REPORTS what today's checked
-constructors in `crates/rumoca-ir-solve/src/typed_program/program.rs` and
-`program/tensor.rs` admit, without adding normative future behavior. Constructor
+constructors in `crates/rumoca-ir-solve/src/typed_program/program.rs`,
+`program/construction_checks.rs`, and `program/tensor.rs` admit, without adding normative future behavior. Constructor
 parity tests prove the IMPLEMENTATION conforms to the row. A disagreement is
 therefore either an implementation defect or a separately reviewed spec
 amendment — never a constructor-wins resolution, because a mutable
@@ -126,6 +126,7 @@ declared end state that construction does not admit yet.
 | `UpdateSlice` | Current | `(aggregate, value, origin)` zero-based | none | `NotApplicable` | Functional slice update |
 | `UpdateView` | Current | `(aggregate, value, axes)` | none | `NotApplicable` | Functional update through a checked view |
 | `Call` | Current | `owner: SolvePureCallOwnerId`, `arguments: [reg]`, `destinations: [reg]`. Aggregate arguments and results each retain ONE typed register; destinations are ordered VALUE results followed by ASSERTION OUTPUTS (predicates and converted message values) exactly as declared by the owner interface | callee body is a separate `TypedProgram` | call | Invokes one compiler-issued pure-call owner atomically; never merges with another invocation (SEV-048) |
+| `Native` | Current | `body: NativeBody`, `operands: [reg]`, `destinations: [reg]`, a TUPLE typed exactly by the body's catalog signature (SPEC_0040 DAE-C30). Each body is its own capability key, `Native.<body>` | none | `NotApplicable`: pure; status-producing where the row declares a failure | Applies the body's one definitional evaluator in `rumoca-core::native_body`, which every evaluator and backend executes; a row failure is a typed failure. Its operands are Integer, so it carries no tangent |
 
 **Aspirational.** SEV-001's `InvokeOp`/`EffectOp`/`Terminator` factoring is the
 proposed end state. Today `Call` is the single pure-call owner above — there is
@@ -138,7 +139,9 @@ REJECTS at the declared target boundary (SEV-155, discharged); what remains
 missing is the admitting path. Those factors are uncataloged and the grammar is
 NOT closed; SPEC_0047 §1 carries the gap rows, and SEV-156 makes the
 consequence explicit — every external function REJECTS today, since there is no
-grammar for it to be checked against.
+grammar for it to be checked against. A `Native` operation is not such an invoke: it executes a compiler-defined
+meaning of a cataloged entry point (SPEC_0040 DAE-C30), never foreign code, and
+has no effect footprint.
 
 The Proposed leaves that slice must add, sketched so the reject arm has a
 successor:
@@ -165,13 +168,24 @@ Element-kind columns record what the checked constructor ADMITS today.
 | `SolveBinaryOperator` | `Divide` | **Real only** | `FloatingPrimitive` | Current |
 | `SolveBinaryOperator` | `Power` | **Real only** | `FloatingTranscendental` | Current |
 | `SolveBinaryOperator` | `Atan2` | **Real only** | `FloatingTranscendental` | Current |
-| `SolveBinaryOperator` | Integer `Divide` with divide-by-zero and `MIN/-1` status (SEV-025) | — | `ExactIntegral` | **Proposed** |
+| `SolveBinaryOperator` | `IntegerDivide`, `IntegerModulo`, `IntegerRemainder` | Integer only, identical shape and domain | `ExactIntegral` | Current: interpreter and portable WASM; checked quotient failures below |
 | `SolveBinaryOperator` | Integer-exponent `Power` with its own domain and status | — | `ExactIntegral` | **Proposed** |
 | `SolveCompareOperator` | `Equal`, `NotEqual` | any two IDENTICAL types, Boolean included | `RelationalEquality` | Current |
 | `SolveCompareOperator` | `Less`, `LessEqual`, `Greater`, `GreaterEqual` | numeric: Real or Integer | `RelationalOrdering` | Current |
 | `SolveConversionOperator` | `IntegerToReal` | Integer to Real | `Conversion` | Current |
 | `SolveConversionOperator` | `RealToIntegerTowardZero` | Real to Integer | `Conversion` | Current |
 | `SolveConversionOperator` | `RealToIntegerTowardNegativeInfinity` | Real to Integer | `Conversion` | Current |
+
+The exact Integer quotient leaves implement MLS §3.7.2: `IntegerDivide`
+truncates toward zero, `IntegerRemainder` has the dividend's sign, and
+`IntegerModulo` has the divisor's sign. All reject a zero divisor and any
+result outside the root's Integer domain with an Integer-arithmetic failure.
+`MIN/-1` fails for `IntegerDivide`; both remainder leaves return zero without
+constructing the unrepresentable intermediate quotient. They never convert
+through Real, including above 2^53. Real `/` remains `Divide` and does not
+admit Integer operands. The portable WASM executor checks faults before
+trapping instructions and publishes outputs only on success. Cranelift
+explicitly refuses the new leaves until it owns a checked failure ABI.
 | `SolveReductionOperator` | `Sum`, `Product` | numeric | `Reduction` | Current |
 | `SolveReductionOperator` | `Minimum`, `Maximum` | numeric | `Reduction`, NaN handling per the profile | Current |
 | `SolveReductionOperator` | `All` | Boolean only | `NotApplicable` | Current |

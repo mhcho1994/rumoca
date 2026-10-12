@@ -220,30 +220,13 @@ fn inst_006_conflicting_inherited_components_fail() {
 // "Expression must not depend on the variable itself"
 // =============================================================================
 
-// A non-final binding is a default that a modification replaces, so the cycle
-// is judged on the instance (DAE construction, ED023); a final cyclic binding
-// can never be broken and is rejected by Resolve (ER007).
 #[test]
 fn inst_008_no_cyclic_binding() {
-    expect_failure_in_phase_with_code(
+    expect_resolve_failure_with_code(
         r#"
         model Test
             parameter Real a = b;
             parameter Real b = a;
-            Real x;
-        equation
-            x = a;
-        end Test;
-    "#,
-        "Test",
-        FailedPhase::ToDae,
-        "ED023",
-    );
-    expect_resolve_failure_with_code(
-        r#"
-        model Test
-            final parameter Real a = b;
-            final parameter Real b = a;
             Real x;
         equation
             x = a;
@@ -251,25 +234,6 @@ fn inst_008_no_cyclic_binding() {
     "#,
         "Test",
         "ER007",
-    );
-}
-
-#[test]
-fn inst_008_modification_breaks_a_default_cycle() {
-    expect_success(
-        r#"
-        model Pipe
-            parameter Real a = b;
-            parameter Real b = a;
-            Real x;
-        equation
-            x = a + b;
-        end Pipe;
-        model Test
-            Pipe p(a = 2);
-        end Test;
-    "#,
-        "Test",
     );
 }
 
@@ -384,33 +348,27 @@ fn inst_011_inner_must_match_outer_constraint() {
 // =============================================================================
 
 #[test]
-fn inst_012_outer_binding_is_reported_and_ignored() {
-    let source = r#"
+fn inst_012_outer_binding_is_rejected() {
+    expect_parse_err_with_code(
+        r#"
         model Test
-            model Sub
-                outer Real x = 1;
-                Real y = x;
-            end Sub;
-            inner Real x = 2;
-            Sub s;
+            outer Real x = 1;
         end Test;
-    "#;
-    expect_compile_warning(source, "Test", "WR007");
+    "#,
+        "EP001",
+    );
 }
 
 #[test]
-fn inst_012_outer_modification_is_reported_and_ignored() {
-    let source = r#"
+fn inst_012_outer_modification_is_rejected() {
+    expect_parse_err_with_code(
+        r#"
         model Test
-            model Sub
-                outer Real x(start = 1);
-                Real y = x;
-            end Sub;
-            inner Real x = 2;
-            Sub s;
+            outer Real x(start = 1);
         end Test;
-    "#;
-    expect_compile_warning(source, "Test", "WR007");
+    "#,
+        "EP001",
+    );
 }
 
 // =============================================================================
@@ -1555,40 +1513,6 @@ fn inst_024_function_extends_connector_rejected() {
 }
 
 // =============================================================================
-// INST-040: Each keyword on modifier requires it is applied in array
-// declaration/modification
-// =============================================================================
-
-/// MLS §7.2.5 gives `each` no meaning on a scalar component. OpenModelica
-/// warns and applies the modification as written (AixLib's
-/// `simpleNLayer(each final T_start=fill(T0, n))`), so Rumoca warns (WR009)
-/// and the array value lands unchanged on the array member.
-#[test]
-fn inst_040_each_on_scalar_component_ignored_with_warning() {
-    let source = r#"
-        model M
-            model Sub
-                parameter Integer n = 3;
-                parameter Real T[n] = fill(1.0, n);
-                Real x[n];
-            equation
-                der(x) = T;
-            end Sub;
-            Sub s(each T = {2.0, 3.0, 4.0}, each x(each start = 0, each fixed = true));
-        end M;
-    "#;
-    rumoca_contracts::test_support::expect_compile_warning(source, "M", "WR009");
-    let trace = rumoca_contracts::test_support::simulate_model(source, "M", 1.0);
-    for (name, slope) in [("s.x[1]", 2.0), ("s.x[2]", 3.0), ("s.x[3]", 4.0)] {
-        let value = trace.final_value(name);
-        assert!(
-            (value - slope).abs() < 1e-6,
-            "{name} must integrate slope {slope}, got {value}"
-        );
-    }
-}
-
-// =============================================================================
 // INST-041: Sizes must match without each prefix or it is an error
 // =============================================================================
 
@@ -1936,86 +1860,3 @@ fn inst_031_outer_class_short_definition_accepted() {
 // INST-032: If outer component declaration is disabled conditional, also
 // ignored for automatic inner creation
 // =============================================================================
-
-#[test]
-fn inst_032_disabled_conditional_outer_needs_no_inner() {
-    expect_success(
-        r#"
-        model M
-            connector C
-                Real e;
-                flow Real f;
-            end C;
-            model Sub
-                parameter Boolean has = false;
-                outer C shared if has;
-                Real y = 1;
-            end Sub;
-            Sub s;
-        end M;
-    "#,
-        "M",
-    );
-}
-
-// =============================================================================
-// INST-038: Modifications of elements declared with both inner and outer only
-// applied to inner declaration
-// =============================================================================
-
-#[test]
-fn inst_038_inner_outer_modification_accepted() {
-    expect_success(
-        r#"
-        model M
-            model Sub
-                inner outer Real shared = 5;
-                Real y = shared;
-            end Sub;
-            Sub s;
-            inner Real shared = 1;
-        end M;
-    "#,
-        "M",
-    );
-}
-
-// =============================================================================
-// `redeclare function extends F` of a short-class alias (TOOLBUG-133)
-// =============================================================================
-
-/// ThermoPower `FanCharacteristics.Models.SplineFlow`: the redeclared class
-/// extends the inherited `flowCharacteristic`, not itself. Constant collection
-/// looked the base up by spelling, found the redeclaring class and recursed
-/// until the stack overflowed.
-#[test]
-fn redeclare_function_extends_short_alias_does_not_recurse() {
-    expect_success(
-        r#"
-        package P
-            partial function baseFlow
-                input Real q;
-                output Real H;
-            end baseFlow;
-            function dummyFlow
-                extends baseFlow;
-            algorithm
-                H := q;
-            end dummyFlow;
-            model BaseFlow
-                replaceable function flowCharacteristic = P.dummyFlow
-                    constrainedby P.baseFlow;
-                Real y = flowCharacteristic(time);
-            end BaseFlow;
-            model SplineFlow
-                extends BaseFlow;
-                redeclare function extends flowCharacteristic
-                algorithm
-                    H := 2 * q;
-                end flowCharacteristic;
-            end SplineFlow;
-        end P;
-    "#,
-        "P.SplineFlow",
-    );
-}

@@ -137,15 +137,7 @@ impl Context {
         infer_enum_range_dimensions(binding, tree).or_else(|| {
             infer_array_dimensions_full_with_functions(
                 binding,
-                &ParamEvalContext::new(
-                    &self.parameter_values,
-                    &self.real_parameter_values,
-                    &self.boolean_parameter_values,
-                    &self.enum_parameter_values,
-                    &self.array_dimensions,
-                    &self.functions,
-                    Some(var_name),
-                ),
+                &self.param_eval_context(Some(var_name)),
             )
         })
     }
@@ -171,16 +163,16 @@ impl Context {
             expr,
             crate::ast_lower::PredefinedIntrinsicIds::from_tree(tree),
         )?;
-        let eval_ctx = ParamEvalContext {
-            known_ints: &self.parameter_values,
-            known_reals: &self.real_parameter_values,
-            known_bools: &self.boolean_parameter_values,
-            known_enums: &self.enum_parameter_values,
-            array_dims: &self.array_dimensions,
-            functions: &self.functions,
-            var_context: Some(var_name),
-        };
-        let Some(dim) = try_eval_integer_with_context(&lowered, &eval_ctx) else {
+        let eval_ctx = self.param_eval_context(Some(var_name));
+        let dim = try_eval_integer_with_context(&lowered, &eval_ctx).or_else(|| {
+            // MLS 5.3: a constant the dimension names is evaluated in its own
+            // declaration scope, whichever class declares the array.
+            let constants = self
+                .declared_constants
+                .get_or_init(|| rumoca_ir_ast::DeclaredConstants::from_tree(tree));
+            rumoca_eval_ast::eval::eval_integer_of_declared_constants(expr, constants)
+        });
+        let Some(dim) = dim else {
             return Err(FlattenError::unresolved_component_dimension(
                 var_name,
                 expr.to_string(),

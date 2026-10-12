@@ -42,3 +42,35 @@ fn nested_parameter_folds_render_for_both_fmi_targets() {
         assert!(files.iter().any(|file| file.path == "modelDescription.xml"));
     }
 }
+
+#[test]
+fn parameter_reductions_render_for_both_fmi_targets() {
+    for operator in ["sum", "product", "min", "max"] {
+        let source = format!(
+            "model ParameterReduction
+               function reduce
+                 input Real scale;
+                 output Real y;
+               protected
+                 Real a[3];
+               algorithm
+                 a := {{scale, 2*scale, 3*scale}};
+                 y := {operator}(a);
+               end reduce;
+               parameter Real scale = 2;
+               parameter Real gain = reduce(scale);
+               output Real x(start=0, fixed=true);
+             equation
+               der(x) = gain;
+             end ParameterReduction;"
+        );
+        let compiled = rumoca::Compiler::new()
+            .model("ParameterReduction")
+            .compile_str(&source, "ParameterReduction.mo")
+            .expect("compile parameter reduction");
+        for target in ["fmi3", "fmi2"] {
+            rumoca::render_target_files(&compiled, "ParameterReduction", target, None)
+                .unwrap_or_else(|error| panic!("render {operator} {target}: {error:#}"));
+        }
+    }
+}

@@ -1,8 +1,16 @@
+mod construction_checks;
 mod construction_error;
+use construction_checks::{
+    binary_operator_accepts, checked_ordinal, construct_region, declare_interface_slots,
+    indices_in_bounds, require_fold_domain, require_map_domain, require_provenance,
+    slice_in_bounds,
+};
 pub use construction_error::SolveProgramConstructionError;
 
 mod directional;
 mod linear_solve;
+mod native;
+mod read_flow;
 mod tensor;
 
 pub use tensor::promoted_concatenate_dimensions;
@@ -10,6 +18,7 @@ pub(in crate::typed_program) mod wire;
 
 use std::marker::PhantomData;
 
+use rumoca_core::native_body::NativeBody;
 use rumoca_core::{Span, StructuredIndexDomain};
 use serde::{Deserialize, Serialize};
 
@@ -157,6 +166,10 @@ pub enum SolveBinaryOperator {
     /// failure, never a wrapped or defaulted value. `Divide` stays Real-only,
     /// so an Integer `/` cannot bypass its explicit conversion to Real.
     IntegerQuotient,
+    /// MLS `mod`: exact Integer remainder with the divisor's sign.
+    IntegerModulo,
+    /// MLS `rem`: exact Integer remainder with the dividend's sign.
+    IntegerRemainder,
     Power,
     And,
     Or,
@@ -259,6 +272,10 @@ pub enum SolveOperation {
         captures: Box<[SolveRegisterId]>,
         destinations: Box<[SolveRegisterId]>,
         transition: Box<SolveProgramRegion>,
+        /// A bounded `while` loop's predicate over the carried tuple and the
+        /// captures, evaluated before each pass; the first false value ends
+        /// the loop with the current tuple (MLS §11.2.3).
+        continuation: Option<Box<SolveProgramRegion>>,
     },
     /// Elementwise multiplication of one aggregate by one scalar.
     Scale {
@@ -387,6 +404,14 @@ pub enum SolveOperation {
         matrix: SolveRegisterId,
         rhs: SolveRegisterId,
     },
+    /// One SPEC_0040 DAE-C30 compiler-defined foreign body, typed by its
+    /// catalog interface: operands are its inputs and destinations its
+    /// outputs, each in interface order.
+    Native {
+        body: NativeBody,
+        operands: Box<[SolveRegisterId]>,
+        destinations: Box<[SolveRegisterId]>,
+    },
 }
 
 impl SolveOperation {
@@ -485,7 +510,11 @@ impl SolveOperation {
                 visit(*value);
                 visit_view_axis_registers(axes, &mut visit);
             }
-            Self::Call { arguments, .. } => arguments.iter().copied().for_each(&mut visit),
+            Self::Call { arguments, .. }
+            | Self::Native {
+                operands: arguments,
+                ..
+            } => arguments.iter().copied().for_each(&mut visit),
         }
     }
 
@@ -523,7 +552,8 @@ impl SolveOperation {
             | Self::UpdateView { destination, .. } => visit(*destination),
             Self::Conditional { destinations, .. }
             | Self::Fold { destinations, .. }
-            | Self::Call { destinations, .. } => {
+            | Self::Call { destinations, .. }
+            | Self::Native { destinations, .. } => {
                 destinations.iter().copied().for_each(&mut visit);
             }
         }
@@ -627,6 +657,8 @@ pub struct TypedProgram {
     slots: Box<[SolveSlot]>,
     register_types: Box<[SolveValueType]>,
     operations: Box<[SolveSpannedOperation]>,
+    #[serde(skip)]
+    read_flow: read_flow::ReadFlow,
 }
 
 impl TypedProgram {
@@ -646,12 +678,12 @@ impl TypedProgram {
             marker: PhantomData,
         };
         build(&mut builder)?;
-        Ok(Self {
+        Ok(Self::assemble(
             arithmetic,
-            slots: builder.slots.into_boxed_slice(),
-            register_types: builder.register_types.into_boxed_slice(),
-            operations: builder.operations.into_boxed_slice(),
-        })
+            builder.slots,
+            builder.register_types,
+            builder.operations,
+        ))
     }
 
     pub(super) fn construct_with_calls(
@@ -671,12 +703,52 @@ impl TypedProgram {
             marker: PhantomData,
         };
         build(&mut builder)?;
-        Ok(Self {
+        Ok(Self::assemble(
             arithmetic,
-            slots: builder.slots.into_boxed_slice(),
-            register_types: builder.register_types.into_boxed_slice(),
-            operations: builder.operations.into_boxed_slice(),
-        })
+            builder.slots,
+            builder.register_types,
+            builder.operations,
+        ))
+    }
+
+    fn assemble(
+        arithmetic: SolveArithmeticProfile,
+        slots: Vec<SolveSlot>,
+        register_types: Vec<SolveValueType>,
+        operations: Vec<SolveSpannedOperation>,
+    ) -> Self {
+        let read_flow = read_flow::ReadFlow::of(&operations, register_types.len(), &slots);
+        Self {
+            arithmetic,
+            slots: slots.into_boxed_slice(),
+            register_types: register_types.into_boxed_slice(),
+            operations: operations.into_boxed_slice(),
+            read_flow,
+        }
+    }
+
+    /// The last operation of this program that reads each register, by register
+    /// index; `None` for a register nothing reads. Every executor derives its
+    /// value lifetimes from this relation.
+    #[must_use]
+    pub fn register_last_reads(&self) -> &[Option<usize>] {
+        self.read_flow.register_last_reads()
+    }
+
+    /// Whether `operation` is the last operation of this program that reads
+    /// `register` and lists it once. The register's value is dead afterwards,
+    /// so an executor may move it out instead of sharing it.
+    #[must_use]
+    pub fn register_moves_at(&self, register: SolveRegisterId, operation: usize) -> bool {
+        self.read_flow
+            .register_moves_at(register.index(), operation)
+    }
+
+    /// Whether `operation` is the last load of the read-only `slot`, whose
+    /// value is dead afterwards.
+    #[must_use]
+    pub fn slot_last_load_at(&self, slot: SolveSlotId, operation: usize) -> bool {
+        self.read_flow.slot_last_load_at(slot.index(), operation)
     }
 
     #[must_use]
@@ -1103,7 +1175,74 @@ impl<'program> TypedProgramBuilder<'program> {
                 build(builder, carried, captures, binders, outputs)
             },
         )?;
-        self.fold_from_region(domain, initial, captures, transition, provenance)
+        self.fold_from_region(domain, initial, captures, transition, None, provenance)
+    }
+
+    /// A fold that ends at the first pass whose `continuation` predicate,
+    /// built over the carried tuple and the captures, is false.
+    pub fn fold_while(
+        &mut self,
+        domain: StructuredIndexDomain,
+        initial: &[ProgramRegister<'program>],
+        captures: &[ProgramRegister<'program>],
+        provenance: Span,
+        continuation: impl for<'region> FnOnce(
+            &mut TypedProgramBuilder<'region>,
+            &[ProgramSlot<'region>],
+            &[ProgramSlot<'region>],
+            &[ProgramSlot<'region>],
+        ) -> Result<(), SolveProgramConstructionError>,
+        build: impl for<'region> FnOnce(
+            &mut TypedProgramBuilder<'region>,
+            &[ProgramSlot<'region>],
+            &[ProgramSlot<'region>],
+            &[ProgramSlot<'region>],
+            &[ProgramSlot<'region>],
+        ) -> Result<(), SolveProgramConstructionError>,
+    ) -> Result<Vec<ProgramRegister<'program>>, SolveProgramConstructionError> {
+        require_provenance(provenance)?;
+        let carried_types = self.register_types_for(initial, provenance)?;
+        let capture_types = self.register_types_for(captures, provenance)?;
+        let carried_count = carried_types.len();
+        let predicate = self.build_region(
+            carried_types
+                .iter()
+                .chain(&capture_types)
+                .cloned()
+                .collect(),
+            vec![SolveValueType::scalar(SolveScalarType::Boolean)],
+            provenance,
+            |builder, inputs, outputs| {
+                let (carried, captures) = inputs.split_at(carried_count);
+                continuation(builder, carried, captures, outputs)
+            },
+        )?;
+        let binder_types = vec![
+            SolveValueType::scalar(SolveScalarType::integer(self.arithmetic));
+            domain.binders.len()
+        ];
+        let capture_count = capture_types.len();
+        let mut input_types = carried_types.clone();
+        input_types.extend(capture_types);
+        input_types.extend(binder_types);
+        let transition = self.build_region(
+            input_types,
+            carried_types,
+            provenance,
+            |builder, inputs, outputs| {
+                let (carried, remaining) = inputs.split_at(carried_count);
+                let (captures, binders) = remaining.split_at(capture_count);
+                build(builder, carried, captures, binders, outputs)
+            },
+        )?;
+        self.fold_from_region(
+            domain,
+            initial,
+            captures,
+            transition,
+            Some(predicate),
+            provenance,
+        )
     }
 
     pub fn map(
@@ -1238,6 +1377,7 @@ impl<'program> TypedProgramBuilder<'program> {
         initial: &[ProgramRegister<'program>],
         captures: &[ProgramRegister<'program>],
         transition: SolveProgramRegion,
+        continuation: Option<SolveProgramRegion>,
         provenance: Span,
     ) -> Result<Vec<ProgramRegister<'program>>, SolveProgramConstructionError> {
         require_provenance(provenance)?;
@@ -1256,6 +1396,14 @@ impl<'program> TypedProgramBuilder<'program> {
             || transition.outputs.as_ref() != carried_types
             || transition.body.arithmetic() != self.arithmetic
             || transition.provenance != provenance
+            || continuation.as_ref().is_some_and(|predicate| {
+                predicate.inputs.as_ref()
+                    != &expected_inputs[..carried_types.len() + capture_types.len()]
+                    || predicate.outputs.as_ref()
+                        != [SolveValueType::scalar(SolveScalarType::Boolean)]
+                    || predicate.body.arithmetic() != self.arithmetic
+                    || predicate.provenance != provenance
+            })
         {
             return Err(SolveProgramConstructionError::InvalidFold { provenance });
         }
@@ -1282,6 +1430,7 @@ impl<'program> TypedProgramBuilder<'program> {
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 transition: Box::new(transition),
+                continuation: continuation.map(Box::new),
             },
             provenance,
         );
@@ -1742,205 +1891,6 @@ impl<'program> TypedProgramBuilder<'program> {
             provenance,
         });
     }
-}
-
-fn declare_interface_slots<'program>(
-    builder: &mut TypedProgramBuilder<'program>,
-    value_types: &[SolveValueType],
-    storage: SolveStorageClass,
-    access: SolveSlotAccess,
-    provenance: Span,
-) -> Result<Vec<ProgramSlot<'program>>, SolveProgramConstructionError> {
-    value_types
-        .iter()
-        .cloned()
-        .map(|value_type| builder.declare_slot(value_type, storage, access, provenance))
-        .collect()
-}
-
-fn require_fold_domain(
-    domain: &StructuredIndexDomain,
-    arithmetic: SolveArithmeticProfile,
-    provenance: Span,
-) -> Result<(), SolveProgramConstructionError> {
-    domain
-        .validate()
-        .map_err(|_| SolveProgramConstructionError::InvalidFold { provenance })?;
-    let integers = arithmetic.integer_domain();
-    if domain.binders.is_empty()
-        || domain
-            .binders
-            .iter()
-            .any(|binder| !integers.contains(binder.lower) || !integers.contains(binder.upper))
-    {
-        return Err(SolveProgramConstructionError::InvalidFold { provenance });
-    }
-    Ok(())
-}
-
-fn require_map_domain(
-    domain: &StructuredIndexDomain,
-    arithmetic: SolveArithmeticProfile,
-    provenance: Span,
-) -> Result<(), SolveProgramConstructionError> {
-    domain
-        .validate()
-        .map_err(|_| SolveProgramConstructionError::InvalidMap { provenance })?;
-    let integers = arithmetic.integer_domain();
-    if domain.binders.is_empty()
-        || domain
-            .binders
-            .iter()
-            .any(|binder| !integers.contains(binder.lower) || !integers.contains(binder.upper))
-    {
-        return Err(SolveProgramConstructionError::InvalidMap { provenance });
-    }
-    Ok(())
-}
-
-pub(super) fn construct_region(
-    inputs: Vec<SolveValueType>,
-    outputs: Vec<SolveValueType>,
-    body: TypedProgram,
-    provenance: Span,
-) -> Result<SolveProgramRegion, SolveProgramConstructionError> {
-    if provenance.is_dummy()
-        || outputs.is_empty()
-        || inputs
-            .iter()
-            .chain(&outputs)
-            .any(|value_type| !value_type.belongs_to(body.arithmetic()))
-    {
-        return Err(SolveProgramConstructionError::InvalidRegion { provenance });
-    }
-    validate_region_body(&body, &inputs, &outputs, provenance)?;
-    Ok(SolveProgramRegion {
-        inputs: inputs.into_boxed_slice(),
-        outputs: outputs.into_boxed_slice(),
-        body,
-        provenance,
-    })
-}
-
-fn validate_region_body(
-    body: &TypedProgram,
-    inputs: &[SolveValueType],
-    outputs: &[SolveValueType],
-    provenance: Span,
-) -> Result<(), SolveProgramConstructionError> {
-    let interface_count = inputs
-        .len()
-        .checked_add(outputs.len())
-        .ok_or(SolveProgramConstructionError::IdentityOverflow { provenance })?;
-    if body.slots().len() < interface_count
-        || !slots_match(
-            &body.slots()[..inputs.len()],
-            inputs,
-            SolveStorageClass::Input,
-        )
-        || !slots_match(
-            &body.slots()[inputs.len()..interface_count],
-            outputs,
-            SolveStorageClass::Output,
-        )
-        || body.slots()[interface_count..]
-            .iter()
-            .any(|slot| slot.storage() != SolveStorageClass::MethodLocal)
-    {
-        return Err(SolveProgramConstructionError::InvalidRegion { provenance });
-    }
-    validate_region_outputs(body, inputs.len(), outputs.len(), provenance)
-}
-
-fn slots_match(
-    slots: &[SolveSlot],
-    expected: &[SolveValueType],
-    storage: SolveStorageClass,
-) -> bool {
-    slots
-        .iter()
-        .zip(expected)
-        .all(|(slot, expected)| slot.storage() == storage && slot.value_type() == expected)
-}
-
-fn validate_region_outputs(
-    body: &TypedProgram,
-    output_start: usize,
-    output_count: usize,
-    provenance: Span,
-) -> Result<(), SolveProgramConstructionError> {
-    let mut stores = vec![0usize; output_count];
-    for operation in body.operations() {
-        match operation.operation() {
-            SolveOperation::Load { slot, .. }
-                if (output_start..output_start + output_count).contains(&slot.index()) =>
-            {
-                return Err(SolveProgramConstructionError::InvalidRegion { provenance });
-            }
-            SolveOperation::Store { slot, .. } => {
-                if let Some(output) = slot
-                    .index()
-                    .checked_sub(output_start)
-                    .filter(|output| *output < output_count)
-                {
-                    stores[output] += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    if stores.iter().any(|count| *count != 1) {
-        return Err(SolveProgramConstructionError::InvalidRegion { provenance });
-    }
-    Ok(())
-}
-
-fn checked_ordinal(value: usize, provenance: Span) -> Result<u32, SolveProgramConstructionError> {
-    u32::try_from(value).map_err(|_| SolveProgramConstructionError::IdentityOverflow { provenance })
-}
-
-fn require_provenance(provenance: Span) -> Result<(), SolveProgramConstructionError> {
-    if provenance.is_dummy() {
-        return Err(SolveProgramConstructionError::MissingProvenance);
-    }
-    Ok(())
-}
-
-fn binary_operator_accepts(operator: SolveBinaryOperator, scalar: SolveScalarType) -> bool {
-    match operator {
-        SolveBinaryOperator::Add
-        | SolveBinaryOperator::Subtract
-        | SolveBinaryOperator::Multiply => scalar.is_numeric(),
-        // MLS §10.3.4 orders Boolean operands with `false < true`.
-        SolveBinaryOperator::Min | SolveBinaryOperator::Max => {
-            scalar.is_numeric() || scalar == SolveScalarType::Boolean
-        }
-        SolveBinaryOperator::IntegerQuotient => matches!(scalar, SolveScalarType::Integer(_)),
-        SolveBinaryOperator::Divide | SolveBinaryOperator::Power | SolveBinaryOperator::Atan2 => {
-            matches!(scalar, SolveScalarType::Real { .. })
-        }
-        SolveBinaryOperator::And | SolveBinaryOperator::Or => scalar == SolveScalarType::Boolean,
-    }
-}
-
-fn indices_in_bounds(dimensions: &[u32], indices: &[u32]) -> bool {
-    dimensions.len() == indices.len()
-        && dimensions
-            .iter()
-            .zip(indices)
-            .all(|(extent, index)| *index < *extent)
-}
-
-fn slice_in_bounds(base: &[u32], origin: &[u32], dimensions: &[u32]) -> bool {
-    base.len() == origin.len()
-        && base.len() == dimensions.len()
-        && base
-            .iter()
-            .zip(origin)
-            .zip(dimensions)
-            .all(|((base, origin), extent)| {
-                origin.checked_add(*extent).is_some_and(|end| end <= *base)
-            })
 }
 
 #[cfg(test)]

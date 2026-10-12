@@ -1,0 +1,38 @@
+{
+  "source_branch": "rumoca-bitcode-v1",
+  "source_commit": "4b4a31c0ea5eab5ef948a2616969768a2204b5f0",
+  "upstream_commit": "0b249f0f725431613c25bb56e40fbbe0df54c4d2",
+  "candidate_commit": "e92faa51333cc7ae6c2f84954ca85507ec5fef96",
+  "items": [
+    {
+      "area": "Shared scalar fold C rendering and serialization",
+      "decision": "Keep current upstream",
+      "reason": "Upstream 800f589b4 and 9e8de45a5 provide fold rendering plus continuation semantics. Original NestedParameterFold renders for FMI 2 and FMI 3 and executes via FastDyn on upstream."
+    },
+    {
+      "area": "Typed function map rendering",
+      "decision": "Keep current upstream",
+      "reason": "Upstream 5c954bb73 implements map rendering, including negative/non-divisible iteration steps."
+    },
+    {
+      "area": "Typed tensor reductions",
+      "decision": "Port and adapt",
+      "reason": "Concrete ParameterReduction compiles on upstream but FMI rendering fails with unsupported-feature:fmi.c.pure-call: tensor reduce. Port supports Real binary64 sum/product/min/max and Boolean all, using current arithmetic helpers and first-element accumulation."
+    },
+    {
+      "area": "Legacy scalar fold dependency extension",
+      "decision": "Do not transplant in this PR",
+      "reason": "Original parameter-fold sources pass current upstream checked admission. Old code predates continuation and slice contracts; transplanting it is unnecessary for the reproduced generation defect. No claim is made that every scalar-fold dependency form is supported."
+    },
+    {
+      "area": "Initialization solver starting coordinate",
+      "decision": "Keep current upstream",
+      "reason": "Upstream already starts the initialization solve from the unsettled coordinate; the source-branch delta from v0.10.1 in initialization_solver_y is explanatory text."
+    },
+    {
+      "area": "Native trace publication, bitcode and ModelSan/frontend changes",
+      "decision": "Exclude from this FMI C-generation PR",
+      "reason": "They are outside the selected upstream PR scope; source branch is preserved."
+    }
+  ]
+}
