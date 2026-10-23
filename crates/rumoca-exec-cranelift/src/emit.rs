@@ -29,6 +29,7 @@ mod input_validation;
 mod interpreter;
 mod native_fault;
 pub(crate) mod observation_carrier;
+mod output_ranges;
 mod owned_jit_module;
 mod projection_batch;
 pub(crate) mod projection_jacobian;
@@ -2382,6 +2383,16 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             .map_err(|_| CompileError::Backend("residual output index exceeds i32".to_string()))?;
         for op in row {
             self.source_operation = op as *const _;
+            if let LinearOp::StoreOutputRange {
+                start,
+                count,
+                stride: 1,
+            } = *op
+                && let Some(next) = self.copy_taped_output_range(start, count, out_ptr, out_idx)?
+            {
+                out_idx = next;
+                continue;
+            }
             let values = match op.clone() {
                 LinearOp::StoreOutputRange {
                     start,
@@ -3023,21 +3034,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         let pointer_type = self.module.target_config().pointer_type();
         let input_ptr = scratch::stack_addr(self.fb, pointer_type, input_slot, 0);
         let output_ptr = scratch::stack_addr(self.fb, pointer_type, output_slot, 0);
-        let mut input_cell = 0usize;
-        for (start, value_type) in input_starts.iter().zip(inputs) {
-            for offset in 0..value_type.scalar_count() as usize {
-                let register = checked_reg_offset(*start, offset, "typed pure-call input")?;
-                let value = self.lookup(register)?;
-                let value = encode_typed_cell(self.fb, value_type.element_type(), value);
-                scratch::stack_store(
-                    self.fb,
-                    value,
-                    input_slot,
-                    stack_element_byte_offset(input_cell, "typed pure-call input")?,
-                );
-                input_cell += 1;
-            }
-        }
+        self.pack_typed_call_inputs(input_starts, inputs, input_slot)?;
         if matches!(published, PublishedOutputs::Predicates(_)) {
             let marker = self
                 .fb
@@ -3122,6 +3119,14 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         (output_slot, first_cell): (StackSlot, usize),
         dst: u32,
     ) -> Result<(), CompileError> {
+        if self.copy_taped_real_cells(
+            dst,
+            output.value_type(),
+            (output_slot, first_cell),
+            output_ranges::TypedRangeDirection::Output,
+        )? {
+            return Ok(());
+        }
         for offset in 0..output.value_type().scalar_count() as usize {
             let value = scratch::stack_load(
                 self.fb,

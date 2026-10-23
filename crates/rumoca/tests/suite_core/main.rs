@@ -24,6 +24,7 @@
 //! libtest filters are substring matches over the full path, so filtering by
 //! bare test name still works, and `<file_stem>::` selects one member file.
 
+mod discrete_array_history_ranges;
 mod history_operator_checked;
 mod initial_boolean_parameter;
 mod initialization_parameter_conditionals;
