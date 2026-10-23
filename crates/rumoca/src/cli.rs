@@ -24,7 +24,7 @@ mod projection_report;
 pub(crate) mod sim_defaults;
 mod value;
 #[cfg(test)]
-pub(crate) use debug_tracing::expand_trace_filter;
+use debug_tracing::expand_trace_filter;
 pub(crate) use debug_tracing::{init_debug_tracing, trace_requests_viewer};
 use sim_defaults::{direct_sim_window, sim_window};
 
@@ -306,7 +306,8 @@ pub struct ModelOptions {
     pub no_fold_parameter_bindings: bool,
 
     /// Treat fixed parameters as non-tunable at their declared values.
-    /// Enables declared-value analyses; parameters with fixed=false remain tunable.
+    /// Specializes pure model bindings at proven immutable inputs using bounded
+    /// constant evaluation. Parameters with fixed=false remain unfrozen.
     #[arg(long)]
     pub freeze_parameters: bool,
 

@@ -346,7 +346,6 @@ fn build_checked<'dae>(
             initial_parameters: &analysis.initial_parameters,
             evaluable_parameters: &analysis.evaluable_parameters,
             native_table_ids: &analysis.native_table_ids,
-            constants: &analysis.constants,
         },
         variable_plan,
         variable_identities.reserved,

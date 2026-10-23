@@ -1,0 +1,64 @@
+{
+  "base_commit": "73c6a7d588cc2d8af04764089edc6910f26e0aa0",
+  "dirty": true,
+  "binary_sha256": "a0b6da433329da1c5f6c4b37fe126fc6fd87cf25d87b1a5bab70513c5d3c052b",
+  "results": [
+    {
+      "id": "BUG-001",
+      "model": "C6",
+      "source": "model C6 Real x(start=1,fixed=true); Real s; algorithm s:=sum({x*i for i in 1:2}); equation der(x)=-x; end C6;",
+      "command": [
+        "/data/mrumoca/rumoca/target/debug/rumoca",
+        "compile",
+        "/data/mrumoca/rumoca/target/reporting-review-20261001/BUG-001.mo",
+        "--model",
+        "C6",
+        "--pass",
+        "none",
+        "--emit-bitcode",
+        "/data/mrumoca/rumoca/target/reporting-review-20261001/BUG-001.rbc"
+      ],
+      "returncode": 101,
+      "stdout": "",
+      "stderr": "\nthread 'main' (15) panicked at crates/rumoca-phase-dae/src/construction/expression.rs:1795:14:\nanalysis proves the exact comprehension occurrence\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+    },
+    {
+      "id": "BUG-007",
+      "model": "H1",
+      "source": "model H1 Real x(start=1,fixed=true); equation der(x)=-x; assert(x > -1,\"bound\",AssertionLevel.warning); end H1;",
+      "command": [
+        "/data/mrumoca/rumoca/target/debug/rumoca",
+        "compile",
+        "/data/mrumoca/rumoca/target/reporting-review-20261001/BUG-007.mo",
+        "--model",
+        "H1",
+        "--pass",
+        "none",
+        "--emit-bitcode",
+        "/data/mrumoca/rumoca/target/reporting-review-20261001/BUG-007.rbc"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "wrote bitcode v2 (cbor) to /data/mrumoca/rumoca/target/reporting-review-20261001/BUG-007.rbc\n"
+    },
+    {
+      "id": "BUG-004",
+      "model": "T.M",
+      "source": "package T\n  record Cx\n    Real re;\n    Real im;\n  end Cx;\n\n  function cabs\n    input Cx c;\n    output Real y;\n  algorithm\n    y := sqrt(c.re * c.re + c.im * c.im);\n  end cabs;\n\n  model M\n    parameter Integer m = 2;\n    Cx v[m];\n    Real a[m] = cabs(v);        // vectorised call: array of records -> scalar-record function\n    Real x(start = 1);\n  equation\n    der(x) = -x;\n    for i in 1:m loop\n      v[i].re = x * i;\n      v[i].im = 0;\n    end for;\n  end M;\nend T;\n",
+      "command": [
+        "/data/mrumoca/rumoca/target/debug/rumoca",
+        "compile",
+        "/data/mrumoca/rumoca/target/reporting-review-20261001/BUG-004.mo",
+        "--model",
+        "T.M",
+        "--pass",
+        "none",
+        "--emit-bitcode",
+        "/data/mrumoca/rumoca/target/reporting-review-20261001/BUG-004.rbc"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "  \u001b[31m\u001b[0m \u001b[31m[ED008]\u001b[0m unresolved Flat reference `v.re`\n    \u256d\u2500[\u001b[36;1;4m/data/mrumoca/rumoca/target/reporting-review-20261001/BUG-004.mo:17:22\u001b[0m]\n \u001b[2m16\u001b[0m \u2502     Cx v[m];\n \u001b[2m17\u001b[0m \u2502     Real a[m] = cabs(v);        // vectorised call: array of records -> scalar-record function\n    \u00b7 \u001b[31;1m                     \u252c\u001b[0m\n    \u00b7                      \u001b[31;1m\u2570\u2500\u2500 \u001b[31;1mundefined reference used here\u001b[0m\u001b[0m\n \u001b[2m18\u001b[0m \u2502     Real x(start = 1);\n    \u2570\u2500\u2500\u2500\u2500\n\u001b[36m  help: \u001b[0mFlat IR must carry a declared, fully resolved coordinate identity\n\n"
+    }
+  ]
+}

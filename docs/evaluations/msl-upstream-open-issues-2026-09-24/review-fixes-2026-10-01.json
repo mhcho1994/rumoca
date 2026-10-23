@@ -1,0 +1,761 @@
+{
+  "date": "2026-10-01",
+  "base_commit": "73c6a7d588cc2d8af04764089edc6910f26e0aa0",
+  "worktree_dirty": true,
+  "profile": "default compiler fixed 20-model canary; separate known-issue native gates explicitly freeze parameters",
+  "binary_sha256": "a0b6da433329da1c5f6c4b37fe126fc6fd87cf25d87b1a5bab70513c5d3c052b",
+  "canary_sha256": "536004933ce502f7a8a4317e5dd6de2b700a6b176e84d2d6e7bbe0dcdf61eafa",
+  "implementation_sha256": {
+    "crates/rumoca-compile/src/session/compile_support.rs": "a67c40031f5b4f18bbd0de6fa23b7ce2f14b4864e39faa7a83b8fcc93548dac9",
+    "crates/rumoca-compile/src/session/session_impl_model_queries.rs": "a0a1916111692ee7484f0239f11ea4f115be0b750fe97c4afd15d537416edcf9",
+    "crates/rumoca-phase-dae/src/construction.rs": "0d4e7ee06eda473b1b576aa9eb1b549865d8cbc6621f914dd89afa852126433d",
+    "crates/rumoca-phase-dae/src/construction/expression.rs": "6cd332e5479b326b1c3f24080650ff06e1b46fda2e2fb20ca379138832c7dfe5",
+    "crates/rumoca-phase-dae/src/construction/variable_construction.rs": "784c409f9dd97bbedb121d647466a416a85d5e74f1a1603c73e371a0ad206361",
+    "crates/rumoca-phase-flatten/src/functions.rs": "87700cf0d2fe37da3634bd2c0ac3988a103545fb74e258ad5d058c1728950503",
+    "crates/rumoca-phase-flatten/src/functions/pure_constants.rs": "19e65a6f0daa25d6159bd7578cbec448fbd646dc6a32de0600cc727e5804f751",
+    "crates/rumoca-phase-flatten/src/lib.rs": "f3539fa160e9396cfce7c2e3b359d89fabbb4b094cdd3838c39380a75ed7a42c",
+    "crates/rumoca-phase-flatten/src/pipeline/flatten_pipeline.rs": "6680550f50c9baf8c455c27b4635eb4602df01e1e45464f2b6d28b9fa72ede3b",
+    "crates/rumoca/src/cli.rs": "21c1eddb35b9b69ce118ce4f8c1cf95c8a01a98dec55ad5fbdeac744b6f43fec",
+    "crates/rumoca/src/cli/parameter_profile_tests.rs": "27b2b4782bb9f85e0c337bd5918dcb27bdacf7df015693dcbe930d08d471776a",
+    "packages/modelsan/modelsan/check.py": "eeb29efb1a76121dc7c8ea24ab054a1f7ff2367d53413ae56ce3edf50eab2cdf",
+    "packages/modelsan/modelsan/pipeline.py": "d56b40c61b119dab4b509464299a0b5145c57f9d6f5ab1ef753fe73c31ea9e59",
+    "packages/modelsan/tests/test_campaign.py": "35930e0e2cc68b75dc878ee3f7484179ac6f810c132bbe0268434b90b6f01273",
+    "packages/modelsan/tests/test_check_command.py": "497f1121ff9847951dbfb19065e5d5ca1fdebade3bf67ca7f1a3e69c008c7abc",
+    "packages/modelsan/tests/test_current_bitcode.py": "16d9324738ea94ef8dbac70043e7f864e208620eee906cff39922f78ec1f0d4e",
+    "packages/modelsan/tests/test_known_msl_issues.py": "c62c4d476244a73ff8bc9b9b7a15a594597dd9f4970b861a0938ab3dbef32c6a"
+  },
+  "before": {
+    "report_sha256": {
+      "msl_results.json": "43a918776ea99a678abf3fe0b1af15738e10282dbe9b322c2a4023dff8614cbe",
+      "sim_trace_comparison.json": "512a44e0eadf08a2be1858b91fd4a2760b3cef80bb9d13a9f1e2d17c8cdfe0e6"
+    },
+    "counts": {
+      "total_models": 20,
+      "compiled_models": 11,
+      "todae_failed": 9,
+      "sim_attempted": 11,
+      "sim_ok": 9,
+      "sim_solver_fail": 2
+    },
+    "models": [
+      {
+        "model_name": "Modelica.Blocks.Examples.BooleanNetwork1",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Blocks.Examples.BooleanNetwork1 failed in ToDae: unsupported Flat semantic owner `function value type`: `Modelica.Blocks.Tables.Internal.getTimeTableTmin.tableID` has unsupported type `Modelica.Blocks.Types.ExternalCombiTimeTable`",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Blocks.Examples.Noise.AutomaticSeed",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Blocks.Examples.Noise.AutomaticSeed failed in ToDae: unsupported Flat semantic owner `function shape proof`: extent depends on the value of scalar `nState`, which requires a value-proven function specialization",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.BooleanSignals.BackSample",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Clocked.Examples.Elementary.BooleanSignals.BackSample failed in ToDae: unsupported Flat semantic owner `function value type`: `Modelica.Blocks.Tables.Internal.getTimeTableTmin.tableID` has unsupported type `Modelica.Blocks.Types.ExternalCombiTimeTable`",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.BooleanSignals.TimeBasedPulse",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.IntegerSignals.BackSample",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Clocked.Examples.Elementary.IntegerSignals.BackSample failed in ToDae: unsupported Flat semantic owner `function value type`: `Modelica.Blocks.Tables.Internal.getTimeTableTmin.tableID` has unsupported type `Modelica.Blocks.Types.ExternalCombiTimeTable`",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.IntegerSignals.TimeBasedStep",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.Sample1",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.TickBasedRamp",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.SimpleControlledDrive.ClockedWithDiscreteController",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Electrical.Analog.Examples.DemoPowerSupply",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Electrical.Analog.Examples.OpAmps.Comparator",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Electrical.Analog.Examples.OpAmps.OpAmpCircuits.Add",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": "Solve",
+        "failure_bucket": "StructuralAnalysis",
+        "owner_category": "Structural",
+        "failure_error_code": "EL005"
+      },
+      {
+        "model_name": "Modelica.Electrical.Analog.Examples.ShowSaturatingInductor",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Electrical.Digital.Examples.Counter",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Electrical.Digital.Examples.Counter failed in ToDae: invalid Appendix B discrete solved form: element assignments must cover a discrete coordinate exactly once",
+        "error_code": "ED010",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED010"
+      },
+      {
+        "model_name": "Modelica.Electrical.Digital.Examples.FullAdder",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Electrical.Digital.Examples.FullAdder failed in ToDae: unsupported model algorithm in canonical DAE: sequential read of `Adder1.Adder2.AND.G2.y_auxiliary` after an earlier write requires an SSA event transition",
+        "error_code": "ED013",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED013"
+      },
+      {
+        "model_name": "Modelica.Electrical.Polyphase.Examples.TransformerYD",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Math.Nonlinear.Examples.QuadratureLobatto3",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Math.Nonlinear.Examples.QuadratureLobatto3 failed in ToDae: canonical DAE construction rejected an invalid operation: expression shape mismatch",
+        "error_code": "ED020",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED020"
+      },
+      {
+        "model_name": "Modelica.StateGraph.Examples.ShowCompositeStep",
+        "phase_reached": "ToDae",
+        "error": "Modelica.StateGraph.Examples.ShowCompositeStep failed in ToDae: invalid Appendix B discrete solved form: a discrete-valued equation must have one unsubscripted resolved coordinate as its left-hand side",
+        "error_code": "ED010",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED010"
+      },
+      {
+        "model_name": "Modelica.Mechanics.Rotational.Examples.Friction",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Mechanics.Rotational.Examples.Friction failed in ToDae: unsupported Flat semantic owner `function value type`: `Modelica.Blocks.Types.ExternalCombiTable1D.externalCombiTable1D` has unsupported type `ExternalCombiTable1D`",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Mechanics.Rotational.Examples.FirstGrounded",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": "Solve",
+        "failure_bucket": "StructuralAnalysis",
+        "owner_category": "Structural",
+        "failure_error_code": "EL005"
+      }
+    ],
+    "trace_counts": {
+      "models_candidate": 9,
+      "models_compared": 8,
+      "missing_trace_models": 1,
+      "skipped_models": 0,
+      "agreement_bands": {
+        "high_agreement": 8,
+        "minor_agreement": 0,
+        "deviation": 0
+      },
+      "missing_trace": {
+        "Modelica.Electrical.Polyphase.Examples.TransformerYD": {
+          "kind": "omc_trace_missing",
+          "detail": "OMC attempt status `error` is not successful; stale trace artifacts are ineligible"
+        }
+      }
+    },
+    "trace_models": {
+      "Modelica.Clocked.Examples.Elementary.BooleanSignals.TimeBasedPulse": {
+        "model_name": "Modelica.Clocked.Examples.Elementary.BooleanSignals.TimeBasedPulse",
+        "compared_variables": 3,
+        "samples_compared": 3000,
+        "bounded_normalized_l1_score": 0.0,
+        "mean_channel_bounded_normalized_l1": 0.0,
+        "max_channel_bounded_normalized_l1": 0.0,
+        "channel_high_count": 3,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Clocked.Examples.Elementary.IntegerSignals.TimeBasedStep": {
+        "model_name": "Modelica.Clocked.Examples.Elementary.IntegerSignals.TimeBasedStep",
+        "compared_variables": 3,
+        "samples_compared": 3000,
+        "bounded_normalized_l1_score": 0.0,
+        "mean_channel_bounded_normalized_l1": 0.0,
+        "max_channel_bounded_normalized_l1": 0.0,
+        "channel_high_count": 3,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Clocked.Examples.Elementary.RealSignals.Sample1": {
+        "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.Sample1",
+        "compared_variables": 5,
+        "samples_compared": 5372,
+        "bounded_normalized_l1_score": 2.498001805406601e-16,
+        "mean_channel_bounded_normalized_l1": 7.877148734807988e-08,
+        "max_channel_bounded_normalized_l1": 1.9692871799549943e-07,
+        "channel_high_count": 5,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Clocked.Examples.Elementary.RealSignals.TickBasedRamp": {
+        "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.TickBasedRamp",
+        "compared_variables": 3,
+        "samples_compared": 3000,
+        "bounded_normalized_l1_score": 0.0,
+        "mean_channel_bounded_normalized_l1": 0.0,
+        "max_channel_bounded_normalized_l1": 0.0,
+        "channel_high_count": 3,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Clocked.Examples.SimpleControlledDrive.ClockedWithDiscreteController": {
+        "model_name": "Modelica.Clocked.Examples.SimpleControlledDrive.ClockedWithDiscreteController",
+        "compared_variables": 26,
+        "samples_compared": 28692,
+        "bounded_normalized_l1_score": 3.289141368226906e-16,
+        "mean_channel_bounded_normalized_l1": 3.7131010203050214e-07,
+        "max_channel_bounded_normalized_l1": 4.799728938549861e-06,
+        "channel_high_count": 26,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Electrical.Analog.Examples.DemoPowerSupply": {
+        "model_name": "Modelica.Electrical.Analog.Examples.DemoPowerSupply",
+        "compared_variables": 21,
+        "samples_compared": 500052,
+        "bounded_normalized_l1_score": 1.5254383786347727e-12,
+        "mean_channel_bounded_normalized_l1": 4.473713745847687e-11,
+        "max_channel_bounded_normalized_l1": 1.5341750276657592e-10,
+        "channel_high_count": 21,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Electrical.Analog.Examples.OpAmps.Comparator": {
+        "model_name": "Modelica.Electrical.Analog.Examples.OpAmps.Comparator",
+        "compared_variables": 45,
+        "samples_compared": 104288,
+        "bounded_normalized_l1_score": 0.0,
+        "mean_channel_bounded_normalized_l1": 2.2183686998244897e-05,
+        "max_channel_bounded_normalized_l1": 0.0004977005200683121,
+        "channel_high_count": 45,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Electrical.Analog.Examples.ShowSaturatingInductor": {
+        "model_name": "Modelica.Electrical.Analog.Examples.ShowSaturatingInductor",
+        "compared_variables": 23,
+        "samples_compared": 57776,
+        "bounded_normalized_l1_score": 2.0153275602096597e-06,
+        "mean_channel_bounded_normalized_l1": 3.224301236622765e-06,
+        "max_channel_bounded_normalized_l1": 1.2951264934479879e-05,
+        "channel_high_count": 23,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      }
+    }
+  },
+  "after": {
+    "report_sha256": {
+      "msl_results.json": "696e9f6d11bf669a6db67fc5d81778a9952371cc09586a9c1a4c1745560a4633",
+      "sim_trace_comparison.json": "7ddcb26f61cae114943f877f8ebdbc57c4cc40538356c532ec4c36c72765682f"
+    },
+    "counts": {
+      "total_models": 20,
+      "compiled_models": 11,
+      "todae_failed": 9,
+      "sim_attempted": 11,
+      "sim_ok": 9,
+      "sim_solver_fail": 2
+    },
+    "models": [
+      {
+        "model_name": "Modelica.Blocks.Examples.BooleanNetwork1",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Blocks.Examples.BooleanNetwork1 failed in ToDae: unsupported Flat semantic owner `function value type`: `Modelica.Blocks.Tables.Internal.getTimeTableTmin.tableID` has unsupported type `Modelica.Blocks.Types.ExternalCombiTimeTable`",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Blocks.Examples.Noise.AutomaticSeed",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Blocks.Examples.Noise.AutomaticSeed failed in ToDae: unsupported Flat semantic owner `function shape proof`: extent depends on the value of scalar `nState`, which requires a value-proven function specialization",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.BooleanSignals.BackSample",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Clocked.Examples.Elementary.BooleanSignals.BackSample failed in ToDae: unsupported Flat semantic owner `function value type`: `Modelica.Blocks.Tables.Internal.getTimeTableTmin.tableID` has unsupported type `Modelica.Blocks.Types.ExternalCombiTimeTable`",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.BooleanSignals.TimeBasedPulse",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.IntegerSignals.BackSample",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Clocked.Examples.Elementary.IntegerSignals.BackSample failed in ToDae: unsupported Flat semantic owner `function value type`: `Modelica.Blocks.Tables.Internal.getTimeTableTmin.tableID` has unsupported type `Modelica.Blocks.Types.ExternalCombiTimeTable`",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.IntegerSignals.TimeBasedStep",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.Sample1",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.TickBasedRamp",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Clocked.Examples.SimpleControlledDrive.ClockedWithDiscreteController",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Electrical.Analog.Examples.DemoPowerSupply",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Electrical.Analog.Examples.OpAmps.Comparator",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Electrical.Analog.Examples.OpAmps.OpAmpCircuits.Add",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": "Solve",
+        "failure_bucket": "StructuralAnalysis",
+        "owner_category": "Structural",
+        "failure_error_code": "EL005"
+      },
+      {
+        "model_name": "Modelica.Electrical.Analog.Examples.ShowSaturatingInductor",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Electrical.Digital.Examples.Counter",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Electrical.Digital.Examples.Counter failed in ToDae: invalid Appendix B discrete solved form: element assignments must cover a discrete coordinate exactly once",
+        "error_code": "ED010",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED010"
+      },
+      {
+        "model_name": "Modelica.Electrical.Digital.Examples.FullAdder",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Electrical.Digital.Examples.FullAdder failed in ToDae: unsupported model algorithm in canonical DAE: sequential read of `Adder1.Adder2.AND.G2.y_auxiliary` after an earlier write requires an SSA event transition",
+        "error_code": "ED013",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED013"
+      },
+      {
+        "model_name": "Modelica.Electrical.Polyphase.Examples.TransformerYD",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": null,
+        "failure_bucket": null,
+        "owner_category": null,
+        "failure_error_code": null
+      },
+      {
+        "model_name": "Modelica.Math.Nonlinear.Examples.QuadratureLobatto3",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Math.Nonlinear.Examples.QuadratureLobatto3 failed in ToDae: canonical DAE construction rejected an invalid operation: expression shape mismatch",
+        "error_code": "ED020",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED020"
+      },
+      {
+        "model_name": "Modelica.StateGraph.Examples.ShowCompositeStep",
+        "phase_reached": "ToDae",
+        "error": "Modelica.StateGraph.Examples.ShowCompositeStep failed in ToDae: invalid Appendix B discrete solved form: a discrete-valued equation must have one unsubscripted resolved coordinate as its left-hand side",
+        "error_code": "ED010",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED010"
+      },
+      {
+        "model_name": "Modelica.Mechanics.Rotational.Examples.Friction",
+        "phase_reached": "ToDae",
+        "error": "Modelica.Mechanics.Rotational.Examples.Friction failed in ToDae: unsupported Flat semantic owner `function value type`: `Modelica.Blocks.Types.ExternalCombiTable1D.externalCombiTable1D` has unsupported type `ExternalCombiTable1D`",
+        "error_code": "ED019",
+        "failure_phase": "ToDae",
+        "failure_bucket": "DaeConstruction",
+        "owner_category": "DaeConstruction",
+        "failure_error_code": "ED019"
+      },
+      {
+        "model_name": "Modelica.Mechanics.Rotational.Examples.FirstGrounded",
+        "phase_reached": "Success",
+        "error": null,
+        "error_code": null,
+        "failure_phase": "Solve",
+        "failure_bucket": "StructuralAnalysis",
+        "owner_category": "Structural",
+        "failure_error_code": "EL005"
+      }
+    ],
+    "trace_counts": {
+      "models_candidate": 9,
+      "models_compared": 8,
+      "missing_trace_models": 1,
+      "skipped_models": 0,
+      "agreement_bands": {
+        "high_agreement": 8,
+        "minor_agreement": 0,
+        "deviation": 0
+      },
+      "missing_trace": {
+        "Modelica.Electrical.Polyphase.Examples.TransformerYD": {
+          "kind": "omc_trace_missing",
+          "detail": "OMC attempt status `error` is not successful; stale trace artifacts are ineligible"
+        }
+      }
+    },
+    "trace_models": {
+      "Modelica.Clocked.Examples.Elementary.BooleanSignals.TimeBasedPulse": {
+        "model_name": "Modelica.Clocked.Examples.Elementary.BooleanSignals.TimeBasedPulse",
+        "compared_variables": 3,
+        "samples_compared": 3000,
+        "bounded_normalized_l1_score": 0.0,
+        "mean_channel_bounded_normalized_l1": 0.0,
+        "max_channel_bounded_normalized_l1": 0.0,
+        "channel_high_count": 3,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Clocked.Examples.Elementary.IntegerSignals.TimeBasedStep": {
+        "model_name": "Modelica.Clocked.Examples.Elementary.IntegerSignals.TimeBasedStep",
+        "compared_variables": 3,
+        "samples_compared": 3000,
+        "bounded_normalized_l1_score": 0.0,
+        "mean_channel_bounded_normalized_l1": 0.0,
+        "max_channel_bounded_normalized_l1": 0.0,
+        "channel_high_count": 3,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Clocked.Examples.Elementary.RealSignals.Sample1": {
+        "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.Sample1",
+        "compared_variables": 5,
+        "samples_compared": 5372,
+        "bounded_normalized_l1_score": 2.498001805406601e-16,
+        "mean_channel_bounded_normalized_l1": 7.877148734807988e-08,
+        "max_channel_bounded_normalized_l1": 1.9692871799549943e-07,
+        "channel_high_count": 5,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Clocked.Examples.Elementary.RealSignals.TickBasedRamp": {
+        "model_name": "Modelica.Clocked.Examples.Elementary.RealSignals.TickBasedRamp",
+        "compared_variables": 3,
+        "samples_compared": 3000,
+        "bounded_normalized_l1_score": 0.0,
+        "mean_channel_bounded_normalized_l1": 0.0,
+        "max_channel_bounded_normalized_l1": 0.0,
+        "channel_high_count": 3,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Clocked.Examples.SimpleControlledDrive.ClockedWithDiscreteController": {
+        "model_name": "Modelica.Clocked.Examples.SimpleControlledDrive.ClockedWithDiscreteController",
+        "compared_variables": 26,
+        "samples_compared": 28692,
+        "bounded_normalized_l1_score": 3.289141368226906e-16,
+        "mean_channel_bounded_normalized_l1": 3.7131010203050214e-07,
+        "max_channel_bounded_normalized_l1": 4.799728938549861e-06,
+        "channel_high_count": 26,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Electrical.Analog.Examples.DemoPowerSupply": {
+        "model_name": "Modelica.Electrical.Analog.Examples.DemoPowerSupply",
+        "compared_variables": 21,
+        "samples_compared": 500052,
+        "bounded_normalized_l1_score": 1.5254383786347727e-12,
+        "mean_channel_bounded_normalized_l1": 4.473713745847687e-11,
+        "max_channel_bounded_normalized_l1": 1.5341750276657592e-10,
+        "channel_high_count": 21,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Electrical.Analog.Examples.OpAmps.Comparator": {
+        "model_name": "Modelica.Electrical.Analog.Examples.OpAmps.Comparator",
+        "compared_variables": 45,
+        "samples_compared": 104288,
+        "bounded_normalized_l1_score": 0.0,
+        "mean_channel_bounded_normalized_l1": 2.2183686998244897e-05,
+        "max_channel_bounded_normalized_l1": 0.0004977005200683121,
+        "channel_high_count": 45,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      },
+      "Modelica.Electrical.Analog.Examples.ShowSaturatingInductor": {
+        "model_name": "Modelica.Electrical.Analog.Examples.ShowSaturatingInductor",
+        "compared_variables": 23,
+        "samples_compared": 57776,
+        "bounded_normalized_l1_score": 2.0153275602096597e-06,
+        "mean_channel_bounded_normalized_l1": 3.224301236622765e-06,
+        "max_channel_bounded_normalized_l1": 1.2951264934479879e-05,
+        "channel_high_count": 23,
+        "channel_minor_count": 0,
+        "channel_deviation_count": 0,
+        "channel_severe_count": 0
+      }
+    }
+  },
+  "compile_outcome_changes": [],
+  "validation_logs": {
+    "rust": {
+      "path": "/tmp/modelsan-fixes-rust.log",
+      "sha256": "d0e0805c41dae32592bbd5ceb9b451bc28a5a82fc27d6b3c138c8fc890aec1a1",
+      "summaries": [
+        "test result: ok. 373 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+        "test result: ok. 271 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.96s",
+        "test result: ok. 621 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s"
+      ]
+    },
+    "core": {
+      "path": "/tmp/modelsan-fixes-core.log",
+      "sha256": "fec514ce10151a419d56e7fa9a9a2444c2cbe7af84985517b63e1a43ebef2edf",
+      "summaries": [
+        "test result: FAILED. 488 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.23s"
+      ]
+    },
+    "profile": {
+      "path": "/tmp/modelsan-fixes-profile.log",
+      "sha256": "5befc1585ff56d8091767c30b361d6348d6dc511cfacdea9d961577f327e0671",
+      "summaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 118 filtered out; finished in 0.01s"
+      ]
+    },
+    "dimensions": {
+      "path": "/tmp/modelsan-fixes-dimensions.log",
+      "sha256": "f9f627ae55ffadebeea97d8494a6e84f0c2da6aaa453e98be0aec2dba5776f28",
+      "summaries": [
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 480 filtered out; finished in 0.04s"
+      ]
+    },
+    "python-full": {
+      "path": "/tmp/modelsan-fixes-python-full.log",
+      "sha256": "f1be9b1527dd3f2087e5cf43e61fd973acaf7f1f8d552f9a413bbf4d9d76eed7",
+      "summaries": [
+        "352 passed, 3 skipped, 2 warnings in 518.62s (0:08:38)"
+      ]
+    },
+    "final-gates": {
+      "path": "/tmp/modelsan-fixes-final-gates.log",
+      "sha256": "df469a8b3d5ac316ab1f764a1690e0c92fe34724c659263b7cf7e80ff8ed0703",
+      "summaries": [
+        "10 passed in 263.34s (0:04:23)"
+      ]
+    },
+    "current": {
+      "path": "/tmp/modelsan-fixes-current.log",
+      "sha256": "b38691776f9fbc149d4c2303d15cbda753fb6ad0b0f145bd4a42d1e5ec608f7b",
+      "summaries": [
+        "22 passed in 6.59s"
+      ]
+    },
+    "sdk": {
+      "path": "/tmp/modelsan-fixes-sdk.log",
+      "sha256": "54d1dd552afbe518cca424efbbe315b1d4b7ed460e7cf58a5b2ae73e94c1bd72",
+      "summaries": [
+        "Ran 50 tests in 26.636s",
+        "OK"
+      ]
+    },
+    "clippy": {
+      "path": "/tmp/modelsan-fixes-clippy.log",
+      "sha256": "fbd0072beb759d9e4a913fceed83ae0ad7bff26318a1aa3b4bb9d48eb9addcd6",
+      "summaries": []
+    },
+    "fmt": {
+      "path": "/tmp/modelsan-fixes-fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "summaries": []
+    }
+  }
+}

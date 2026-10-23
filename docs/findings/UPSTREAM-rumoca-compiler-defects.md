@@ -3,6 +3,11 @@
 **Status: DRAFT. Not filed anywhere.**
 Target: `Arslan8/rumoca` (this fork) or upstream `cognipilot/rumoca`.
 
+**October 1 review:** BUG-001 and BUG-004 still reproduce on the local branch;
+BUG-007's example compiles. Clean-upstream reproduction remains outstanding,
+so the historical “Ready to send” heading below does not establish upstream
+attribution. See [updated drafts and outputs](reporting-2026-10-01/README.md).
+
 These are defects in the **compiler**, not in any model, so they are not
 ModelSan findings — they live here only because this is where the drafts are
 collected. The reports themselves are in [`../toolbugs/`](../toolbugs/).

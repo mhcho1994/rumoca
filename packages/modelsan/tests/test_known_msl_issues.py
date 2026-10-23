@@ -48,6 +48,10 @@ class KnownIssueDetection(unittest.TestCase):
         self.assertEqual(quantizer['evidence']['observed_count_lower_bound'], 5)
         for name in ['PulseControl','DelayControl','QuantizationControl','GasControl','MoistAirFull']:
             self.assertEqual(reports[name]['status'], 'no-violation-observed', reports[name])
+        full_trace = reports['MoistAirFull']['executions'][0]['trace']
+        self.assertIsNotNone(full_trace)
+        for value in full_trace['columns']['actual']:
+            self.assertAlmostEqual(value, 300, delta=1e-6)
         reduced = reports['MoistAirReduced']
         expected = 'execution-failed' if reduced['backend']=='openmodelica' else 'model-rejected'
         self.assertEqual(reduced['status'], expected, reduced)
@@ -56,6 +60,10 @@ class KnownIssueDetection(unittest.TestCase):
         self.assertTrue(any(word in failure for word in ['dim_size','bound','length','size']))
         self.assertTrue(any(f['sanitizer'] in ('solver','domain') and f['severity']=='high'
                             for f in reduced['findings']))
+        if reduced['backend'] != 'openmodelica':
+            proof = next(f for f in reduced['findings'] if f['kind']=='compile-time-array-bounds')
+            self.assertEqual(proof['evidence']['compiler_diagnostic']['code'], 'EF032')
+            self.assertTrue(proof['source_locations'])
         for report in reports.values():
             self.assertFalse(any(f['kind']=='contract-unobserved' for f in report['findings']))
 

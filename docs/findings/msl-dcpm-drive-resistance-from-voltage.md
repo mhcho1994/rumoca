@@ -1,6 +1,10 @@
 # MSL: a resistance computed from a voltage in DCPM_Drive
 
-**Status:** new — not in the upstream tracker as of the 2026-09-24 snapshot
+**Status:** previously reported upstream; unresolved source occurrence checked
+2026-10-01. The original novelty claim was incorrect: the exact case appears
+in [a comment on #4098](https://github.com/modelica/ModelicaStandardLibrary/issues/4098#issuecomment-1486606129).
+The closing PR #4112 changed battery examples, not DCPM_Drive. See the
+[follow-up draft](reporting-2026-10-01/dcpm-followup-draft.md).
 **Found:** 2026-09-24 by `QuantitySan`'s `binding-unit-conflict` check, on its
 first sweep of the library. No issue-specific code was involved.
 
@@ -21,32 +25,35 @@ declared   Ohm    kg.m2.s-3.A-2
 binding           kg.m2.s-3.A-1      reads VaNominal[V]
 ```
 
-The `1000` is standing in for a current — almost certainly the nominal
-armature current — written as a bare number. Numerically the model runs and
-gives the intended answer at the default rating.
+The divisor would need current units to make the expression a resistance.
+The source does not establish whether it is intended to represent a fixed
+1000 A scale or the machine's nominal armature current.
 
 ## Why it matters
 
-The value is right only by coincidence of the present parameter set. The
-declaration says "5% of nominal voltage per 1000 amperes" while the author
-meant "5% of nominal impedance". Re-rate the machine — change `VaNominal`
-without changing the hidden 1000 — and the resistor no longer represents 5% of
-anything. A parameter that silently stops meaning what it says is worse than
-one that is visibly wrong.
+The supported claim is dimensional inconsistency and an unstated current
+scale. The earlier report inferred author intent and claimed incorrect
+rerating behavior without independent evidence; those claims are withdrawn.
+No incorrect numerical trajectory is established by this finding.
 
-This is the same mechanism as upstream [#4078] and [#4079], where a capacitance
+This is the same mechanism as upstream [#4078](https://github.com/modelica/ModelicaStandardLibrary/issues/4078)
+and [#4079](https://github.com/modelica/ModelicaStandardLibrary/issues/4079), where a capacitance
 is bound to the reciprocal of an inductance. In all three the declaration and
 its own binding disagree dimensionally, and in all three the equations are
 silent because nothing is inconsistent *between* equations.
 
 ## Suggested fix
 
-Bind the resistance to a current the model already names, so the dimensions
-close and the intent is stated:
+If the fixed scale is intended, name it with current units while preserving
+the numerical value:
 
 ```modelica
-Analog.Basic.Resistor resistor(R=0.05*dcpmData.VaNominal/dcpmData.IaNominal)
+parameter Modelica.Units.SI.Current IScale = 1000;
+Analog.Basic.Resistor resistor(R=0.05*dcpmData.VaNominal/IScale)
 ```
+
+Using `dcpmData.IaNominal` instead requires confirmation of the intended
+design relationship; it is not justified by unit checking alone.
 
 ## Detection
 

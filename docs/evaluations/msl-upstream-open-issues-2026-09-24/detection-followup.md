@@ -1,5 +1,9 @@
 # ModelSan detection follow-up — 2026-09-24
 
+Historical results below are superseded for the six focused cases by the
+[October 1 regression follow-up](review-fixes-2026-10-01.md), which passes all
+six faults and five controls in both native execution profiles.
+
 ModelSan now detects **five of the six reproduced issue patterns with native
 Rumoca**, and **all six across explicitly selected Rumoca and OpenModelica
 backends**. These are actual sanitizer findings from the original MSL APIs,

@@ -118,6 +118,9 @@ use rumoca_eval_flat::phase_constant::{
 /// Options controlling flatten strictness.
 #[derive(Debug, Clone, Copy)]
 pub struct FlattenOptions {
+    /// Explicit fixed-input profile: specialize pure model bindings whose
+    /// complete inputs are proven immutable. Ordinary compilation retains calls.
+    pub specialize_frozen_bindings: bool,
     /// Whether to enforce connection type/dimension validation.
     pub strict_connection_validation: bool,
     /// Whether to shorten flat variable names after flattening.
@@ -143,6 +146,7 @@ pub struct FlattenOptions {
 impl Default for FlattenOptions {
     fn default() -> Self {
         Self {
+            specialize_frozen_bindings: false,
             strict_connection_validation: true,
             simplify_variable_names: false,
             materialize_structured_families: false,

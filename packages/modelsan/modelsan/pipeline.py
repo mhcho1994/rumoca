@@ -15,6 +15,7 @@ and SolverSan exists to read it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 from .analysis.context import AnalysisContext
 from .backends.base import ExecutionResult, ExecutionStatus
@@ -24,6 +25,7 @@ from .findings.signature import attach
 from .fuzz.hints import FuzzHint, merge
 from .fuzz.testcase import NOMINAL, TestCase
 from .instrumentation.planner import CapabilityPlanner, Plan
+from .instrumentation.capability import Capability
 from .sanitizers.registry import SanitizerRegistry
 
 
@@ -50,6 +52,10 @@ class RunOutcome:
                     key = f"behavior.contract.{finding.evidence['contract_id']}"
                     gaps[key] = finding.evidence["reason"]
         for index, result in enumerate(self.results):
+            if not result.ok:
+                gaps[f"execution.run{index}"] = (
+                    f"{result.status.value} during {result.phase.value}: "
+                    f"{result.failure.message if result.failure else 'execution did not complete'}")
             evidence = result.backend_metadata.get("domain_diagnostics", {})
             if evidence.get("available") is False:
                 gaps[f"domain.failure.run{index}"] = "native diagnostics unavailable for this run"
@@ -81,12 +87,36 @@ class Pipeline:
             hints.extend(sanitizer.hints(model, context))
         return merge(hints)
 
+    def run_static(self, model) -> RunOutcome:
+        """Analyse the artifact without preparing or launching an execution backend."""
+        from .network import build
+        context = AnalysisContext(model)
+        available = {Capability.CANONICAL_MODEL, Capability.CANONICAL_IDENTITY}
+        if not build(model).absent:
+            available.add(Capability.CONNECTION_GRAPH)
+        static_capabilities = {Capability.CANONICAL_MODEL, Capability.CANONICAL_IDENTITY,
+                               Capability.CONNECTION_GRAPH}
+        analyzers = self.registry.static_analyzers()
+        components = [SimpleNamespace(name=s.name, requires={
+            component: needed for component, needed in getattr(s, 'requires', {}).items()
+            if set(needed) <= static_capabilities}) for s in analyzers]
+        outcome = RunOutcome(model_name=model.name)
+        outcome.plan = CapabilityPlanner(frozenset(available)).plan(components, [])
+        for sanitizer in analyzers:
+            outcome.database.extend(attach(sanitizer.analyze(model, context)))
+        return outcome
+
     def plan(self, model, context: AnalysisContext) -> Plan:
         requests = []
         for sanitizer in self.registry.instrumentation_requesters():
             requests.extend(sanitizer.requests(model, context))
-        capabilities = frozenset(getattr(self.backend, "capabilities", frozenset()))
-        return CapabilityPlanner(capabilities).plan(self.registry.active(), requests)
+        capabilities = set(getattr(self.backend, "capabilities", frozenset()))
+        if model is not None:
+            from .network import build
+            capabilities.add(Capability.CANONICAL_MODEL)
+            if not build(model).absent:
+                capabilities.add(Capability.CONNECTION_GRAPH)
+        return CapabilityPlanner(frozenset(capabilities)).plan(self.registry.active(), requests)
 
     def judge(self, result: ExecutionResult, model, context: AnalysisContext,
               testcase: TestCase) -> list[Finding]:
@@ -141,6 +171,11 @@ class Pipeline:
         outcome.plan = self.plan(model, context)
         outcome.hints = self.collect_hints(model, context)
 
+        # Static evidence does not depend on whether the simulator can prepare
+        # this artifact. Preserve it even when preparation fails.
+        for sanitizer in self.registry.static_analyzers():
+            outcome.database.extend(attach(sanitizer.analyze(model, context)))
+
         build_failure = self.backend.prepare(model_path, model_name)
         # Preparation discovers per-artifact observation/connector coverage.
         # Re-plan before executing; a saved program may have a different profile.
@@ -155,9 +190,6 @@ class Pipeline:
                             if build_failure.status is ExecutionStatus.FAILED else
                             "backend could not build the model")
             return outcome
-
-        for sanitizer in self.registry.static_analyzers():
-            outcome.database.extend(attach(sanitizer.analyze(model, context)))
 
         baseline = self.backend.run(NOMINAL, outcome.plan.satisfied)
         outcome.baseline = baseline
