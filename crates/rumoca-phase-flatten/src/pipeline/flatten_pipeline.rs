@@ -1046,7 +1046,7 @@ pub(crate) fn finalize_flat_model(
         flat,
     );
 
-    collapse_index_refs_to_known_varrefs(flat);
+    collapse_index_refs_to_known_varrefs(flat)?;
     inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
     ctx.seed_expanded_component_keys(flat);
     substitute_known_constants_in_flat(flat, ctx)?;
@@ -1078,7 +1078,7 @@ pub(crate) fn finalize_flat_model(
         )?;
         substitute_known_constants_in_flat(flat, ctx)?;
         mark_record_constructor_calls(flat, tree);
-        collapse_index_refs_to_known_varrefs(flat);
+        collapse_index_refs_to_known_varrefs(flat)?;
     }
     functions::canonicalize_collected_function_calls(flat, class_index)?;
     // Materialize source-level defaults while record inputs still have their
@@ -1095,7 +1095,7 @@ pub(crate) fn finalize_flat_model(
     expand_record_array_field_projections_in_equations(flat);
     // Record ABI lowering introduces field projections at call sites. Resolve
     // those through the same occurrence owner as source-written projections.
-    collapse_index_refs_to_known_varrefs(flat);
+    collapse_index_refs_to_known_varrefs(flat)?;
     // Recheck the decomposed ABI and materialize defaults of any scalar calls
     // introduced by record projection.
     functions::materialize_flat_function_call_args(flat)?;
