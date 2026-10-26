@@ -1049,7 +1049,7 @@ pub(crate) fn finalize_flat_model(
         flat,
     );
 
-    collapse_index_refs_to_known_varrefs(flat);
+    collapse_index_refs_to_known_varrefs(flat)?;
     inject_referenced_qualified_class_constants(tree, class_index, model_name, flat, overlay, ctx)?;
     ctx.seed_expanded_component_keys(flat);
     substitute_known_constants_in_flat(flat, ctx)?;
@@ -1081,7 +1081,7 @@ pub(crate) fn finalize_flat_model(
         )?;
         substitute_known_constants_in_flat(flat, ctx)?;
         mark_record_constructor_calls(flat, tree);
-        collapse_index_refs_to_known_varrefs(flat);
+        collapse_index_refs_to_known_varrefs(flat)?;
     }
     functions::canonicalize_collected_function_calls(flat, class_index)?;
     // Materialize source-level defaults while record inputs still have their
@@ -1099,7 +1099,7 @@ pub(crate) fn finalize_flat_model(
     expand_record_array_field_projections_in_equations(flat);
     // Record ABI lowering introduces field projections at call sites. Resolve
     // those through the same occurrence owner as source-written projections.
-    collapse_index_refs_to_known_varrefs(flat);
+    collapse_index_refs_to_known_varrefs(flat)?;
     // Recheck the decomposed ABI and materialize defaults of any scalar calls
     // introduced by record projection.
     functions::materialize_flat_function_call_args(flat)?;
@@ -1113,6 +1113,12 @@ pub(crate) fn finalize_flat_model(
     crate::postprocess::rewrite_array_domain_comprehensions(flat)?;
     resolve_nested_constructor_field_access_bindings(flat);
     crate::postprocess::fold_invariant_bindings(flat, &ctx.resource_roots);
+    // MLS §4.5 / §12.3: an explicitly frozen artifact may specialize pure
+    // bindings at their immutable inputs. This profile is not enabled by the
+    // default optimization pipeline or by literals at an ordinary call site.
+    if options.specialize_frozen_bindings {
+        functions::specialize_frozen_bindings(flat)?;
+    }
     functions::prune_unreachable_functions(flat);
     // Pure calls with settled inputs are folded by the `fold-pure-calls`
     // bitcode pass, not here; the frontend only proves their bindings in

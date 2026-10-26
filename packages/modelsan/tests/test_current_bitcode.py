@@ -94,6 +94,41 @@ class CurrentBitcode(unittest.TestCase):
         self.assertTrue(result.ok, result.failure)
         self.assertAlmostEqual(result.trace.final_state["x"], 2 * math.exp(-0.4), delta=1e-5)
 
+    def test_integer_binding_keeps_tunable_array_dependency(self):
+        import subprocess
+        source = self.root / 'Dependent.mo'
+        source.write_text('model Dependent parameter Real a[2]={1,2}; '
+            'parameter Integer k=if a[2]>0 then 3 else 1; Real y=k+time; end Dependent;')
+        artifact = self.root / 'dependent.rbc'
+        subprocess.run([RUMOCA, 'compile', str(source), '--model', 'Dependent',
+            '--no-fold-parameter-bindings', '--pass', 'none', '--emit-bitcode', str(artifact)],
+            check=True, capture_output=True, timeout=20)
+        self.assertIsNone(self.backend.prepare_from_artifact(artifact))
+        for value, expected in [(2.0,3.2), (-1.0,1.2), (2.0,3.2)]:
+            result = self.backend.run(Case(parameters={'a[2]': value}))
+            self.assertTrue(result.ok, result.failure)
+            self.assertAlmostEqual(result.trace.final_state['y'], expected)
+
+    def test_saved_frozen_artifact_rejects_overrides_without_backend_profile(self):
+        import subprocess
+        source = self.root / 'Frozen.mo'
+        source.write_text('function iterate input Real seed; output Real y; '
+            'algorithm y:=seed; while y<3 loop y:=y+1; end while; end iterate; '
+            'model Frozen parameter Real seed=1; Real actual=iterate(seed); end Frozen;')
+        artifact = self.root / 'frozen.rbc'
+        subprocess.run([RUMOCA, 'compile', str(source), '--model', 'Frozen',
+            '--freeze-parameters', '--pass', 'none', '--emit-bitcode', str(artifact)],
+            check=True, capture_output=True, timeout=20)
+        seed = next(v for v in Model.load(artifact).raw_model['variables'] if v['name']=='seed')
+        self.assertFalse(seed['tunable'])
+        self.assertIsNone(self.backend.prepare_from_artifact(artifact))
+        result = self.backend.run(NOMINAL)
+        self.assertTrue(result.ok, result.failure)
+        self.assertEqual(result.trace.final_state['actual'], 3.0)
+        result = self.backend.run(Case(parameters={'seed': 4.0}))
+        self.assertEqual(result.status, ExecutionStatus.BACKEND_ERROR)
+        self.assertIn('not tunable', result.failure.raw)
+
     def test_fixed_parameter_profile_rejects_overrides_before_launch(self):
         path = self.root / 'equations.rbc'
         decay().save(path)

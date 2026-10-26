@@ -1,0 +1,238 @@
+{
+  "review_date": "2026-10-01",
+  "msl_commit": "4c40388dde27ccb6702cea876adbf54c76d75b97",
+  "issues": [
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814",
+      "title": "Parameter-domain constraints permit division-by-zero and invalid configurations in MSL",
+      "state": "open",
+      "updated_at": "2026-09-29T13:23:41Z"
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaSpecification/issues/3941",
+      "title": "Explicitly specify division-by-zero behavior in Modelica",
+      "state": "open",
+      "updated_at": "2026-10-01T08:19:04Z"
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4098",
+      "title": "Unit error in Modelica.Electrical.Batteries.Examples.BatteryDischargeCharge",
+      "state": "closed",
+      "updated_at": "2024-01-16T19:23:10Z"
+    }
+  ],
+  "comments": [
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814#issuecomment-5757638818",
+      "author": "HansOlsson",
+      "body": "> During a security audit of **Modelica Standard Library (MSL) 4.1.0**, we identified a number of cases where parameter values permitted by a model can trigger division-by-zero failures or otherwise violate assumptions made by the model equations.\n> \n> The most common case is straightforward: a parameter is allowed to take the value zero but is subsequently used as a divisor. \n\nThe intent in Modelica has as far as I know never been that it just generates incorrect result - but that it is a modeling error that tools should treat as errors.\n\nFor some reason sqrt of a negative number explicitly states that the input must be [non-negative](https://specification.modelica.org/master/operators-and-expressions.html#modelica:sqrt), but even if it has been assumed I couldn't find that division explicitly excludes the zero-case.\n\nSo, it seems that we should clarify that division by zero is an error (as many tools already assume), and that is one of good ways of handling CWE-369.\n\nModifying the models, e.g., by restricting the parameters would be problematic for a number of reasons:\n- Some are sort of non-parameters (like vps and vns in ideal-diodes)\n- Using min-max isn't that  simple:\n  - We cannot just exclude zero, but would have to decide if a parameter should be positive or negative\n  - We don't have `min=0+` so we would have to use `Modelica.Constants.small`, and using that would cause a number of other issues (as it is likely to lead to overflow)\n- Additionally if division by zero is really bad, then assertions in equations (manual ones, or generated from min/max) aren't a safe solution, as you are not certain that they are executed before the division"
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814#issuecomment-5774522720",
+      "author": "HansOlsson",
+      "body": "I would thus propose to close this issue and open a new issue to clearly state that division by zero (etc) is an error in Modelica.\n(Alternatively migrate the issue.)\n"
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814#issuecomment-5779869463",
+      "author": "AHaumer",
+      "body": "@HansOlsson I agree that it's a good idea to \"clearly state that division by zero (etc) is an error in Modelica.\" \nBut looking at the list of cases provided in this issue:\nNevertheless, shouldn't we provide (min=0+ i.e. small?) for the cases where a parameter<0  is meaningless and parameter=0 would cause a division by zero? A message \"Parameter is not in range ...\" befor translation is much nicer than \"Division by zero\" during initialization."
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814#issuecomment-5781173455",
+      "author": "Arslan8",
+      "body": "Apologies for the delayed response. I was traveling and could not comment earlier.\n\nI agree with this. I am happy to open a separate issue in the ModelicaSpecification repository to clarify that division by zero is an error and to make the expected tool behavior explicit. This is also useful from an implementation perspective, since compiler authors need an unambiguous semantic rule here.\n\nAt the same time, I do not think that clarification should make the concrete MSL cases go away.\n\nWhere the semantics of a parameter already imply a restricted domain, and zero would necessarily lead to an invalid computation, expressing that constraint in the model seems preferable. As mentioned above, reporting that a parameter is outside its valid range during translation or initialization is much more informative than allowing the model to proceed until it encounters a division-by-zero error.\n\nI think this is particularly important for the example models. Unless an example is intentionally demonstrating an invalid configuration, examples should ideally exercise valid parameterizations and encode the assumptions required by their equations. Making division by zero explicitly erroneous in the language would not make such examples valid; it would only make the eventual failure better specified.\n\nSo my preference would be to separate the two concerns:\n\n1. Open a ModelicaSpecification issue to clearly define division-by-zero semantics and the obligations of conforming tools.\n2. Keep this MSL issue for the concrete cases and evaluate which ones should be constrained or otherwise corrected at the model level.\n\nI agree that not every case will necessarily have the same fix, especially where the valid domain is more complicated than simply requiring a positive parameter. But I would rather triage those individually than close the MSL issue solely because the language semantics are clarified."
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814#issuecomment-5791124841",
+      "author": "HansOlsson",
+      "body": "> [@HansOlsson](https://github.com/HansOlsson) I agree that it's a good idea to \"clearly state that division by zero (etc) is an error in Modelica.\" But looking at the list of cases provided in this issue: Nevertheless, shouldn't we provide (min=0+ i.e. small?) for the cases where a parameter<0 is meaningless and parameter=0 would cause a division by zero? A message \"Parameter is not in range ...\" befor translation is much nicer than \"Division by zero\" during initialization.\n\nWe can do that, but:\n- Just for cases where it is easy, makes sense, and is straightforward. We shouldn't worry for other cases: like vps/vns (or we could make an `assert(vps>vns,\"Positive supply should have larger potential than negative\")` for that case - from my studies I know that violating that led to interesting smoky results).\n- Whether it should be `final` or not can be debated, I would skip it - since it is shorter, avoids some weird edge-cases where people modify it in existing models, and would a user to set a negative value if needed (similarly as setting negative resistance in circuits). Basically the goal should be better diagnostics, not 100% safety.\n- Check with (other) tool-vendors that it doesn't cause issues."
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814#issuecomment-5848798839",
+      "author": "Arslan8",
+      "body": "We have completed verification of the next batch of findings and are attaching them here rather than opening a separate issue.\n\nThis batch contains **46 additional verified source locations in MSL 4.1.0**. As with the original report, the locations were identified using our analysis tooling and then manually reviewed and validated with OpenModelica.\n\nA few clarifications on how to interpret this batch may be useful.\n\nThe findings are not all the same kind of defect. They broadly fall into the following categories:\n\n- **Direct invalid operations.** Some cases contain an explicit operation in the MSL source whose domain is not enforced by the corresponding parameters. Examples include divisions by inductance or density and square roots whose radicand can become negative for otherwise permitted parameter combinations.\n\n- **Degenerate or non-invertible configurations.** In several models, the source equation itself is written in an implicit form such as `i = C*der(v)` or `L*der(i) = v`. A Modelica tool may rearrange such an equation when determining causality. At values such as `C = 0` or `L = 0`, the resulting model can become singular, inconsistent, or underdetermined depending on the surrounding equations. In these cases, we are reporting the problematic accepted configuration and the behavior we verified, rather than claiming that the MSL source necessarily contains a literal division by that parameter.\n\n- **Missing physical-domain constraints.** Some parameters represent quantities for which negative values make the model physically inconsistent, for example self/leakage inductances used in machine models. These are distinct from cases where zero may represent a meaningful ideal limit.\n\n- **Missing relationships between parameters.** A few findings cannot be expressed as a simple bound on one parameter. For example, `TransformerData` computes\n  `sqrt(Z1ph^2 - R1^2)` and `sqrt(Z2ph^2 - R2^2)`. The relevant consistency condition reduces to a relationship between the supplied transformer test data, rather than simply requiring one individual parameter to be positive.\n\nThere is one distinction we want to make particularly explicit: **we are not claiming that zero inductance, capacitance, resistance, etc. is universally invalid in MSL.** In fact, some ideal MSL components intentionally permit such limiting cases. The issue arises where a particular higher-level model, parameterization, or causal interface accepts such a value but cannot represent that limit consistently.\n\nSimilarly, several entries in the spreadsheet are related occurrences of the same underlying condition. We list them because they are separate affected source locations, but they should not necessarily be interpreted as 46 independent root causes. Examples include parameter records that propagate a problematic value into a machine model, polyphase wrappers around an affected scalar component, and multiple derived parameters depending on the same missing invariant.\n\nSome particularly clear examples in this batch are:\n\n- FundamentalWave machine components that explicitly construct magnetic reluctance using terms proportional to `1/Lsigma`, `1/Lsigma.d`, or `1/Lsigma.q`;\n- `GenericFluxTube`, where `area = 0` propagates both to zero permeance and to `B = Phi/A`;\n- `FluidHeatFlow`, where `medium.rho` is used directly as a divisor;\n- `TransformerData`, where inconsistent short-circuit data can make the argument of `sqrt(...)` negative; and\n- machine parameters representing self/leakage inductances that currently accept negative values.\n\nFor the zero-valued ideal cases, the appropriate upstream fix may not always be a stricter `min` constraint. In some cases an explicit limiting-case formulation, an assertion on a derived relationship, or a different representation may be preferable. We have therefore kept the report focused primarily on identifying the accepted configuration and its consequence rather than assuming that every case should receive the same kind of fix.\n\nAs before, if some of these configurations are intentionally supported or intentionally outside the valid domain of the corresponding model, clarification from the maintainers would be very helpful. Our main concern is that the model interface and the assumptions made by its equations agree, so that an invalid configuration can be distinguished from an intentionally supported ideal or limiting case.\n\nI am attaching the full list of these additional verified findings below.\n\n[MSL_4.1.0_Parameter_Bound_Issues (2).xlsx](https://github.com/user-attachments/files/32687696/MSL_4.1.0_Parameter_Bound_Issues.2.xlsx)\n\nAdding my student @z4rgh4m to the thread as well; he has been helping me with confirming these issues. "
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814#issuecomment-5891197710",
+      "author": "HansOlsson",
+      "body": "> * **Degenerate or non-invertible configurations.** In several models, the source equation itself is written in an implicit form such as `i = C*der(v)` or `L*der(i) = v`. A Modelica tool may rearrange such an equation when determining causality. At values such as `C = 0` or `L = 0`, the resulting model can become singular, inconsistent, or underdetermined depending on the surrounding equations. In these cases, we are reporting the problematic accepted configuration and the behavior we verified, rather than claiming that the MSL source necessarily contains a literal division by that parameter.\n\nJust a specific comment on this case:\n\nTo me these are valid models, and it's more a potential index-change that tools need to deal with. \n\nFor some uses it doesn't matter (e.g., for a series connection of two inductors only the sum of their `L` matters, so one of them can be zero without any actual change), and in other cases evaluating the parameter is necessary and causes a different index reduction and state-selection.\n\nThe important part in general is that tools shouldn't view  `L*der(i) = v` and  `der(i) = v/L` as equivalent, but be more cautious. And users should prefer equations without division."
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4098#issuecomment-1486606129",
+      "author": "qlambert-pro",
+      "body": "`Modelica.Electrical.Machines.Examples.DCMachines.DCPM_Drive` suffers from a similar issue:\r\n\r\n`resistor.R` expects a value expressed in `\"Ohm\"` but is given one expressed in `\"V\"`"
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4098#issuecomment-1894370867",
+      "author": "beutlich",
+      "body": "Resolved by #4112."
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaSpecification/issues/3941#issuecomment-5854281219",
+      "author": "HansOlsson",
+      "body": "I believe it is best written as a general statement in Chapter 3 \"Operators and Expressions\", and we also should consider the current 3.3 overflow handling; as we should also consider how to handle overflow (not leaving it completely undefined).\n\nI.e., defining the result for all mathematical operations leading not giving finite results, as a form of error.\n\nTo me the realistic alternatives for all of those errors are:\n- Trigger an error before the issue occurs (this seem the only real possibility for \"integer\" division by zero)\n- Generate inf/nan for Real\n- For overflow of integer literals transform to Real\n- Wrap-around or possibly \"clamp\" for integer overflow and negative overflow except for literals; the security problem I would see with integers in Modelica are centered around array index (or in rare cases array sizes, which will then lead to array index issues) and they should anyway be checked (this is currently a bit hidden in 10.5/10.1.1 and should be made more explicit).\n\nTo me it makes sense that division by zero, asin of 2, sqrt of negative 1, are all treated in somewhat similar fashion.\n\nNote that I wrote \"negative overflow\" as \"underflow\" (at least for floating point numbers) normally mean being too close to zero, which shouldn't be a problem."
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaSpecification/issues/3941#issuecomment-5880106332",
+      "author": "Arslan8",
+      "body": "Thanks. I went back through the relevant parts of the specification, and I agree that a general rule in Chapter 3 would be cleaner than handling division by zero in isolation.\n\nThis also aligns well with what we are seeing in our ongoing analysis of MSL. Division by zero was the first class of issue that motivated this specification issue, but as we continue the analysis we are also finding cases involving invalid mathematical domains, such as negative arguments reaching `sqrt`, as well as arithmetic conditions where the resulting value cannot be represented meaningfully. Given that these are appearing as related classes of findings in the same analysis, I think broadening the specification discussion makes sense rather than treating division by zero as an isolated special case.\n\nThere already seems to be a fairly strong basis for such a rule in the current specification. For example, `sqrt` is defined through `nthRoot`, which requires a non-negative argument for even roots; `asin`, `acos`, `log`, and `tan` similarly have explicitly stated domains. Section 12.3 also already lists dividing by zero as one of the ways evaluation of a pure function may fail.\n\nThe main inconsistencies seem to be that `/` and `./` do not explicitly require a nonzero divisor, `div`, `mod`, and `rem` have the same gap, and Section 3.3 currently says that the result of numeric overflow is undefined.\n\nOne detail that may matter for the possible handling is that the predefined `Real` type currently requires its value to be a finite floating-point number. Therefore, making `Inf` or `NaN` valid results of these operations would appear to require a corresponding change to the semantics of `Real`, rather than only a clarification in Chapter 3. If we want to retain the existing definition of `Real`, treating an evaluated operation that has no valid finite `Real` result as an error seems more consistent with the current language.\n\nPerhaps the general rule could therefore be phrased in terms of an operation being erroneous when its mathematical result is outside the defined domain of the operation or cannot be represented by the required Modelica result type. That would naturally cover division by zero, `sqrt(-1)`, `asin(2)`, and numeric overflow, while still allowing the detailed handling of `Real` and `Integer` to be specified separately where necessary.\n\nI also agree that integer overflow deserves explicit treatment. One small concern with relying on array-index checks to contain the consequences of integer wraparound is that the current discussion of automatically generated array-bound assertions is non-normative and explicitly allows those checks to be suppressed for efficiency. So I think it would be preferable to define integer overflow semantics independently, and separately consider whether the array-size/index requirements should be made more explicit or normative.\n\nAnd yes, I agree that \"negative overflow\" is the clearer term here; floating-point underflow toward zero is a different issue.\n\nOverall, I would be happy to broaden this issue from division by zero to a coherent treatment of arithmetic operations whose arguments are outside their defined domain or whose results are not representable. This also matches the broader classes of issues emerging from our analysis. My main goal is that these cases have explicit language semantics rather than being left undefined or dependent on implementation behavior."
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaSpecification/issues/3941#issuecomment-5926281268",
+      "author": "MarkusOlssonModelon",
+      "body": "Here is a case worth considering.\n\n```modelica\nmodel DivisionByDivisionByZero\n    input Real x;\n    Real y;\nequation\n    y = 1 / (1 / x);\nend DivisionByDivisionByZero;\n```\n\nIf we decide that any division by zero is an error, then we have an error here if `x` is zero. To me this model seems fine, I don't see any problems evaluating `1 / (1 / 0)` to 0. \n\nIf it is an error, is a tool allowed to do symbolic simplification to rewrite the equation to `y = x`? If so, this model may or may not be valid depending on which simplifications the tool does."
+    },
+    {
+      "url": "https://github.com/modelica/ModelicaSpecification/issues/3941#issuecomment-5927564464",
+      "author": "HansOlsson",
+      "body": "Language group: Agreement that division by zero etc, is an error - but a matter of describing the details.\n\nHans:\n```\nmodel D\n  input Real x;\n  Real a,b;\nequation\n   a=b/x;\nend D;\n extends D(a=time);\n```\n\nIf `a` is known we can compute `b` as `a*x`, what if `x` is zero? Some tools do this, is this used in practice? We need to test.\n"
+    }
+  ],
+  "searches": [
+    {
+      "key": "reporting_search_1",
+      "results": []
+    },
+    {
+      "key": "reporting_search_2",
+      "results": []
+    },
+    {
+      "key": "reporting_search_3",
+      "results": [
+        {
+          "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/1423",
+          "title": "Uninitialized local variable den2 in Modelica.Blocks.Continuous.Internal.Filter.base.CriticalDamping used"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/427",
+          "title": "Failed fluid simulation of TestCriticalCases.BranchingPipes12 due to valve models"
+        }
+      ]
+    },
+    {
+      "key": "reporting_follow_0",
+      "results": []
+    },
+    {
+      "key": "reporting_follow_1",
+      "results": [
+        {
+          "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4814",
+          "title": "Parameter-domain constraints permit division-by-zero and invalid configurations in MSL"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/3936",
+          "title": "ERROR: division leads to inf or nan at time X, (a=xx) / (b=yy), where divisor b is: firstOrder.T"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/3412",
+          "title": "Analysis of the MSL v4.0.0-beta.1 regressions vs. v3.2.3-rc.2"
+        }
+      ]
+    },
+    {
+      "key": "reporting_follow_2",
+      "results": []
+    },
+    {
+      "key": "reporting_follow_3",
+      "results": [
+        {
+          "url": "https://github.com/CogniPilot/rumoca/issues/9",
+          "title": "Component Class Not Found"
+        }
+      ]
+    },
+    {
+      "key": "reporting_extra_2",
+      "results": []
+    },
+    {
+      "key": "reporting_extra_3",
+      "results": [
+        {
+          "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/3878",
+          "title": "Unit-checking using Gain and LimIntegrator-blocks"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/4098",
+          "title": "Unit error in Modelica.Electrical.Batteries.Examples.BatteryDischargeCharge"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaStandardLibrary/issues/2636",
+          "title": "Parameters' description string missing or not starting with upper case"
+        }
+      ]
+    },
+    {
+      "key": "reporting_spec_search",
+      "results": [
+        {
+          "url": "https://github.com/modelica/ModelicaSpecification/issues/3941",
+          "title": "Explicitly specify division-by-zero behavior in Modelica"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaSpecification/issues/2757",
+          "title": "What is the semantics of binding equations in records?"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaSpecification/issues/1512",
+          "title": "MCP-0012: Calling blocks as functions"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaSpecification/issues/3322",
+          "title": "stream connector spec causes singularity at constant zero flow"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaSpecification/issues/3008",
+          "title": "Improve criteria for start value prioritization among alias variables in Modelica"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaSpecification/issues/594",
+          "title": "Exception handling needed for embedded systems"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaSpecification/issues/605",
+          "title": "0^0 should be defined 1"
+        },
+        {
+          "url": "https://github.com/modelica/ModelicaSpecification/issues/2057",
+          "title": "Clarify conditional components"
+        }
+      ]
+    }
+  ],
+  "dcpm": {
+    "encoding": "utf-8",
+    "sha": "6a4b61fd058587edd8857b8e054808203d60721c",
+    "display_url": "https://github.com/modelica/ModelicaStandardLibrary/blob/master/Modelica/Electrical/Machines/Examples/DCMachines/DCPM_Drive.mo",
+    "display_title": "DCPM_Drive.mo"
+  },
+  "pr4112_files": [
+    {
+      "filename": "Modelica/Electrical/Batteries/Examples/BatteryDischargeCharge.mo",
+      "patch": "@@ -9,11 +9,12 @@ model BatteryDischargeCharge \"Discharge and charge idealized battery\"\n     Tp=60,\n     startTime=60)\n     annotation (Placement(transformation(extent={{-80,-10},{-60,10}})));\n+  parameter Modelica.Units.SI.Current Isc = 1200 \"Short-circuit current of cell at OCVmax\";\n   parameter Modelica.Electrical.Batteries.ParameterRecords.CellData cellData1(\n     Qnom=18000,\n     OCVmax=4.2,\n     OCVmin=2.5,\n-    Ri=cellData1.OCVmax/1200)\n+    Ri=cellData1.OCVmax/Isc)\n     annotation (Placement(transformation(extent={{60,20},{80,40}})));\n   Modelica.Electrical.Batteries.BatteryStacks.CellStack battery1(\n     Ns=10,\n@@ -38,7 +39,7 @@ model BatteryDischargeCharge \"Discharge and charge idealized battery\"\n   parameter Modelica.Electrical.Batteries.ParameterRecords.TransientData.ExampleData cellData2(\n     Qnom=18000,\n     useLinearSOCDependency=false,\n-    Ri=cellData2.OCVmax/1200,\n+    Ri=cellData2.OCVmax/Isc,\n     Idis=0.1,\n     nRC=2,\n     rcData={Modelica.Electrical.Batteries.ParameterRecords.TransientData.RCData("
+    },
+    {
+      "filename": "Modelica/Electrical/Batteries/Examples/CCCV_Cell.mo",
+      "patch": "@@ -2,10 +2,11 @@ within Modelica.Electrical.Batteries.Examples;\n model CCCV_Cell\n   \"Charge a cell with constant current - constant voltage characteristic\"\n   extends Modelica.Icons.Example;\n+  parameter Modelica.Units.SI.Current Isc = 1200 \"Short-circuit current of cell at OCVmax\";\n   parameter Modelica.Electrical.Batteries.ParameterRecords.ExampleData cellData(\n     Qnom=18000,\n     useLinearSOCDependency=false,\n-    Ri=4.2/1200,\n+    Ri=cellData.OCVmax/Isc,\n     Idis=0.001) \"Cell data\"\n     annotation (Placement(transformation(extent={{-10,-60},{10,-40}})));\n   Modelica.Electrical.Batteries.Utilities.CCCVcharger cccvCharger(I=25, Vend=4.2) annotation (Placement("
+    },
+    {
+      "filename": "Modelica/Electrical/Batteries/Examples/CCCV_CellRC.mo",
+      "patch": "@@ -2,10 +2,11 @@ within Modelica.Electrical.Batteries.Examples;\n model CCCV_CellRC\n   \"Charge a transient cell with constant current - constant voltage characteristic\"\n   extends Modelica.Icons.Example;\n+  parameter Modelica.Units.SI.Current Isc = 1200 \"Short-circuit current of cell at OCVmax\";\n   parameter Modelica.Electrical.Batteries.ParameterRecords.TransientData.ExampleData cellData(\n     Qnom=18000,\n     useLinearSOCDependency=false,\n-    Ri=4.2/1200,\n+    Ri=cellData.OCVmax/Isc,\n     Idis=0.001) \"Cell data\"\n     annotation (Placement(transformation(extent={{-10,-60},{10,-40}})));\n   Modelica.Electrical.Batteries.Utilities.CCCVcharger cccvCharger(I=25, Vend=4.2) annotation (Placement("
+    },
+    {
+      "filename": "Modelica/Electrical/Batteries/Examples/CCCV_Stack.mo",
+      "patch": "@@ -2,16 +2,17 @@ within Modelica.Electrical.Batteries.Examples;\n model CCCV_Stack\n   \"Charge a stack with constant current - constant voltage characteristic\"\n   extends Modelica.Icons.Example;\n+  parameter Modelica.Units.SI.Current Isc = 1200 \"Short-circuit current of cell at OCVmax\";\n   parameter Modelica.Electrical.Batteries.ParameterRecords.ExampleData cellDataOriginal(\n     Qnom=18000,\n     useLinearSOCDependency=false,\n-    Ri=4.2/1200,\n+    Ri=cellDataOriginal.OCVmax/Isc,\n     Idis=0.001) \"Original cell data\"\n     annotation (Placement(transformation(extent={{-40,-60},{-20,-40}})));\n   parameter Modelica.Electrical.Batteries.ParameterRecords.ExampleData cellDataDegraded(\n     Qnom=18000,\n     useLinearSOCDependency=false,\n-    Ri=2*4.2/1200,\n+    Ri=2*cellDataDegraded.OCVmax/Isc,\n     Idis=0.001) \"Degraded cell data\"\n     annotation (Placement(transformation(extent={{20,-60},{40,-40}})));\n   parameter Modelica.Electrical.Batteries.ParameterRecords.StackData"
+    },
+    {
+      "filename": "Modelica/Electrical/Batteries/Examples/CCCV_StackRC.mo",
+      "patch": "@@ -2,16 +2,17 @@ within Modelica.Electrical.Batteries.Examples;\n model CCCV_StackRC\n   \"Charge a transient stack with constant current - constant voltage characteristic\"\n   extends Modelica.Icons.Example;\n+  parameter Modelica.Units.SI.Current Isc = 1200 \"Short-circuit current of cell at OCVmax\";\n   parameter Modelica.Electrical.Batteries.ParameterRecords.TransientData.ExampleData cellDataOriginal(\n     Qnom=18000,\n     useLinearSOCDependency=false,\n-    Ri=4.2/1200,\n+    Ri=cellDataOriginal.OCVmax/Isc,\n     Idis=0.001) \"Original cell data\"\n     annotation (Placement(transformation(extent={{-40,-60},{-20,-40}})));\n   parameter Modelica.Electrical.Batteries.ParameterRecords.TransientData.ExampleData cellDataDegraded(\n     Qnom=18000,\n     useLinearSOCDependency=false,\n-    Ri=2*4.2/1200,\n+    Ri=2*cellDataDegraded.OCVmax/Isc,\n     Idis=0.001) \"Degraded cell data\"\n     annotation (Placement(transformation(extent={{20,-60},{40,-40}})));\n   parameter Modelica.Electrical.Batteries.ParameterRecords.TransientData.StackData"
+    },
+    {
+      "filename": "Modelica/Electrical/Batteries/Examples/CCCVcharging.mo",
+      "patch": "@@ -2,10 +2,11 @@ within Modelica.Electrical.Batteries.Examples;\n model CCCVcharging\n   \"Charge a battery with constant current - constant voltage characteristic\"\n   extends Modelica.Icons.Example;\n+  parameter Modelica.Units.SI.Current Isc = 1200 \"Short-circuit current of cell at OCVmax\";\n   parameter Modelica.Electrical.Batteries.ParameterRecords.TransientData.ExampleData cellData(\n     Qnom=18000,\n     useLinearSOCDependency=false,\n-    Ri=cellData.OCVmax/1200,\n+    Ri=cellData.OCVmax/Isc,\n     Idis=0.001)\n     annotation (Placement(transformation(extent={{20,-20},{40,0}})));\n   Modelica.Electrical.Batteries.BatteryStacks.CellRCStack battery("
+    }
+  ]
+}

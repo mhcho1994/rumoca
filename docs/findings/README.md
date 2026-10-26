@@ -1,5 +1,11 @@
 # ModelSan findings
 
+**Reporting review (2026-10-01):** the historical claims and counts below
+include entries superseded by later adjudications. Use the
+[reporting review and drafts](reporting-2026-10-01/README.md) before submitting
+issues. In particular, two-tool zero-storage failures do not establish a
+primitive-component defect, and several older claims were withdrawn.
+
 Bugs in **target programs** — Modelica models and libraries. This is what
 ModelSan is for and the only thing that counts as a result.
 

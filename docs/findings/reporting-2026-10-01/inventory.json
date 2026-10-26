@@ -1,0 +1,14 @@
+{
+  "scope": "Inventory routing only. No new execution validation of the 6440 historical reports. Counts are report instances, not independent bugs.",
+  "source": "docs/v2/verified/index.json",
+  "source_sha256": "7dab9915f9eb7a3111711f46cd1dae5702d3d4a28f59cd007d7187fc249861ed",
+  "counts": {
+    "false-positive": 3373,
+    "confirmed": 830,
+    "unresolved": 1555,
+    "candidate": 44,
+    "advisory": 638
+  },
+  "rows": 6440,
+  "unique_ids": 6440
+}

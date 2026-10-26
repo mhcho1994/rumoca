@@ -7,13 +7,15 @@
 
 The model is compiled with Rumoca, the selected sanitizers analyse it and
 watch one nominal simulation, and each finding is printed as a compiler-style
-diagnostic. Exit status: 0 nothing found, 1 findings, 2 the model could not
-be compiled or the command was misused.
+diagnostic. Static-only selections do not run the simulator. Exit status:
+0 no violation or coverage gap, 1 actionable findings, 2 incomplete checking
+or command misuse. Completed static findings survive a runtime failure.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -21,6 +23,8 @@ import sys
 import tempfile
 
 from . import sanitizers as san
+from .backends.process import execute
+from .findings.finding import Severity
 
 #: Every sanitizer `check` can run, by its short name. BehaviorSan needs a
 #: contract file and is run by `modelsan contracts`; the comparative oracles
@@ -91,6 +95,10 @@ def run(args) -> int:
         return 0
     try:
         names = selected(args.sanitize)
+        if not names:
+            raise ValueError('select at least one sanitizer')
+        if not math.isfinite(args.timeout) or args.timeout <= 0:
+            raise ValueError('timeout must be finite and positive')
     except ValueError as error:
         print(f"modelsan: {error}", file=sys.stderr)
         return 2
@@ -101,10 +109,18 @@ def run(args) -> int:
     with tempfile.TemporaryDirectory(prefix="modelsan-") as work:
         artifact = Path(work) / "model.rbc"
         command = [args.rumoca, "compile", str(args.source), "--model", args.model,
-                   "--emit-bitcode", str(artifact)]
+                   "--emit-bitcode", str(artifact), "--pass", "none",
+                   "--no-fold-parameter-bindings"]
         for root in args.source_root:
             command += ["--source-root", root]
-        compiled = subprocess.run(command, capture_output=True, text=True)
+        try:
+            compiled = execute(command, Path.cwd(), args.timeout)
+        except subprocess.TimeoutExpired:
+            print(f'modelsan: compilation exceeded {args.timeout:g}s', file=sys.stderr)
+            return 2
+        except OSError as error:
+            print(f'modelsan: cannot launch compiler: {error}', file=sys.stderr)
+            return 2
         if compiled.returncode != 0:
             sys.stderr.write(compiled.stderr)
             print(f"modelsan: {args.model} did not compile", file=sys.stderr)
@@ -113,22 +129,38 @@ def run(args) -> int:
         registry = san.SanitizerRegistry()
         for name in names:
             registry.register(SANITIZERS[name]())
-        backend = RumocaBackend(args.rumoca, t_start=args.start_time, t_end=args.stop_time,
-                                timeout=args.timeout, source_roots=args.source_root)
-        outcome = Pipeline(registry, backend).run(model, str(artifact), model.name)
+        static_only = set(names) <= set(GROUPS['static'])
+        if static_only:
+            outcome = Pipeline(registry, None).run_static(model)
+        else:
+            try:
+                backend = RumocaBackend(args.rumoca, t_start=args.start_time, t_end=args.stop_time,
+                                        timeout=args.timeout, source_roots=args.source_root)
+            except ValueError as error:
+                print(f'modelsan: {error}', file=sys.stderr)
+                return 2
+            try:
+                outcome = Pipeline(registry, backend).run(model, str(artifact), model.name)
+            finally:
+                backend.close()
         findings = [finding for bug in outcome.database.bugs for finding in bug.findings]
         for finding in findings:
             print(diagnostic(finding, args.source))
         gaps = outcome.coverage
+        violations = any(f.severity is not Severity.INFO for f in findings)
+        status = 'violated' if violations else 'incomplete' if gaps else 'no-violation-observed'
         for component, reason in gaps.items():
             print(f"note: not checked: {component}: {reason}", file=sys.stderr)
         print(f"{len(findings)} finding(s) from {len(names)} sanitizer(s)", file=sys.stderr)
         if args.json:
             args.json.write_text(json.dumps({
                 "model": args.model, "sanitizers": names,
+                "status": status, "mode": 'static' if static_only else 'static-and-runtime',
+                "executions": [dict(status=r.status.value, phase=r.phase.value,
+                    failure=r.failure.raw if r.failure else None) for r in outcome.results],
                 "findings": [as_json(finding) for finding in findings],
                 "not_checked": gaps}, indent=2, default=str) + "\n")
-    return 1 if findings else 0
+    return 1 if violations else 2 if gaps else 0
 
 
 def diagnostic(finding, source: Path) -> str:

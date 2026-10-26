@@ -1,6 +1,11 @@
 # Draft upstream issue — MSL: components inherit numeric bounds their equations cannot honour
 
-**Status: DRAFT. Not filed anywhere.**
+**Status: SUPERSEDED — do not submit this draft.** Later source-recompilation
+and initialization controls refuted several blanket zero-storage claims.
+Related work is already discussed in
+[MSL #4814](https://github.com/modelica/ModelicaStandardLibrary/issues/4814).
+See the [current reporting review](reporting-2026-10-01/README.md). The old
+draft below is retained as history, not an approved issue body.
 Target: `modelica/ModelicaStandardLibrary` · Version examined: MSL 4.1.0
 Counts below are from the completed 827-model sweep. Rows are marked with
 whether they survived cross-confirmation in a second tool; **only the confirmed

@@ -67,11 +67,12 @@ fn summarize_typecheck_error_code(diags: &CommonDiagnostics) -> Option<String> {
     }
 }
 
-pub(super) fn flatten_options_for_tree() -> FlattenOptions {
+pub(super) fn flatten_options_for_tree(freeze_parameters: bool) -> FlattenOptions {
     // Connection compatibility is model-local at flatten time (overlay-scoped),
     // so strict validation should always be enabled for compiled models even
     // when the source tree contains many external source-root classes.
     FlattenOptions {
+        specialize_frozen_bindings: freeze_parameters,
         strict_connection_validation: true,
         simplify_variable_names: false,
         // Family-native lowering: regular state-derivative for-families materialize
@@ -87,6 +88,7 @@ fn dae_model_outcome_internal_with_options(
     model_name: &str,
     instantiation_options: InstantiateOptions,
 ) -> DaeModelOutcome {
+    let freeze_parameters = instantiation_options.freeze_parameters;
     notify_compile_phase(FailedPhase::Instantiate, CompilePhaseEvent::Started);
     let instantiate_start = maybe_start_timer();
     let instantiate_outcome = InstantiatedModelOutcome::from_instantiation_outcome(
@@ -107,7 +109,7 @@ fn dae_model_outcome_internal_with_options(
     notify_compile_phase(FailedPhase::Flatten, CompilePhaseEvent::Started);
     let flatten_start = maybe_start_timer();
     let (flat_outcome, flattened_built) =
-        flat_model_outcome_from_typed(tree, model_name, typed_outcome);
+        flat_model_outcome_from_typed(tree, model_name, typed_outcome, freeze_parameters);
     if flattened_built {
         maybe_record_compile_phase_timing(FailedPhase::Flatten, flatten_start);
     }
@@ -204,6 +206,7 @@ pub(super) fn flat_model_outcome_from_typed(
     tree: &ast::ClassTree,
     model_name: &str,
     typed_outcome: TypedModelOutcome,
+    freeze_parameters: bool,
 ) -> (FlatModelOutcome, bool) {
     let overlay = match typed_outcome {
         TypedModelOutcome::Success(overlay) => *overlay,
@@ -227,7 +230,12 @@ pub(super) fn flat_model_outcome_from_typed(
         }
     };
 
-    match flatten_ref_with_options(tree, &overlay, model_name, flatten_options_for_tree()) {
+    match flatten_ref_with_options(
+        tree,
+        &overlay,
+        model_name,
+        flatten_options_for_tree(freeze_parameters),
+    ) {
         Ok(flat) => (
             FlatModelOutcome::Success(Box::new(FlatModelArtifactData { flat })),
             true,

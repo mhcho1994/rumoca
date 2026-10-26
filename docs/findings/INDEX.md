@@ -1,5 +1,9 @@
 # Index
 
+For current submission decisions, start with the
+[October 1 reporting review](reporting-2026-10-01/README.md). This historical
+index includes claims later refuted and does not establish upstream novelty.
+
 Everything produced by this project, in the order you would read it.
 
 ## Start here

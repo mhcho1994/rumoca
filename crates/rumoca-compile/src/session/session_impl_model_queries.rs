@@ -355,7 +355,12 @@ impl Session {
             } else {
                 None
             };
-            let (flat, flattened_built) = flat_model_outcome_from_typed(tree, model_name, typed);
+            let (flat, flattened_built) = flat_model_outcome_from_typed(
+                tree,
+                model_name,
+                typed,
+                self.instantiation_options.freeze_parameters,
+            );
             if record_compile_timings && flattened_built {
                 maybe_record_compile_phase_timing(FailedPhase::Flatten, flatten_started);
             }
@@ -378,7 +383,12 @@ impl Session {
         } else {
             None
         };
-        let (flat, flattened_built) = flat_model_outcome_from_typed(tree, model_name, typed);
+        let (flat, flattened_built) = flat_model_outcome_from_typed(
+            tree,
+            model_name,
+            typed,
+            self.instantiation_options.freeze_parameters,
+        );
         if record_compile_timings && flattened_built {
             maybe_record_compile_phase_timing(FailedPhase::Flatten, flatten_started);
         }

@@ -75,6 +75,21 @@ class CampaignTests(unittest.TestCase):
         report = run_case(Backend(timeout), '', 'M', [self.contract])
         self.assertEqual(report['status'], 'inconclusive')
 
+    def test_preparation_failure_preserves_completed_static_findings(self):
+        from modelsan.pipeline import Pipeline
+        from modelsan.sanitizers.registry import SanitizerRegistry
+        from modelsan.findings.finding import Finding, Severity
+        class StaticProbe:
+            name = 'probe'
+            def analyze(self, model, context):
+                return [Finding('probe', 'static-witness', Severity.MEDIUM)]
+        registry = SanitizerRegistry()
+        registry.register(StaticProbe())
+        failure = ExecutionResult.backend_error('test-backend', 'cannot instrument')
+        outcome = Pipeline(registry, Backend(None, preparation=failure)).run(None, '', 'M')
+        self.assertEqual(outcome.database.bugs[0].findings[0].kind, 'static-witness')
+        self.assertIn('execution.run0', outcome.coverage)
+
     def test_external_abort_is_not_a_high_severity_model_bug(self):
         data = ObservationStream()
         data.add(SimulationAbort(kind=FailureKind.ABORTED, reason='killed by signal'))

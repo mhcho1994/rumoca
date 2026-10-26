@@ -1,8 +1,10 @@
 # Upstream MSL open-issue evaluation — 2026-09-24
 
-**Implementation follow-up:** ModelSan now detects five of the six reproduced
-issue patterns with native Rumoca and all six across explicit backends. See the
-[detection results, controls and remaining gaps](detection-followup.md). The census
+**October 1 regression follow-up:** all six reproduced issue patterns are now
+detected in both native source and saved-bitcode gates using the explicit
+frozen-parameter profile, with all five controls passing. See the
+[review fixes and validation limits](review-fixes-2026-10-01.md). The earlier
+[detection results](detection-followup.md) remain historical evidence. The census
 and initial capability assessment below retain the state before those repairs.
 
 The GitHub access blocker is resolved. The snapshot contains **353 open issues and all 1,637 issue comments** from [modelica/ModelicaStandardLibrary](https://github.com/modelica/ModelicaStandardLibrary/issues). Every issue has a capability assessment. **#4814, authored by Arslan8, is excluded**, leaving **352 independent issue entries**. Pull requests are excluded from the census.

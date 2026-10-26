@@ -16,16 +16,26 @@ use super::*;
 use rumoca_core::{ExpressionRewriter, StatementRewriter};
 
 mod aggregate_projection;
+mod equation_shapes;
 
-pub(crate) fn collapse_index_refs_to_known_varrefs(flat: &mut flat::Model) {
+pub(crate) fn collapse_index_refs_to_known_varrefs(
+    flat: &mut flat::Model,
+) -> Result<(), FlattenError> {
     let known_flat_vars = KnownFlatVars::build(flat);
 
-    for eq in &mut flat.equations {
-        collapse_index_expr(&mut eq.residual, &known_flat_vars);
-    }
-    for eq in &mut flat.initial_equations {
-        collapse_index_expr(&mut eq.residual, &known_flat_vars);
-    }
+    let dimensions = equation_shapes::variable_dimensions(flat);
+    equation_shapes::collapse_equations(
+        &mut flat.equations,
+        &mut flat.structured_equations,
+        &known_flat_vars,
+        &dimensions,
+    )?;
+    equation_shapes::collapse_equations(
+        &mut flat.initial_equations,
+        &mut flat.initial_structured_equations,
+        &known_flat_vars,
+        &dimensions,
+    )?;
     // A structured family's comprehension template is a peer copy of its scalar
     // residual, and downstream phases read the template rather than
     // reconstructing it from the materialized cells. Collapsing only the scalar
@@ -108,6 +118,7 @@ pub(crate) fn collapse_index_refs_to_known_varrefs(flat: &mut flat::Model) {
         }
         collapse_index_statements(&mut function.body, &known_flat_vars);
     }
+    Ok(())
 }
 
 fn collapse_index_when_equations(
@@ -149,7 +160,7 @@ fn collapse_index_when_equations(
                 collapse_index_expr(function, known_flat_vars);
             }
             rumoca_ir_flat::WhenEquation::Terminate { message, .. } => {
-                collapse_index_expr(message, known_flat_vars)
+                collapse_index_expr(message, known_flat_vars);
             }
         }
     }
@@ -164,8 +175,14 @@ fn collapse_index_statements(
     }
 }
 
-fn collapse_index_expr(expr: &mut rumoca_core::Expression, known_flat_vars: &KnownFlatVars) {
-    *expr = CollapseIndexRewriter { known_flat_vars }.rewrite_expression(expr);
+fn collapse_index_expr(
+    expr: &mut rumoca_core::Expression,
+    known_flat_vars: &KnownFlatVars,
+) -> bool {
+    let collapsed = CollapseIndexRewriter { known_flat_vars }.rewrite_expression(expr);
+    let changed = collapsed != *expr;
+    *expr = collapsed;
+    changed
 }
 
 /// Flat variable lookup for the collapse pass.

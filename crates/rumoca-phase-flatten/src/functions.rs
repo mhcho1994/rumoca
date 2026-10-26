@@ -72,6 +72,7 @@ use function_requests::{FunctionIdentitySet, same_function_request};
 pub(crate) use function_requests::{FunctionRequest, FunctionRequests};
 pub(crate) use higher_order::specialize_function_inputs;
 pub(crate) use pure_constants::check_settled_binding_bounds;
+pub(crate) use pure_constants::specialize_frozen_bindings;
 pub(crate) use record_value_fields::split_branch_assigned_records;
 
 use crate::algorithms;

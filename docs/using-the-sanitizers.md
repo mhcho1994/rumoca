@@ -76,7 +76,7 @@ modelsan check FILE.mo --model NAME [-fsanitize=LIST] [options]
 | `--list` | show every sanitizer and group |
 | `--source-root DIR` | load a library (repeatable), e.g. the MSL for `Modelica.*` models |
 | `--stop-time T`, `--start-time T` | simulation interval (default 0 to 1) |
-| `--timeout S` | give up on a run after S seconds (default 300) |
+| `--timeout S` | bound each compiler/simulator process group to S seconds (default 300) |
 | `--rumoca PATH` | the Rumoca executable (default: `rumoca` on `PATH`) |
 | `--json FILE` | also write the findings and coverage as JSON |
 
@@ -84,8 +84,18 @@ Groups: `default` (the table below), `static` (structure only: singularity,
 structure, dimension, quantity, network, init-static, divisor,
 discontinuity), `runtime` (watchers of the simulation), `all`.
 
-Exit status: **0** nothing found, **1** findings, **2** the model did not
-compile or the command was misused, so it slots into scripts and CI:
+Selecting only names from `static` skips simulator preparation and execution.
+Mixed selections keep completed static findings even if runtime preparation or
+simulation fails. The command compiles with `--pass none` and
+`--no-fold-parameter-bindings` so static analyses see units and parameter
+dependencies before optional optimization.
+
+Exit status: **0** no violation observed and no reported coverage gap,
+**1** actionable findings, **2** incomplete checking, compilation failure or
+command misuse. A failed execution is recorded even when SolverSan is not
+selected. JSON includes the checking mode, status, execution failures and
+coverage; static-only reports have an empty execution list. Findings take
+precedence in the exit code, so always inspect coverage alongside them:
 
 ```sh
 modelsan check Pkg/package.mo --model Pkg.Examples.Demo \

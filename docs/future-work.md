@@ -90,10 +90,6 @@ stratified sample.
 
 ## 2. Decisions to revisit
 
-- **TOOLBUG-168:** whole-number parameters with translation-time bindings
-  are lowered as literals even under `--no-fold-parameter-bindings`.
-  Narrow it to parameters actually used as array extents so the flag keeps
-  its meaning.
 - **ED001:** models OpenModelica also counts as unbalanced stay an error.
   OpenModelica's `checkModel` never rejects on balance; if coverage against
   it matters more than refusing unrunnable models, this becomes a warning.
@@ -103,15 +99,14 @@ stratified sample.
 - **Pass scheduling:** pipelines run in the order written (with groups,
   `fixpoint(...)` and skip-when-unchanged). Dependency-ordered scheduling
   (passes declaring what they require and invalidate) is not implemented.
-- **`modelsan check -fsanitize=static`** still runs one simulation; a
-  static-only selection should skip execution.
 - **Sanitizer coverage gaps** reported as "not checked": runtime expression
   observation for DomainSan (`observe_expression`) and connector observation
   for NetworkSan are not provided by the Rumoca backend.
 - **Unit analysis after passes:** the default `inline-constants` pass
   replaces package-constant references with literals, so unit analyses must
   read `--pass none` output (TOOLBUG-028). A pass that keeps units on
-  inlined literals would remove that caveat.
+  inlined literals would remove that caveat. `modelsan check` now selects
+  `--pass none` itself.
 
 ## 4. Environment
 

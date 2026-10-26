@@ -1,5 +1,11 @@
 # Catalog: declaration sites permitting physically impossible values
 
+**Historical catalog — not a submission list.** Later review found that an
+SI quantity or missing bound does not by itself establish the component's
+physical contract. The title and counts below reflect the original survey;
+do not treat all 911 entries as bugs or propose global positivity constraints.
+See the [current reporting review](../reporting-2026-10-01/README.md).
+
 Every entry is a place in MSL 4.1.0 where a quantity that cannot be
 negative is declared without a lower bound, with `file:line` so it can be
 checked directly.

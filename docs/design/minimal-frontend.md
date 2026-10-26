@@ -5,6 +5,15 @@ Anything that *changes* a model to make it smaller, cheaper or more folded
 belongs in a bitcode pass, where it can be tested, reordered, skipped, and
 blamed individually.
 
+The explicit `--freeze-parameters` compilation profile is a separate,
+fixed-input specialization request. It marks fixed parameters non-tunable and
+uses bounded pure evaluation for model bindings and numeric attributes before
+DAE construction. Unsettled, impure or external calls remain for normal checked
+lowering; `fixed=false` parameters and runtime inputs are never guessed. This
+also applies when the caller disables subsequent bitcode passes: freezing was
+requested separately. Ordinary compilation retains its calls and the bitcode
+optimization stage. The profile does not add general runtime `while` support.
+
 **Why now.** Every serious breakage this project has recorded in the compiler
 came from an optimization living inside lowering, not from lowering itself:
 
