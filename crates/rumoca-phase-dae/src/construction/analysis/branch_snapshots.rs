@@ -27,25 +27,43 @@ use super::function_returns::{GeneratedBooleanDefinition, and_condition, guarded
 use super::*;
 use rumoca_core::Reference;
 
+mod loop_selections;
+pub(super) use loop_selections::{BoundLoopSelection, SnapshotLoopSelection, bind_loop_selections};
+
 /// Rewrite every conditional whose branches own a loop, at any nesting depth,
 /// into captured selections, guarded statements through its last loop and one
 /// loop-free remainder conditional. `guards` holds the return guards issued
 /// before compaction and receives the captures issued here.
+#[cfg(test)]
 pub(super) fn snapshot_loop_conditionals(
     statements: &[rumoca_core::Statement],
     guards: &mut Vec<GeneratedBooleanDefinition>,
 ) -> Result<Vec<rumoca_core::Statement>, ToDaeError> {
+    let (statements, _) = snapshot_loop_conditionals_with_entries(statements, guards)?;
+    Ok(statements)
+}
+
+pub(super) fn snapshot_loop_conditionals_with_entries(
+    statements: &[rumoca_core::Statement],
+    guards: &mut Vec<GeneratedBooleanDefinition>,
+) -> Result<(Vec<rumoca_core::Statement>, Vec<SnapshotLoopSelection>), ToDaeError> {
     let mut snapshots = Snapshots {
-        immutable: guards.iter().map(|guard| guard.target.clone()).collect(),
+        immutable: guards
+            .iter()
+            .filter(|guard| !guard.mutable)
+            .map(|guard| guard.target.clone())
+            .collect(),
         guards,
+        loops: Vec::new(),
     };
     let normalized = snapshots.sequence(statements, None)?;
     certify_generated_scopes(&normalized, snapshots.guards)?;
-    Ok(normalized)
+    Ok((normalized, snapshots.loops))
 }
 
 struct Snapshots<'guards> {
     guards: &'guards mut Vec<GeneratedBooleanDefinition>,
+    loops: Vec<SnapshotLoopSelection>,
     /// Generated Booleans: no statement assigns them after their definition.
     immutable: HashSet<VarName>,
 }
@@ -79,11 +97,15 @@ impl Snapshots<'_> {
                 indices,
                 equations,
                 span,
-            } => normalized.push(rumoca_core::Statement::For {
-                indices: indices.clone(),
-                equations: self.sequence(equations, active)?,
-                span: *span,
-            }),
+            } => {
+                self.loops
+                    .push(SnapshotLoopSelection::issue(indices, *span, active));
+                normalized.push(rumoca_core::Statement::For {
+                    indices: indices.clone(),
+                    equations: self.sequence(equations, active)?,
+                    span: *span,
+                });
+            }
             // A false selection must not iterate a `while`, so the guard stays
             // outside it; its body is captured per iteration.
             rumoca_core::Statement::While { block, span } => {
@@ -244,6 +266,7 @@ impl Snapshots<'_> {
         let target = rumoca_core::function_branch_guard_name(span.start.0);
         normalized.push(rumoca_core::Statement::Empty { span });
         self.guards.push(GeneratedBooleanDefinition {
+            mutable: false,
             target: target.clone(),
             value,
             span,
@@ -352,7 +375,7 @@ impl ScopeCertificate<'_> {
                     return Ok(());
                 };
                 self.reads_in_scope(&guard.value, scope, *span)?;
-                if !scope.insert(guard.target.clone()) {
+                if !scope.insert(guard.target.clone()) && !guard.mutable {
                     return Err(scope_error("is defined twice in one scope", *span));
                 }
                 Ok(())

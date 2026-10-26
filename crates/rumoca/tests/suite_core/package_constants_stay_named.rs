@@ -55,11 +55,11 @@ fn the_frontend_declares_a_package_constant_and_the_pass_inlines_it() {
 
     let lowered = dae_text(source, &["none"]);
     assert!(
-        lowered.contains("constant Real KC.P.c = 3.0"),
+        lowered.contains("constant Real 'KC.P.c' = 3.0"),
         "the package constant is declared: {lowered}"
     );
     assert!(
-        lowered.contains("KC.P.c) * x"),
+        lowered.contains("'KC.P.c') * x"),
         "the equation still names it: {lowered}"
     );
 

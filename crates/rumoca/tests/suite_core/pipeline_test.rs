@@ -50,11 +50,9 @@ fn codegen_context_is_the_checked_semantic_projection() {
         .expect("checked DAE template projection serializes");
 
     assert_eq!(json["schema"]["name"], "rumoca.checked-dae-template");
-    // Pinned to `dae_backend::TEMPLATE_SCHEMA_VERSION`: every change to the
-    // projected template shape bumps that constant, and this literal must be
-    // bumped with it so template consumers see the break loudly. Version 6
-    // adds checked initialization parameter definitions.
-    assert_eq!(json["schema"]["version"], 6);
+    // Pin the private `dae_backend::TEMPLATE_SCHEMA_VERSION` so a changed
+    // semantic projection requires an explicit review of this consumer.
+    assert_eq!(json["schema"]["version"], 9);
     assert!(json["value_types"].is_array());
     assert!(json["variables"].is_array());
     assert!(json["expressions"].is_array());

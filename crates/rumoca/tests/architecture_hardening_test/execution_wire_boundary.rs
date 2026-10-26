@@ -81,7 +81,7 @@ fn no_reader_of_a_serialized_observation_list_remains() {
     // points the program references; nothing reads an `observe` list off the
     // wire or off the command line any more.
     for relative in [
-        "crates/rumoca-phase-solve/src/execution.rs",
+        "crates/rumoca-eval-solve/src/execution/numerical.rs",
         "crates/rumoca-sim/src/execution.rs",
     ] {
         let source = fs::read_to_string(root.join(relative))

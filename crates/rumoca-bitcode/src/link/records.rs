@@ -182,10 +182,21 @@ impl Shift for RbcFunctionConditional {
         Ok(())
     }
 }
+impl Shift for RbcFunctionBranch {
+    fn shift(&mut self, m: &Map<'_>) -> Result<()> {
+        fields!(self, m, statements, provenance);
+        Ok(())
+    }
+}
 impl Shift for RbcFunctionStatement {
     fn shift(&mut self, m: &Map<'_>) -> Result<()> {
         match self {
-            Self::Assignment {
+            Self::RequireAssigned {
+                expression,
+                provenance,
+                ..
+            }
+            | Self::Assignment {
                 expression,
                 provenance,
                 ..
@@ -211,6 +222,20 @@ impl Shift for RbcFunctionStatement {
             } => {
                 conditional.shift(m)?;
                 expressions.shift(m)?;
+                provenance.shift(m)
+            }
+            Self::Conditional {
+                conditions,
+                branches,
+                fallback,
+                outputs,
+                provenance,
+                ..
+            } => {
+                conditions.shift(m)?;
+                branches.shift(m)?;
+                fallback.shift(m)?;
+                outputs.shift(m)?;
                 provenance.shift(m)
             }
             Self::For {

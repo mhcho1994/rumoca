@@ -20,20 +20,41 @@ use std::{
 
 use rumoca_ir_solve::{
     BinaryOp, CompareOp, FoldTensorUpdateStore, LinearOp, MatrixProductShape, Reg,
-    ScalarProgramBlock, ScalarProgramRegisterFlow, SolveEventActionKind, SolveEventMessagePart,
-    SolveEventPartition, SolveProblemShapeContractError, SolvePureCallDirectionalSite,
-    SolvePureCallSite, SolvePureCallTable, SolveScalarType, SolveStringConversionFormat,
-    SolveStringConversionSource, SolveValueKind, SolveValueType, StridedOperand, UnaryOp,
-    resolve_indexed_slot,
+    ScalarProgramBlock, ScalarProgramRegisterFlow, SolveEventActionKind, SolveEventPartition,
+    SolvePureCallDirectionalSite, SolvePureCallSite, SolvePureCallTable, SolveScalarType,
+    SolveValueKind, SolveValueType, UnaryOp, resolve_indexed_slot,
 };
 
+pub mod ad;
+pub mod artifacts;
 mod block_residual_split;
 mod compute_block_scalarize;
+mod conditional_region;
+mod errors;
+mod event_messages;
+mod event_observations;
+#[cfg(test)]
+use event_messages::MAX_EVENT_MESSAGE_BYTES;
+pub use event_messages::{
+    EventMessageProgramExecution, EventMessageProgramInput, EventMessageProgramKind,
+    eval_event_action_message,
+};
+pub(crate) use event_messages::{
+    MAX_STRING_SIGNIFICANT_DIGITS, append_event_message_part, format_significant_digits,
+    invalid_message_option, pad_event_message_conversion,
+};
+#[cfg(feature = "wire-replay")]
+pub mod fmi_wire;
+#[cfg(feature = "wire-replay")]
+pub mod model_wire;
+pub use errors::EvalSolveError;
+pub use event_observations::{CheckedEventObservationContext, EventObservationAuthority};
 pub mod dense_basis;
 pub mod domain_diagnostics;
 pub mod execution;
 pub mod linear_solve;
 pub mod nan_trace;
+mod native_tensors;
 mod ops;
 mod prepared;
 mod prepared_event_transaction;
@@ -43,13 +64,17 @@ mod pure_call_execution;
 mod random_runtime;
 pub mod refresh_plan;
 pub mod reverse;
+mod scalar_ops;
 #[cfg(test)]
 mod scalar_program_contract_tests;
+pub use scalar_ops::lower_scalar_ops;
 mod sparsity;
 mod table_runtime;
 mod tangent_lanes;
 mod tensor_index;
 pub mod tensor_policy;
+mod tensor_snapshot;
+mod versioned_lazy;
 use tensor_index::tensor_register_offset;
 mod typed_program;
 mod update_rows;
@@ -66,7 +91,8 @@ pub use prepared::{
     ComputeNodeOutputRangeRequest, PreparedComputeBlock, PreparedEvaluationBlock,
     PreparedScalarProgramBlock, PreparedTargetValuePlan, PreparedTornSweep,
     TargetAssignmentOutputRequest, TargetIsolationProgram, TornSweepComposite, TornSweepRun,
-    TornSweepStatus, replaced_programs, target_assignment_shape, target_assignment_shapes,
+    TornSweepStatus, parameter_static_y_gradient_params, replaced_programs,
+    target_assignment_shape, target_assignment_shapes,
 };
 pub use prepared_event_transaction::PreparedEventTransactionProgram;
 pub use prepared_guarded_assignment::PreparedGuardedAssignmentProgram;
@@ -78,7 +104,7 @@ use random_runtime::{
 pub use sparsity::{
     derive_column_coloring, derive_jacobian_pattern_from_jvp,
     derive_jacobian_pattern_from_scalar_jvp, derive_solve_structural_artifacts,
-    row_seed_dependencies,
+    derive_solve_structural_artifacts_with_calls, row_seed_dependencies,
 };
 pub use table_runtime::{
     TableRuntimeError, eval_table_bound_value_in, eval_table_lookup_slope_value_in,
@@ -89,8 +115,10 @@ pub use tangent_lanes::{
     TangentPoint, TornTangentEvaluator, TornTangentJacobian, causal_coefficient_is_finite,
 };
 pub use typed_program::{
-    TypedProgramEvalError, TypedValue, TypedValueConstructionError, eval_pure_call,
-    eval_pure_call_directional,
+    AssertionInvocationEvaluation, AssertionReport, TypedAssertionFailure, TypedProgramEvalError,
+    TypedValue, TypedValueConstructionError, eval_assertion_invocation, eval_pure_call,
+    eval_pure_call_checked, eval_pure_call_directional, eval_pure_call_directional_checked,
+    render_retained_message,
 };
 pub use update_rows::{
     UpdateRowApplication, apply_scalar_slot_value, apply_scalar_slot_value_exact,
@@ -141,321 +169,6 @@ struct BlockEvalStats {
 }
 
 type BlockEvalStatsMap = BTreeMap<(&'static str, usize), BlockEvalStats>;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum EvalSolveError {
-    ExternalTable {
-        operation: &'static str,
-        table_id: f64,
-        column: Option<f64>,
-        reason: String,
-    },
-    MissingInput {
-        vector: &'static str,
-        index: usize,
-        len: usize,
-        span: Option<rumoca_core::Span>,
-    },
-    /// A one-based tensor axis did not contain an exact finite signed Integer.
-    InvalidTensorIndex {
-        axis: usize,
-        value: f64,
-        span: Option<rumoca_core::Span>,
-    },
-    /// A valid Integer lies outside this source tensor axis's checked extent.
-    TensorIndexOutOfBounds {
-        axis: usize,
-        index: i64,
-        extent: u32,
-        span: Option<rumoca_core::Span>,
-    },
-    RegisterOutOfBounds {
-        access: &'static str,
-        register: Reg,
-        len: usize,
-        span: Option<rumoca_core::Span>,
-    },
-    UninitializedRegister {
-        register: Reg,
-        span: Option<rumoca_core::Span>,
-    },
-    OutputTooSmall {
-        required: usize,
-        len: usize,
-        span: Option<rumoca_core::Span>,
-    },
-    UpdateRowTargetMismatch {
-        rows: usize,
-        targets: usize,
-    },
-    UpdateDidNotConverge {
-        t: f64,
-        max_iters: usize,
-    },
-    SingularTargetAssignment {
-        row: usize,
-        target_y_index: usize,
-        coefficient: f64,
-        span: Option<rumoca_core::Span>,
-    },
-    EventActionConditionMismatch {
-        rows: usize,
-        actions: usize,
-    },
-    MissingRuntimeState {
-        operation: &'static str,
-    },
-    RandomStateProjectionOutOfBounds {
-        index: usize,
-        len: usize,
-    },
-    InvalidLinearOp {
-        helper: &'static str,
-        op: &'static str,
-    },
-    LinearSolve {
-        size: usize,
-        component: Option<usize>,
-        reason: &'static str,
-        span: Option<rumoca_core::Span>,
-    },
-    InvalidRow {
-        message: String,
-        span: Option<rumoca_core::Span>,
-    },
-    Scalarization {
-        message: String,
-        span: Option<rumoca_core::Span>,
-    },
-    ShapeContract {
-        message: String,
-        span: Option<rumoca_core::Span>,
-    },
-}
-
-impl EvalSolveError {
-    pub fn source_span(&self) -> Option<rumoca_core::Span> {
-        match self {
-            Self::MissingInput { span, .. } => *span,
-            Self::RegisterOutOfBounds { span, .. } => *span,
-            Self::InvalidTensorIndex { span, .. } | Self::TensorIndexOutOfBounds { span, .. } => {
-                *span
-            }
-            Self::UninitializedRegister { span, .. } => *span,
-            Self::OutputTooSmall { span, .. } => *span,
-            Self::SingularTargetAssignment { span, .. } => *span,
-            Self::LinearSolve { span, .. } => *span,
-            Self::InvalidRow { span, .. } => *span,
-            Self::Scalarization { span, .. } => *span,
-            Self::ShapeContract { span, .. } => *span,
-            _ => None,
-        }
-    }
-
-    pub(crate) fn with_source_span(self, span: Option<rumoca_core::Span>) -> Self {
-        match self {
-            Self::MissingInput {
-                vector,
-                index,
-                len,
-                span: None,
-            } => Self::MissingInput {
-                vector,
-                index,
-                len,
-                span,
-            },
-            Self::InvalidTensorIndex {
-                axis,
-                value,
-                span: None,
-            } => Self::InvalidTensorIndex { axis, value, span },
-            Self::TensorIndexOutOfBounds {
-                axis,
-                index,
-                extent,
-                span: None,
-            } => Self::TensorIndexOutOfBounds {
-                axis,
-                index,
-                extent,
-                span,
-            },
-            Self::RegisterOutOfBounds {
-                access,
-                register,
-                len,
-                span: None,
-            } => Self::RegisterOutOfBounds {
-                access,
-                register,
-                len,
-                span,
-            },
-            Self::UninitializedRegister {
-                register,
-                span: None,
-            } => Self::UninitializedRegister { register, span },
-            Self::OutputTooSmall {
-                required,
-                len,
-                span: None,
-            } => Self::OutputTooSmall {
-                required,
-                len,
-                span,
-            },
-            Self::SingularTargetAssignment {
-                row,
-                target_y_index,
-                coefficient,
-                span: None,
-            } => Self::SingularTargetAssignment {
-                row,
-                target_y_index,
-                coefficient,
-                span,
-            },
-            Self::LinearSolve {
-                size,
-                component,
-                reason,
-                span: None,
-            } => Self::LinearSolve {
-                size,
-                component,
-                reason,
-                span,
-            },
-            Self::InvalidRow {
-                message,
-                span: None,
-            } => Self::InvalidRow { message, span },
-            error => error,
-        }
-    }
-}
-
-impl std::fmt::Display for EvalSolveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ExternalTable {
-                operation,
-                table_id,
-                column,
-                reason,
-            } => {
-                if let Some(column) = column {
-                    write!(
-                        f,
-                        "external table {operation} failed for table id {table_id} column {column}: {reason}"
-                    )
-                } else {
-                    write!(
-                        f,
-                        "external table {operation} failed for table id {table_id}: {reason}"
-                    )
-                }
-            }
-            Self::MissingInput {
-                vector, index, len, ..
-            } => write!(
-                f,
-                "missing {vector}[{index}] while evaluating Solve-IR row; vector length is {len}"
-            ),
-            Self::InvalidTensorIndex { .. } | Self::TensorIndexOutOfBounds { .. } => {
-                tensor_index::fmt_index_fault(self, f)
-            }
-            Self::RegisterOutOfBounds {
-                access,
-                register,
-                len,
-                ..
-            } => write!(
-                f,
-                "cannot {access} Solve-IR register r{register}; register file length is {len}"
-            ),
-            Self::UninitializedRegister { register, .. } => {
-                write!(f, "cannot read uninitialized Solve-IR register r{register}")
-            }
-            Self::OutputTooSmall { required, len, .. } => write!(
-                f,
-                "output buffer too small while evaluating Solve-IR row block: {len} < {required}"
-            ),
-            Self::UpdateRowTargetMismatch { rows, targets } => write!(
-                f,
-                "update RHS row count {rows} does not match target count {targets}"
-            ),
-            Self::UpdateDidNotConverge { t, max_iters } => write!(
-                f,
-                "update equations did not converge at t={t} after {max_iters} iterations"
-            ),
-            Self::SingularTargetAssignment {
-                row,
-                target_y_index,
-                coefficient,
-                ..
-            } => write!(
-                f,
-                "cannot isolate target y[{target_y_index}] from Solve-IR row {row}: singular coefficient {coefficient}"
-            ),
-            Self::EventActionConditionMismatch { rows, actions } => write!(
-                f,
-                "event action condition row count {rows} does not match event action count {actions}"
-            ),
-            Self::MissingRuntimeState { operation } => write!(
-                f,
-                "missing simulation runtime state while evaluating Solve-IR {operation}"
-            ),
-            Self::RandomStateProjectionOutOfBounds { index, len } => write!(
-                f,
-                "random state projection index {index} is out of bounds for state length {len}"
-            ),
-            Self::InvalidLinearOp { helper, op } => {
-                write!(f, "Solve-IR {helper} helper cannot evaluate {op} op")
-            }
-            Self::LinearSolve {
-                size,
-                component,
-                reason,
-                ..
-            } => match component {
-                Some(component) => write!(
-                    f,
-                    "Solve-IR linear solve of size {size} cannot evaluate component {component}: {reason}"
-                ),
-                None => write!(f, "Solve-IR linear solve of size {size} failed: {reason}"),
-            },
-            Self::InvalidRow { message, .. } => write!(f, "invalid Solve-IR row: {message}"),
-            Self::Scalarization { message, .. } => {
-                write!(f, "Solve-IR scalarization failed: {message}")
-            }
-            Self::ShapeContract { message, .. } => {
-                write!(f, "Solve-IR shape contract failed: {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for EvalSolveError {}
-
-impl From<ScalarizeError> for EvalSolveError {
-    fn from(value: ScalarizeError) -> Self {
-        Self::Scalarization {
-            message: value.to_string(),
-            span: value.source_span(),
-        }
-    }
-}
-
-impl From<SolveProblemShapeContractError> for EvalSolveError {
-    fn from(value: SolveProblemShapeContractError) -> Self {
-        Self::ShapeContract {
-            message: value.to_string(),
-            span: value.source_span(),
-        }
-    }
-}
 
 pub fn reset_solve_row_eval_trace() {
     let enabled = solve_row_eval_trace_requested();
@@ -632,6 +345,8 @@ pub struct RowEvalContext<'a> {
     pub pure_calls: Option<&'a SolvePureCallTable>,
     pub pure_call_execution: Option<&'a dyn PureCallExecution>,
     pub runtime_state: Option<&'a SimulationRuntimeState>,
+    pub event_observations: Option<&'a CheckedEventObservationContext<'a>>,
+    pub message_program_execution: Option<&'a EventMessageProgramExecution>,
 }
 
 /// Immutable numerical point and direction for one Jacobian evaluation.
@@ -793,10 +508,26 @@ pub(crate) struct RowEvalScratch {
     pub(crate) regs: Vec<f64>,
     pub(crate) initialized: Vec<bool>,
     pub(crate) affine_ops: Vec<LinearOp>,
+    tensor_results: Vec<f64>,
     lazy_computed: Vec<bool>,
     lazy_tasks: Vec<LazyEvalTask>,
     lazy_trace: Vec<LazyTraceStep>,
     lazy_outputs: Vec<f64>,
+    version_values: Vec<f64>,
+    version_computed: Vec<bool>,
+    version_tasks: Vec<versioned_lazy::VersionTask>,
+    /// Evaluation frames of nested function-conditional regions, reused across
+    /// region runs so a region run allocates nothing once its frame is warm.
+    region_frames: Vec<RowEvalScratch>,
+    /// The result tuple of the function conditional this frame is running.
+    region_values: Vec<f64>,
+}
+
+impl RowEvalScratch {
+    /// The first scratch a nesting depth uses, before the pool holds one for it.
+    fn fresh() -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -839,6 +570,7 @@ pub(crate) struct PreparedLazyRowPlan {
     outputs: Box<[Reg]>,
     trace: RefCell<Option<Box<[LazyTraceStep]>>>,
     trace_native_specialization: bool,
+    versions: Option<rumoca_ir_solve::RegisterVersionProgram>,
 }
 
 /// One branch-specialized, still-valid Solve-IR program derived from a lazy
@@ -854,16 +586,35 @@ pub struct SpecializedRowProgram {
 
 impl PreparedLazyRowPlan {
     pub(crate) fn new(row: &[LinearOp], register_count: usize) -> Option<Self> {
-        if row.len() < 64 || !row.iter().any(|op| matches!(op, LinearOp::Select { .. })) {
+        Self::with_conditional_captures(row, register_count, None)
+    }
+
+    /// The plan for a region of a function conditional that reads `capture_count`
+    /// captures of its enclosing conditional.
+    pub(crate) fn with_conditional_captures(
+        row: &[LinearOp],
+        register_count: usize,
+        capture_count: Option<usize>,
+    ) -> Option<Self> {
+        // Branch reachability owns demanded gathers, regardless of row size.
+        if !row.iter().any(|op| matches!(op, LinearOp::Select { .. })) {
             return None;
         }
         if !row.iter().all(lazy_row_op_supported) {
             return None;
         }
-        Some(Self::from_supported(row, register_count))
+        Self::from_supported(row, register_count, capture_count)
     }
 
-    fn from_supported(row: &[LinearOp], register_count: usize) -> Self {
+    fn from_supported(
+        row: &[LinearOp],
+        register_count: usize,
+        capture_count: Option<usize>,
+    ) -> Option<Self> {
+        let versions = rumoca_ir_solve::RegisterVersionProgram::for_mutable_program_with_captures(
+            row,
+            capture_count,
+        )?;
         let mut definitions = vec![usize::MAX; register_count];
         let mut outputs = Vec::new();
         for (op_index, op) in row.iter().enumerate() {
@@ -876,11 +627,11 @@ impl PreparedLazyRowPlan {
                 outputs.push(src);
             }
         }
-        Self {
+        Some(Self {
             definitions: definitions.into_boxed_slice(),
             outputs: outputs.into_boxed_slice(),
             trace: RefCell::new(None),
-            trace_native_specialization: !row.iter().any(|operation| {
+            trace_native_specialization: versions.is_none() && !row.iter().any(|operation| {
                 // A trailing specialization guard cannot authorize a potentially
                 // failing address read from a branch that is currently inactive.
                 matches!(operation, LinearOp::LoadIndexedRegister { indices, .. }
@@ -888,9 +639,12 @@ impl PreparedLazyRowPlan {
                 || matches!(
                     operation,
                     LinearOp::FunctionConditional { .. } | LinearOp::GuardedFunctionFold { .. }
+                        | LinearOp::LoadFunctionConditionalCapture { .. }
+                        | LinearOp::LoadFunctionConditionalCaptureRange { .. }
                 )
             }),
-        }
+            versions,
+        })
     }
 
     fn specialization(&self, row: &[LinearOp]) -> Option<SpecializedRowProgram> {
@@ -1068,6 +822,8 @@ fn lazy_row_op_supported(op: &LinearOp) -> bool {
             | LinearOp::LoadTime { .. }
             | LinearOp::LoadY { .. }
             | LinearOp::LoadP { .. }
+            | LinearOp::LoadFunctionConditionalCapture { .. }
+            | LinearOp::LoadFunctionConditionalCaptureRange { .. }
             | LinearOp::LoadIndexedP { .. }
             | LinearOp::LoadIndexedRegister { .. }
             | LinearOp::Move { .. }
@@ -1207,6 +963,20 @@ pub fn eval_event_action_request(
     }
     let mut values =
         eval_solve_f64_values(events.actions.len(), 0.0, "event action condition values")?;
+    let observations = context
+        .pure_calls
+        .map(|table| {
+            CheckedEventObservationContext::construct(
+                table,
+                &events.action_conditions,
+                &events.actions,
+            )
+        })
+        .transpose()?;
+    let context = RowEvalContext {
+        event_observations: observations.as_ref(),
+        ..context
+    };
     eval_scalar_program_block_with_context(
         &events.action_conditions,
         y,
@@ -1233,9 +1003,8 @@ pub fn event_action_request_from_values(
         }
         match action.kind {
             SolveEventActionKind::Assert => {
-                return Ok(EventActionRequest::AssertionFailed {
-                    message: eval_event_action_message(action, y, p, t, context)?,
-                });
+                let message = eval_event_action_message(action, y, p, t, context)?;
+                return Ok(EventActionRequest::AssertionFailed { message });
             }
             SolveEventActionKind::Terminate => {
                 return Ok(EventActionRequest::Terminate {
@@ -1249,232 +1018,6 @@ pub fn event_action_request_from_values(
         }
     }
     Ok(EventActionRequest::Continue)
-}
-
-/// The message of one event action, rendered at one point.
-pub fn eval_event_action_message(
-    action: &rumoca_ir_solve::SolveEventAction,
-    y: &[f64],
-    p: &[f64],
-    t: f64,
-    context: RowEvalContext<'_>,
-) -> Result<String, EvalSolveError> {
-    let mut message = String::new();
-    let eval = MessageEvalContext {
-        y,
-        p,
-        t,
-        row: context,
-        span: action.span,
-    };
-    for part in &action.message.parts {
-        match part {
-            SolveEventMessagePart::Text(text) => {
-                append_event_message_part(&mut message, text, action.span)?;
-            }
-            SolveEventMessagePart::Conversion {
-                value,
-                source,
-                format,
-            } => {
-                let rendered = eval_event_message_conversion(value, *source, format, eval)?;
-                append_event_message_part(&mut message, &rendered, action.span)?;
-            }
-        }
-    }
-    Ok(message)
-}
-
-#[derive(Clone, Copy)]
-struct MessageEvalContext<'a> {
-    y: &'a [f64],
-    p: &'a [f64],
-    t: f64,
-    row: RowEvalContext<'a>,
-    span: rumoca_core::Span,
-}
-
-const MAX_EVENT_MESSAGE_BYTES: usize = 1_048_576;
-const MAX_STRING_SIGNIFICANT_DIGITS: i64 = 1_024;
-
-fn eval_event_message_conversion(
-    row: &[LinearOp],
-    source: SolveStringConversionSource,
-    format: &SolveStringConversionFormat,
-    eval: MessageEvalContext<'_>,
-) -> Result<String, EvalSolveError> {
-    let value = eval_row_with_context(row, eval.y, eval.p, eval.t, eval.row)?;
-    let SolveStringConversionFormat::Options {
-        minimum_length,
-        left_justified,
-        significant_digits,
-    } = format;
-    let minimum_length =
-        eval_message_integer_option(minimum_length.as_deref(), 0, "minimumLength", eval)?;
-    let left_justified =
-        eval_message_boolean_option(left_justified.as_deref(), true, "leftJustified", eval)?;
-    let significant_digits =
-        eval_message_integer_option(significant_digits.as_deref(), 6, "significantDigits", eval)?;
-    if !(1..=MAX_STRING_SIGNIFICANT_DIGITS).contains(&significant_digits) {
-        return Err(invalid_message_option(
-            format!("significantDigits must be in 1..={MAX_STRING_SIGNIFICANT_DIGITS}"),
-            eval.span,
-        ));
-    }
-    let converted = match source {
-        SolveStringConversionSource::Real => {
-            format_significant_digits(value, significant_digits as usize)
-        }
-        SolveStringConversionSource::Integer => {
-            if !value.is_finite() || value.fract() != 0.0 {
-                return Err(invalid_message_option(
-                    "Integer String conversion received a non-integer runtime value",
-                    eval.span,
-                ));
-            }
-            format!("{value:.0}")
-        }
-        SolveStringConversionSource::Boolean => {
-            if value == 0.0 {
-                "false".to_string()
-            } else if value == 1.0 {
-                "true".to_string()
-            } else {
-                return Err(invalid_message_option(
-                    "Boolean String conversion received a value outside {0,1}",
-                    eval.span,
-                ));
-            }
-        }
-    };
-    let width = usize::try_from(minimum_length)
-        .map_err(|_| invalid_message_option("minimumLength must be nonnegative", eval.span))?;
-    if width > MAX_EVENT_MESSAGE_BYTES {
-        return Err(invalid_message_option(
-            format!("minimumLength exceeds the {MAX_EVENT_MESSAGE_BYTES}-byte message limit"),
-            eval.span,
-        ));
-    }
-    if converted.len() >= width {
-        return Ok(converted);
-    }
-    let padding_len = width - converted.len();
-    let mut padded = String::new();
-    padded
-        .try_reserve_exact(width)
-        .map_err(|_| invalid_message_option("event message allocation failed", eval.span))?;
-    if left_justified {
-        padded.push_str(&converted);
-        padded.extend(std::iter::repeat_n(' ', padding_len));
-    } else {
-        padded.extend(std::iter::repeat_n(' ', padding_len));
-        padded.push_str(&converted);
-    }
-    Ok(padded)
-}
-
-fn eval_message_integer_option(
-    row: Option<&[LinearOp]>,
-    default: i64,
-    name: &'static str,
-    eval: MessageEvalContext<'_>,
-) -> Result<i64, EvalSolveError> {
-    let Some(row) = row else {
-        return Ok(default);
-    };
-    let value = eval_row_with_context(row, eval.y, eval.p, eval.t, eval.row)?;
-    if !value.is_finite()
-        || value.fract() != 0.0
-        || value < i64::MIN as f64
-        || value >= 9_223_372_036_854_775_808.0
-    {
-        return Err(invalid_message_option(
-            format!("{name} must evaluate to an Integer"),
-            eval.span,
-        ));
-    }
-    Ok(value as i64)
-}
-
-fn eval_message_boolean_option(
-    row: Option<&[LinearOp]>,
-    default: bool,
-    name: &'static str,
-    eval: MessageEvalContext<'_>,
-) -> Result<bool, EvalSolveError> {
-    let Some(row) = row else {
-        return Ok(default);
-    };
-    match eval_row_with_context(row, eval.y, eval.p, eval.t, eval.row)? {
-        0.0 => Ok(false),
-        1.0 => Ok(true),
-        _ => Err(invalid_message_option(
-            format!("{name} must evaluate to a Boolean"),
-            eval.span,
-        )),
-    }
-}
-
-fn append_event_message_part(
-    message: &mut String,
-    part: &str,
-    span: rumoca_core::Span,
-) -> Result<(), EvalSolveError> {
-    let total = message
-        .len()
-        .checked_add(part.len())
-        .filter(|total| *total <= MAX_EVENT_MESSAGE_BYTES)
-        .ok_or_else(|| {
-            invalid_message_option(
-                format!("event message exceeds the {MAX_EVENT_MESSAGE_BYTES}-byte limit"),
-                span,
-            )
-        })?;
-    message
-        .try_reserve_exact(total - message.len())
-        .map_err(|_| invalid_message_option("event message allocation failed", span))?;
-    message.push_str(part);
-    Ok(())
-}
-
-fn invalid_message_option(message: impl Into<String>, span: rumoca_core::Span) -> EvalSolveError {
-    EvalSolveError::InvalidRow {
-        message: message.into(),
-        span: Some(span),
-    }
-}
-
-fn format_significant_digits(value: f64, digits: usize) -> String {
-    if !value.is_finite() || value == 0.0 {
-        return value.to_string();
-    }
-    let exponent = value.abs().log10().floor() as i32;
-    if exponent < -4 || exponent >= digits as i32 {
-        let mut formatted = format!("{:.*e}", digits.saturating_sub(1), value);
-        trim_fraction_zeros(&mut formatted, 'e');
-        return formatted;
-    }
-    let fractional = (digits as i32 - exponent - 1).max(0) as usize;
-    let mut formatted = format!("{value:.fractional$}");
-    trim_fraction_zeros(&mut formatted, '\0');
-    formatted
-}
-
-fn trim_fraction_zeros(value: &mut String, exponent_marker: char) {
-    let exponent = (exponent_marker != '\0')
-        .then(|| value.find(exponent_marker))
-        .flatten()
-        .unwrap_or(value.len());
-    let mut end = exponent;
-    while end > 0 && value.as_bytes()[end - 1] == b'0' {
-        end -= 1;
-    }
-    if end > 0 && value.as_bytes()[end - 1] == b'.' {
-        end -= 1;
-    }
-    if end != exponent {
-        value.replace_range(end..exponent, "");
-    }
 }
 
 /// Largest interleaved lane count of one tensor operation.
@@ -1620,8 +1163,9 @@ pub(crate) fn eval_row_prepared_maybe_fast(
     if domain_diagnostics::active() {
         if domain_diagnostics::supported(input.row)
             && (register_safe || domain_diagnostics::checked_flow(input.row, input.source_span))
+            && let Some(plan) =
+                PreparedLazyRowPlan::from_supported(input.row, input.register_count, None)
         {
-            let plan = PreparedLazyRowPlan::from_supported(input.row, input.register_count);
             return eval_row_prepared_lazy(input.with_lazy_plan(Some(&plan)), scratch, sink);
         }
         domain_diagnostics::unobserved();
@@ -1649,10 +1193,19 @@ fn eval_row_prepared_lazy(
     let plan = input
         .lazy_plan
         .expect("lazy row evaluation requires a prepared plan");
+    if let Some(versions) = &plan.versions {
+        return versioned_lazy::evaluate(input, versions, scratch, sink);
+    }
     scratch.regs.resize(input.register_count, 0.0);
     scratch.lazy_outputs.clear();
     if let Some(trace) = plan.trace.borrow().as_deref()
-        && eval_cached_lazy_trace(input, &mut scratch.regs, trace, &mut scratch.lazy_outputs)?
+        && eval_cached_lazy_trace(
+            input,
+            &mut scratch.regs,
+            &mut scratch.tensor_results,
+            trace,
+            &mut scratch.lazy_outputs,
+        )?
     {
         for value in scratch.lazy_outputs.iter().copied() {
             sink.store(value)?;
@@ -1711,7 +1264,12 @@ fn execute_lazy_task(
         }
         LazyEvalTask::Apply(op_index) => {
             let op = input.row[op_index].clone();
-            eval_lazy_pure_op(input, &mut scratch.regs, op.clone())?;
+            eval_lazy_pure_op(
+                input,
+                &mut scratch.regs,
+                &mut scratch.tensor_results,
+                op.clone(),
+            )?;
             scratch.lazy_trace.push(LazyTraceStep::Apply(op_index));
             let dst = op
                 .dst_register()
@@ -1764,6 +1322,7 @@ fn execute_lazy_task(
 fn eval_cached_lazy_trace(
     input: PreparedRowEval<'_, '_>,
     regs: &mut [f64],
+    tensor_results: &mut Vec<f64>,
     trace: &[LazyTraceStep],
     outputs: &mut Vec<f64>,
 ) -> Result<bool, EvalSolveError> {
@@ -1771,7 +1330,7 @@ fn eval_cached_lazy_trace(
     for step in trace.iter().copied() {
         match step {
             LazyTraceStep::Apply(op_index) => {
-                eval_lazy_pure_op(input, regs, input.row[op_index].clone())?;
+                eval_lazy_pure_op(input, regs, tensor_results, input.row[op_index].clone())?;
             }
             LazyTraceStep::Guard { cond, expected } => {
                 if (regs[cond as usize] != 0.0) != expected {
@@ -1803,6 +1362,8 @@ fn push_lazy_dependencies(tasks: &mut Vec<LazyEvalTask>, op: LinearOp) {
         | LinearOp::LoadTime { .. }
         | LinearOp::LoadY { .. }
         | LinearOp::LoadP { .. }
+        | LinearOp::LoadFunctionConditionalCapture { .. }
+        | LinearOp::LoadFunctionConditionalCaptureRange { .. }
         | LinearOp::TensorIdentity { .. }
         | LinearOp::TensorLoad { .. } => {}
         LinearOp::LoadIndexedP { index, .. } => push_lazy_register(tasks, index),
@@ -2052,6 +1613,7 @@ fn push_lazy_tensor_elements(
 fn eval_lazy_pure_op(
     input: PreparedRowEval<'_, '_>,
     regs: &mut [f64],
+    tensor_results: &mut Vec<f64>,
     op: LinearOp,
 ) -> Result<(), EvalSolveError> {
     match op {
@@ -2067,19 +1629,53 @@ fn eval_lazy_pure_op(
         | LinearOp::Unary { .. }
         | LinearOp::Binary { .. }
         | LinearOp::Compare { .. }) => eval_lazy_scalar_op(input, regs, op)?,
+        op @ (LinearOp::LoadFunctionConditionalCapture { .. }
+        | LinearOp::LoadFunctionConditionalCaptureRange { .. }) => {
+            eval_conditional_capture_op(input, regs, &op)?
+        }
         op @ (LinearOp::MatrixMultiply { .. }
         | LinearOp::TensorBinary { .. }
         | LinearOp::TensorTranspose { .. }
         | LinearOp::TensorConcatenate { .. }
-        | LinearOp::TensorUpdate { .. }) => eval_lazy_tensor_algebra_op(regs, op)?,
-        op @ (LinearOp::TensorFill { .. }
-        | LinearOp::TensorIdentity { .. }
-        | LinearOp::TensorLoad { .. }) => eval_lazy_tensor_constructor_op(input, regs, op)?,
+        | LinearOp::TensorUpdate { .. }
+        | LinearOp::TensorFill { .. }) => eval_lazy_tensor_algebra_op(regs, tensor_results, op)?,
+        op @ (LinearOp::TensorIdentity { .. } | LinearOp::TensorLoad { .. }) => {
+            eval_lazy_tensor_constructor_op(input, regs, op)?
+        }
         op @ (LinearOp::FunctionFold { .. }
         | LinearOp::GuardedFunctionFold { .. }
         | LinearOp::FunctionConditional { .. }) => eval_lazy_region_op(input, regs, op)?,
         _ => unreachable!("unsupported operations do not receive a lazy apply task"),
     }
+    Ok(())
+}
+
+fn eval_conditional_capture_op(
+    input: PreparedRowEval<'_, '_>,
+    regs: &mut [f64],
+    op: &LinearOp,
+) -> Result<(), EvalSolveError> {
+    let (destination, start, count) = match *op {
+        LinearOp::LoadFunctionConditionalCapture { dst, index } => (dst, index, 1),
+        LinearOp::LoadFunctionConditionalCaptureRange {
+            dst_start,
+            index_start,
+            count,
+        } => (dst_start, index_start, count),
+        _ => unreachable!("conditional capture dispatch has exactly its two checked load owners"),
+    };
+    let captures = input
+        .conditional_captures
+        .and_then(|values| {
+            start
+                .checked_add(count)
+                .and_then(|end| values.get(start..end))
+        })
+        .ok_or_else(|| {
+            invalid_row("invalid function-conditional capture load")
+                .with_source_span(input.source_span)
+        })?;
+    regs[destination as usize..destination as usize + count].copy_from_slice(captures);
     Ok(())
 }
 
@@ -2157,101 +1753,12 @@ fn eval_lazy_scalar_op(
     Ok(())
 }
 
-fn eval_lazy_tensor_algebra_op(regs: &mut [f64], op: LinearOp) -> Result<(), EvalSolveError> {
-    match op {
-        LinearOp::MatrixMultiply {
-            dst_start,
-            lhs_start,
-            rhs_start,
-            rows,
-            inner,
-            columns,
-            lanes,
-        } => eval_matrix_multiply(
-            regs,
-            dst_start,
-            lhs_start,
-            rhs_start,
-            MatrixProductShape {
-                rows,
-                inner,
-                columns,
-                lanes,
-            },
-        ),
-        LinearOp::TensorBinary {
-            dst_start,
-            op,
-            lhs_start,
-            rhs_start,
-            count,
-            lhs_stride,
-            rhs_stride,
-            lanes,
-        } => eval_tensor_binary(
-            regs,
-            dst_start,
-            op,
-            (
-                StridedOperand {
-                    start: lhs_start,
-                    stride: lhs_stride,
-                },
-                StridedOperand {
-                    start: rhs_start,
-                    stride: rhs_stride,
-                },
-            ),
-            count,
-            lanes,
-        ),
-        LinearOp::TensorTranspose {
-            dst_start,
-            src_start,
-            rows,
-            columns,
-            element_width,
-            lanes,
-        } => eval_tensor_transpose(
-            regs,
-            dst_start,
-            src_start,
-            rows,
-            columns,
-            element_width,
-            lanes,
-        ),
-        LinearOp::TensorConcatenate {
-            dst_start,
-            sources,
-            dimensions,
-            axis,
-            lanes,
-        } => {
-            visit_tensor_concatenate(&sources, &dimensions, axis, lanes, |source, destination| {
-                regs[dst_start as usize + destination] = regs[source as usize];
-                Ok::<(), EvalSolveError>(())
-            })?
-        }
-        LinearOp::TensorUpdate {
-            dst_start,
-            base_start,
-            value_start,
-            dimensions,
-            subscripts,
-            lanes,
-        } => eval_tensor_update(
-            regs,
-            dst_start,
-            base_start,
-            value_start,
-            &dimensions,
-            &subscripts,
-            lanes,
-        )?,
-        _ => unreachable!("lazy tensor algebra dispatch receives only tensor operations"),
-    }
-    Ok(())
+fn eval_lazy_tensor_algebra_op(
+    regs: &mut [f64],
+    tensor_results: &mut Vec<f64>,
+    op: LinearOp,
+) -> Result<(), EvalSolveError> {
+    native_tensors::eval(regs, tensor_results, &op)
 }
 
 fn eval_lazy_tensor_constructor_op(
@@ -2260,19 +1767,6 @@ fn eval_lazy_tensor_constructor_op(
     op: LinearOp,
 ) -> Result<(), EvalSolveError> {
     match op {
-        LinearOp::TensorFill {
-            dst_start,
-            value_start,
-            count,
-            lanes,
-        } => {
-            for element in 0..count {
-                for lane in 0..lanes {
-                    regs[dst_start as usize + element * lanes + lane] =
-                        regs[value_start as usize + lane];
-                }
-            }
-        }
         LinearOp::TensorIdentity {
             dst_start,
             size,
@@ -2398,7 +1892,7 @@ fn eval_lazy_region_op(
         } => {
             let captures =
                 &regs[capture_start as usize..capture_start as usize + program.capture_count];
-            let values = eval_function_conditional(input, &program, captures)?;
+            let values = eval_function_conditional_owned(input, &program, captures)?;
             regs[dst_start as usize..dst_start as usize + program.result_count]
                 .copy_from_slice(&values);
         }
@@ -2434,15 +1928,15 @@ struct CheckedRowEvaluator<'scratch, 'row, 'ctx, 'out> {
 
 impl CheckedRowEvaluator<'_, '_, '_, '_> {
     fn eval(mut self) -> Result<(), EvalSolveError> {
-        for op in self.input.row {
-            self.eval_op(op.clone())?;
+        for (operation, op) in self.input.row.iter().enumerate() {
+            self.eval_op(operation, op.clone())?;
         }
         Ok(())
     }
 
     // SPEC_0021: Exception - exhaustive checked execution dispatch over every LinearOp variant.
     #[allow(clippy::excessive_nesting, clippy::too_many_lines)]
-    fn eval_op(&mut self, op: LinearOp) -> Result<(), EvalSolveError> {
+    fn eval_op(&mut self, operation: usize, op: LinearOp) -> Result<(), EvalSolveError> {
         match op {
             LinearOp::Const { dst, value } => {
                 self.set(dst, value)?;
@@ -2621,67 +2115,8 @@ impl CheckedRowEvaluator<'_, '_, '_, '_> {
                 }
                 self.set(dst, value)?;
             }
-            LinearOp::MatrixMultiply {
-                dst_start,
-                lhs_start,
-                rhs_start,
-                rows,
-                inner,
-                columns,
-                lanes,
-            } => {
-                let mut values = vec![0.0; rows * columns * lanes];
-                for row in 0..rows {
-                    for column in 0..columns {
-                        let output = (row * columns + column) * lanes;
-                        for term in 0..inner {
-                            let lhs = (row * inner + term) * lanes;
-                            let rhs = (term * columns + column) * lanes;
-                            let lhs_re = self.get(lhs_start + lhs as Reg)?;
-                            let rhs_re = self.get(rhs_start + rhs as Reg)?;
-                            values[output] += lhs_re * rhs_re;
-                            for lane in 1..lanes {
-                                values[output + lane] +=
-                                    self.get(lhs_start + (lhs + lane) as Reg)? * rhs_re
-                                        + lhs_re * self.get(rhs_start + (rhs + lane) as Reg)?;
-                            }
-                        }
-                    }
-                }
-                for (offset, value) in values.into_iter().enumerate() {
-                    self.set(dst_start + offset as Reg, value)?;
-                }
-            }
-            LinearOp::TensorBinary {
-                dst_start,
-                op,
-                lhs_start,
-                rhs_start,
-                count,
-                lhs_stride,
-                rhs_stride,
-                lanes,
-            } => {
-                let mut values = Vec::with_capacity(count * lanes);
-                for element in 0..count {
-                    let lhs = lhs_start + (element * lhs_stride * lanes) as Reg;
-                    let rhs = rhs_start + (element * rhs_stride * lanes) as Reg;
-                    let lhs_re = self.get(lhs)?;
-                    let rhs_re = self.get(rhs)?;
-                    values.push(eval_tensor_binary_primal(op, lhs_re, rhs_re, lanes));
-                    for lane in 1..lanes {
-                        values.push(eval_tensor_binary_tangent(
-                            op,
-                            lhs_re,
-                            self.get(lhs + lane as Reg)?,
-                            rhs_re,
-                            self.get(rhs + lane as Reg)?,
-                        ));
-                    }
-                }
-                for (offset, value) in values.into_iter().enumerate() {
-                    self.set(dst_start + offset as Reg, value)?;
-                }
+            op @ (LinearOp::MatrixMultiply { .. } | LinearOp::TensorBinary { .. }) => {
+                self.eval_tensor_result(&op)?
             }
             LinearOp::TensorCross {
                 dst_start,
@@ -2702,29 +2137,7 @@ impl CheckedRowEvaluator<'_, '_, '_, '_> {
                     self.set(dst_start + offset as Reg, *value)?;
                 }
             }
-            LinearOp::TensorTranspose {
-                dst_start,
-                src_start,
-                rows,
-                columns,
-                element_width,
-                lanes,
-            } => {
-                let value_width = element_width * lanes;
-                let mut values = vec![0.0; rows * columns * value_width];
-                for row in 0..rows {
-                    for column in 0..columns {
-                        for value in 0..value_width {
-                            let dst = (row * columns + column) * value_width + value;
-                            let src = (column * rows + row) * value_width + value;
-                            values[dst] = self.get(src_start + src as Reg)?;
-                        }
-                    }
-                }
-                for (offset, value) in values.into_iter().enumerate() {
-                    self.set(dst_start + offset as Reg, value)?;
-                }
-            }
+            op @ LinearOp::TensorTranspose { .. } => self.eval_tensor_result(&op)?,
             LinearOp::TensorConcatenate {
                 dst_start,
                 sources,
@@ -2916,7 +2329,14 @@ impl CheckedRowEvaluator<'_, '_, '_, '_> {
                 let captures = (0..program.capture_count)
                     .map(|offset| self.get(capture_start + offset as Reg))
                     .collect::<Result<Vec<_>, _>>()?;
-                let values = eval_function_conditional(self.input, &program, &captures)?;
+                let values = eval_function_conditional_owned(self.input, &program, &captures)?;
+                for (offset, value) in values.into_iter().enumerate() {
+                    self.set(dst_start + offset as Reg, value)?;
+                }
+            }
+            LinearOp::PureCallObservation { dst_start, .. } => {
+                let values =
+                    eval_observation_payload(self.input, operation, |register| self.get(register))?;
                 for (offset, value) in values.into_iter().enumerate() {
                     self.set(dst_start + offset as Reg, value)?;
                 }
@@ -3151,6 +2571,19 @@ impl CheckedRowEvaluator<'_, '_, '_, '_> {
         self.set(dst, self.input.read_input("seed", seed, slot)?)
     }
 
+    fn eval_tensor_result(&mut self, op: &LinearOp) -> Result<(), EvalSolveError> {
+        let dst = op
+            .dst_register()
+            .expect("tensor operation has a destination");
+        let values = (0..op.dst_register_count())
+            .map(|offset| native_tensors::value_at(op, &mut |reg| self.get(reg), offset))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (offset, value) in values.into_iter().enumerate() {
+            self.set(dst + offset as Reg, value)?;
+        }
+        Ok(())
+    }
+
     fn get(&self, reg: Reg) -> Result<f64, EvalSolveError> {
         get(self.regs, self.initialized, reg, self.input.source_span)
     }
@@ -3175,7 +2608,8 @@ fn eval_row_prepared_fast(
 ) -> Result<(), EvalSolveError> {
     scratch.regs.resize(input.register_count, 0.0);
     let regs = &mut scratch.regs;
-    for op in input.row {
+    let tensor_results = &mut scratch.tensor_results;
+    for (operation, op) in input.row.iter().enumerate() {
         if let LinearOp::StoreOutputFoldTensorUpdate {
             source_base,
             source_stride,
@@ -3309,23 +2743,9 @@ fn eval_row_prepared_fast(
                     .copied()
                     .ok_or_else(|| invalid_row("invalid function-fold capture load"))?;
             }
-            LinearOp::LoadFunctionConditionalCapture { dst, index } => {
-                regs[*dst as usize] = input
-                    .conditional_captures
-                    .and_then(|values| values.get(*index))
-                    .copied()
-                    .ok_or_else(|| invalid_row("invalid function-conditional capture load"))?;
-            }
-            LinearOp::LoadFunctionConditionalCaptureRange {
-                dst_start,
-                index_start,
-                count,
-            } => {
-                let captures = input.conditional_captures.ok_or_else(|| {
-                    invalid_row("invalid function-conditional capture range load")
-                })?;
-                regs[*dst_start as usize..*dst_start as usize + *count]
-                    .copy_from_slice(&captures[*index_start..*index_start + *count]);
+            op @ (LinearOp::LoadFunctionConditionalCapture { .. }
+            | LinearOp::LoadFunctionConditionalCaptureRange { .. }) => {
+                eval_conditional_capture_op(input, regs, op)?
             }
             LinearOp::Move { dst, src } => regs[*dst as usize] = regs[*src as usize],
             LinearOp::LinearSolveComponent {
@@ -3354,121 +2774,18 @@ fn eval_row_prepared_fast(
                 }
                 regs[*dst as usize] = value;
             }
-            LinearOp::MatrixMultiply {
-                dst_start,
-                lhs_start,
-                rhs_start,
-                rows,
-                inner,
-                columns,
-                lanes,
-            } => eval_matrix_multiply(
-                regs,
-                *dst_start,
-                *lhs_start,
-                *rhs_start,
-                MatrixProductShape {
-                    rows: *rows,
-                    inner: *inner,
-                    columns: *columns,
-                    lanes: *lanes,
-                },
-            ),
-            LinearOp::TensorBinary {
-                dst_start,
-                op,
-                lhs_start,
-                rhs_start,
-                count,
-                lhs_stride,
-                rhs_stride,
-                lanes,
-            } => eval_tensor_binary(
-                regs,
-                *dst_start,
-                *op,
-                (
-                    StridedOperand {
-                        start: *lhs_start,
-                        stride: *lhs_stride,
-                    },
-                    StridedOperand {
-                        start: *rhs_start,
-                        stride: *rhs_stride,
-                    },
-                ),
-                *count,
-                *lanes,
-            ),
+            op @ (LinearOp::MatrixMultiply { .. }
+            | LinearOp::TensorBinary { .. }
+            | LinearOp::TensorTranspose { .. }
+            | LinearOp::TensorConcatenate { .. }
+            | LinearOp::TensorUpdate { .. }
+            | LinearOp::TensorFill { .. }) => native_tensors::eval(regs, tensor_results, op)?,
             LinearOp::TensorCross {
                 dst_start,
                 lhs_start,
                 rhs_start,
                 lanes,
             } => eval_tensor_cross(regs, *dst_start, *lhs_start, *rhs_start, *lanes),
-            LinearOp::TensorTranspose {
-                dst_start,
-                src_start,
-                rows,
-                columns,
-                element_width,
-                lanes,
-            } => eval_tensor_transpose(
-                regs,
-                *dst_start,
-                *src_start,
-                *rows,
-                *columns,
-                *element_width,
-                *lanes,
-            ),
-            LinearOp::TensorConcatenate {
-                dst_start,
-                sources,
-                dimensions,
-                axis,
-                lanes,
-            } => {
-                visit_tensor_concatenate(
-                    sources,
-                    dimensions,
-                    *axis,
-                    *lanes,
-                    |source, destination| {
-                        regs[*dst_start as usize + destination] = regs[source as usize];
-                        Ok::<(), EvalSolveError>(())
-                    },
-                )?;
-            }
-            LinearOp::TensorUpdate {
-                dst_start,
-                base_start,
-                value_start,
-                dimensions,
-                subscripts,
-                lanes,
-            } => eval_tensor_update(
-                regs,
-                *dst_start,
-                *base_start,
-                *value_start,
-                dimensions,
-                subscripts,
-                *lanes,
-            )?,
-            LinearOp::TensorFill {
-                dst_start,
-                value_start,
-                count,
-                lanes,
-            } => {
-                for element in 0..*count {
-                    for lane in 0..*lanes {
-                        regs[*dst_start as usize + element * *lanes + lane] =
-                            regs[*value_start as usize + lane];
-                    }
-                }
-            }
             LinearOp::TensorIdentity {
                 dst_start,
                 size,
@@ -3578,8 +2895,24 @@ fn eval_row_prepared_fast(
             } => {
                 let captures =
                     &regs[*capture_start as usize..*capture_start as usize + program.capture_count];
-                let values = eval_function_conditional(input, program, captures)?;
+                let mut values = std::mem::take(&mut scratch.region_values);
+                values.resize(program.result_count, 0.0);
+                eval_function_conditional(
+                    input,
+                    program,
+                    captures,
+                    &mut scratch.region_frames,
+                    &mut values,
+                )?;
                 regs[*dst_start as usize..*dst_start as usize + program.result_count]
+                    .copy_from_slice(&values);
+                scratch.region_values = values;
+            }
+            LinearOp::PureCallObservation { dst_start, .. } => {
+                let values = eval_observation_payload(input, operation, |register| {
+                    Ok(regs[register as usize])
+                })?;
+                regs[*dst_start as usize..*dst_start as usize + values.len()]
                     .copy_from_slice(&values);
             }
             LinearOp::PureCall {
@@ -3766,90 +3099,6 @@ fn fold_tensor_node_value(
     }
 }
 
-fn eval_matrix_multiply(
-    regs: &mut [f64],
-    dst_start: Reg,
-    lhs_start: Reg,
-    rhs_start: Reg,
-    shape: MatrixProductShape,
-) {
-    let MatrixProductShape {
-        rows,
-        inner,
-        columns,
-        lanes,
-    } = shape;
-    for element in 0..rows.saturating_mul(columns) {
-        let row = element / columns;
-        let column = element % columns;
-        let output = element * lanes;
-        let mut re = 0.0;
-        for term in 0..inner {
-            let lhs = (row * inner + term) * lanes;
-            let rhs = (term * columns + column) * lanes;
-            re += regs[lhs_start as usize + lhs] * regs[rhs_start as usize + rhs];
-        }
-        // Each tangent lane accumulates in the same term order as the dual lane.
-        for lane in 1..lanes {
-            let mut du = 0.0;
-            for term in 0..inner {
-                let lhs = (row * inner + term) * lanes;
-                let rhs = (term * columns + column) * lanes;
-                du += regs[lhs_start as usize + lhs + lane] * regs[rhs_start as usize + rhs]
-                    + regs[lhs_start as usize + lhs] * regs[rhs_start as usize + rhs + lane];
-            }
-            regs[dst_start as usize + output + lane] = du;
-        }
-        regs[dst_start as usize + output] = re;
-    }
-}
-
-fn eval_tensor_binary(
-    regs: &mut [f64],
-    dst_start: Reg,
-    op: BinaryOp,
-    operands: (StridedOperand, StridedOperand),
-    count: usize,
-    lanes: usize,
-) {
-    let (lhs_operand, rhs_operand) = operands;
-    for element in 0..count {
-        let lhs = lhs_operand.start as usize + element * lhs_operand.stride * lanes;
-        let rhs = rhs_operand.start as usize + element * rhs_operand.stride * lanes;
-        let dst = dst_start as usize + element * lanes;
-        let lhs_re = regs[lhs];
-        let rhs_re = regs[rhs];
-        let mut tangents = [0.0; MAX_OP_LANES];
-        for lane in 1..lanes {
-            tangents[lane] =
-                eval_tensor_binary_tangent(op, lhs_re, regs[lhs + lane], rhs_re, regs[rhs + lane]);
-        }
-        regs[dst] = eval_tensor_binary_primal(op, lhs_re, rhs_re, lanes);
-        regs[dst + 1..dst + lanes].copy_from_slice(&tangents[1..lanes]);
-    }
-}
-
-fn eval_tensor_transpose(
-    regs: &mut [f64],
-    dst_start: Reg,
-    src_start: Reg,
-    rows: usize,
-    columns: usize,
-    element_width: usize,
-    lanes: usize,
-) {
-    let value_width = element_width * lanes;
-    for row in 0..rows {
-        for column in 0..columns {
-            for value in 0..value_width {
-                let dst = dst_start as usize + (row * columns + column) * value_width + value;
-                let src = src_start as usize + (column * rows + row) * value_width + value;
-                regs[dst] = regs[src];
-            }
-        }
-    }
-}
-
 fn visit_tensor_concatenate<E>(
     sources: &[rumoca_ir_solve::TensorConcatenateSource],
     dimensions: &[u32],
@@ -3881,34 +3130,6 @@ fn visit_tensor_concatenate<E>(
             }
         }
         axis_offset += source_axis;
-    }
-    Ok(())
-}
-
-fn eval_tensor_update(
-    regs: &mut [f64],
-    dst_start: Reg,
-    base_start: Reg,
-    value_start: Reg,
-    dimensions: &[u32],
-    subscripts: &[rumoca_ir_solve::TensorUpdateSubscript],
-    lanes: usize,
-) -> Result<(), EvalSolveError> {
-    let count = dimensions
-        .iter()
-        .fold(1usize, |count, extent| count * *extent as usize);
-    for element in 0..count {
-        let value_offset =
-            tensor_update_register_value_offset(dimensions, subscripts, element, |register| {
-                Ok::<_, EvalSolveError>(regs[register as usize])
-            })?;
-        for lane in 0..lanes {
-            let source = match value_offset {
-                Some(offset) => value_start as usize + offset * lanes + lane,
-                None => base_start as usize + element * lanes + lane,
-            };
-            regs[dst_start as usize + element * lanes + lane] = regs[source];
-        }
     }
     Ok(())
 }
@@ -4030,18 +3251,25 @@ fn eval_function_fold(
     Ok(carried)
 }
 
+/// Evaluate the ordered arms of one function conditional into `out`, which
+/// has the program's result width. `frames` are reusable evaluation frames for
+/// the arm regions, so a warm evaluation allocates nothing.
 fn eval_function_conditional(
     input: PreparedRowEval<'_, '_>,
     program: &rumoca_ir_solve::FunctionConditionalProgram,
     captures: &[f64],
-) -> Result<Vec<f64>, EvalSolveError> {
+    frames: &mut Vec<RowEvalScratch>,
+    out: &mut [f64],
+) -> Result<(), EvalSolveError> {
     for (arm_index, arm) in program.arms.iter().enumerate() {
-        let condition = eval_function_conditional_region(
+        let mut condition = [0.0];
+        eval_function_conditional_region(
             input,
             &arm.condition,
             arm.condition_register_count,
             captures,
-            1,
+            frames,
+            &mut condition,
         )?;
         tracing::trace!(
             target: "rumoca_eval_solve::function_conditional",
@@ -4057,7 +3285,8 @@ fn eval_function_conditional(
                 &arm.result,
                 arm.result_register_count,
                 captures,
-                program.result_count,
+                frames,
+                out,
             );
         }
     }
@@ -4066,17 +3295,37 @@ fn eval_function_conditional(
         &program.fallback,
         program.fallback_register_count,
         captures,
-        program.result_count,
+        frames,
+        out,
     )
 }
 
+/// [`eval_function_conditional`] for callers that own no reusable frames.
+fn eval_function_conditional_owned(
+    input: PreparedRowEval<'_, '_>,
+    program: &rumoca_ir_solve::FunctionConditionalProgram,
+    captures: &[f64],
+) -> Result<Vec<f64>, EvalSolveError> {
+    let mut values = vec![0.0; program.result_count];
+    eval_function_conditional(input, program, captures, &mut Vec::new(), &mut values)?;
+    Ok(values)
+}
+
+/// Run one region over a frame taken from `frames`. The frame receives the
+/// remaining pool for the regions it nests and hands it back with itself.
 fn eval_function_conditional_region(
     input: PreparedRowEval<'_, '_>,
     region: &[LinearOp],
     register_count: usize,
     captures: &[f64],
-    output_count: usize,
-) -> Result<Vec<f64>, EvalSolveError> {
+    frames: &mut Vec<RowEvalScratch>,
+    out: &mut [f64],
+) -> Result<(), EvalSolveError> {
+    if out.len() == 1
+        && let Some(value) = conditional_region::direct_value(input, region, register_count)
+    {
+        return OutputCursor::new(out).store(value?);
+    }
     let mut nested = PreparedRowEval::new(
         region,
         register_count,
@@ -4090,11 +3339,21 @@ fn eval_function_conditional_region(
     nested.fold_carried = input.fold_carried;
     nested.fold_indices = input.fold_indices;
     nested.fold_captures = input.fold_captures;
-    let mut values = vec![0.0; output_count];
-    let mut scratch = RowEvalScratch::default();
-    let mut sink = OutputCursor::new(&mut values);
-    eval_row_prepared_fast(nested, &mut scratch, &mut sink)?;
-    Ok(values)
+    let lazy_plan = PreparedLazyRowPlan::with_conditional_captures(
+        region,
+        register_count,
+        Some(captures.len()),
+    );
+    nested = nested.with_lazy_plan(lazy_plan.as_ref());
+    // The pool hands back a retained scratch when one exists; a fresh one is not
+    // a substituted value, it is the first frame this nesting depth has used.
+    let mut frame = frames.pop().unwrap_or_else(RowEvalScratch::fresh);
+    std::mem::swap(&mut frame.region_frames, frames);
+    let result =
+        eval_row_prepared_maybe_fast(nested, true, &mut frame, &mut OutputCursor::new(out));
+    std::mem::swap(&mut frame.region_frames, frames);
+    frames.push(frame);
+    result
 }
 
 fn tensor_update_register_value_offset<E>(
@@ -4433,12 +3692,28 @@ fn linear_op_name(op: &LinearOp) -> &'static str {
         LinearOp::GuardedFunctionFold { .. } => "GuardedFunctionFold",
         LinearOp::FunctionConditional { .. } => "FunctionConditional",
         LinearOp::PureCall { .. } => "PureCall",
+        LinearOp::PureCallObservation { .. } => "PureCallObservation",
         LinearOp::PureCallDirectional { .. } => "PureCallDirectional",
         LinearOp::StoreOutputFoldTensorUpdate { .. } => "StoreOutputFoldTensorUpdate",
         LinearOp::StoreOutputFunctionFold { .. } => "StoreOutputFunctionFold",
         LinearOp::StoreOutputRange { .. } => "StoreOutputRange",
         LinearOp::StoreOutput { .. } => "StoreOutput",
     }
+}
+
+fn eval_observation_payload(
+    input: PreparedRowEval<'_, '_>,
+    operation: usize,
+    read: impl FnMut(Reg) -> Result<f64, EvalSolveError>,
+) -> Result<Vec<f64>, EvalSolveError> {
+    let context = input.context.event_observations.ok_or_else(|| {
+        invalid_row("assertion observation requires its checked event-action adapter")
+    })?;
+    let table = input
+        .context
+        .pure_calls
+        .ok_or_else(|| invalid_row("observation has no pure-call table"))?;
+    context.evaluate(table, input.row, operation, read)
 }
 
 fn eval_pure_call_payload(
@@ -4455,10 +3730,14 @@ fn eval_pure_call_payload(
     if !table.matches_site(site) || input_starts.len() != site.inputs().len() {
         return Err(invalid_row("pure-call site does not match its model owner"));
     }
-    if let Some(execution) = context.pure_call_execution {
+    let invocation = PureCallInvocation::Primal(site);
+    if let Some(execution) = context
+        .pure_call_execution
+        .filter(|execution| execution.executes(invocation))
+    {
         return pure_call_execution::eval_compiled_call(
             execution,
-            PureCallInvocation::Primal(site),
+            invocation,
             input_starts,
             &mut read,
         );
@@ -4492,10 +3771,14 @@ fn eval_pure_call_directional_payload(
             "directional pure-call site does not match its model owner",
         ));
     }
-    if let Some(execution) = context.pure_call_execution {
+    let invocation = PureCallInvocation::Directional(site);
+    if let Some(execution) = context
+        .pure_call_execution
+        .filter(|execution| execution.executes(invocation))
+    {
         return pure_call_execution::eval_compiled_call(
             execution,
-            PureCallInvocation::Directional(site),
+            invocation,
             input_starts,
             &mut read,
         );
@@ -4537,13 +3820,15 @@ fn eval_typed_call_payload(
         inputs,
         output_count,
     } = signature;
+    let provenance = table.owner(owner).map(|owner| owner.provenance());
     let mut arguments = Vec::with_capacity(inputs.len());
     for (&start, value_type) in input_starts.iter().zip(inputs) {
         let mut elements = Vec::with_capacity(value_type.scalar_count() as usize);
         for offset in 0..value_type.scalar_count() as usize {
-            elements.push(pure_call_execution::read_input_element(
-                start, offset, value_type, read,
-            )?);
+            elements.push(
+                pure_call_execution::read_input_element(start, offset, value_type, read)
+                    .map_err(|error| error.with_source_span(provenance))?,
+            );
         }
         arguments.push(
             TypedValue::construct(value_type.clone(), elements)
@@ -4555,17 +3840,24 @@ fn eval_typed_call_payload(
     } else {
         typed_program::eval_pure_call(table, owner, &arguments)
     }
-    .map_err(|error| invalid_row(error.to_string()))?;
+    .map_err(EvalSolveError::from)?;
     let mut flattened = Vec::with_capacity(
         output_count.ok_or_else(|| invalid_row("pure-call output width overflows"))?,
     );
     for output in outputs {
-        flattened.extend(output.elements().iter().copied().map(typed_kind_to_scalar));
+        for &value in output.elements() {
+            flattened.push(
+                checked_scalar_payload_value(value)
+                    .map_err(|error| error.with_source_span(provenance))?,
+            );
+        }
     }
     Ok(flattened)
 }
 
-pub(crate) fn typed_kind_from_scalar(
+/// Decode one scalar runtime ABI value against its checked typed interface.
+/// Integer inputs must fit the signed domain before conversion.
+pub fn typed_kind_from_scalar(
     value: f64,
     value_type: &SolveValueType,
 ) -> Result<SolveValueKind, EvalSolveError> {
@@ -4581,6 +3873,9 @@ pub(crate) fn typed_kind_from_scalar(
         SolveScalarType::Integer(domain) => {
             if !value.is_finite() || value.fract() != 0.0 {
                 return Err(invalid_row("pure-call Integer input is not integral"));
+            }
+            if value < i64::MIN as f64 || value >= 9_223_372_036_854_775_808.0 {
+                return Err(invalid_row("pure-call Integer input is outside its domain"));
             }
             let integer = value as i64;
             if !domain.contains(integer) || integer as f64 != value {
@@ -4599,6 +3894,20 @@ pub(crate) fn typed_kind_to_scalar(value: SolveValueKind) -> f64 {
         SolveValueKind::Integer(value) => value as f64,
         SolveValueKind::Boolean(value) => f64::from(value),
     }
+}
+
+/// Project one typed value into the scalar runtime ABI without Integer rounding.
+/// This boundary does not restrict typed Int64 storage or Integer-to-Real coercion.
+pub fn checked_scalar_payload_value(value: SolveValueKind) -> Result<f64, EvalSolveError> {
+    let scalar = typed_kind_to_scalar(value);
+    if let SolveValueKind::Integer(integer) = value
+        && scalar as i128 != i128::from(integer)
+    {
+        return Err(invalid_row(
+            "Integer result is not exactly representable in the scalar ABI",
+        ));
+    }
+    Ok(scalar)
 }
 
 pub(crate) fn required_registers(row: &[LinearOp]) -> Result<usize, EvalSolveError> {

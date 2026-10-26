@@ -70,6 +70,7 @@ pub fn import(file: &RbcFile) -> Result<dae::Dae, ImportError> {
         Some(message) => ImportError::Unsupported(message),
         None => ImportError::Construction(error.to_string()),
     })?;
+    functions::verify_conditional_outputs(&dae, model)?;
     Ok(dae)
 }
 
@@ -600,6 +601,20 @@ struct Tables<'a, 'dae> {
     terminals: &'a [dae::TerminalId<'dae>],
 }
 
+fn build_array_update<'dae>(
+    owner: &mut dae::Expressions<'_, 'dae>,
+    ctx: &Rebuild<'_>,
+    (base, value): (ExprId, ExprId),
+    subscripts: &[RbcSubscript],
+    built: &[dae::ExprId<'dae>],
+    at: dae::DaeProvenance,
+) -> Result<dae::ExprId<'dae>, dae::DaeConstructionError> {
+    let base = resolve(built, base.0, "expression", ctx)?;
+    let value = resolve(built, value.0, "expression", ctx)?;
+    let subscripts = subscripts_of(subscripts, built, ctx, at)?;
+    owner.at(at).array_update(base, value, subscripts)
+}
+
 fn build_expression<'dae>(
     owner: &mut dae::Expressions<'_, 'dae>,
     ctx: &Rebuild<'_>,
@@ -614,6 +629,7 @@ fn build_expression<'dae>(
         // value is created by opening or closing its loop.
         RbcExprNode::FunctionValue { .. }
         | RbcExprNode::FunctionFoldParameter { .. }
+        | RbcExprNode::FunctionConditionalOutput { .. }
         | RbcExprNode::FunctionFoldOutput { .. } => {
             return Err(ctx.unsupported(format!(
                 "expression {} reads a function body outside that body's replay",
@@ -701,12 +717,7 @@ fn build_expression<'dae>(
             base,
             value,
             subscripts,
-        } => {
-            let base = resolve(built, base.0, "expression", ctx)?;
-            let value = resolve(built, value.0, "expression", ctx)?;
-            let subscripts = subscripts_of(subscripts, built, ctx, at)?;
-            owner.at(at).array_update(base, value, subscripts)?
-        }
+        } => build_array_update(owner, ctx, (*base, *value), subscripts, built, at)?,
         RbcExprNode::Unsupported { detail } => {
             return Err(ctx.unsupported(format!(
                 "expression {} is unsupported: {detail}",
@@ -1010,6 +1021,7 @@ fn rebuild_domains<'dae>(
                 .map(|binder| rumoca_core::StructuredIndexBinder {
                     id: binder.id as usize,
                     display_name: binder.display_name.clone(),
+                    provenance: rumoca_core::IndexBinderProvenance::Generated,
                     lower: binder.lower,
                     upper: binder.upper,
                     step: binder.step,

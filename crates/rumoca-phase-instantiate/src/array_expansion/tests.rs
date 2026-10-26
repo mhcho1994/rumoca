@@ -338,10 +338,12 @@ fn test_index_binding_for_element_projects_multidim_array_comprehension() {
         expr: Arc::new(make_comp_ref_expr(&["ks"])),
         indices: vec![
             ast::ForIndex {
+                binder: None,
                 ident: make_token("ks"),
                 range: make_range_expr(1, 3),
             },
             ast::ForIndex {
+                binder: None,
                 ident: make_token("kp"),
                 range: make_range_expr(1, 2),
             },
@@ -373,6 +375,7 @@ fn test_index_binding_for_element_substitutes_comprehension_index_in_subscripts(
             span: rumoca_core::Span::DUMMY,
         }),
         indices: vec![ast::ForIndex {
+            binder: None,
             ident: make_token("i"),
             range: make_range_expr(1, 3),
         }],
@@ -419,6 +422,7 @@ fn test_index_binding_for_element_substitutes_comprehension_index_in_class_modif
             span: rumoca_core::Span::DUMMY,
         }),
         indices: vec![ast::ForIndex {
+            binder: None,
             ident: make_token("k"),
             range: make_range_expr(1, 3),
         }],
@@ -468,6 +472,7 @@ fn test_resolve_mod_to_array_substitutes_comprehension_index_in_class_modificati
             span: rumoca_core::Span::DUMMY,
         }),
         indices: vec![ast::ForIndex {
+            binder: None,
             ident: make_token("k"),
             range: make_range_expr(1, 3),
         }],
@@ -509,6 +514,7 @@ fn test_index_array_start_projects_vectorized_binary_comprehension() {
         lhs: Arc::new(ast::Expression::ArrayComprehension {
             expr: Arc::new(make_indexed_comp_ref_expr("m_flows", "i")),
             indices: vec![ast::ForIndex {
+                binder: None,
                 ident: make_token("i"),
                 range: make_range_expr(1, 3),
             }],
@@ -552,6 +558,7 @@ fn test_index_binding_for_element_projects_nested_array_comprehensions() {
     let inner = ast::Expression::ArrayComprehension {
         expr: Arc::new(make_comp_ref_expr(&["ks"])),
         indices: vec![ast::ForIndex {
+            binder: None,
             ident: make_token("kp"),
             range: make_range_expr(1, 2),
         }],
@@ -561,6 +568,7 @@ fn test_index_binding_for_element_projects_nested_array_comprehensions() {
     let binding = ast::Expression::ArrayComprehension {
         expr: Arc::new(inner),
         indices: vec![ast::ForIndex {
+            binder: None,
             ident: make_token("ks"),
             range: make_range_expr(1, 3),
         }],

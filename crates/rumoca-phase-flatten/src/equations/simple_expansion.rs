@@ -70,7 +70,7 @@ pub(super) fn expand_for_to_simple(
     let remaining_indices = &indices[1..];
 
     let index_values = expand_range_indices(ctx, &first_index.range, prefix, span)?;
-    let index_name = &first_index.ident.text;
+    let index_name = IndexSubstitution::from_index(first_index)?;
 
     let mut result = Vec::new();
     for value in index_values {

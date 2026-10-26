@@ -1,11 +1,11 @@
+use super::{RowEvalPoint, ScalarExecutionView};
 use crate::RuntimeSolveError;
 
 use rumoca_ir_solve as solve;
 
-use super::SolveRuntime;
 use rumoca_eval_solve::ComputeNodeOutputRangeRequest;
 
-impl SolveRuntime {
+impl ScalarExecutionView<'_> {
     pub(super) fn try_refresh_tensor_output_segment(
         &self,
         plan: solve::RefreshRows<'_>,
@@ -14,13 +14,18 @@ impl SolveRuntime {
         solver_y: &mut [f64],
         params: &[f64],
     ) -> Result<Option<usize>, RuntimeSolveError> {
+        let Some(reference) = self.scalar.implicit_scalar_rhs.reference() else {
+            return Ok(None);
+        };
         let first = &plan[start];
         if !self.can_refresh_from_tensor_output(first) {
             return Ok(None);
         }
         let first_program = self.refresh_program_row(first)?;
         let Some(first_output) = self
+            .scalar
             .implicit_scalar_rhs
+            .source()
             .row_output_index(first_program, first.output_offset())
         else {
             return Ok(None);
@@ -31,7 +36,9 @@ impl SolveRuntime {
         while end < plan.len() && self.can_refresh_from_tensor_output(&plan[end]) {
             let program = self.refresh_program_row(&plan[end])?;
             let Some(output_index) = self
+                .scalar
                 .implicit_scalar_rhs
+                .source()
                 .row_output_index(program, plan[end].output_offset())
             else {
                 break;
@@ -46,11 +53,10 @@ impl SolveRuntime {
             return Ok(None);
         }
 
-        let mut tensor_out = self.refresh_tensor_scratch.borrow_mut();
+        let mut tensor_out = self.scalar.refresh_tensor_scratch.borrow_mut();
         let len = end - start;
-        let covered = self
-            .implicit_rhs
-            .eval_node_covering_output_range_with_context(ComputeNodeOutputRangeRequest {
+        let Some(covered) = reference.eval_node_covering_output_range_with_context(
+            ComputeNodeOutputRangeRequest {
                 start: first_output,
                 len,
                 y: solver_y,
@@ -58,7 +64,11 @@ impl SolveRuntime {
                 t,
                 context: self.row_eval_context(),
                 out: &mut tensor_out,
-            })?;
+            },
+        )?
+        else {
+            return Ok(None);
+        };
         if !covered {
             return Ok(None);
         }
@@ -67,7 +77,9 @@ impl SolveRuntime {
             let refresh_row = &plan[position];
             let program = self.refresh_program_row(refresh_row)?;
             let Some(output_index) = self
+                .scalar
                 .implicit_scalar_rhs
+                .source()
                 .row_output_index(program, refresh_row.output_offset())
             else {
                 return Err(RuntimeSolveError::solve_ir(format!(
@@ -102,7 +114,12 @@ impl SolveRuntime {
     ) -> Result<Option<usize>, RuntimeSolveError> {
         let first = &plan[start];
         let row_idx = self.refresh_program_row(first)?;
-        let Some(output_count) = self.implicit_scalar_rhs.row_output_count(row_idx) else {
+        let Some(output_count) = self
+            .scalar
+            .implicit_scalar_rhs
+            .source()
+            .row_output_count(row_idx)
+        else {
             return Ok(None);
         };
         if output_count <= 1 || !self.can_batch_shapeless_output_refresh(first) {
@@ -116,15 +133,16 @@ impl SolveRuntime {
             end += 1;
         }
         row_outputs.resize(output_count, 0.0);
-        self.implicit_scalar_rhs
-            .eval_row_outputs_unchecked_with_context(
-                row_idx,
-                solver_y,
-                params,
+        self.scalar.implicit_scalar_rhs.eval_program_outputs(
+            row_idx,
+            RowEvalPoint {
+                y: solver_y,
+                p: params,
                 t,
-                self.row_eval_context(),
-                row_outputs,
-            )?;
+            },
+            self.row_eval_context(),
+            row_outputs,
+        )?;
         for position in start..end {
             let refresh_row = &plan[position];
             let Some(value) = row_outputs.get(refresh_row.output_offset()).copied() else {
@@ -153,23 +171,31 @@ impl SolveRuntime {
     }
 
     fn can_batch_shapeless_output_refresh(&self, row: &solve::AlgebraicRefreshRow) -> bool {
-        let Some(program) = self.refresh_program_rows.get(&row.source()).copied() else {
+        let Some(program) = self.scalar.refresh_program_rows.get(&row.source()).copied() else {
             return false;
         };
         row.assignment_target() == Some(row.target_index())
-            && !self.implicit_scalar_rhs.row_has_assignment_shape(program)
             && !self
+                .scalar
                 .implicit_scalar_rhs
+                .source()
+                .row_has_assignment_shape(program)
+            && !self
+                .scalar
+                .implicit_scalar_rhs
+                .source()
                 .row_reads_y(program, row.target_index())
     }
 
     fn can_refresh_from_tensor_output(&self, row: &solve::AlgebraicRefreshRow) -> bool {
-        let Some(program) = self.refresh_program_rows.get(&row.source()).copied() else {
+        let Some(program) = self.scalar.refresh_program_rows.get(&row.source()).copied() else {
             return false;
         };
         row.assignment_target() == Some(row.target_index())
             && !self
+                .scalar
                 .implicit_scalar_rhs
+                .source()
                 .row_reads_y(program, row.target_index())
     }
 }

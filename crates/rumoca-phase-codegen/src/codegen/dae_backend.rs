@@ -4,10 +4,15 @@
 //! for persistence and reconstruction; templates receive semantic arrays with
 //! explicit typed identities and systems.
 
+mod function_predecessors;
+
 use rumoca_ir_dae as dae;
 use serde_json::{Value, json};
 
-pub(super) const TEMPLATE_SCHEMA_VERSION: u16 = 6;
+// 8: carries both ordered conditional statements and retained external-table
+// descriptors; versions 7 published either one alone.
+// 9: retains checked scalar selections on discrete-value targets.
+pub(super) const TEMPLATE_SCHEMA_VERSION: u16 = 9;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum DaeBackendError {
@@ -35,10 +40,13 @@ impl DaeBackendError {
 }
 
 pub(super) fn project(model: &dae::Dae) -> Result<Value, DaeBackendError> {
-    model.inspect(project_view)
+    model.inspect(|view| project_view(view, model.external_tables()))
 }
 
-fn project_view(view: dae::DaeView<'_>) -> Result<Value, DaeBackendError> {
+fn project_view(
+    view: dae::DaeView<'_>,
+    external_tables: &[rumoca_core::ExternalTableData],
+) -> Result<Value, DaeBackendError> {
     Ok(json!({
         "schema": {
             "name": "rumoca.checked-dae-template",
@@ -47,6 +55,7 @@ fn project_view(view: dae::DaeView<'_>) -> Result<Value, DaeBackendError> {
         "value_types": project_value_types(view),
         "variables": project_variables(view)?,
         "functions": project_functions(view),
+        "external_tables": external_tables,
         "domains": project_domains(view),
         "expressions": project_expressions(view),
         "systems": {
@@ -261,6 +270,17 @@ fn project_external_interface(external: dae::ExternalFunctionView<'_>) -> Value 
         },
         "language": external.language().as_str(),
         "symbol": external.symbol().as_str(),
+        "native_table_operator": if external.language().as_str() == "C" {
+            dae::NativeTableOperator::from_symbol(external.symbol().as_str()).map(|operator| match operator {
+                dae::NativeTableOperator::Lookup => "lookup",
+                dae::NativeTableOperator::Slope => "slope",
+                dae::NativeTableOperator::BoundsMin => "bounds_min",
+                dae::NativeTableOperator::BoundsMax => "bounds_max",
+                dae::NativeTableOperator::NextEvent => "next_event",
+            })
+        } else {
+            None
+        },
         "arguments": external
             .arguments()
             .map(|argument| match argument {
@@ -284,7 +304,7 @@ fn project_function_definitions<'dae>(
     view: dae::DaeView<'dae>,
     function: dae::FunctionView<'dae>,
 ) -> Vec<Value> {
-    let mut current = vec![None; function.values().count()];
+    let predecessors = function_predecessors::project(view, function);
     (0..function.definition_count())
         .map(|ordinal| {
             let id = function
@@ -294,13 +314,17 @@ fn project_function_definitions<'dae>(
                 .function_definition(id)
                 .expect("checked function definition resolves");
             let target = definition.target().ordinal() as usize;
-            let previous_target_definition = current[target];
-            current[target] = Some(definition.id().ordinal());
+            let previous = predecessors[ordinal];
+            let previous_target_definition = match previous {
+                dae::FunctionAssignedState::Assigned(id) => Some(id.ordinal()),
+                _ => None,
+            };
             json!({
                 "ordinal": definition.id().ordinal(),
                 "target": target,
                 "rhs": definition.rhs().index(),
                 "previous_target_definition": previous_target_definition,
+                "previous_target_state": function_predecessors::project_state(previous),
                 "provenance": definition.provenance(),
             })
         })
@@ -309,6 +333,21 @@ fn project_function_definitions<'dae>(
 
 fn project_function_statement(statement: dae::FunctionStatementView<'_>) -> Value {
     match statement {
+        dae::FunctionStatementView::Conditional { conditional } => {
+            project_function_conditional(conditional)
+        }
+        dae::FunctionStatementView::RequireAssigned {
+            conditional,
+            value,
+            definition,
+            provenance,
+        } => json!({
+            "kind": "require_assigned",
+            "conditional": conditional.id().ordinal(),
+            "value": value.ordinal(),
+            "definition": definition.id().ordinal(),
+            "provenance": provenance,
+        }),
         dae::FunctionStatementView::Assignment { definition } => json!({
             "kind": "assignment",
             "definition": definition.id().ordinal(),
@@ -346,6 +385,21 @@ fn project_function_statement(statement: dae::FunctionStatementView<'_>) -> Valu
             "provenance": provenance,
         }),
     }
+}
+
+fn project_function_conditional(conditional: dae::FunctionConditionalBodyView<'_>) -> Value {
+    json!({
+        "kind": "conditional",
+        "ordinal": conditional.id().ordinal(),
+        "branches": conditional.conditions().zip(conditional.branches()).map(|(condition, branch)| json!({
+            "condition": condition.index(),
+            "statements": branch.statements().map(project_function_statement).collect::<Vec<_>>(),
+            "provenance": branch.declaration(),
+        })).collect::<Vec<_>>(),
+        "fallback": conditional.fallback().statements().map(project_function_statement).collect::<Vec<_>>(),
+        "outputs": conditional.outputs().map(|definition| definition.id().ordinal()).collect::<Vec<_>>(),
+        "provenance": conditional.declaration(),
+    })
 }
 
 fn project_domains(view: dae::DaeView<'_>) -> Vec<Value> {
@@ -458,6 +512,17 @@ fn project_expression_operation(operation: dae::ExpressionOperation<'_>) -> Valu
         dae::ExpressionOperation::FunctionValue { value, definition } => {
             project_function_value_operation(value, definition)
         }
+        dae::ExpressionOperation::FunctionConditionalOutput {
+            conditional,
+            value,
+            definition,
+        } => json!({
+            "kind": "function_conditional_output",
+            "function": value.function().index(),
+            "conditional": conditional.ordinal(),
+            "value": value.ordinal(),
+            "definition": definition.id().ordinal(),
+        }),
         dae::ExpressionOperation::FunctionFoldParameter {
             fold,
             carried,
@@ -473,14 +538,23 @@ fn project_expression_operation(operation: dae::ExpressionOperation<'_>) -> Valu
             source,
             source_clock,
             target_clock,
-        } => json!({
-            "kind": "clock_transfer",
-            "conversion": kind,
-            "source": source.index(),
-            "source_clock": source_clock.index(),
-            "target_clock": target_clock.index(),
-        }),
+        } => project_clock_transfer(kind, source, source_clock, target_clock),
     }
+}
+
+fn project_clock_transfer(
+    kind: dae::ClockTransferKind,
+    source: dae::ExprId<'_>,
+    source_clock: dae::ClockId<'_>,
+    target_clock: dae::ClockId<'_>,
+) -> Value {
+    json!({
+        "kind": "clock_transfer",
+        "conversion": kind,
+        "source": source.index(),
+        "source_clock": source_clock.index(),
+        "target_clock": target_clock.index(),
+    })
 }
 
 fn project_string_conversion(
@@ -795,7 +869,10 @@ fn project_discrete_values(view: dae::DaeView<'_>) -> Value {
                 "targets": owner
                     .targets()
                     .iter()
-                    .map(|target| target.index())
+                    .map(|target| json!({
+                        "variable": target.variable().index(),
+                        "scalar_selection": target.scalar_selection(),
+                    }))
                     .collect::<Vec<_>>(),
                 "branches": owner
                     .branches()
@@ -843,6 +920,8 @@ fn project_conditions(view: dae::DaeView<'_>) -> Value {
                 json!({
                     "id": id.index(),
                     "expression": relation.expression().index(),
+                    "activation_guard": view.model_activation_guard(relation.expression())
+                        .map(|guard| guard.index()),
                     "provenance": relation.provenance(),
                 })
             })

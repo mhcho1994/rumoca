@@ -57,7 +57,8 @@ pub(crate) use assert_equations::{decode_assert_arguments, decode_terminate_argu
 pub(crate) use conditional_and_eval::build_eval_context;
 use conditional_and_eval::*;
 pub(crate) use conditional_and_eval::{
-    expand_range_indices, substitute_index_in_equation, substitute_index_in_expression,
+    IndexSubstitution, expand_range_indices, substitute_index_in_equation,
+    substitute_index_in_expression,
 };
 use connections_graph::{extract_vcg_data_from_function_call, is_side_effect_only_function};
 pub(crate) use flattened_equations::FlattenedEquations;
@@ -533,10 +534,12 @@ pub(crate) fn flatten_equation_with_def_map(
             ))
         }
 
-        ast::Equation::When(_blocks) => {
-            // When-equations are handled separately by flatten_when_equation()
-            // Return empty here since they don't produce regular flat equations
-            Ok(FlattenedEquations::default())
+        ast::Equation::When(blocks) => {
+            // When bodies own no ordinary residuals, but target indices are structural.
+            let selection = parameter_selections::when_target_selection(ctx, blocks, prefix, span)?;
+            let mut flattened = FlattenedEquations::default();
+            flattened.parameter_branch_selections.extend(selection);
+            Ok(flattened)
         }
 
         ast::Equation::If {
@@ -842,10 +845,10 @@ fn expand_reduction_over_comprehension(
     if !array_value {
         return Ok(None);
     }
-    let mut index_ranges: Vec<(String, Vec<i64>)> = Vec::new();
-    for index in indices {
+    let mut index_ranges = Vec::new();
+    for index in indices.iter().rev() {
         let values = expand_range_indices(ctx, &index.range, prefix, span)?;
-        index_ranges.push((index.ident.text.to_string(), values));
+        index_ranges.push((IndexSubstitution::from_index(index)?, values));
     }
     let env = ArrayComprehensionExpansionEnv {
         ctx,
@@ -887,10 +890,10 @@ fn expand_array_comprehension_expression(
     prefix: &ast::QualifiedName,
     span: rumoca_core::Span,
 ) -> Result<ast::Expression, FlattenError> {
-    let mut index_ranges: Vec<(String, Vec<i64>)> = Vec::new();
-    for idx in indices {
+    let mut index_ranges = Vec::new();
+    for idx in indices.iter().rev() {
         let values = expand_range_indices(ctx, &idx.range, prefix, span)?;
-        index_ranges.push((idx.ident.text.to_string(), values));
+        index_ranges.push((IndexSubstitution::from_index(idx)?, values));
     }
 
     let env = ArrayComprehensionExpansionEnv {
@@ -919,7 +922,7 @@ struct ArrayComprehensionExpansionEnv<'a> {
     ctx: &'a Context,
     prefix: &'a ast::QualifiedName,
     span: rumoca_core::Span,
-    index_ranges: &'a [(String, Vec<i64>)],
+    index_ranges: &'a [(IndexSubstitution<'a>, Vec<i64>)],
 }
 
 fn expand_array_comprehension_recursive(
@@ -950,10 +953,10 @@ fn expand_array_comprehension_recursive(
 
     let (idx_name, values) = &env.index_ranges[depth];
     for &val in values {
-        let substituted_body = substitute_index_in_expression(&body, idx_name, val);
+        let substituted_body = substitute_index_in_expression(&body, *idx_name, val);
         let substituted_filter = filter
             .as_ref()
-            .map(|f| substitute_index_in_expression(f, idx_name, val));
+            .map(|f| substitute_index_in_expression(f, *idx_name, val));
         expand_array_comprehension_recursive(
             env,
             substituted_body,
@@ -1500,7 +1503,7 @@ fn collect_for_iterations(
     let first_index = &indices[0];
     let remaining_indices = &indices[1..];
     let range_values = expand_range_indices(env.ctx, &first_index.range, env.prefix, env.span)?;
-    let index_name = &first_index.ident.text;
+    let index_name = IndexSubstitution::from_index(first_index)?;
 
     if remaining_indices.is_empty()
         && cheapen_plan.is_none()

@@ -90,6 +90,90 @@ fn seed() -> Vec<f64> {
         .collect()
 }
 
+#[test]
+fn cloned_lane_owner_emits_once() {
+    let owner = std::sync::Arc::new(
+        solve::TangentLaneProgram::replicate(&dual_program(), LANES)
+            .expect("the checked lane owner"),
+    );
+    let mut family = LaneFamily::default();
+    let span = solve::source_span_from_offsets(1, 0, 1);
+    let first = family.intern(std::sync::Arc::clone(&owner), span);
+    let second = family.intern(std::sync::Arc::clone(&owner), span);
+    assert_eq!(
+        first, second,
+        "one issued lane owner has one emitted function"
+    );
+    assert_eq!(emitted_lane_count(family), 1);
+}
+
+fn lane_owner(lanes: usize) -> std::sync::Arc<solve::TangentLaneProgram> {
+    std::sync::Arc::new(
+        solve::TangentLaneProgram::replicate(&dual_program(), lanes)
+            .expect("the checked lane owner"),
+    )
+}
+
+fn emitted_lane_count(family: LaneFamily) -> usize {
+    let plan = family.into_plan().expect("the checked render block");
+    crate::codegen::create_environment()
+        .render_str("{{ plan.programs | length }}", minijinja::context! { plan })
+        .expect("render the program inventory")
+        .parse()
+        .expect("the emitted program count")
+}
+
+#[test]
+fn independent_lane_owners_and_widths_stay_distinct() {
+    let owner = lane_owner(LANES);
+    let independent = lane_owner(LANES);
+    assert_eq!(
+        owner.as_ref(),
+        independent.as_ref(),
+        "identical checked bodies"
+    );
+    let wider = lane_owner(LANES + 1);
+    let mut family = LaneFamily::default();
+    let span = solve::source_span_from_offsets(1, 0, 1);
+    assert_eq!(family.intern(owner, span), 0);
+    assert_eq!(family.intern(independent, span), 1);
+    assert_eq!(family.intern(wider, span), 2);
+    assert_eq!(emitted_lane_count(family), 3);
+}
+
+#[test]
+fn lane_owner_preserves_complete_diagnostic_provenance() {
+    let owner = lane_owner(LANES);
+    let mut family = LaneFamily::default();
+    let spans = [
+        solve::source_span_from_offsets(1, 0, 1),
+        solve::source_span_from_offsets(2, 0, 1),
+        solve::source_span_from_offsets(1, 1, 2),
+        solve::source_span_from_offsets(1, 0, 2),
+    ];
+    for (id, span) in spans.into_iter().enumerate() {
+        assert_eq!(family.intern(std::sync::Arc::clone(&owner), span), id);
+        assert_eq!(family.intern(std::sync::Arc::clone(&owner), span), id);
+    }
+    assert_eq!(emitted_lane_count(family), spans.len());
+}
+
+#[test]
+fn lane_family_retains_owner_until_its_identity_key_is_retired() {
+    let owner = lane_owner(LANES);
+    let weak = std::sync::Arc::downgrade(&owner);
+    let mut family = LaneFamily::default();
+    let span = solve::source_span_from_offsets(1, 0, 1);
+    assert_eq!(family.intern(owner, span), 0);
+    let retained = weak.upgrade().expect("the key retains its issued owner");
+    assert_eq!(family.intern(retained, span), 0);
+    assert_eq!(emitted_lane_count(family), 1);
+    assert!(
+        weak.upgrade().is_none(),
+        "the consumed render view owns its checked block"
+    );
+}
+
 const HARNESS: &str = r#"{%- from "fmi-c-kernel.jinja" import scalar_op %}
 #include <math.h>
 #include <stdio.h>
@@ -98,6 +182,7 @@ typedef struct { const double* y; const double* p; double time; } ModelInstance;
 {%- set program = plan.programs[plan.programs|length - 1] %}
 static int lane_program(ModelInstance* m, const double* seed, double* o) {
     double r[{{ program.temporary_count }}];
+    (void)seed;
 {%- for op in program.ops %}
 {{ scalar_op(op, "o", "-1") }}
 {%- endfor %}
@@ -115,13 +200,20 @@ int main(void) {
 "#;
 
 fn render(program: &solve::TangentLaneProgram, outputs: usize) -> String {
+    render_inputs(lane_plan(program), outputs, &Y, &seed())
+}
+
+fn lane_plan(program: &solve::TangentLaneProgram) -> minijinja::Value {
     // The rendered program follows another, so its stores must address
     // its own outputs from zero.
     let mut family = LaneFamily::default();
     let span = solve::source_span_from_offsets(1, 0, 1);
-    family.push(program.clone(), span);
-    family.push(program.clone(), span);
-    let plan = family.into_plan().expect("a checked tangent-lane plan");
+    family.intern(std::sync::Arc::new(program.clone()), span);
+    family.intern(std::sync::Arc::new(program.clone()), span);
+    family.into_plan().expect("a checked tangent-lane plan")
+}
+
+fn render_inputs(plan: minijinja::Value, outputs: usize, y: &[f64], seed: &[f64]) -> String {
     let mut environment = crate::codegen::create_environment();
     environment
         .add_template(
@@ -143,8 +235,8 @@ fn render(program: &solve::TangentLaneProgram, outputs: usize) -> String {
         .expect("the harness is registered")
         .render(minijinja::context! {
             plan => plan,
-            y => decimal(&Y),
-            seed => decimal(&seed()),
+            y => decimal(y),
+            seed => decimal(seed),
             outputs => outputs,
         })
         .expect("the tangent-lane program renders")
@@ -219,4 +311,91 @@ fn every_widened_aggregate_matches_the_linked_evaluator_bit_for_bit() {
             .collect::<Vec<_>>(),
         "generated {generated:?} linked {linked:?}"
     );
+}
+
+/// `[-1 -1 -1] · [0 0 0]` with every lhs seed `-1` and rhs seed `0`: each
+/// product `l·r` and each tangent term `du_l·r + l·du_r` is `-0.0`, so the
+/// first-term convention gives `-0.0` where a `+0.0` start gives `+0.0`.
+fn signed_zero_dot(lanes: usize) -> Vec<LinearOp> {
+    vec![
+        LinearOp::TensorLoad {
+            dst_start: 0,
+            input: TensorInputKind::Y,
+            input_start: 0,
+            count: 6,
+            seed_start: (lanes == 2).then_some(0),
+            lanes,
+        },
+        LinearOp::MatrixMultiply {
+            dst_start: 6 * lanes as u32,
+            lhs_start: 0,
+            rhs_start: 3 * lanes as u32,
+            rows: 1,
+            inner: 3,
+            columns: 1,
+            lanes,
+        },
+        LinearOp::StoreOutputRange {
+            start: 6 * lanes as u32,
+            count: lanes,
+            stride: 1,
+        },
+    ]
+}
+
+#[test]
+fn generated_matrix_products_start_each_output_from_its_first_term() {
+    let y = [-1.0, -1.0, -1.0, 0.0, 0.0, 0.0];
+    let span = solve::source_span_from_offsets(1, 0, 1);
+    let mut mismatches = Vec::new();
+    // One primal lane, one dual tangent, and a widened three-lane owner.
+    for (lanes, width) in [(1, 1), (2, 2), (2, 3)] {
+        let ops = signed_zero_dot(lanes);
+        let seed = y
+            .iter()
+            .flat_map(|value| std::iter::repeat_n(*value, width.max(2) - 1))
+            .collect::<Vec<_>>();
+        let context = rumoca_eval_solve::RowEvalContext {
+            seed: (lanes == 2).then_some(&seed[..]),
+            ..Default::default()
+        };
+        let (plan, linked) = if width > 2 {
+            let program = solve::TangentLaneProgram::replicate(&ops, width - 1)
+                .expect("the dual product widens");
+            assert!(
+                program
+                    .ops()
+                    .iter()
+                    .filter_map(solve::tensor_lanes)
+                    .all(|lanes| lanes == width)
+            );
+            let outputs = solve::ScalarProgramBlock::program_output_count(program.ops());
+            let mut linked = vec![0.0; outputs];
+            rumoca_eval_solve::PreparedTangentLaneProgram::new(program.clone())
+                .eval(&y, &y, 0.0, context, &mut linked)
+                .expect("the linked evaluator runs the lanes");
+            (lane_plan(&program), linked)
+        } else {
+            let block = std::sync::Arc::new(
+                solve::ScalarProgramBlock::with_program_spans(vec![ops], vec![span]).unwrap(),
+            );
+            let mut linked = vec![0.0; width];
+            rumoca_eval_solve::PreparedScalarProgramBlock::new((*block).clone())
+                .unwrap()
+                .eval_with_context(&y, &y, 0.0, context, &mut linked)
+                .expect("the linked evaluator runs the product");
+            let plan = crate::codegen::scalar_program_plan::ScalarProgramPlan::new(block).unwrap();
+            (minijinja::Value::from_object(plan), linked)
+        };
+        let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let negative_zeros = bits(&vec![-0.0; linked.len()]);
+        let generated = run_c(&render_inputs(plan, linked.len(), &y, &seed));
+        if bits(&generated) != negative_zeros {
+            mismatches.push(format!("generated C, width {width}: {generated:?}"));
+        }
+        if bits(&linked) != negative_zeros {
+            mismatches.push(format!("linked, width {width}: {linked:?}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }

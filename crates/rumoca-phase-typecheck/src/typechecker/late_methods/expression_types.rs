@@ -11,9 +11,9 @@ impl TypeChecker {
         type_table: &TypeTable,
     ) -> Option<TypeId> {
         if let Expression::ComponentReference(comp) = expr
-            && self.is_integer_iterator_reference(comp)
+            && let Some(element_type) = self.iterator_reference_type(comp)
         {
-            return Some(type_table.integer());
+            return Some(element_type);
         }
         match self.lookup_instance_expression(expr) {
             SemanticLookup::Found(semantics) => return Some(semantics.type_id),
@@ -97,17 +97,42 @@ impl TypeChecker {
         }
     }
 
-    pub(crate) fn is_integer_iterator_reference(
-        &self,
-        comp: &rumoca_ir_ast::ComponentReference,
-    ) -> bool {
-        comp.parts.len() == 1
-            && comp.parts[0].subs.iter().flatten().next().is_none()
-            && self
-                .current_integer_iterators
-                .iter()
-                .rev()
-                .any(|name| name.as_str() == comp.parts[0].ident.text.as_ref())
+    pub(crate) fn is_iterator_reference(&self, comp: &rumoca_ir_ast::ComponentReference) -> bool {
+        self.iterator_reference_type(comp).is_some()
+    }
+
+    fn iterator_reference_type(&self, comp: &rumoca_ir_ast::ComponentReference) -> Option<TypeId> {
+        if comp.parts.len() != 1 || comp.parts[0].subs.iter().flatten().next().is_some() {
+            return None;
+        }
+        self.current_iterators
+            .iter()
+            .rev()
+            .find(|(binder, name, _)| match binder {
+                Some(rumoca_core::IndexBinderProvenance::Source(id)) => {
+                    comp.target_def_id() == Some(*id)
+                }
+                Some(rumoca_core::IndexBinderProvenance::Generated) => {
+                    comp.target_def_id().is_none()
+                        && name.as_str() == comp.parts[0].ident.text.as_ref()
+                }
+                None => false,
+            })
+            .map(|(_, _, element_type)| *element_type)
+    }
+
+    pub(super) fn infer_iterator_type(&self, range: &Expression, types: &TypeTable) -> TypeId {
+        if let Some(ty) = self.infer_expression_type(range, types) {
+            return ty;
+        }
+        let Expression::ComponentReference(reference) = range else {
+            return TypeId::UNKNOWN;
+        };
+        self.resolve_type_name(
+            &Self::component_ref_name(reference),
+            reference.target_def_id(),
+            types,
+        )
     }
 
     pub(crate) fn infer_function_call_result_type(
@@ -188,25 +213,29 @@ impl TypeChecker {
             | OpBinary::Ge
             | OpBinary::And
             | OpBinary::Or => Some(type_table.boolean()),
-            OpBinary::Div | OpBinary::DivElem => {
-                let lhs = self.infer_expression_type(lhs, type_table)?;
-                let rhs = self.infer_expression_type(rhs, type_table)?;
-                let common = self.common_value_type(lhs, rhs, type_table)?;
+            OpBinary::Div | OpBinary::DivElem | OpBinary::Exp | OpBinary::ExpElem => {
+                let lhs_type = self.infer_expression_type(lhs, type_table)?;
+                let rhs_type = self.infer_expression_type(rhs, type_table)?;
+                let common = self.common_value_type(lhs_type, rhs_type, type_table)?;
                 let root = self.resolve_type_root(type_table, common);
-                matches!(
+                let numeric = matches!(
                     type_table.get(root),
                     Some(Type::Builtin(
                         rumoca_ir_ast::BuiltinType::Real | rumoca_ir_ast::BuiltinType::Integer
                     ))
-                )
-                .then_some(type_table.real())
-                .or(Some(common))
+                );
+                if numeric
+                    && (*op != OpBinary::Exp
+                        || self.infer_expression_shape(lhs, type_table)?.is_empty())
+                {
+                    Some(type_table.real())
+                } else {
+                    Some(common)
+                }
             }
             OpBinary::Add
             | OpBinary::Sub
             | OpBinary::Mul
-            | OpBinary::Exp
-            | OpBinary::ExpElem
             | OpBinary::AddElem
             | OpBinary::SubElem
             | OpBinary::MulElem
@@ -274,11 +303,14 @@ impl TypeChecker {
             | BuiltinFunction::FirstTick => Some(type_table.boolean()),
             // MLS 3.7 §3.7.1 expands `sign(v)` into an if-expression over Integer
             // literals, an Integer for either operand type.
+            // MLS 3.7 §10.3.3: `zeros` and `ones` are Integer arrays.
             BuiltinFunction::Integer
             | BuiltinFunction::Sign
             | BuiltinFunction::Ndims
             | BuiltinFunction::Size
-            | BuiltinFunction::Identity => Some(type_table.integer()),
+            | BuiltinFunction::Identity
+            | BuiltinFunction::Zeros
+            | BuiltinFunction::Ones => Some(type_table.integer()),
             BuiltinFunction::Sqrt
             | BuiltinFunction::Floor
             | BuiltinFunction::Ceil
@@ -295,8 +327,6 @@ impl TypeChecker {
             | BuiltinFunction::Exp
             | BuiltinFunction::Log
             | BuiltinFunction::Log10
-            | BuiltinFunction::Zeros
-            | BuiltinFunction::Ones
             | BuiltinFunction::Linspace
             | BuiltinFunction::Interval => Some(type_table.real()),
             BuiltinFunction::Clock => type_table.lookup("Clock"),

@@ -1,15 +1,67 @@
 use super::*;
 
 #[test]
+fn visible_discrete_sources_follow_prefixes_and_the_current_parameter_snapshot() {
+    let model = crate::fixture_layout::with_visible_expressions(
+        solve::SolveModel {
+            problem: solve::SolveProblem {
+                layout: solve::VarLayout::from_parts(Default::default(), 0, 5),
+                solve_layout: solve::SolveLayout {
+                    parameter_count: 1,
+                    compiled_parameter_len: 5,
+                    input_scalar_names: ["drive".to_owned()].into_iter().collect(),
+                    discrete_real_scalar_names: vec!["sampled".to_owned()],
+                    discrete_valued_scalar_names: vec!["enabled".to_owned(), "count".to_owned()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        vec!["enabled".to_owned(), "count".to_owned()],
+        solve::ScalarProgramBlock::default(),
+        Vec::new(),
+    );
+    let runtime = SolveRuntime::new_fixture(&model).expect("visible storage is in bounds");
+    let requested = vec![
+        "count".to_owned(),
+        "missing".to_owned(),
+        "enabled".to_owned(),
+    ];
+    // Distinct prefix sentinels detect accidental parameter/input/Real routing.
+    let mut parameters = vec![17.0, 19.0, 23.0, 0.0, 7.0];
+    let first = runtime
+        .visible_values_for_names(&[], &parameters, 0.0, &requested)
+        .expect("the initial discrete-value snapshot is visible");
+    assert_eq!(
+        first.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["count", "enabled"]
+    );
+    assert_eq!(first["count"], 7.0);
+    assert_eq!(first["enabled"], 0.0);
+    parameters[3] = 1.0;
+    parameters[4] = -3.0;
+    let next = runtime
+        .visible_values_for_names(&[], &parameters, 0.1, &requested)
+        .expect("a later snapshot reads the updated discrete lanes");
+    assert_eq!(next["count"], -3.0);
+    assert_eq!(next["enabled"], 1.0);
+    assert!(!next.contains_key("missing"));
+}
+
+#[test]
 fn visible_values_for_names_preserves_requested_order() {
-    let model = solve::SolveModel {
-        visible_names: vec!["b".to_string(), "a".to_string()],
-        visible_value_rows: spanned_block(
+    let model = crate::fixture_layout::with_visible_expressions(
+        solve::SolveModel {
+            ..Default::default()
+        },
+        vec!["b".to_string(), "a".to_string()],
+        spanned_block(
             vec![const_visible_value_row(2.0), const_visible_value_row(1.0)],
             "visible_values.mo",
         ),
-        ..Default::default()
-    };
+        Vec::new(),
+    );
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
     let names = vec!["a".to_string(), "missing".to_string(), "b".to_string()];
 
@@ -27,9 +79,12 @@ fn visible_values_for_names_preserves_requested_order() {
 
 #[test]
 fn visible_values_fast_path_reads_direct_sources() {
-    let model = solve::SolveModel {
-        visible_names: vec!["y2".to_string(), "p1".to_string(), "time".to_string()],
-        visible_value_rows: spanned_block(
+    let model = crate::fixture_layout::with_visible_expressions(
+        solve::SolveModel {
+            ..Default::default()
+        },
+        vec!["y2".to_string(), "p1".to_string(), "time".to_string()],
+        spanned_block(
             vec![
                 direct_y_visible_value_row(1),
                 direct_param_visible_value_row(0),
@@ -37,8 +92,8 @@ fn visible_values_fast_path_reads_direct_sources() {
             ],
             "visible_fast_path.mo",
         ),
-        ..Default::default()
-    };
+        Vec::new(),
+    );
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
 
     let values = runtime
@@ -50,14 +105,17 @@ fn visible_values_fast_path_reads_direct_sources() {
 
 #[test]
 fn visible_values_mixed_plan_keeps_expression_rows() {
-    let model = solve::SolveModel {
-        visible_names: vec!["y2".to_string(), "computed".to_string()],
-        visible_value_rows: spanned_block(
+    let model = crate::fixture_layout::with_visible_expressions(
+        solve::SolveModel {
+            ..Default::default()
+        },
+        vec!["y2".to_string(), "computed".to_string()],
+        spanned_block(
             vec![direct_y_visible_value_row(1), positive_sum_residual_row()],
             "visible_mixed_plan.mo",
         ),
-        ..Default::default()
-    };
+        Vec::new(),
+    );
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
 
     let values = runtime
@@ -74,14 +132,17 @@ fn visible_value_plan_deduplicates_equal_expression_rows() {
         unreachable!("sum fixture begins with a state load")
     };
     *index = 2;
-    let model = solve::SolveModel {
-        visible_names: vec![
+    let model = crate::fixture_layout::with_visible_expressions(
+        solve::SolveModel {
+            ..Default::default()
+        },
+        vec![
             "y2".to_string(),
             "computed_a".to_string(),
             "computed_different".to_string(),
             "computed_b".to_string(),
         ],
-        visible_value_rows: spanned_block(
+        spanned_block(
             vec![
                 direct_y_visible_value_row(1),
                 positive_sum_residual_row(),
@@ -90,10 +151,13 @@ fn visible_value_plan_deduplicates_equal_expression_rows() {
             ],
             "visible_duplicate_expressions.mo",
         ),
-        ..Default::default()
-    };
+        Vec::new(),
+    );
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
     let plan = runtime
+        .scalar_execution()
+        .unwrap()
+        .scalar
         .visible_value_plan
         .as_ref()
         .expect("visible value plan should build");
@@ -138,16 +202,19 @@ fn root_condition_plan_keeps_full_values_but_neutralizes_search_roots() {
             },
             ..Default::default()
         },
-        parameters: vec![2.5, 9.0],
+        parameters: vec![2.5, 9.0].into(),
         ..Default::default()
     };
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
     let plan = runtime
+        .scalar_execution()
+        .unwrap()
+        .scalar
         .root_condition_plan
         .as_ref()
         .expect("root condition plan should build");
 
-    assert_eq!(plan.evaluated_rows, vec![0, 2, 3, 4]);
+    assert_eq!(plan.evaluated.outputs(), vec![0, 2, 3, 4]);
     assert_eq!(plan.search_rows, vec![4]);
 
     let full = runtime
@@ -190,12 +257,13 @@ fn root_condition_plan_preserves_grouped_output_ownership() {
     ];
     let model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 1),
+                vec!["state".to_owned()],
+            ),
             solve_layout: solve::SolveLayout {
                 state_scalar_count: 1,
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["state".to_owned()],
-                    ..Default::default()
-                },
+
                 parameter_count: 1,
                 compiled_parameter_len: 1,
                 ..Default::default()
@@ -211,17 +279,20 @@ fn root_condition_plan_preserves_grouped_output_ownership() {
             },
             ..Default::default()
         },
-        parameters: vec![3.0],
-        initial_y: vec![4.0],
+        parameters: vec![3.0].into(),
+        initial_y: vec![4.0].into(),
         ..Default::default()
     };
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
     let plan = runtime
+        .scalar_execution()
+        .unwrap()
+        .scalar
         .root_condition_plan
         .as_ref()
         .expect("grouped root condition plan should build");
 
-    assert_eq!(plan.evaluated_rows, vec![0, 1, 2, 3]);
+    assert_eq!(plan.evaluated.outputs(), vec![0, 1, 2, 3]);
     assert_eq!(plan.search_rows, vec![2, 3]);
     assert_eq!(
         runtime
@@ -271,11 +342,11 @@ fn initial_event_commits_delay_left_limit_before_the_synthetic_right_limit() {
             },
             ..Default::default()
         },
-        parameters: vec![1.0, 0.0],
+        parameters: vec![1.0, 0.0].into(),
         ..Default::default()
     };
     let runtime = SolveRuntime::new_fixture(&model).expect("delay runtime should prepare");
-    let mut p = model.parameters.clone();
+    let mut p = model.parameters.to_vec();
     runtime
         .initialize_delay_history(0.0, &[], &mut p)
         .expect("delay history should initialize");
@@ -335,11 +406,11 @@ fn initial_event_advances_pre_memory_before_the_synthetic_right_limit() {
         },
         // p[0] is the converged current value, p[1] is its lowered pre slot,
         // and p[2] records what the post-event projection observed.
-        parameters: vec![2.0, 1.0, 0.0],
+        parameters: vec![2.0, 1.0, 0.0].into(),
         ..Default::default()
     };
     let runtime = SolveRuntime::new_fixture(&model).expect("runtime should prepare");
-    let mut p = model.parameters.clone();
+    let mut p = model.parameters.to_vec();
     let event_pre_p = p.clone();
 
     let outcome = runtime
@@ -385,60 +456,64 @@ fn phase_zero_clock_tick_executes_once_after_initialization() {
     let owner = clocks
         .periodic_clock_id(0)
         .expect("inserted clock has a typed identity");
-    let model = solve::SolveModel {
-        problem: solve::SolveProblem {
-            solve_layout: solve::SolveLayout {
-                parameter_count: 3,
-                compiled_parameter_len: 3,
-                pre_param_bindings: vec![solve::PreParamBinding {
-                    dest_p_index: 1,
-                    source: solve::PreParamSource::P { index: 0 },
-                    clock_schedule: Some(schedule),
-                }],
+    let model = crate::fixture_layout::with_visible_expressions(
+        solve::SolveModel {
+            problem: solve::SolveProblem {
+                solve_layout: solve::SolveLayout {
+                    parameter_count: 3,
+                    compiled_parameter_len: 3,
+                    pre_param_bindings: vec![solve::PreParamBinding {
+                        dest_p_index: 1,
+                        source: solve::PreParamSource::P { index: 0 },
+                        clock_schedule: Some(schedule),
+                    }],
+                    ..Default::default()
+                },
+                clocks,
+                discrete: solve::DiscreteSolveSystem {
+                    rhs: spanned_block(
+                        vec![vec![
+                            solve::LinearOp::LoadP { dst: 0, index: 1 },
+                            solve::LinearOp::Const { dst: 1, value: 1.0 },
+                            solve::LinearOp::Binary {
+                                dst: 2,
+                                op: solve::BinaryOp::Add,
+                                lhs: 0,
+                                rhs: 1,
+                            },
+                            solve::LinearOp::StoreOutput { src: 2 },
+                        ]],
+                        "phase_zero_clock_tick.mo",
+                    ),
+                    update_targets: vec![solve::scalar_slot_p(0)],
+                    row_roles: vec![solve::DiscreteRowRole::Equation],
+                    pre_modes: vec![solve::DiscreteEventPreMode::EventEntry],
+                    observation_refresh: vec![false],
+                    integrator_history_effects: vec![solve::IntegratorHistoryEffect::Preserve],
+                    clock_owners: vec![Some(owner)],
+                    // SOLVE-C57: every clock-owned producer carries its issued
+                    // same-tick step; construction validates exact coverage.
+                    clock_partition_order: vec![solve::ClockPartitionStep::ScalarRows {
+                        start_row: 0,
+                        count: 1,
+                    }],
+                    ..Default::default()
+                },
                 ..Default::default()
             },
-            clocks,
-            discrete: solve::DiscreteSolveSystem {
-                rhs: spanned_block(
-                    vec![vec![
-                        solve::LinearOp::LoadP { dst: 0, index: 1 },
-                        solve::LinearOp::Const { dst: 1, value: 1.0 },
-                        solve::LinearOp::Binary {
-                            dst: 2,
-                            op: solve::BinaryOp::Add,
-                            lhs: 0,
-                            rhs: 1,
-                        },
-                        solve::LinearOp::StoreOutput { src: 2 },
-                    ]],
-                    "phase_zero_clock_tick.mo",
-                ),
-                update_targets: vec![solve::scalar_slot_p(0)],
-                row_roles: vec![solve::DiscreteRowRole::Equation],
-                pre_modes: vec![solve::DiscreteEventPreMode::EventEntry],
-                observation_refresh: vec![false],
-                integrator_history_effects: vec![solve::IntegratorHistoryEffect::Preserve],
-                clock_owners: vec![Some(owner)],
-                // SOLVE-C57: every clock-owned producer carries its issued
-                // same-tick step; construction validates exact coverage.
-                clock_partition_order: vec![solve::ClockPartitionStep::ScalarRows {
-                    start_row: 0,
-                    count: 1,
-                }],
-                ..Default::default()
-            },
+            parameters: vec![0.0, 0.0, 0.0].into(),
+
             ..Default::default()
         },
-        parameters: vec![0.0, 0.0, 0.0],
-        visible_names: vec!["counter".to_string()],
-        visible_value_rows: spanned_block(
+        vec!["counter".to_string()],
+        spanned_block(
             vec![direct_param_visible_value_row(0)],
             "phase_zero_clock_tick_visible.mo",
         ),
-        ..Default::default()
-    };
+        Vec::new(),
+    );
     let runtime = SolveRuntime::new_fixture(&model).expect("clock fixture should prepare");
-    let mut p = model.parameters.clone();
+    let mut p = model.parameters.to_vec();
     let event_pre_p = p.clone();
 
     let outcome = runtime
@@ -505,11 +580,14 @@ fn root_condition_plan_neutralizes_parameter_static_algebraic_outputs() {
     let model = algebraic_output_root_model(assignment_residual_row());
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
     let plan = runtime
+        .scalar_execution()
+        .unwrap()
+        .scalar
         .root_condition_plan
         .as_ref()
         .expect("root condition plan should build");
 
-    assert_eq!(plan.evaluated_rows, vec![0]);
+    assert_eq!(plan.evaluated.outputs(), vec![0]);
     assert!(plan.search_rows.is_empty());
 
     let full = runtime
@@ -529,11 +607,14 @@ fn root_condition_plan_keeps_state_dependent_algebraic_outputs_dynamic() {
     let model = algebraic_output_root_model(add_assignment_residual_row(1, 0, 1.0));
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
     let plan = runtime
+        .scalar_execution()
+        .unwrap()
+        .scalar
         .root_condition_plan
         .as_ref()
         .expect("root condition plan should build");
 
-    assert_eq!(plan.evaluated_rows, vec![0]);
+    assert_eq!(plan.evaluated.outputs(), vec![0]);
     assert_eq!(plan.search_rows, vec![0]);
 
     let mut search = vec![0.0];
@@ -547,11 +628,11 @@ fn root_condition_plan_keeps_state_dependent_algebraic_outputs_dynamic() {
 fn parameter_static_refresh_cache_invalidates_with_parameter_snapshot() {
     let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 1),
+                vec!["state".to_string(), "static_output".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["state".to_string(), "static_output".to_string()],
-                    ..Default::default()
-                },
                 state_scalar_count: 1,
                 algebraic_scalar_count: 1,
                 parameter_count: 1,
@@ -566,26 +647,38 @@ fn parameter_static_refresh_cache_invalidates_with_parameter_snapshot() {
                     ],
                     "parameter_static_refresh.mo",
                 )),
-                implicit_row_targets: vec![None, Some(solve::scalar_slot_y(1))],
+                implicit_row_targets: (vec![None, Some(solve::scalar_slot_y(1))]).into(),
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![0.0, 0.0],
-        parameters: vec![2.0],
+        initial_y: vec![0.0, 0.0].into(),
+        parameters: vec![2.0].into(),
         ..Default::default()
     };
     set_causal_test_projection_plan(&mut model);
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
-    assert_eq!(runtime.algebraic_refresh.static_causal_seed_rows.len(), 1);
+    assert_eq!(
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .static_causal_seed_rows
+            .len(),
+        1
+    );
     assert!(
         runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
             .algebraic_refresh
             .dynamic_causal_seed_rows
             .is_empty()
     );
 
-    let mut solver_y = model.initial_y.clone();
+    let mut solver_y = model.initial_y.to_vec();
     runtime
         .refresh_algebraic_and_output_slots(0.0, &mut solver_y, &[2.0], 1.0e-12, 4)
         .expect("first static refresh should populate the cache");
@@ -606,11 +699,11 @@ fn parameter_static_refresh_cache_invalidates_with_parameter_snapshot() {
 fn algebraic_output_root_model(implicit_row: Vec<solve::LinearOp>) -> solve::SolveModel {
     let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec!["state".to_string(), "output".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["state".to_string(), "output".to_string()],
-                    ..Default::default()
-                },
                 state_scalar_count: 1,
                 algebraic_scalar_count: 1,
                 ..Default::default()
@@ -620,7 +713,7 @@ fn algebraic_output_root_model(implicit_row: Vec<solve::LinearOp>) -> solve::Sol
                     vec![derivative_placeholder_row(0), implicit_row],
                     "algebraic_output_root.mo",
                 )),
-                implicit_row_targets: vec![None, Some(solve::scalar_slot_y(1))],
+                implicit_row_targets: (vec![None, Some(solve::scalar_slot_y(1))]).into(),
                 ..Default::default()
             },
             events: solve::SolveEventPartition {
@@ -634,7 +727,7 @@ fn algebraic_output_root_model(implicit_row: Vec<solve::LinearOp>) -> solve::Sol
             },
             ..Default::default()
         },
-        initial_y: vec![0.0, 2.0],
+        initial_y: vec![0.0, 2.0].into(),
         ..Default::default()
     };
     set_complete_test_projection_plan(&mut model);
@@ -648,16 +741,19 @@ fn visible_value_runtime_errors_keep_row_span() {
         4,
         9,
     );
-    let model = solve::SolveModel {
-        visible_names: vec!["x".to_string()],
-        visible_value_rows: solve::ScalarProgramBlock::with_source_span(
+    let model = crate::fixture_layout::with_visible_expressions(
+        solve::SolveModel {
+            ..Default::default()
+        },
+        vec!["x".to_string()],
+        solve::ScalarProgramBlock::with_source_span(
             vec![derivative_placeholder_row(0)],
             span.require_provenance("visible-value runtime fixture")
                 .expect("fixture span is source-backed"),
         )
         .expect("fixture program is computable"),
-        ..Default::default()
-    };
+        Vec::new(),
+    );
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
 
     let names = vec!["x".to_string()];
@@ -670,4 +766,186 @@ fn visible_value_runtime_errors_keep_row_span() {
         err.to_string().contains("missing y[0]"),
         "error should explain the missing visible input: {err}"
     );
+}
+
+fn unowned_sample_counter_program() -> Vec<solve::LinearOp> {
+    vec![
+        solve::LinearOp::LoadP { dst: 0, index: 1 },
+        solve::LinearOp::Const { dst: 1, value: 1.0 },
+        solve::LinearOp::Binary {
+            dst: 2,
+            op: solve::BinaryOp::Add,
+            lhs: 0,
+            rhs: 1,
+        },
+        solve::LinearOp::LoadP { dst: 3, index: 2 },
+        solve::LinearOp::LoadP { dst: 4, index: 3 },
+        solve::LinearOp::Unary {
+            dst: 5,
+            op: solve::UnaryOp::Not,
+            arg: 4,
+        },
+        solve::LinearOp::Binary {
+            dst: 6,
+            op: solve::BinaryOp::And,
+            lhs: 3,
+            rhs: 5,
+        },
+        // Match the checked when producer's inactive fallback: hold the
+        // current target, not pre(counter). The pulse buffer settles inside
+        // this event pass after the increment has already been published.
+        solve::LinearOp::LoadP { dst: 8, index: 0 },
+        solve::LinearOp::Select {
+            dst: 7,
+            cond: 6,
+            if_true: 2,
+            if_false: 8,
+        },
+        solve::LinearOp::StoreOutput { src: 7 },
+    ]
+}
+
+fn unowned_zero_phase_sample_model() -> solve::SolveModel {
+    let schedule = solve::PeriodicEventSchedule::new(
+        rumoca_core::ClockLattice::from_seconds(0.1, 0.0).unwrap(),
+    )
+    .unwrap();
+    let model = solve::SolveModel {
+        problem: solve::SolveProblem {
+            layout: solve::VarLayout::from_parts(Default::default(), 0, 4),
+            solve_layout: solve::SolveLayout {
+                compiled_parameter_len: 4,
+                discrete_valued_scalar_names: vec!["counter".to_owned()],
+                variable_storage_runs: vec![solve::SolveVariableStorageRun {
+                    base: solve::scalar_slot_p(0),
+                    scalar_count: 1,
+                    role: solve::SolveVariableStorageRole::DiscreteValue,
+                    value_kind: solve::SolveVariableValueKind::Integer,
+                }],
+                variable_declarations: vec![solve::SolveVariableDeclaration::new(
+                    solve::SolveVariableStorageRole::DiscreteValue,
+                    solve::SolveVariableValueKind::Integer,
+                )],
+                pre_param_bindings: vec![solve::PreParamBinding {
+                    dest_p_index: 1,
+                    source: solve::PreParamSource::P { index: 0 },
+                    clock_schedule: None,
+                }],
+                ..Default::default()
+            },
+            clocks: solve::SolveClockPartition {
+                periodic_event_schedules: vec![schedule],
+                activation_parameter_indices: vec![2],
+            },
+            discrete: solve::DiscreteSolveSystem {
+                // The checked iteration owner advances the ordinary pre lane
+                // between passes; a raw binding without its run cannot do so.
+                event_iteration_plan: solve::EventIterationPlan::new(vec![
+                    solve::EventIterationRun {
+                        variable: 0,
+                        pre_binding_start: 0,
+                        owner: solve::EventIterationOwner::ScalarRows { start_row: 0 },
+                    },
+                ]),
+                rhs: spanned_block(
+                    vec![
+                        unowned_sample_counter_program(),
+                        vec![
+                            solve::LinearOp::LoadP { dst: 0, index: 2 },
+                            solve::LinearOp::StoreOutput { src: 0 },
+                        ],
+                    ],
+                    "unowned_zero_phase_sample.mo",
+                ),
+                update_targets: vec![solve::scalar_slot_p(0), solve::scalar_slot_p(3)],
+                row_roles: vec![
+                    solve::DiscreteRowRole::Equation,
+                    solve::DiscreteRowRole::PulseConditionMemory,
+                ],
+                pre_modes: vec![
+                    solve::DiscreteEventPreMode::EventEntry,
+                    solve::DiscreteEventPreMode::FollowCurrent,
+                ],
+                observation_refresh: vec![false, false],
+                integrator_history_effects: vec![solve::IntegratorHistoryEffect::Preserve; 2],
+                clock_owners: vec![None, None],
+                ..Default::default()
+            },
+            events: solve::SolveEventPartition {
+                condition_memory_parameter_indices: vec![3],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        parameters: vec![0.0; 4].into(),
+        ..Default::default()
+    };
+    crate::fixture_layout::with_visible_expressions(
+        model,
+        vec!["counter".to_owned()],
+        spanned_block(
+            vec![direct_param_visible_value_row(0)],
+            "unowned_zero_phase_visible.mo",
+        ),
+        Vec::new(),
+    )
+}
+
+#[test]
+fn phase_zero_unowned_sample_waits_for_its_single_post_initial_tick() {
+    let model = unowned_zero_phase_sample_model();
+    assert_eq!(
+        model.problem.solve_layout.initial_event_parameter_index,
+        None
+    );
+    let runtime = SolveRuntime::new_fixture(&model).expect("unowned sample fixture prepares");
+    let mut p = model.parameters.to_vec();
+    let event_pre_p = p.clone();
+    let outcome = runtime
+        .apply_projected_initial_event_boundary(
+            ProjectedInitialEventInput {
+                y: &mut [],
+                p: &mut p,
+                t_start: 0.0,
+                t_end: 0.2,
+                tol: 1e-9,
+                event_pre_y: &[],
+                event_pre_p: &event_pre_p,
+                max_iters: 8,
+                dynamic_event: None,
+            },
+            |_, _, _| Ok(false),
+        )
+        .expect("initialization and the first sample tick settle");
+    assert_eq!(outcome.final_t, 0.0);
+    assert_eq!(outcome.observations.len(), 2);
+    assert_eq!(
+        outcome.observations[0].p[0], 0.0,
+        "sample is inactive during initialization"
+    );
+    assert_eq!(
+        outcome.observations[1].p[0], 1.0,
+        "exactly one post-initial sample tick"
+    );
+    assert_eq!(p[0], 1.0);
+    assert_eq!(p[3], 0.0, "the completed sample pulse is rearmed");
+    let action = runtime
+        .apply_projected_post_initial_event_update(
+            ProjectedPostInitialEventInput {
+                y: &mut [],
+                p: &mut p,
+                t: 0.1,
+                tol: 1e-9,
+                max_iters: 8,
+                row_filter: EventUpdateRowFilter::All,
+            },
+            |_, _| Ok(false),
+        )
+        .expect("next periodic tick settles");
+    assert_eq!(action, EventActionOutcome::Continue);
+    assert_eq!(
+        p[0], 2.0,
+        "one further tick, not a permanently disabled sample"
+    );
+    assert_eq!(p[3], 0.0);
 }

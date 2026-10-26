@@ -12,6 +12,7 @@ mod operator_nodes;
 mod record_nodes;
 mod string_conversion;
 mod subscript_nodes;
+mod target_nodes;
 mod type_rules;
 mod value_types;
 
@@ -23,8 +24,9 @@ use crate::temporal::{DelayEntry, DelayKind};
 use crate::{
     AlgebraicId, ClockId, ClockTransferKind, DaeConstructionError, DaeProvenance, DelayCoordinate,
     DelayId, DiscreteRealId, DiscreteValueId, DomainBinderId, DomainId, ExprId,
-    FunctionDefinitionId, FunctionFoldId, FunctionId, FunctionParameterId, FunctionValueId,
-    InputId, ParameterId, PeriodicClockId, PositiveParameter, StateId, ValueTypeId,
+    FunctionConditionalId, FunctionDefinitionId, FunctionFoldId, FunctionId, FunctionParameterId,
+    FunctionValueId, InputId, ParameterId, PeriodicClockId, PositiveParameter, StateId,
+    ValueTypeId,
 };
 use derived_facts::{definition_type, max_variability, merge_binder_domain, merged_binder_domain};
 use function_facts::{FunctionCallFact, node_function_facts};
@@ -37,7 +39,8 @@ use type_rules::{
 
 pub(crate) use arena::{ExpressionArenaStorage, FrozenExpressionArenaStorage, OperandRange};
 pub(crate) use function_nodes::{
-    insert_function_fold_output, insert_function_fold_parameter, insert_function_value_use,
+    insert_function_conditional_output, insert_function_fold_output,
+    insert_function_fold_parameter, insert_function_value_use,
 };
 pub use nodes::{BinaryOperator, CoordinateInput, PureBuiltin, UnaryOperator};
 pub(crate) use nodes::{Coordinate, ExprNode, PackedSubscript, PackedSubscriptKind};
@@ -257,6 +260,27 @@ impl<'dae> ExpressionAt<'_, 'dae> {
             self.provenance,
         )?;
         let function_facts = node_function_facts(self.storage, node, self.provenance)?;
+        let mut visible = Ok(());
+        node.for_each_child(&self.storage.expressions, |child| {
+            if visible.is_ok() {
+                visible = self
+                    .storage
+                    .expect_model_arm_visible(child, self.provenance);
+            }
+        });
+        visible?;
+        let binder_domain = match self.storage.active_model_arm {
+            Some(arm) => {
+                let guard = self.storage.model_arms[arm as usize].guard;
+                merge_binder_domain(
+                    self.storage,
+                    binder_domain,
+                    self.storage.expressions.binder_domains[guard as usize],
+                    self.provenance,
+                )?
+            }
+            None => binder_domain,
+        };
         Ok((
             id,
             ExpressionInsertionFacts {
@@ -267,6 +291,8 @@ impl<'dae> ExpressionAt<'_, 'dae> {
                 function_illegal_coordinate: function_facts.illegal_coordinate,
                 function_read_set: function_facts.read_set,
                 function_latest_call: function_facts.latest_call,
+                model_arm_scope: self.storage.active_model_arm,
+                model_conditional_owner: self.storage.closing_model_conditional,
             },
         ))
     }
@@ -288,6 +314,8 @@ impl<'dae> ExpressionAt<'_, 'dae> {
 /// Per-node facts committed together with the node itself, owned by
 /// [`ExpressionAt`] so no other module can fabricate arena rows.
 struct ExpressionInsertionFacts {
+    model_conditional_owner: Option<u32>,
+    model_arm_scope: Option<u32>,
     value_type: u32,
     variability: ExpressionVariability,
     binder_domain: Option<u32>,
@@ -318,6 +346,9 @@ impl ExpressionArenaStorage {
             .push(facts.function_illegal_coordinate);
         self.function_read_sets.push(facts.function_read_set);
         self.function_latest_calls.push(facts.function_latest_call);
+        self.model_arm_scopes.push(facts.model_arm_scope);
+        self.model_conditional_owners
+            .push(facts.model_conditional_owner);
         debug_assert_eq!(self.nodes.len(), self.provenance.len());
         debug_assert_eq!(self.nodes.len(), self.value_types.len());
         debug_assert_eq!(self.nodes.len(), self.variability.len());

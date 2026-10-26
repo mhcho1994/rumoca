@@ -86,7 +86,7 @@ native backend. Ordinary equation-only workflows keep their existing support.
 | Owner | Responsibility |
 |---|---|
 | `rumoca-ir-solve::execution` | Public profile, operation vocabulary, scalar and lifecycle validation |
-| `rumoca-phase-solve::execution` | Projection from Solve and checked reconstruction, including derived refresh/AD artifacts |
+| `rumoca-eval-solve::execution::numerical` | Projection from Solve and checked reconstruction, including derived refresh/AD artifacts |
 | `rumoca-eval-solve::execution` | Lifecycle interpreter and generic CSV resources; arithmetic delegates to the existing evaluator |
 | `rumoca-solver::fmi_me` | Proves publication coordinates/roles and performs same-time deduplication |
 | `rumoca-sim::execution` | Composes checked FMI component, native effect interpreter and existing RK45 master |

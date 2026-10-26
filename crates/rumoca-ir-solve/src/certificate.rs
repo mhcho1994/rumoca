@@ -264,6 +264,7 @@ fn program_dependencies(program: &[LinearOp]) -> Option<BTreeSet<DependencySlot>
             | LinearOp::Compare { .. }
             | LinearOp::Select { .. }
             | LinearOp::PureCall { .. }
+            | LinearOp::PureCallObservation { .. }
             | LinearOp::PureCallDirectional { .. }
             | LinearOp::StoreOutputFoldTensorUpdate { .. }
             | LinearOp::StoreOutputFunctionFold { .. }
@@ -299,6 +300,7 @@ pub fn derive_runtime_assignment_roles(
     rhs: &ScalarProgramBlock,
     targets: &[ScalarSlot],
     relation_memory_parameter_indices: &[usize],
+    initial_mode: Option<usize>,
 ) -> Result<Vec<RuntimeAssignmentRole>, SolveProblemShapeContractError> {
     let relation_memory = relation_memory_parameter_indices
         .iter()
@@ -312,11 +314,7 @@ pub fn derive_runtime_assignment_roles(
         .map(|(program, target)| {
             let writes_relation_memory =
                 matches!(target, ScalarSlot::P { index, .. } if relation_memory.contains(&index));
-            if writes_relation_memory
-                || program
-                    .iter()
-                    .any(|op| matches!(op, LinearOp::Compare { .. }))
-            {
+            if writes_relation_memory || contains_transient_relation_effect(program, initial_mode) {
                 RuntimeAssignmentRole::RelationEvaluating
             } else {
                 RuntimeAssignmentRole::RelationFree
@@ -456,6 +454,65 @@ pub fn derive_root_relation_refresh_roles(
     Ok(roles)
 }
 
+/// Effect of the checked regions reachable with initialization mode cleared.
+fn contains_transient_relation_effect(program: &[LinearOp], initial_mode: Option<usize>) -> bool {
+    program.iter().any(|op| match op {
+        LinearOp::Compare { .. } => true,
+        LinearOp::FunctionConditional { program, .. } => {
+            program.arms.iter().any(|arm| {
+                contains_transient_relation_effect(&arm.condition, initial_mode)
+                    || (!initial_mode_condition(&arm.condition, initial_mode)
+                        && contains_transient_relation_effect(&arm.result, initial_mode))
+            }) || contains_transient_relation_effect(&program.fallback, initial_mode)
+        }
+        _ => {
+            let mut effect = RelationEffect(false);
+            match crate::visitor::walk_linear_op_slice(
+                &mut effect,
+                crate::visitor::LinearOpSliceKind::ScalarProgram {
+                    program_index: 0,
+                    span: None,
+                },
+                std::slice::from_ref(op),
+            ) {
+                Ok(()) => {}
+                Err(never) => match never {},
+            }
+            effect.0
+        }
+    })
+}
+
+struct RelationEffect(bool);
+
+impl crate::visitor::SolveVisitor for RelationEffect {
+    type Error = std::convert::Infallible;
+
+    fn visit_linear_op(
+        &mut self,
+        _kind: crate::visitor::LinearOpSliceKind,
+        _index: usize,
+        op: &LinearOp,
+    ) -> Result<(), Self::Error> {
+        // Opaque typed owners have no phase-specific relation-effect proof.
+        // They cannot authorize relation-free post-commit replay.
+        self.0 |= matches!(
+            op,
+            LinearOp::Compare { .. }
+                | LinearOp::PureCall { .. }
+                | LinearOp::PureCallObservation { .. }
+                | LinearOp::PureCallDirectional { .. }
+                | LinearOp::StoreOutputFoldTensorUpdate { .. }
+        );
+        Ok(())
+    }
+}
+
+fn initial_mode_condition(program: &[LinearOp], initial_mode: Option<usize>) -> bool {
+    initial_mode
+        .is_some_and(|flag| crate::parameter_reads::scalar_parameter_output(program) == Some(flag))
+}
+
 pub(crate) fn validate_runtime_assignment_certificates(
     problem: &SolveProblem,
 ) -> Result<(), SolveProblemShapeContractError> {
@@ -464,6 +521,7 @@ pub(crate) fn validate_runtime_assignment_certificates(
         &system.runtime_assignment_rhs,
         &system.runtime_assignment_targets,
         &problem.solve_layout.relation_memory_parameter_indices,
+        problem.solve_layout.initial_event_parameter_index,
     )?;
     for (row, (actual, expected)) in system
         .runtime_assignment_roles

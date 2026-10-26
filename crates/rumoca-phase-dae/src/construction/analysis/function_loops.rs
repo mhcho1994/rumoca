@@ -78,6 +78,7 @@ fn validate_function_loop_domain(
             ));
         };
         binders.push(StructuredIndexBinder {
+            provenance: index.binder,
             id: ordinal,
             display_name: index.ident.clone(),
             lower,
@@ -270,6 +271,9 @@ fn classify_function_loop(
         FunctionLoopLowering::Fold {
             targets,
             iteration_locals: Vec::new(),
+            selected_entry: None,
+            entry_reads: Vec::new(),
+            entry_seeds: Vec::new(),
         }
     }
 }
@@ -502,6 +506,7 @@ pub(in crate::construction) fn flattened_function_loop_source<'statement>(
 /// A generated branch selection is certified to be defined and read only in
 /// the sequence that holds its definition, so it belongs to the innermost loop
 /// whose body holds that definition and is never a value of an enclosing loop.
+/// A mutable function exit state escapes each nested loop and remains carried.
 fn function_loop_targets(plans: &[FunctionStatementPlan]) -> Vec<VarName> {
     loop_targets(plans, true)
 }
@@ -513,13 +518,15 @@ fn loop_targets(plans: &[FunctionStatementPlan], own_generated: bool) -> Vec<Var
             FunctionStatementPlan::Assignment(assignment) => {
                 extend_unique_targets(&mut targets, [assignment.target().clone()]);
             }
-            FunctionStatementPlan::GeneratedBooleanAssignment { target, .. } if own_generated => {
+            FunctionStatementPlan::GeneratedBooleanAssignment {
+                target, mutable, ..
+            } if own_generated || *mutable => {
                 extend_unique_targets(&mut targets, [target.clone()]);
             }
             FunctionStatementPlan::RecordAssembly(assembly) => {
                 extend_unique_targets(&mut targets, [assembly.target.clone()]);
             }
-            FunctionStatementPlan::MultiOutputCall { outputs } => {
+            FunctionStatementPlan::MultiOutputCall { outputs, .. } => {
                 extend_unique_targets(
                     &mut targets,
                     outputs

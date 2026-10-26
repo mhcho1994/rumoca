@@ -73,6 +73,7 @@ pub(super) fn lower_total_array_model_algorithm<'dae>(
             function_body: None,
             values: None,
             owner_clock: None,
+            source_comprehension_binders: None,
         },
         &binders,
         value,
@@ -128,6 +129,7 @@ pub(super) fn lower_separated_array_sum_model_algorithm<'dae>(
         function_body: None,
         values: None,
         owner_clock: None,
+        source_comprehension_binders: None,
     };
     let element = lower_expression_scoped(lowering.construction, symbols, &binders, element, None)?;
     let array = lowering

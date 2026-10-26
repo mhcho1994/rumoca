@@ -162,6 +162,20 @@ impl Frame<'_> {
                     expressions,
                     ..
                 } => self.group(values, expressions)?,
+                RbcFunctionStatement::Conditional {
+                    conditions,
+                    branches,
+                    fallback,
+                    outputs,
+                    ..
+                } => {
+                    self.conditional(conditions, branches, fallback, outputs)?;
+                }
+                RbcFunctionStatement::RequireAssigned { value, .. } => {
+                    let definition = self.current.get(*value as usize).copied().flatten()?;
+                    let result = self.definitions.get(&definition)?.clone();
+                    self.define(*value, result)?;
+                }
                 RbcFunctionStatement::For {
                     fold, statements, ..
                 } => self.fold(*fold, statements)?,
@@ -180,6 +194,35 @@ impl Frame<'_> {
             .collect::<Option<Vec<_>>>()?;
         for (value, result) in values.iter().zip(results) {
             self.define(*value, result)?;
+        }
+        Some(())
+    }
+
+    fn conditional(
+        &mut self,
+        conditions: &[ExprId],
+        branches: &[RbcFunctionBranch],
+        fallback: &RbcFunctionBranch,
+        outputs: &[RbcFunctionDefinition],
+    ) -> Option<()> {
+        let mut selected = branches.len();
+        for (index, condition) in conditions.iter().enumerate() {
+            if self.eval(*condition)?.boolean()? {
+                selected = index;
+                break;
+            }
+        }
+        for (index, branch) in branches.iter().chain(std::iter::once(fallback)).enumerate() {
+            if index == selected {
+                self.run(&branch.statements)?;
+            } else {
+                self.next_definition += count_definitions(self.function, &branch.statements)?;
+            }
+        }
+        for output in outputs {
+            let definition = self.current.get(output.value as usize).copied().flatten()?;
+            let result = self.definitions.get(&definition)?.clone();
+            self.define(output.value, result)?;
         }
         Some(())
     }
@@ -246,7 +289,20 @@ fn count_definitions(function: &RbcFunction, statements: &[RbcFunctionStatement]
     let mut count = 0u32;
     for statement in statements {
         count += match statement {
-            RbcFunctionStatement::Assignment { .. } => 1,
+            RbcFunctionStatement::Assignment { .. }
+            | RbcFunctionStatement::RequireAssigned { .. } => 1,
+            RbcFunctionStatement::Conditional {
+                branches,
+                fallback,
+                outputs,
+                ..
+            } => {
+                let mut total = outputs.len() as u32;
+                for branch in branches.iter().chain(std::iter::once(fallback)) {
+                    total += count_definitions(function, &branch.statements)?;
+                }
+                total
+            }
             RbcFunctionStatement::Assertion { .. } => 0,
             RbcFunctionStatement::AssignmentGroup { values, .. } => values.len() as u32,
             RbcFunctionStatement::For {
@@ -317,6 +373,7 @@ impl Scope<'_, '_> {
             RbcExprNode::Coordinate { coordinate } => self.coordinate(*coordinate)?,
             RbcExprNode::FunctionValue { definition, .. }
             | RbcExprNode::FunctionFoldParameter { definition, .. }
+            | RbcExprNode::FunctionConditionalOutput { definition, .. }
             | RbcExprNode::FunctionFoldOutput { definition, .. } => {
                 self.frame.as_ref()?.definitions.get(definition)?.clone()
             }

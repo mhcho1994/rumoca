@@ -15,7 +15,7 @@ use rumoca_ir_solve as solve;
 
 use super::{
     AssertionSlot, EnvironmentLayout, ExpressionLowerer, LoweredValue, RegionContext,
-    load_region_lowerer,
+    implied_guards, load_region_lowerer,
 };
 
 /// One fold's checked transition record.
@@ -47,26 +47,22 @@ struct FoldIteration<'a, 'dae> {
     transition: &'a FoldTransition<'dae>,
     environment: &'a EnvironmentLayout<'dae>,
     context: &'a RegionContext<'dae>,
+    state_keys: &'a [(
+        (dae::FunctionConditionalId<'dae>, dae::FunctionValueId<'dae>),
+        Range<usize>,
+    )],
     carried_layout: &'a CarriedLayout<'dae>,
     /// Assertion slots of calls the iterations reach, carried after the
     /// targets (see [`FoldAssertions`]).
     assertions: &'a FoldAssertions,
-    body: &'a super::assertions::FoldBody<'dae>,
+    source: Option<&'a super::assertions::LoopStatements<'dae>>,
     provenance: rumoca_core::Span,
 }
 
-/// Assertion slots a fold's iterations reach, carried through the loop.
-///
-/// A call inside the loop body may fail on any iteration, and the first
-/// failing iteration ends the function (MLS 3.7 §11.2.8.1). Each predicate
-/// slot is carried as the conjunction of every iteration's predicate, and each
-/// message value slot as the value of the first iteration whose predicate
-/// failed, so the loop publishes one assertion outcome per slot.
+/// Diagnostic slots a fold's iterations reach. The in-frame observer owns
+/// their failures and captures; the normal carried tuple keeps inactive cells.
 struct FoldAssertions {
     slots: Vec<usize>,
-    kinds: Vec<AssertionSlot>,
-    /// Index into the carried tuple of the first assertion slot.
-    start: usize,
 }
 
 impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
@@ -79,37 +75,28 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             return Ok(values.clone());
         }
         let transition = checked_transition(self.view, fold, provenance)?;
-        let body = self
-            .fold_bodies
-            .get(&fold)
-            .cloned()
-            .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-        let roots = transition
-            .update_expressions
-            .iter()
-            .copied()
-            .chain(body.conditions.iter().copied())
-            .chain(transition.continuation)
-            .collect::<Vec<_>>();
-        let pending = self.pending_predicates(roots.iter().copied());
-        if transition.initial_definitions.is_empty()
-            && transition.continuation.is_none()
-            && pending.is_empty()
-            && body.conditions.iter().all(|condition| {
-                super::assertions::assertion_is_map_independent(self.view, *condition)
-            })
-        {
-            let next = self.next_direct_assertion;
-            self.next_direct_assertion = body.assertions.start;
-            self.loop_assertions(body.statements, &mut vec![transition.domain], provenance)?;
-            self.next_direct_assertion = next;
-            self.fold_values.insert(fold, Vec::new());
-            return Ok(Vec::new());
+        let source = self.loop_statements.get(&fold).cloned();
+        let mut roots = source.as_ref().map_or_else(
+            || transition.update_expressions.clone(),
+            |source| {
+                super::assertions::statement_roots(source.statements.clone(), &|owner, value| {
+                    self.assigned_values.contains_key(&(owner, value))
+                })
+            },
+        );
+        if let Some(source) = &source {
+            for declaration in &self.direct_assertions[source.assertions.clone()] {
+                roots.extend(declaration.message_values.iter().map(|&(value, _)| value));
+            }
         }
         let (mut initial_flat, carried_layout) =
             self.carried_entry_values(&transition, provenance)?;
-        let slots = body.assertions.clone().chain(pending).collect();
-        let assertions = self.fold_assertions(slots, &mut initial_flat, provenance)?;
+        let assertions =
+            self.fold_assertions(&roots, source.as_ref(), &mut initial_flat, provenance)?;
+        if initial_flat.is_empty() {
+            self.fold_values.insert(fold, Vec::new());
+            return Ok(Vec::new());
+        }
         let domain = self
             .view
             .domain(transition.domain)
@@ -124,41 +111,55 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
             .view
             .function_scope(fold.function(), Some(fold))
             .ok_or(solve::SolveProgramConstructionError::WireMismatch)?;
-        let (captures, environment) =
-            self.capture_environment_for_fold(roots.iter().copied(), fold, scope)?;
-        let context = RegionContext {
-            view: self.view,
-            callees: self.callees.clone(),
-            predicate_ranges: self.predicate_ranges.clone(),
-            conditional_groups: self.conditional_groups.clone(),
-            fold_bodies: self.fold_bodies.clone(),
-            assertion_slots: self.assertion_slots.clone(),
-            direct_assertion_count: self.direct_assertion_count,
-        };
+        let (captures, environment) = self.capture_environment_for_fold(
+            roots.iter().copied().chain(transition.continuation),
+            fold,
+            scope,
+        )?;
+        let state_environment = self.assigned_capture_environment();
+        let context = self.region_context();
         let iteration = FoldIteration {
             fold,
             transition: &transition,
             environment: &environment,
             context: &context,
+            state_keys: &state_environment.keys,
             carried_layout: &carried_layout,
             assertions: &assertions,
-            body: &body,
+            source: source.as_ref(),
             provenance,
         };
-        let destinations = iteration.build(self.builder, domain, &initial_flat, &captures)?;
-        for (offset, slot) in assertions.slots.iter().enumerate() {
-            let value = destinations
-                .get(assertions.start + offset)
-                .copied()
-                .ok_or(solve::SolveProgramConstructionError::InvalidCallOutput { provenance })?;
-            let published = self
-                .predicate_values
-                .get_mut(*slot)
-                .ok_or(solve::SolveProgramConstructionError::InvalidCallOutput { provenance })?;
-            if published.replace(value).is_some() {
-                return Err(solve::SolveProgramConstructionError::InvalidCallOutput { provenance });
-            }
-        }
+        let destinations = match transition.continuation {
+            Some(continuation) => self.builder.fold_while_assigned(
+                domain,
+                &initial_flat,
+                (&captures, &state_environment.captures),
+                provenance,
+                move |builder, states, carried, captures, binders, outputs| {
+                    iteration.lower_continuation(
+                        builder,
+                        states,
+                        continuation,
+                        (carried, captures, binders),
+                        outputs,
+                    )
+                },
+                move |builder, states, carried, captures, binders, outputs| {
+                    iteration.lower(builder, states, carried, captures, binders, outputs)
+                },
+            )?,
+            None => self.builder.fold_with_assigned(
+                domain,
+                &initial_flat,
+                &captures,
+                &state_environment.captures,
+                provenance,
+                move |builder, states, carried, captures, binders, outputs| {
+                    iteration.lower(builder, states, carried, captures, binders, outputs)
+                },
+            )?,
+        };
+        self.publish_inactive_fold_assertions(&assertions, provenance)?;
         let values = carried_layout
             .iter()
             .map(|(_, value_type, range)| LoweredValue {
@@ -170,16 +171,45 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
         Ok(values)
     }
 
+    fn publish_inactive_fold_assertions(
+        &mut self,
+        assertions: &FoldAssertions,
+        provenance: rumoca_core::Span,
+    ) -> Result<(), solve::SolveProgramConstructionError> {
+        for slot in &assertions.slots {
+            let value = self.inactive_slot(*slot, provenance)?;
+            let published = self
+                .predicate_values
+                .get_mut(*slot)
+                .ok_or(solve::SolveProgramConstructionError::InvalidCallOutput { provenance })?;
+            if published.replace(value).is_some() {
+                return Err(solve::SolveProgramConstructionError::InvalidCallOutput { provenance });
+            }
+        }
+        Ok(())
+    }
+
     /// Carry the assertion slots of every call the loop body reaches, each
     /// entering the loop at its unselected value.
     fn fold_assertions(
         &mut self,
-        slots: Vec<usize>,
+        roots: &[dae::ExprId<'dae>],
+        source: Option<&super::assertions::LoopStatements<'dae>>,
         initial_flat: &mut Vec<solve::ProgramRegister<'program>>,
         provenance: rumoca_core::Span,
     ) -> Result<FoldAssertions, solve::SolveProgramConstructionError> {
-        let start = initial_flat.len();
-        let mut kinds = Vec::with_capacity(slots.len());
+        let mut slots = source.map_or_else(Vec::new, |source| source.assertions.clone().collect());
+        if let Some(source) = source {
+            slots.extend(
+                self.assertion_slots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, kind)| {
+                        message_slot_in_range(slot, kind, &source.assertions)
+                    }),
+            );
+        }
+        slots.extend(self.unissued_assertion_slots(roots.iter().copied()));
         for slot in &slots {
             let kind =
                 self.assertion_slots.get(*slot).cloned().ok_or(
@@ -197,13 +227,8 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
                 });
             }
             initial_flat.push(kind.unselected(self.builder, provenance)?);
-            kinds.push(kind);
         }
-        Ok(FoldAssertions {
-            slots,
-            kinds,
-            start,
-        })
+        Ok(FoldAssertions { slots })
     }
 
     /// Entry value of each carried target, flattened into the initial tuple.
@@ -240,7 +265,21 @@ impl<'program, 'dae> ExpressionLowerer<'_, 'program, 'dae> {
     }
 }
 
-/// Check one DAE fold record, including loops whose only effect is an assertion.
+fn message_slot_in_range(
+    slot: usize,
+    kind: &AssertionSlot,
+    assertions: &std::ops::Range<usize>,
+) -> Option<usize> {
+    let AssertionSlot::MessageValue { predicate, .. } = kind else {
+        return None;
+    };
+    assertions
+        .contains(&slot.checked_sub(*predicate)?)
+        .then_some(slot)
+}
+
+/// Check one DAE fold record into a transition. An assertion-only loop carries
+/// its real assertion observations even when it has no ordinary target.
 fn checked_transition<'dae>(
     view: dae::DaeView<'dae>,
     fold: dae::FunctionFoldId<'dae>,
@@ -294,45 +333,15 @@ fn checked_transition<'dae>(
 }
 
 impl<'dae> FoldIteration<'_, 'dae> {
-    fn build<'program>(
-        self,
-        builder: &mut solve::TypedProgramBuilder<'program>,
-        domain: rumoca_core::StructuredIndexDomain,
-        initial: &[solve::ProgramRegister<'program>],
-        captures: &[solve::ProgramRegister<'program>],
-    ) -> Result<Vec<solve::ProgramRegister<'program>>, solve::SolveProgramConstructionError> {
-        match self.transition.continuation {
-            Some(continuation) => builder.fold_while(
-                domain,
-                initial,
-                captures,
-                self.provenance,
-                move |builder, carried, captures, outputs| {
-                    self.lower_continuation(builder, continuation, (carried, captures), outputs)
-                },
-                move |builder, carried, captures, binders, outputs| {
-                    self.lower(builder, carried, captures, binders, outputs)
-                },
-            ),
-            None => builder.fold(
-                domain,
-                initial,
-                captures,
-                self.provenance,
-                move |builder, carried, captures, binders, outputs| {
-                    self.lower(builder, carried, captures, binders, outputs)
-                },
-            ),
-        }
-    }
-
-    /// Build a bounded `while` fold's predicate region over the carried
-    /// tuple and the captures.
+    /// Build a fold's early-exit predicate region over the carried tuple, the
+    /// captures and the binders of the pass about to run.
     fn lower_continuation<'region>(
         self,
         builder: &mut solve::TypedProgramBuilder<'region>,
+        states: &[solve::ProgramAssignedState<'region>],
         continuation: dae::ExprId<'dae>,
-        (carried, captures): (
+        (carried, captures, binders): (
+            &[solve::ProgramSlot<'region>],
             &[solve::ProgramSlot<'region>],
             &[solve::ProgramSlot<'region>],
         ),
@@ -345,7 +354,14 @@ impl<'dae> FoldIteration<'_, 'dae> {
             self.context,
             self.provenance,
         )?;
+        super::scoped_conditionals::bind_states(
+            &mut lowerer,
+            self.state_keys,
+            states,
+            self.provenance,
+        )?;
         self.seed_carried_values(&mut lowerer, carried)?;
+        self.seed_binders(&mut lowerer, binders)?;
         let value = lowerer.expression(continuation)?;
         match (value.leaves.as_slice(), outputs) {
             ([predicate], [output]) => lowerer.builder.store(*output, *predicate, self.provenance),
@@ -359,6 +375,7 @@ impl<'dae> FoldIteration<'_, 'dae> {
     fn lower<'region>(
         self,
         builder: &mut solve::TypedProgramBuilder<'region>,
+        states: &[solve::ProgramAssignedState<'region>],
         carried: &[solve::ProgramSlot<'region>],
         captures: &[solve::ProgramSlot<'region>],
         binders: &[solve::ProgramSlot<'region>],
@@ -371,10 +388,26 @@ impl<'dae> FoldIteration<'_, 'dae> {
             self.context,
             self.provenance,
         )?;
+        super::scoped_conditionals::bind_states(
+            &mut lowerer,
+            self.state_keys,
+            states,
+            self.provenance,
+        )?;
         self.seed_carried_values(&mut lowerer, carried)?;
         self.seed_binders(&mut lowerer, binders)?;
-        lowerer.next_direct_assertion = self.body.assertions.start;
-        lowerer.statements(self.body.statements.clone())?;
+        if let Some(continuation) = self.transition.continuation {
+            lowerer.implied_guards = implied_guards::conjuncts(lowerer.view, continuation);
+        }
+        if let Some(source) = self.source {
+            lowerer.next_direct_assertion = source.assertions.start;
+            lowerer.statements(source.statements.clone())?;
+            if lowerer.next_direct_assertion != source.assertions.end {
+                return Err(solve::SolveProgramConstructionError::InvalidCallOutput {
+                    provenance: self.provenance,
+                });
+            }
+        }
         let mut updated = self.lower_updates(&mut lowerer)?;
         updated.extend(self.accumulate_assertions(&mut lowerer, carried)?);
         if updated.len() != outputs.len() {
@@ -388,65 +421,18 @@ impl<'dae> FoldIteration<'_, 'dae> {
         Ok(())
     }
 
-    /// Each carried assertion slot after this iteration: a predicate holds
-    /// while every iteration so far held it, and a message value is the one
-    /// of the first iteration whose predicate failed.
+    /// The observer owns each iteration's diagnostics; normal carried outputs
+    /// contain only the inactive assertion cells.
     fn accumulate_assertions<'program>(
         &self,
         lowerer: &mut ExpressionLowerer<'_, 'program, 'dae>,
-        carried: &[solve::ProgramSlot<'program>],
+        _carried: &[solve::ProgramSlot<'program>],
     ) -> Result<Vec<solve::ProgramRegister<'program>>, solve::SolveProgramConstructionError> {
-        let assertions = self.assertions;
-        let provenance = self.provenance;
-        let mut entry = Vec::with_capacity(assertions.slots.len());
-        let mut iteration = Vec::with_capacity(assertions.slots.len());
-        for (offset, slot) in assertions.slots.iter().enumerate() {
-            let carried = carried
-                .get(assertions.start + offset)
-                .ok_or(solve::SolveProgramConstructionError::InvalidCallOutput { provenance })?;
-            entry.push(lowerer.builder.load(*carried, provenance)?);
-            iteration.push(lowerer.published_slot(*slot, provenance)?);
-        }
-        let mut accumulated = Vec::with_capacity(assertions.slots.len());
-        for (offset, kind) in assertions.kinds.iter().enumerate() {
-            let value = match kind {
-                AssertionSlot::Predicate => lowerer.builder.binary(
-                    solve::SolveBinaryOperator::And,
-                    entry[offset],
-                    iteration[offset],
-                    provenance,
-                )?,
-                AssertionSlot::MessageValue { predicate, .. } => {
-                    let owner = assertions.slots[offset] - predicate;
-                    let owner = assertions
-                        .slots
-                        .iter()
-                        .position(|slot| *slot == owner)
-                        .ok_or(solve::SolveProgramConstructionError::InvalidCallInterface {
-                            provenance,
-                        })?;
-                    let failed = lowerer.builder.unary(
-                        solve::SolveUnaryOperator::Not,
-                        iteration[owner],
-                        provenance,
-                    )?;
-                    let first_failure = lowerer.builder.binary(
-                        solve::SolveBinaryOperator::And,
-                        entry[owner],
-                        failed,
-                        provenance,
-                    )?;
-                    lowerer.builder.select(
-                        first_failure,
-                        iteration[offset],
-                        entry[offset],
-                        provenance,
-                    )?
-                }
-            };
-            accumulated.push(value);
-        }
-        Ok(accumulated)
+        self.assertions
+            .slots
+            .iter()
+            .map(|slot| lowerer.inactive_slot(*slot, self.provenance))
+            .collect()
     }
 
     /// Install this iteration's entry value of every carried target.

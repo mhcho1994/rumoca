@@ -55,7 +55,17 @@ pub(in crate::construction) fn assigned_function_targets(
     statements: &[rumoca_core::Statement],
 ) -> HashSet<String> {
     let mut assigned = HashSet::new();
-    collect_function_assignment_targets(statements, &mut assigned);
+    collect_function_assignment_targets(statements, &mut assigned, &[]);
+    assigned
+}
+
+/// Writes in normalized source include the checked generated Boolean stores.
+pub(super) fn assigned_function_targets_with_generated(
+    statements: &[rumoca_core::Statement],
+    generated: &[function_returns::GeneratedBooleanDefinition],
+) -> HashSet<String> {
+    let mut assigned = HashSet::new();
+    collect_function_assignment_targets(statements, &mut assigned, generated);
     assigned
 }
 
@@ -82,6 +92,7 @@ fn insert_written_declaration(
 fn collect_function_assignment_targets(
     statements: &[rumoca_core::Statement],
     assigned: &mut HashSet<String>,
+    generated: &[function_returns::GeneratedBooleanDefinition],
 ) {
     for statement in statements {
         match statement {
@@ -95,10 +106,10 @@ fn collect_function_assignment_targets(
                 }
             }
             rumoca_core::Statement::For { equations, .. } => {
-                collect_function_assignment_targets(equations, assigned);
+                collect_function_assignment_targets(equations, assigned, generated);
             }
             rumoca_core::Statement::While { block, .. } => {
-                collect_function_assignment_targets(&block.stmts, assigned);
+                collect_function_assignment_targets(&block.stmts, assigned, generated);
             }
             rumoca_core::Statement::If {
                 cond_blocks,
@@ -106,20 +117,25 @@ fn collect_function_assignment_targets(
                 ..
             } => {
                 for block in cond_blocks {
-                    collect_function_assignment_targets(&block.stmts, assigned);
+                    collect_function_assignment_targets(&block.stmts, assigned, generated);
                 }
                 collect_function_assignment_targets(
                     else_block.as_deref().unwrap_or_default(),
                     assigned,
+                    generated,
                 );
             }
             rumoca_core::Statement::When { blocks, .. } => {
                 for block in blocks {
-                    collect_function_assignment_targets(&block.stmts, assigned);
+                    collect_function_assignment_targets(&block.stmts, assigned, generated);
+                }
+            }
+            rumoca_core::Statement::Empty { span } => {
+                if let Some(store) = generated.iter().find(|store| store.span == *span) {
+                    assigned.insert(store.target.as_str().to_string());
                 }
             }
             rumoca_core::Statement::Assert { .. }
-            | rumoca_core::Statement::Empty { .. }
             | rumoca_core::Statement::Return { .. }
             | rumoca_core::Statement::Break { .. } => {}
         }
@@ -261,7 +277,46 @@ fn checked_static_integer_binary(operator: &OpBinary, lhs: i64, rhs: i64) -> Opt
         OpBinary::Add | OpBinary::AddElem => lhs.checked_add(rhs),
         OpBinary::Sub | OpBinary::SubElem => lhs.checked_sub(rhs),
         OpBinary::Mul | OpBinary::MulElem => lhs.checked_mul(rhs),
-        OpBinary::Div | OpBinary::DivElem if rhs != 0 && lhs % rhs == 0 => Some(lhs / rhs),
+        OpBinary::Div | OpBinary::DivElem if lhs.checked_rem(rhs) == Some(0) => {
+            lhs.checked_div(rhs)
+        }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod settled_integer_tests {
+    use super::*;
+
+    #[test]
+    fn settled_integer_division_refuses_the_minimum_overflow_domain() {
+        let span = Span::from_offsets(rumoca_core::SourceId::from_source_name("settled.mo"), 0, 1);
+        for operator in [OpBinary::Div, OpBinary::DivElem] {
+            for (lhs, rhs, expected) in [
+                (i64::MIN, -1, None),
+                (1, 0, None),
+                (3, 2, None),
+                (-6, 2, Some(-3)),
+                (i64::MIN, 1, Some(i64::MIN)),
+            ] {
+                let expression = Expression::Binary {
+                    op: operator.clone(),
+                    lhs: Box::new(Expression::Literal {
+                        value: Literal::Integer(lhs),
+                        span,
+                    }),
+                    rhs: Box::new(Expression::Literal {
+                        value: Literal::Integer(rhs),
+                        span,
+                    }),
+                    span,
+                };
+                assert_eq!(
+                    static_integer_expression(&expression, &HashMap::new()),
+                    expected,
+                    "{lhs} / {rhs}"
+                );
+            }
+        }
     }
 }

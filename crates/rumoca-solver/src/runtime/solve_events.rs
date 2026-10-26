@@ -18,14 +18,26 @@ pub fn next_runtime_event_stop(
     current_t: f64,
     target: f64,
 ) -> Result<(f64, Option<RuntimeEventStop>), RuntimeSolveError> {
-    let (static_stop, static_event) = stop_schedule.next_stop(current_t, target);
-    let Some(dynamic_stop) =
-        next_dynamic_time_event(model, runtime_state, y, params, current_t, target)?
-    else {
-        return Ok((static_stop, static_event));
+    let static_stop = stop_schedule.next_stop(current_t, target);
+    let dynamic_stop = next_dynamic_time_event(model, runtime_state, y, params, current_t, target)?;
+    Ok(next_runtime_event_stop_with_dynamic(
+        static_stop,
+        target,
+        dynamic_stop,
+    ))
+}
+
+pub(super) fn next_runtime_event_stop_with_dynamic(
+    static_stop: (f64, Option<RuntimeEventStop>),
+    target: f64,
+    dynamic_stop: Option<f64>,
+) -> (f64, Option<RuntimeEventStop>) {
+    let (static_stop, static_event) = static_stop;
+    let Some(dynamic_stop) = dynamic_stop else {
+        return (static_stop, static_event);
     };
     if dynamic_stop < static_stop && !sample_time_match_with_tol(dynamic_stop, static_stop) {
-        return Ok((dynamic_stop, Some(RuntimeEventStop::dynamic_time_event())));
+        return (dynamic_stop, Some(RuntimeEventStop::dynamic_time_event()));
     }
     if sample_time_match_with_tol(dynamic_stop, static_stop) {
         let event = static_event
@@ -38,9 +50,9 @@ pub fn next_runtime_event_stop(
         // host target bounds this step. Returning the earlier value can leave
         // the later relation false and replay the clock when that dynamic
         // deadline is processed immediately after it.
-        return Ok((static_stop.max(dynamic_stop).min(target), Some(event)));
+        return (static_stop.max(dynamic_stop).min(target), Some(event));
     }
-    Ok((static_stop, static_event))
+    (static_stop, static_event)
 }
 
 pub fn current_dynamic_time_event_stop(
@@ -74,7 +86,7 @@ pub fn visible_values_with_context(
     context: RowEvalContext<'_>,
 ) -> Result<Vec<f64>, RuntimeSolveError> {
     model
-        .visible_names
+        .visible_names()
         .iter()
         .enumerate()
         .map(|(idx, name)| visible_value_with_context(model, idx, name, y, params, t, context))
@@ -165,24 +177,28 @@ fn visible_value_with_context(
     t: f64,
     context: RowEvalContext<'_>,
 ) -> Result<f64, RuntimeSolveError> {
-    if model.visible_value_rows.len() == model.visible_names.len() {
-        let evaluator = PreparedScalarProgramBlock::new(model.visible_value_rows.clone())?;
+    if let Some(slot) = model.visible_projection().slot(visible_idx) {
+        let value = match slot {
+            solve::ScalarSlot::Y { index, .. } => y.get(index),
+            solve::ScalarSlot::P { index, .. } => params.get(index),
+            _ => None,
+        };
+        return value.copied().ok_or_else(|| {
+            RuntimeSolveError::solve_ir(format!("visible storage `{name}` is out of range"))
+        });
+    }
+    let rows = model
+        .visible_projection()
+        .scalar_rows()
+        .map_err(|error| RuntimeSolveError::solve_ir(error.to_string()))?;
+    if visible_idx < rows.row_count() {
+        let evaluator = PreparedScalarProgramBlock::new(rows)?;
         return evaluator
             .eval_row_with_context(visible_idx, y, params, t, context)
             .map_err(Into::into);
     }
-    if let Some(idx) = runtime_parameter_index(&model.problem.solve_layout, name) {
-        return params.get(idx).copied().ok_or_else(|| {
-            RuntimeSolveError::solve_ir(format!("runtime slot `{name}` is out of range"))
-        });
-    }
-    if let Some(idx) = model.problem.solve_layout.solver_maps.name_to_idx.get(name) {
-        return y.get(*idx).copied().ok_or_else(|| {
-            RuntimeSolveError::solve_ir(format!("solver slot `{name}` is out of range"))
-        });
-    }
     Err(RuntimeSolveError::solve_ir(format!(
-        "visible trace name `{name}` is not in solve layout"
+        "visible projection point {visible_idx} for `{name}` has no checked observation row"
     )))
 }
 
@@ -202,14 +218,26 @@ fn next_dynamic_time_event(
         .filter_map(|name| dynamic_time_event_value(model, params, name));
     let mut candidates = dynamic_time_event_row_values(model, runtime_state, y, params, current_t)?;
     candidates.extend(named_events);
-    candidates.retain(|event_t| event_time_in_window(*event_t, current_t, target));
-    Ok(canonical_dynamic_time_event(&candidates))
+    Ok(dynamic_time_event_in_window(
+        &mut candidates,
+        current_t,
+        target,
+    ))
 }
 
 /// Return the reached instant for the earliest tolerance-coincident deadline
 /// cluster.  Dynamic owners can compute the same mathematical time through
 /// different floating-point expressions; choosing the cluster's earliest bit
 /// pattern would leave its slightly later owners armed for an immediate replay.
+pub(super) fn dynamic_time_event_in_window(
+    candidates: &mut Vec<f64>,
+    current_t: f64,
+    target: f64,
+) -> Option<f64> {
+    candidates.retain(|event_t| event_time_in_window(*event_t, current_t, target));
+    canonical_dynamic_time_event(candidates)
+}
+
 fn canonical_dynamic_time_event(candidates: &[f64]) -> Option<f64> {
     let earliest = candidates.iter().copied().min_by(f64::total_cmp)?;
     candidates
@@ -246,7 +274,11 @@ fn dynamic_time_event_row_values(
     Ok(values)
 }
 
-fn dynamic_time_event_value(model: &solve::SolveModel, params: &[f64], name: &str) -> Option<f64> {
+pub(super) fn dynamic_time_event_value(
+    model: &solve::SolveModel,
+    params: &[f64],
+    name: &str,
+) -> Option<f64> {
     runtime_parameter_index(&model.problem.solve_layout, name)
         .and_then(|idx| params.get(idx).copied())
 }
@@ -304,7 +336,7 @@ mod tests {
             .clocks
             .periodic_event_schedules
             .push(periodic(period, 0.0));
-        model.parameters = vec![dynamic_deadline];
+        model.parameters = vec![dynamic_deadline].into();
         let mut schedule = SolveStopSchedule::new(&model.problem, 0.0, 0.02);
 
         let (event_time, event) = next_runtime_event_stop(
@@ -388,7 +420,7 @@ mod tests {
         model.problem.solve_layout.discrete_real_scalar_names = vec!["next".to_string()];
         model.problem.events.dynamic_time_event_names = vec!["next".to_string()];
         model.problem.events.has_terminal_event = true;
-        model.parameters = vec![target.next_up()];
+        model.parameters = vec![target.next_up()].into();
         let mut schedule = SolveStopSchedule::new(&model.problem, 0.0, target);
 
         let (event_time, event) = next_runtime_event_stop(

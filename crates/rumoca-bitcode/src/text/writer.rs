@@ -731,6 +731,7 @@ fn expression_body(node: &RbcExprNode) -> Result<String, TextError> {
         // ever reached another way.
         inner @ (RbcExprNode::FunctionValue { .. }
         | RbcExprNode::FunctionFoldParameter { .. }
+        | RbcExprNode::FunctionConditionalOutput { .. }
         | RbcExprNode::FunctionFoldOutput { .. }) => function_reference_body(inner),
         RbcExprNode::ClockTransfer {
             transfer: kind,
@@ -784,6 +785,15 @@ fn function_reference_body(node: &RbcExprNode) -> String {
             carried,
             definition,
         } => format!("foldout ~{} {fold} {carried} def {definition}", function.0),
+        RbcExprNode::FunctionConditionalOutput {
+            function,
+            conditional,
+            value,
+            definition,
+        } => format!(
+            "condout ~{} {conditional} {value} def {definition}",
+            function.0
+        ),
         _ => unreachable!("only function-body references are passed here"),
     }
 }

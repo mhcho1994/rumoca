@@ -990,6 +990,19 @@ fn parse_function_value(cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextErro
     })
 }
 
+fn parse_conditional_output(cursor: &mut Cursor<'_>) -> Result<RbcExprNode, TextError> {
+    let function = FunctionId(cursor.id('~')?);
+    let conditional = cursor.number()?;
+    let value = cursor.number()?;
+    cursor.expect("def")?;
+    Ok(RbcExprNode::FunctionConditionalOutput {
+        function,
+        conditional,
+        value,
+        definition: cursor.number()?,
+    })
+}
+
 fn parse_fold_value(cursor: &mut Cursor<'_>, output: bool) -> Result<RbcExprNode, TextError> {
     let function = FunctionId(cursor.id('~')?);
     let fold = cursor.number()?;
@@ -1112,6 +1125,7 @@ fn parse_expr_node(kind: &str, cursor: &mut Cursor<'_>) -> Result<RbcExprNode, T
         }
         "invoke" => parse_invoke(cursor)?,
         "fnvalue" => parse_function_value(cursor)?,
+        "condout" => parse_conditional_output(cursor)?,
         "foldparam" | "foldout" => parse_fold_value(cursor, kind == "foldout")?,
         "ctransfer" => parse_clock_transfer(cursor)?,
         "unsupported" => RbcExprNode::Unsupported {

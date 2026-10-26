@@ -1,4 +1,5 @@
 //! Ordered execution effects over canonical Solve scalar computation.
+pub mod numerical;
 use rumoca_ir_solve as solve;
 use solve::execution as ir;
 use std::{

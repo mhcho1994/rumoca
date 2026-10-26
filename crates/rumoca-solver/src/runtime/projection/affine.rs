@@ -53,32 +53,42 @@ fn settle_affine_block<M: ImplicitProjectionModel>(
         block,
         structure,
     };
-    let linearization = AffineLinearization::at_origin(model, point, retained)?;
+    let mut linearization = AffineLinearization::at_origin(model, point, retained)?;
+    let AffineScratch {
+        mut residual,
+        certificate: mut certificate_scales,
+    } = std::mem::take(&mut linearization.scratch);
+    linearization.certificate_scales(model, candidate, block, &mut certificate_scales);
     let mut system = AffineBlockSystem {
         model,
         parameters: p,
         time: t,
         block,
         block_index,
-        certificate_scales: linearization.certificate_scales(model, candidate, block),
+        certificate_scales,
         linearization,
         structure,
         tolerance: tol,
         prefer_torn: true,
         used_torn: std::cell::Cell::new(false),
     };
-    let mut settled = system.project(candidate)?;
+    let mut settled = system.project(candidate, &mut residual)?;
     if !settled && system.used_torn.get() {
         system.prefer_torn = false;
         for &index in &block.y_indices {
             candidate[index] = 0.0;
         }
-        settled = system.project(candidate)?;
+        settled = system.project(candidate, &mut residual)?;
     }
     if let (Some(_), Some(cache)) = (structure, model.affine_jacobian_cache(block_index)) {
+        let mut linearization = system.linearization;
+        linearization.scratch = AffineScratch {
+            residual,
+            certificate: system.certificate_scales,
+        };
         cache
             .borrow_mut()
-            .retain_affine_linearization(system.linearization);
+            .retain_affine_linearization(linearization);
     }
     Ok(settled)
 }
@@ -113,6 +123,15 @@ pub(crate) struct AffineLinearization {
     /// Names `jacobian`, `row_scales`, and `variable_scales` together (see
     /// [`ScaledNewtonSystem::revision`]): issued fresh whenever one changes.
     revision: u64,
+    /// Storage a solve reuses across its passes and, retained with the
+    /// linearization, across solves of the block.
+    scratch: AffineScratch,
+}
+
+#[derive(Clone, Default)]
+struct AffineScratch {
+    residual: Vec<f64>,
+    certificate: CertificateScales,
 }
 
 /// The certified rows' parameter snapshot and the rows a reuse refills.
@@ -172,7 +191,7 @@ struct OriginPoint<'a> {
     p: &'a [f64],
     t: f64,
     block: &'a solve::AlgebraicProjectionBlock,
-    structure: Option<&'a solve::JacobianStructure>,
+    structure: Option<&'a solve::ColoredJacobianStructure>,
 }
 
 impl AffineLinearization {
@@ -213,14 +232,20 @@ impl AffineLinearization {
         } = point;
         let (jacobian, by_rows) =
             affine_block_jacobian(model, candidate, (p, t), block, structure, storage)?;
-        let pattern = structure.map(solve::JacobianStructure::pattern);
+        let pattern = structure.map(solve::ColoredJacobianStructure::pattern);
         let (row_scales, variable_scales) =
             algebraic_block_scales(model, candidate, block, &jacobian, pattern);
         let row_magnitudes = jacobian_row_magnitudes(&jacobian, pattern);
         let row_derived = jacobian_row_derived(&jacobian, &variable_scales, pattern);
-        let reuse = (by_rows && structure.is_some())
-            .then(|| ReuseKey::at(ReuseKey::layout(model, block), p))
-            .flatten();
+        // A reuse refills its uncertified rows from reverse gradients, which
+        // stands for the formation only when the formation also filled them
+        // that way. With every row certified nothing is refilled, so a
+        // Jacobian from the prepared evaluation is reused just the same.
+        let reuse = structure
+            .is_some()
+            .then(|| ReuseKey::layout(model, block))
+            .filter(|(_, uncertified)| by_rows || uncertified.is_empty())
+            .and_then(|layout| ReuseKey::at(layout, p));
         Ok(Self {
             jacobian,
             row_scales,
@@ -230,6 +255,7 @@ impl AffineLinearization {
             fallback_targets: fallback_targets(model, block),
             reuse,
             revision: next_revision(),
+            scratch: AffineScratch::default(),
         })
     }
 
@@ -336,23 +362,22 @@ impl AffineLinearization {
         model: &M,
         candidate: &[f64],
         block: &solve::AlgebraicProjectionBlock,
-    ) -> CertificateScales {
-        CertificateScales {
-            unknowns: block
+        scales: &mut CertificateScales,
+    ) {
+        scales.unknowns.clear();
+        scales.unknowns.extend(
+            block
                 .y_indices
                 .iter()
                 .copied()
-                .zip(self.variable_scales.iter().copied())
-                .collect(),
-            fallbacks: self
-                .fallback_targets
-                .iter()
-                .map(|target| {
-                    target
-                        .map(|index| (index, model_variable_scale(model, index, candidate[index])))
-                })
-                .collect(),
-        }
+                .zip(self.variable_scales.iter().copied()),
+        );
+        scales.fallbacks.clear();
+        scales
+            .fallbacks
+            .extend(self.fallback_targets.iter().map(|target| {
+                target.map(|index| (index, model_variable_scale(model, index, candidate[index])))
+            }));
     }
 }
 
@@ -365,7 +390,7 @@ fn affine_block_jacobian<M: ImplicitProjectionModel>(
     candidate: &[f64],
     (p, t): (&[f64], f64),
     block: &solve::AlgebraicProjectionBlock,
-    structure: Option<&solve::JacobianStructure>,
+    structure: Option<&solve::ColoredJacobianStructure>,
     storage: Option<BlockJacobian>,
 ) -> Result<(BlockJacobian, bool), RuntimeSolveError> {
     let storage = match (storage, structure) {
@@ -396,28 +421,51 @@ struct AffineBlockSystem<'a, M> {
     linearization: AffineLinearization,
     /// The model scales the refinement's certificate reads.
     certificate_scales: CertificateScales,
-    structure: Option<&'a solve::JacobianStructure>,
+    structure: Option<&'a solve::ColoredJacobianStructure>,
     tolerance: f64,
     prefer_torn: bool,
     used_torn: std::cell::Cell<bool>,
 }
 
 impl<M: ImplicitProjectionModel> AffineBlockSystem<'_, M> {
-    fn project(&self, y: &mut [f64]) -> Result<bool, RuntimeSolveError> {
-        let residual = self.residual(y)?;
-        let Some(solution) = self.solve(&residual) else {
+    /// Settle the block from the origin; `residual` is its storage for every
+    /// residual pass.
+    fn project(&self, y: &mut [f64], residual: &mut Vec<f64>) -> Result<bool, RuntimeSolveError> {
+        self.residual(y, residual)?;
+        let Some(solution) = self.solve(residual) else {
             return Ok(false);
         };
         for (&index, &value) in self.block.y_indices.iter().zip(solution.iter()) {
             y[index] = value;
         }
-        self.refine(y)
+        self.refine(y, residual)
     }
 
-    fn residual(&self, y: &[f64]) -> Result<Vec<f64>, RuntimeSolveError> {
+    /// The block residual at `y` into `out`.
+    fn residual(&self, y: &[f64], out: &mut Vec<f64>) -> Result<(), RuntimeSolveError> {
+        out.resize(self.block.rows.len(), 0.0);
+        let point = (y, self.parameters, self.time);
+        if self.model.eval_block_residual(self.block_index, point, out) {
+            #[cfg(debug_assertions)]
+            {
+                let rows = self.residual_by_rows(y)?;
+                let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                assert_eq!(
+                    bits(out),
+                    bits(&rows),
+                    "a fused block residual is its rows' residuals bit for bit"
+                );
+            }
+            return Ok(());
+        }
+        *out = self.residual_by_rows(y)?;
+        Ok(())
+    }
+
+    fn residual_by_rows(&self, y: &[f64]) -> Result<Vec<f64>, RuntimeSolveError> {
         if let Some(selection) = self
             .structure
-            .and_then(solve::JacobianStructure::residual_output_evaluation)
+            .and_then(solve::ColoredJacobianStructure::residual_output_evaluation)
         {
             let mut residual = vec![0.0; self.block.rows.len()];
             if self.model.eval_implicit_residual_outputs(
@@ -448,7 +496,7 @@ impl<M: ImplicitProjectionModel> AffineBlockSystem<'_, M> {
             residual,
             row_scales: &self.linearization.row_scales,
             variable_scales: &self.linearization.variable_scales,
-            structure: self.structure.map(solve::JacobianStructure::pattern),
+            structure: self.structure.map(solve::ColoredJacobianStructure::pattern),
             tolerance: self.tolerance,
             revision: Some(self.linearization.revision),
         };
@@ -477,14 +525,14 @@ impl<M: ImplicitProjectionModel> AffineBlockSystem<'_, M> {
         delta
     }
 
-    fn refine(&self, y: &mut [f64]) -> Result<bool, RuntimeSolveError> {
+    fn refine(&self, y: &mut [f64], residual: &mut Vec<f64>) -> Result<bool, RuntimeSolveError> {
         for iteration in 0..ALGEBRAIC_PROJECTION_MAX_ITERS {
-            let residual = self.residual(y)?;
+            self.residual(y, residual)?;
             // Zero was only the arithmetic origin used to extract b. The
             // residual certificate uses this candidate's coordinate scales.
             let origin = OriginRowScales {
                 jacobian: &self.linearization.jacobian,
-                structure: self.structure.map(solve::JacobianStructure::pattern),
+                structure: self.structure.map(solve::ColoredJacobianStructure::pattern),
                 scales: &self.linearization.row_scales,
                 magnitudes: &self.linearization.row_magnitudes,
                 derived: &self.linearization.row_derived,
@@ -493,7 +541,7 @@ impl<M: ImplicitProjectionModel> AffineBlockSystem<'_, M> {
                 y,
                 &self.certificate_scales,
                 &origin,
-                &residual,
+                residual,
                 self.tolerance,
             );
             // One correction recovers small coordinates lost while solving
@@ -506,7 +554,7 @@ impl<M: ImplicitProjectionModel> AffineBlockSystem<'_, M> {
             // Factorization roundoff can leave small coordinates inaccurate
             // in a block containing much larger currents or forces. Refine
             // against the original residual with the same certified matrix.
-            let Some(delta) = self.solve(&residual) else {
+            let Some(delta) = self.solve(residual) else {
                 return Ok(false);
             };
             let Some(changed) = self.apply_correction(y, delta.as_slice()) else {

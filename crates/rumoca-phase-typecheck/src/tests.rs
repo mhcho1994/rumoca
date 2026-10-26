@@ -10,6 +10,7 @@ mod causality_and_function_tests;
 mod dimension_tests;
 mod effective_type_identity_tests;
 mod equation_and_algorithm_tests;
+mod function_binding_tests;
 mod instanced_check_tests;
 mod instanced_dimension_tests;
 mod instanced_expression_tests;
@@ -19,6 +20,7 @@ mod modifier_tests;
 mod parameter_if_branch_tests;
 mod record_constructor_alias_tests;
 mod semantic_identity_tests;
+mod subscript_type_tests;
 mod user_defined_type_tests;
 mod variability_tests;
 

@@ -5,7 +5,22 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::rc::Rc;
 
-use super::{CompiledSolveExpression, CompiledSolveJacobianExpression, SolveExecutionBackend};
+#[cfg(test)]
+use super::selected_programs::CompleteExpression;
+use super::selected_programs::CompleteJacobian;
+
+use super::{EvalSolveError, SolveExecutionBackend};
+
+pub(super) fn required_compiled<T>(
+    label: &str,
+    source_spans: &[rumoca_core::Span],
+    result: Result<T, String>,
+) -> Result<T, EvalSolveError> {
+    result.map_err(|message| EvalSolveError::CompiledExecution {
+        message: format!("required compiled program `{label}` could not be lowered: {message}"),
+        span: unique_span(source_spans),
+    })
+}
 
 pub(super) fn optional_compiled<T>(label: &str, result: Result<T, String>) -> Option<T> {
     match result {
@@ -23,45 +38,22 @@ pub(super) fn optional_compiled<T>(label: &str, result: Result<T, String>) -> Op
 }
 
 /// `block` compiled by `backend` as a whole-block expression, if it compiles.
+#[cfg(test)]
 pub(super) fn compiled_expression(
     backend: Option<&Rc<dyn SolveExecutionBackend>>,
     label: &str,
     block: &solve::ScalarProgramBlock,
-) -> Option<Rc<dyn CompiledSolveExpression>> {
-    backend.and_then(|backend| optional_compiled(label, backend.compile_expression(block)))
-}
-
-/// `block` compiled by `backend` for whole-block calls with its tensor nodes
-/// kept compact, or `scalar` (the block's scalar view) compiled when the
-/// backend has no compact form for it.
-pub(super) fn compiled_compute_expression(
-    backend: Option<&Rc<dyn SolveExecutionBackend>>,
-    label: &str,
-    block: &solve::ComputeBlock,
-    scalar: &solve::ScalarProgramBlock,
-) -> Option<Rc<dyn CompiledSolveExpression>> {
-    let backend = backend?;
-    match backend.compile_compute_expression(block) {
-        Ok(Some(compiled)) => Some(compiled),
-        Ok(None) => optional_compiled(label, backend.compile_expression(scalar)),
-        Err(error) => optional_compiled(label, Err(error)),
-    }
-}
-
-/// [`compiled_compute_expression`] for a directional (JVP) block, with
-/// `scalar` its scalar view.
-pub(super) fn compiled_compute_jacobian(
-    backend: Option<&Rc<dyn SolveExecutionBackend>>,
-    label: &str,
-    block: &solve::ComputeBlock,
-    scalar: &solve::ScalarProgramBlock,
-) -> Option<Rc<dyn CompiledSolveJacobianExpression>> {
-    let backend = backend?;
-    match backend.compile_compute_jacobian_expression(block) {
-        Ok(Some(compiled)) => Some(compiled),
-        Ok(None) => optional_compiled(label, backend.compile_jacobian_expression(scalar)),
-        Err(error) => optional_compiled(label, Err(error)),
-    }
+) -> Result<Option<Rc<CompleteExpression>>, EvalSolveError> {
+    backend
+        .map(|backend| {
+            let whole = required_compiled(
+                label,
+                block.program_spans(),
+                backend.compile_expression(block),
+            )?;
+            super::selected_programs::expression_from_whole(backend.as_ref(), label, block, whole)
+        })
+        .transpose()
 }
 
 /// `block` compiled by `backend` as a forward-mode Jacobian, if it compiles.
@@ -69,8 +61,10 @@ pub(super) fn compiled_jacobian(
     backend: Option<&Rc<dyn SolveExecutionBackend>>,
     label: &str,
     block: &solve::ScalarProgramBlock,
-) -> Option<Rc<dyn CompiledSolveJacobianExpression>> {
-    backend.and_then(|backend| optional_compiled(label, backend.compile_jacobian_expression(block)))
+) -> Result<Option<Rc<CompleteJacobian>>, EvalSolveError> {
+    backend
+        .map(|backend| super::selected_programs::jacobian(backend.as_ref(), label, block))
+        .transpose()
 }
 
 pub(super) fn zero_runtime_values(
@@ -144,10 +138,10 @@ where
 
 pub(super) fn build_visible_name_index(model: &solve::SolveModel) -> FxHashMap<String, usize> {
     model
-        .visible_names
-        .iter()
+        .visible_names()
+        .into_iter()
         .enumerate()
-        .map(|(idx, name)| (name.clone(), idx))
+        .map(|(idx, name)| (name, idx))
         .collect()
 }
 
@@ -197,4 +191,52 @@ pub(super) fn visible_value_index_error(
     RuntimeSolveError::solve_ir(format!(
         "{context} for visible name `{name}` reference index {index}, but only {len} values are available"
     ))
+}
+
+pub(super) fn admitted_compiled_error(
+    context: &'static str,
+    source_spans: &[rumoca_core::Span],
+    error: RuntimeSolveError,
+) -> RuntimeSolveError {
+    match error {
+        RuntimeSolveError::CompiledExecution {
+            message,
+            source_spans: issued,
+            ..
+        } => RuntimeSolveError::CompiledExecution {
+            context,
+            message,
+            source_spans: if issued.is_empty() {
+                source_spans.into()
+            } else {
+                issued
+            },
+        },
+        RuntimeSolveError::SolveIr { message, span } => RuntimeSolveError::SolveIr {
+            message,
+            span: span.or_else(|| unique_span(source_spans)),
+        },
+        RuntimeSolveError::SourceFault { message, span } => RuntimeSolveError::SourceFault {
+            message,
+            span: span.or_else(|| unique_span(source_spans)),
+        },
+        error => error,
+    }
+}
+
+fn unique_span(spans: &[rumoca_core::Span]) -> Option<rumoca_core::Span> {
+    let first = spans.first().copied()?;
+    spans.iter().all(|span| *span == first).then_some(first)
+}
+
+pub(super) fn admitted_output_call(
+    scratch: &std::cell::RefCell<Vec<f64>>,
+    out: &mut [f64],
+    call: impl FnOnce(&mut [f64]) -> Result<(), RuntimeSolveError>,
+) -> Result<(), RuntimeSolveError> {
+    let mut scratch = scratch.borrow_mut();
+    resize_runtime_values(&mut scratch, out.len(), 0.0, "compiled output transaction")?;
+    call(&mut scratch)?;
+    out.copy_from_slice(&scratch);
+    Ok(())
 }

@@ -36,6 +36,8 @@ pub(crate) fn row_reads_y_index(program: &[LinearOp], target: usize) -> bool {
 /// dependency views can enumerate only producer coordinates intersecting the
 /// ranges without rebuilding one load operation per lane.
 pub(crate) fn row_y_input_ranges(program: &[LinearOp]) -> Vec<Range<usize>> {
+    #[cfg(test)]
+    crate::refresh_plan::record_input_range_walk();
     let mut ranges = Vec::new();
     collect_y_input_ranges(program, &mut ranges);
     ranges.sort_unstable_by_key(|range| (range.start, range.end));
@@ -140,6 +142,7 @@ pub(super) fn op_can_fail(op: &LinearOp) -> bool {
             .any(|index| matches!(index, rumoca_ir_solve::TensorIndex::Runtime(_))),
         LinearOp::LinearSolveComponent { .. }
         | LinearOp::PureCall { .. }
+        | LinearOp::PureCallObservation { .. }
         | LinearOp::PureCallDirectional { .. }
         | LinearOp::TableBounds { .. }
         | LinearOp::TableLookup { .. }
@@ -338,9 +341,11 @@ fn binary_gradient_dependency(
                 && (lhs.gradient_zero || rhs.value_parameter_only)
                 && (rhs.gradient_zero || lhs.value_parameter_only),
         },
+        // `a / b` carries the gradient of either operand: a divisor that reads
+        // solver Y contributes `-a / b^2` times its own.
         BinaryOp::Div => GradientDependency {
             value_parameter_only,
-            gradient_zero: lhs.gradient_zero,
+            gradient_zero: lhs.gradient_zero && rhs.gradient_zero,
             gradient_parameter_only: rhs.value_parameter_only && lhs.gradient_parameter_only,
         },
         BinaryOp::Pow
@@ -357,13 +362,19 @@ fn select_gradient_dependency(
     if_true: GradientDependency,
     if_false: GradientDependency,
 ) -> GradientDependency {
+    // Whichever branch the condition selects, a selection between two
+    // branches without a gradient has none: only a selection between
+    // gradients needs a parameter-only condition to keep its gradient
+    // parameter-static.
+    let gradient_zero = if_true.gradient_zero && if_false.gradient_zero;
     GradientDependency {
         value_parameter_only: condition.value_parameter_only
             && if_true.value_parameter_only
             && if_false.value_parameter_only,
-        gradient_zero: if_true.gradient_zero && if_false.gradient_zero,
-        gradient_parameter_only: condition.value_parameter_only
-            && if_true.gradient_parameter_only
-            && if_false.gradient_parameter_only,
+        gradient_zero,
+        gradient_parameter_only: gradient_zero
+            || (condition.value_parameter_only
+                && if_true.gradient_parameter_only
+                && if_false.gradient_parameter_only),
     }
 }

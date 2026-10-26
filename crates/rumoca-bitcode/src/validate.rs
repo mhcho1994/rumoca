@@ -602,6 +602,7 @@ fn check_expression_node(
         } => check_call(errors, index, *owner, *function, arguments, counts),
         RbcExprNode::FunctionValue { function, .. }
         | RbcExprNode::FunctionFoldParameter { function, .. }
+        | RbcExprNode::FunctionConditionalOutput { function, .. }
         | RbcExprNode::FunctionFoldOutput { function, .. } => {
             // Only the function id is artifact-wide. The other fields
             // are owner-local ordinals, checked against that function's

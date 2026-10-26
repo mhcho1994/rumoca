@@ -2,9 +2,16 @@ use super::*;
 use crate::{SolveRealFormat, SolveTypeConstructionError, SolveValueKind};
 use rumoca_core::{SourceId, StructuredIndexBinder, StructuredIndexDomain};
 
+mod assigned_state;
+mod boolean_extrema;
+mod fault_flow;
 mod linear_solve;
+mod loop_flow;
 mod native;
+mod pass_flow;
 mod read_flow;
+mod value_numbering;
+mod zero_result_conditional;
 
 fn span(start: usize) -> Span {
     Span::from_offsets(
@@ -291,6 +298,7 @@ fn compact_map_derives_tensor_shape_and_replays_its_checked_region() {
     let arithmetic = profile();
     let domain = StructuredIndexDomain {
         binders: vec![StructuredIndexBinder {
+            provenance: rumoca_core::IndexBinderProvenance::Generated,
             id: 0,
             display_name: "i".to_owned(),
             lower: 1,
@@ -337,6 +345,7 @@ fn invalid_map_domain_commits_no_destination_or_operation() {
         let one = builder.constant(SolveValue::real(arithmetic, 1.0), span(30))?;
         let invalid = StructuredIndexDomain {
             binders: vec![StructuredIndexBinder {
+                provenance: rumoca_core::IndexBinderProvenance::Generated,
                 id: 0,
                 display_name: "i".to_owned(),
                 lower: 1,
@@ -573,6 +582,7 @@ fn fold_rejects_an_invalid_domain_before_building_its_transition() {
         builder.fold(
             rumoca_core::StructuredIndexDomain {
                 binders: vec![rumoca_core::StructuredIndexBinder {
+                    provenance: rumoca_core::IndexBinderProvenance::Generated,
                     id: 0,
                     display_name: "i".into(),
                     lower: 1,
@@ -596,6 +606,58 @@ fn fold_rejects_an_invalid_domain_before_building_its_transition() {
             provenance: span(1)
         }
     );
+}
+
+#[test]
+fn a_fold_predicate_takes_the_binders_of_the_pass_beside_the_tuple_and_captures() {
+    let arithmetic = profile();
+    let integer = SolveValueType::scalar(SolveScalarType::integer(arithmetic));
+    let program = TypedProgram::construct(arithmetic, |builder| {
+        let initial = builder.constant(SolveValue::integer(arithmetic, 0).unwrap(), span(0))?;
+        let bound = builder.constant(SolveValue::integer(arithmetic, 3).unwrap(), span(0))?;
+        builder.fold_while(
+            StructuredIndexDomain {
+                binders: vec![StructuredIndexBinder {
+                    provenance: rumoca_core::IndexBinderProvenance::Generated,
+                    id: 0,
+                    display_name: "i".into(),
+                    lower: 1,
+                    upper: 9,
+                    step: 1,
+                }],
+            },
+            &[initial],
+            &[bound],
+            span(1),
+            |region, _carried, captures, binders, outputs| {
+                let index = region.load(binders[0], span(2))?;
+                let bound = region.load(captures[0], span(2))?;
+                let within =
+                    region.compare(SolveCompareOperator::LessEqual, index, bound, span(2))?;
+                region.store(outputs[0], within, span(2))
+            },
+            |region, carried, _captures, _binders, outputs| {
+                let sum = region.load(carried[0], span(3))?;
+                region.store(outputs[0], sum, span(3))
+            },
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let SolveOperation::Fold {
+        transition,
+        continuation: Some(predicate),
+        ..
+    } = program.operations()[2].operation()
+    else {
+        panic!("the third operation is the fold with its predicate");
+    };
+    // Tuple, capture, binder: the predicate and the transition share inputs.
+    assert_eq!(
+        predicate.inputs(),
+        [integer.clone(), integer.clone(), integer]
+    );
+    assert_eq!(predicate.inputs(), transition.inputs());
 }
 
 #[test]

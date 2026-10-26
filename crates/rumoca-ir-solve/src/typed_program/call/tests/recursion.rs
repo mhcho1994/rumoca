@@ -80,7 +80,7 @@ fn mutual_recursion_forms_one_checked_group_that_replays() {
         let dependencies = owner.call_site().output_dependencies().to_vec();
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies[0].len(), 1);
-        assert_eq!(dependencies[0][0].input_index(), 0);
+        assert_eq!(dependencies[0][0].first_input(), 0);
     }
     assert_eq!(
         group.depth_limit(),
@@ -90,6 +90,37 @@ fn mutual_recursion_forms_one_checked_group_that_replays() {
     let json = serde_json::to_string(&table).unwrap();
     let replayed: SolvePureCallTable = serde_json::from_str(&json).unwrap();
     assert_eq!(replayed, table);
+}
+
+#[test]
+fn deployment_admission_does_not_require_c_execution_admission() {
+    use crate::fmi::{FmiComponent, FmiDeploymentCapabilities};
+
+    let model = crate::SolveModel {
+        pure_calls: mutual_table(),
+        ..crate::SolveModel::default()
+    };
+    let component = FmiComponent::construct(model, Vec::new())
+        .expect("canonical recursive owners form a checked FMI component");
+    let kernel = std::ptr::from_ref(component.problem());
+    let deployment = component
+        .into_codegen_view()
+        .try_deployment(FmiDeploymentCapabilities::default())
+        .expect("deployment accessor admission is independent of C recursive-frame support");
+    assert_eq!(std::ptr::from_ref(deployment.component().problem()), kernel);
+    assert_eq!(
+        deployment
+            .runtime_view()
+            .model()
+            .pure_calls
+            .recursive_groups()
+            .len(),
+        1
+    );
+    let error = deployment
+        .try_c()
+        .expect_err("C still refuses recursive calls");
+    assert!(error.to_string().contains("recursive function calls"));
 }
 
 #[test]
@@ -211,6 +242,68 @@ fn group_member_with_an_assertion_output_is_refused() {
         error,
         SolveProgramConstructionError::RecursiveAssertion { .. }
     ));
+}
+
+#[test]
+fn group_cannot_hide_assertions_in_an_earlier_callee() {
+    for hidden in [false, true] {
+        let error = SolvePureCallTable::construct(profile(), |table| {
+            let assertion = table.add_owner(
+                identity(900),
+                vec![],
+                vec![
+                    SolvePureCallOutput::result(real()),
+                    SolvePureCallOutput::assertion_predicate(),
+                ],
+                span(900),
+                |b, _, outputs| {
+                    let condition = b.constant(SolveValue::boolean(true), span(900))?;
+                    let predicate = b.assertion_output(1, span(900))?;
+                    b.check_assertion(predicate, condition, &[], span(900), |_, _, _| Ok(()))?;
+                    let value = b.constant(SolveValue::real(profile(), 0.0), span(900))?;
+                    b.store(outputs[0], value, span(900))?;
+                    b.store(outputs[1], condition, span(900))
+                },
+            )?;
+            let callee = if hidden {
+                hide_assertion(table, assertion)?
+            } else {
+                assertion
+            };
+            table.add_recursive_group(
+                vec![member(902, vec![integer()])],
+                |_, ids, b, inputs, outputs| {
+                    b.call(callee, &[], span(902))?;
+                    count_down(ids[0], b, inputs, outputs)
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SolveProgramConstructionError::RecursiveAssertion { .. }
+            ),
+            "{error}"
+        );
+    }
+}
+
+fn hide_assertion(
+    table: &mut SolvePureCallTableBuilder,
+    assertion: SolvePureCallOwnerId,
+) -> Result<SolvePureCallOwnerId, SolveProgramConstructionError> {
+    table.add_owner(
+        identity(901),
+        vec![],
+        vec![SolvePureCallOutput::result(real())],
+        span(901),
+        |b, _, outputs| {
+            let result = b.call(assertion, &[], span(901))?;
+            b.store(outputs[0], result[0], span(901))
+        },
+    )
 }
 
 #[test]

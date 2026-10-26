@@ -9,7 +9,7 @@
 
 use super::*;
 
-impl SolveRuntime {
+impl ScalarExecutionView<'_> {
     /// The unknowns of `block` and the branch combination its rows select at
     /// parameters `p`: every discrete coordinate and relation memory a row of
     /// the block reads, with its current value, and the rows that select a
@@ -19,41 +19,36 @@ impl SolveRuntime {
         block: &solve::AlgebraicProjectionBlock,
         p: &[f64],
     ) -> Option<(String, String)> {
-        let solver_names = &self.model.problem.solve_layout.solver_maps.names;
         let unknowns = block
             .y_indices
             .iter()
             .map(|&index| {
-                solver_names
-                    .get(index)
-                    .map_or_else(|| format!("y[{index}]"), Clone::clone)
+                self.model
+                    .problem
+                    .solver_name(index)
+                    .unwrap_or_else(|| format!("y[{index}]"))
             })
             .collect::<Vec<_>>()
             .join(", ");
         let mode_slots = self.mode_defining_parameter_slots();
-        let source = self.implicit_scalar_rhs.block();
+        let source = self.scalar.implicit_scalar_rhs.source();
         let mut read = BTreeSet::new();
         let mut conditional = BTreeSet::new();
-        let mut output = 0;
-        for program in source.programs() {
-            let outputs = solve::ScalarProgramBlock::program_output_count(program);
-            let rows = &source.output_indices()[output..output + outputs];
-            output += outputs;
-            let in_block = rows
-                .iter()
+        for program in 0..source.row_count() {
+            let outputs = source.row_output_count(program)?;
+            let in_block = (0..outputs)
+                .filter_map(|offset| source.row_output_index(program, offset))
                 .filter(|row| block.rows.contains(row))
-                .copied()
                 .collect::<Vec<_>>();
             if in_block.is_empty() {
                 continue;
             }
-            if selects_branch(program) {
+            if source.program_selects_branch(program)? {
                 conditional.extend(in_block);
             }
-            let mut reads = Vec::new();
-            collect_parameter_reads(program, &mut |index| reads.push(index));
             read.extend(
-                reads
+                source
+                    .mode_parameter_reads(program)?
                     .into_iter()
                     .filter(|index| mode_slots.contains_key(index)),
             );
@@ -86,24 +81,19 @@ impl SolveRuntime {
     }
 
     /// The unknown a row of the implicit system is matched to, by name.
-    fn row_target_name(&self, row: usize) -> String {
+    pub(super) fn row_target_name(&self, row: usize) -> String {
         match self
             .model
             .problem
             .continuous
             .implicit_row_targets
-            .get(row)
-            .copied()
-            .flatten()
+            .target_at(row)
         {
             Some(solve::ScalarSlot::Y { index, .. }) => self
                 .model
                 .problem
-                .solve_layout
-                .solver_maps
-                .names
-                .get(index)
-                .map_or_else(|| format!("y[{index}]"), Clone::clone),
+                .solver_name(index)
+                .unwrap_or_else(|| format!("y[{index}]")),
             _ => format!("row {row}"),
         }
     }
@@ -112,14 +102,6 @@ impl SolveRuntime {
     /// and runtime-assignment targets, and relation memories, by name.
     fn mode_defining_parameter_slots(&self) -> BTreeMap<usize, String> {
         let problem = &self.model.problem;
-        let mut names = BTreeMap::new();
-        for (name, slot) in problem.layout.bindings() {
-            if let solve::ScalarSlot::P { index, .. } = slot {
-                names
-                    .entry(*index)
-                    .or_insert_with(|| name.as_str().to_string());
-            }
-        }
         let mut slots = BTreeMap::new();
         let discrete = problem
             .discrete
@@ -128,9 +110,9 @@ impl SolveRuntime {
             .chain(&problem.discrete.runtime_assignment_targets);
         for slot in discrete {
             if let solve::ScalarSlot::P { index, .. } = slot {
-                let name = names
-                    .get(index)
-                    .cloned()
+                let name = problem
+                    .layout
+                    .scalar_name_for_slot(*slot)
                     .unwrap_or_else(|| format!("p[{index}]"));
                 slots.insert(*index, name);
             }
@@ -151,16 +133,6 @@ impl SolveRuntime {
     }
 }
 
-/// Whether `program` selects between branches at run time.
-fn selects_branch(program: &[solve::LinearOp]) -> bool {
-    program.iter().any(|op| {
-        matches!(
-            op,
-            solve::LinearOp::Select { .. } | solve::LinearOp::FunctionConditional { .. }
-        )
-    })
-}
-
 fn branch_value(value: f64) -> String {
     if value == 0.0 {
         "false".to_string()
@@ -168,31 +140,5 @@ fn branch_value(value: f64) -> String {
         "true".to_string()
     } else {
         value.to_string()
-    }
-}
-
-/// Every parameter-storage slot `program` loads.
-fn collect_parameter_reads(program: &[solve::LinearOp], visit: &mut dyn FnMut(usize)) {
-    for op in program {
-        match op {
-            solve::LinearOp::LoadP { index, .. } => visit(*index),
-            solve::LinearOp::LoadIndexedP { base, count, .. } => {
-                (*base..*base + *count).for_each(&mut *visit)
-            }
-            solve::LinearOp::TensorLoad {
-                input: solve::TensorInputKind::P,
-                input_start,
-                count,
-                ..
-            } => (*input_start..*input_start + *count).for_each(&mut *visit),
-            solve::LinearOp::FunctionConditional { program, .. } => {
-                for arm in &program.arms {
-                    collect_parameter_reads(&arm.condition, visit);
-                    collect_parameter_reads(&arm.result, visit);
-                }
-                collect_parameter_reads(&program.fallback, visit);
-            }
-            _ => {}
-        }
     }
 }

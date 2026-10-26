@@ -112,6 +112,11 @@ pub enum SimError {
     )]
     ExecutionPolicyContradiction { policy: &'static str },
 
+    #[error(
+        "execution policy '{policy}' requires compiled native execution, but no compiled execution backend is available"
+    )]
+    RequiredExecutionBackendMissing { policy: &'static str },
+
     /// A failure annotated with the stage that raised it.
     ///
     /// The rendered form is exactly the inner failure's, so annotating a path
@@ -175,6 +180,9 @@ impl SimError {
 impl From<RuntimeSolveError> for SimError {
     fn from(value: RuntimeSolveError) -> Self {
         match value {
+            error @ RuntimeSolveError::CompiledExecution { .. } => Self::RuntimeContract {
+                reason: error.to_string(),
+            },
             RuntimeSolveError::SolveIr { message, span }
             | RuntimeSolveError::SourceFault { message, span } => {
                 let message = match span {
@@ -211,6 +219,9 @@ impl From<MeError> for SimError {
     fn from(value: MeError) -> Self {
         let stage = value.stage().map(SimFailureStage::from);
         let error = match value.into_kind() {
+            error @ MeError::CompiledExecution { .. } => Self::RuntimeContract {
+                reason: error.to_string(),
+            },
             MeError::NoContinuousStates => Self::EmptySystem,
             MeError::UnsupportedModel { reason } | MeError::Evaluation { message: reason } => {
                 Self::SolveIr(reason)
@@ -239,8 +250,13 @@ impl From<MeError> for SimError {
 
 impl From<rumoca_solver::fmi_me::MeExecutionPolicyContradiction> for SimError {
     fn from(value: rumoca_solver::fmi_me::MeExecutionPolicyContradiction) -> Self {
-        Self::ExecutionPolicyContradiction {
-            policy: value.policy,
+        match value {
+            rumoca_solver::fmi_me::MeExecutionPolicyContradiction::UnexpectedBackend { policy } => {
+                Self::ExecutionPolicyContradiction { policy }
+            }
+            rumoca_solver::fmi_me::MeExecutionPolicyContradiction::MissingBackend { policy } => {
+                Self::RequiredExecutionBackendMissing { policy }
+            }
         }
     }
 }

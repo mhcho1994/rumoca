@@ -10,6 +10,9 @@ pub use interval::{IntegerInterval, RealInterval};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StructuredIndexBinder {
+    /// Resolve-issued source declaration or an explicitly compiler-created axis.
+    /// Required on the wire; spelling and axis ordinal do not supply identity.
+    pub provenance: crate::IndexBinderProvenance,
     pub id: usize,
     pub display_name: String,
     pub lower: i64,
@@ -27,7 +30,7 @@ pub struct StructuredIndexDomain {
 ///
 /// This is the compact, materialization-free description of how one array
 /// subscript varies across a regular elementwise `for` family.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AffineForm {
     pub constant: i64,
     pub coeffs: Vec<i64>,
@@ -185,6 +188,37 @@ pub fn row_major_coordinates(extents: &[u32], ordinal: usize) -> Option<Vec<u32>
         remainder /= *extent as usize;
     }
     Some(coordinates)
+}
+
+/// Render one scalar declaration component using checked row-major geometry.
+pub fn scalar_component_name(name: &str, extents: &[u32], ordinal: usize) -> Option<String> {
+    let coordinates = row_major_coordinates(extents, ordinal)?
+        .into_iter()
+        .map(|coordinate| (coordinate as usize).checked_add(1))
+        .collect::<Option<Vec<_>>>()?;
+    scalar_component_display_name(name, &coordinates)
+}
+
+/// Render already selected one-based subscripts; display grants no identity proof.
+pub fn scalar_component_display_name(name: &str, coordinates: &[usize]) -> Option<String> {
+    use std::fmt::Write as _;
+    if coordinates.contains(&0) {
+        return None;
+    }
+    if coordinates.is_empty() {
+        return Some(name.to_owned());
+    }
+    let mut result = String::with_capacity(name.len() + 4 * coordinates.len() + 2);
+    result.push_str(name);
+    result.push('[');
+    for (axis, coordinate) in coordinates.iter().enumerate() {
+        if axis > 0 {
+            result.push(',');
+        }
+        write!(result, "{coordinate}").ok()?;
+    }
+    result.push(']');
+    Some(result)
 }
 
 /// Convert zero-based coordinates to one zero-based row-major scalar ordinal.
@@ -560,7 +594,85 @@ impl std::error::Error for StructuredIndexDomainError {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scalar_component_names_preserve_row_major_identity_and_empty_shapes() {
+        assert_eq!(
+            super::scalar_component_name("a.b", &[], 0).as_deref(),
+            Some("a.b")
+        );
+        assert_eq!(
+            super::scalar_component_name("a.b", &[2, 3], 0).as_deref(),
+            Some("a.b[1,1]")
+        );
+        assert_eq!(
+            super::scalar_component_name("a.b", &[2, 3], 3).as_deref(),
+            Some("a.b[2,1]")
+        );
+        assert_eq!(
+            super::scalar_component_name("a.b", &[2, 3], 5).as_deref(),
+            Some("a.b[2,3]")
+        );
+        assert_eq!(super::scalar_component_name("a.b", &[2, 3], 6), None);
+        assert_eq!(super::scalar_component_name("a.b", &[2, 0, 3], 0), None);
+    }
     use super::*;
+
+    #[test]
+    fn structured_binder_wire_preserves_source_and_generated_identity() {
+        for provenance in [
+            crate::IndexBinderProvenance::Source(crate::DefId::new(23)),
+            crate::IndexBinderProvenance::Generated,
+        ] {
+            let binder = StructuredIndexBinder {
+                provenance,
+                id: 0,
+                display_name: "i".into(),
+                lower: 1,
+                upper: 2,
+                step: 1,
+            };
+            let json = serde_json::to_string(&binder).unwrap();
+            let binary = bincode::serialize(&binder).unwrap();
+            assert_eq!(
+                serde_json::from_str::<StructuredIndexBinder>(&json).unwrap(),
+                binder
+            );
+            assert_eq!(
+                bincode::deserialize::<StructuredIndexBinder>(&binary).unwrap(),
+                binder
+            );
+            let reference = provenance.reference("i", crate::Span::DUMMY).unwrap();
+            match provenance {
+                crate::IndexBinderProvenance::Source(id) => {
+                    assert_eq!(reference.target_def_id(), Some(id));
+                    assert!(!reference.is_generated());
+                }
+                crate::IndexBinderProvenance::Generated => {
+                    assert!(reference.is_generated());
+                    assert_eq!(reference.target_def_id(), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn structured_binder_wire_requires_provenance() {
+        let missing = r#"{"id":0,"display_name":"i","lower":1,"upper":2,"step":1}"#;
+        assert!(
+            serde_json::from_str::<StructuredIndexBinder>(missing)
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `provenance`")
+        );
+        let invalid =
+            r#"{"provenance":{"Source":0},"id":0,"display_name":"i","lower":1,"upper":2,"step":1}"#;
+        assert!(
+            serde_json::from_str::<StructuredIndexBinder>(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("resolved nonzero DefId")
+        );
+    }
 
     #[test]
     fn structured_index_domain_error_displays_zero_step() {
@@ -585,6 +697,7 @@ mod tests {
         let domain = StructuredIndexDomain {
             binders: vec![
                 StructuredIndexBinder {
+                    provenance: crate::IndexBinderProvenance::Generated,
                     id: 0,
                     display_name: "i".to_string(),
                     lower: 1,
@@ -592,6 +705,7 @@ mod tests {
                     step: 1,
                 },
                 StructuredIndexBinder {
+                    provenance: crate::IndexBinderProvenance::Generated,
                     id: 1,
                     display_name: "j".to_string(),
                     lower: 3,
@@ -611,6 +725,7 @@ mod tests {
     fn index_tuples_rejects_zero_step() {
         let domain = StructuredIndexDomain {
             binders: vec![StructuredIndexBinder {
+                provenance: crate::IndexBinderProvenance::Generated,
                 id: 7,
                 display_name: "k".to_string(),
                 lower: 1,
@@ -632,6 +747,7 @@ mod tests {
     fn index_tuples_rejects_scalar_count_overflow() {
         let domain = StructuredIndexDomain {
             binders: vec![StructuredIndexBinder {
+                provenance: crate::IndexBinderProvenance::Generated,
                 id: 0,
                 display_name: "i".to_string(),
                 lower: i64::MIN,
@@ -651,6 +767,7 @@ mod tests {
         let domain = StructuredIndexDomain {
             binders: vec![
                 StructuredIndexBinder {
+                    provenance: crate::IndexBinderProvenance::Generated,
                     id: 0,
                     display_name: "i".to_string(),
                     lower: 5,
@@ -658,6 +775,7 @@ mod tests {
                     step: -2,
                 },
                 StructuredIndexBinder {
+                    provenance: crate::IndexBinderProvenance::Generated,
                     id: 1,
                     display_name: "j".to_string(),
                     lower: 2,
@@ -679,6 +797,7 @@ mod tests {
     fn empty_domain_has_no_tuples_or_corners() {
         let domain = StructuredIndexDomain {
             binders: vec![StructuredIndexBinder {
+                provenance: crate::IndexBinderProvenance::Generated,
                 id: 0,
                 display_name: "i".to_string(),
                 lower: 3,
@@ -698,6 +817,7 @@ mod tests {
     fn distant_ordinal_is_computed_without_materializing_prefix() {
         let domain = StructuredIndexDomain {
             binders: vec![StructuredIndexBinder {
+                provenance: crate::IndexBinderProvenance::Generated,
                 id: 0,
                 display_name: "i".to_string(),
                 lower: 1,

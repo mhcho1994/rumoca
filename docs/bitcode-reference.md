@@ -8,7 +8,7 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 
 **Compatibility** is per member. `additive` means a reader of an artifact written before the member existed still works, because the member is optional or defaulted; `required` means adding it is a version break.
 
-89 types.
+90 types.
 
 | Type | Kind | Members |
 |---|---|---:|
@@ -50,7 +50,7 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcEquationFamily`](#rbcequationfamily) | struct | 10 |
 | [`RbcEventAction`](#rbceventaction) | struct | 5 |
 | [`RbcExpr`](#rbcexpr) | struct | 4 |
-| [`RbcExprNode`](#rbcexprnode) | enum | 20 |
+| [`RbcExprNode`](#rbcexprnode) | enum | 21 |
 | [`RbcExternalArgument`](#rbcexternalargument) | enum | 2 |
 | [`RbcExternalLinkage`](#rbcexternallinkage) | struct | 4 |
 | [`RbcFile`](#rbcfile) | struct | 5 |
@@ -58,12 +58,13 @@ The narrative — container, encodings, versioning, identity, provenance, valida
 | [`RbcFlowTerm`](#rbcflowterm) | struct | 2 |
 | [`RbcFunction`](#rbcfunction) | struct | 11 |
 | [`RbcFunctionBody`](#rbcfunctionbody) | enum | 3 |
+| [`RbcFunctionBranch`](#rbcfunctionbranch) | struct | 2 |
 | [`RbcFunctionConditional`](#rbcfunctionconditional) | struct | 3 |
 | [`RbcFunctionDefinition`](#rbcfunctiondefinition) | struct | 2 |
 | [`RbcFunctionDerivative`](#rbcfunctionderivative) | struct | 5 |
 | [`RbcFunctionFold`](#rbcfunctionfold) | struct | 10 |
 | [`RbcFunctionParameter`](#rbcfunctionparameter) | struct | 3 |
-| [`RbcFunctionStatement`](#rbcfunctionstatement) | enum | 4 |
+| [`RbcFunctionStatement`](#rbcfunctionstatement) | enum | 6 |
 | [`RbcFunctionValue`](#rbcfunctionvalue) | struct | 4 |
 | [`RbcFunctionValueRole`](#rbcfunctionvaluerole) | enum | 2 |
 | [`RbcGeneration`](#rbcgeneration) | enum | 25 |
@@ -639,6 +640,7 @@ Expression node. Operands always reference nodes with a **lower** [`ExprId`], so
 | `FunctionValue` | Read a value defined inside a function body. Representable only because bodies are now carried: the value this names is one of `RbcFunction::body`'s definitions, addressed by the owner-local ordinal the DAE uses. While bodies were elided there was nothing for it to refer to, which is why it was `Unsupported` -- and why 97% of unrepresentable nodes across eleven libraries were this one form. |
 | `FunctionFoldParameter` | Read a fold's carried parameter at the current iteration. |
 | `FunctionFoldOutput` | Read a fold's carried output after the last iteration. |
+| `FunctionConditionalOutput` | A value produced by an ordered function conditional or an assigned read. |
 | `Unsupported` | A node this schema version cannot represent. A consumer must treat the containing model as not fully understood rather than assume a default. Producers only emit this when explicitly asked to tolerate gaps. |
 
 ## RbcExternalArgument
@@ -719,6 +721,15 @@ What kind of body the declaration has, and whether this artifact carries it.
 | `Modelica` | A Modelica body, in the bounded form the DAE holds. Not Modelica statements: by the time a body reaches the DAE it has been lowered to assignment, grouped assignment, assertion and a fold over a compact domain. There is no `while`, no `break` and no `return`, so the body itself cannot express unbounded iteration — the only route to non-termination is a call cycle, which `RbcFunction::calls` makes checkable. |
 | `External` | An MLS §12.9 external body, named by language and symbol. Carried because it is the whole of what the function does: there is no Modelica body that could be elided. |
 
+## RbcFunctionBranch
+
+One source-ordered conditional branch.
+
+| Member | Type | Compatibility | Meaning |
+|---|---|---|---|
+| `statements` | `Vec<RbcFunctionStatement>` | required | Actions executed in source order inside this branch. |
+| `provenance` | `RbcProvenance` | required | Source location of the branch. |
+
 ## RbcFunctionConditional
 
 Shared branch correlation for one grouped assignment. `conditions[i]` selects `branches[i]`; `fallback` is the `else`. Each branch supplies one expression per value in the group, so the arity is checked rather than assumed.
@@ -779,13 +790,15 @@ _No description._
 
 ## RbcFunctionStatement
 
-One statement of a lowered function body. The four forms `rumoca_ir_dae::FunctionStatementView` distinguishes. A consumer that only needs to *read* a body — reachability, coverage, a constant-folding pass — works from these without reconstructing a DAE.
+One statement of a lowered function body. The forms `rumoca_ir_dae::FunctionStatementView` distinguishes. A consumer that only needs to *read* a body — reachability, coverage, a constant-folding pass — works from these without reconstructing a DAE.
 
 | Variant | Meaning |
 |---|---|
 | `Assignment` | One SSA definition: `value := expression`. |
 | `Assertion` | An MLS §8.3.7 assertion inside the body. |
 | `AssignmentGroup` | Several values defined together, optionally under a shared branch. One statement rather than a run of assignments because the branch correlation is shared: every value takes its result from the *same* selected branch. Splitting them would let a consumer pick different branches for different values, which is a different program. |
+| `Conditional` | Source-ordered branches, including assertions and partial assignments. |
+| `RequireAssigned` | Read a partially assigned value, failing if the selected path left it unset. |
 | `For` | A bounded loop. `fold` is an owner-local ordinal into the function's fold table, which carries the transition; the body is here, because that is where the DAE keeps it and a second home would let the two disagree about what the loop runs. |
 
 ## RbcFunctionValue

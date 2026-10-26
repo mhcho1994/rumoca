@@ -4,45 +4,73 @@
 //! registers remain compact typed ranges in IR and are materialized as one
 //! contiguous 64-bit-cell range only inside this execution adapter.
 
+mod assertions;
+mod assigned_state;
+#[cfg(test)]
+mod assigned_state_tests;
 mod control;
+mod elementwise;
+mod flat_map;
+#[cfg(test)]
+mod fold_comparison_tests;
+mod fusion;
+mod inline_call;
 mod input_results;
 #[cfg(test)]
 mod input_reuse_tests;
+mod integer;
+#[cfg(test)]
+mod layout_tests;
 mod linear_solve;
 mod native;
+mod observation;
+mod operators;
+mod placement;
 pub(super) use native::rumoca_host_native;
 #[cfg(test)]
 mod local_store_tests;
+#[cfg(test)]
+mod pointwise_abs_tests;
+#[cfg(test)]
+mod pointwise_power_tests;
+#[cfg(test)]
+mod reduction_maximum_tests;
 mod storage;
+mod support;
 mod tensor;
 #[cfg(test)]
 mod tensor_product_tests;
 
 use super::host_runtime::{host_jit_builder, register_math_symbols};
 use super::owned_jit_module::{OwnedJitModule, declare_far_call_in_func};
-use super::status;
 use super::{
     CompileError, MathImports, emit_binary_op, emit_unary_op, finalize_jit_module, to_backend_err,
 };
+use super::{scratch, status};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{
-    AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Type, Value, types,
-};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Type, Value, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use input_results::InputResults;
+use observation::{
+    ObservationCells, ObservationLowering, declare_observation, observation_cells,
+    observation_owner_symbol, publishes_predicates,
+};
+use operators::{map_binary, map_float_compare, map_int_compare, map_unary};
 use rumoca_ir_solve as solve;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use storage::compact_register_tape;
+pub use support::{NativeFormDecline, NativeFormSupport, NativeOwnerSupport};
 
 const CELL_BYTES: usize = std::mem::size_of::<u64>();
+
 static NEXT_TABLE_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// One typed pure-call body and the native function it is compiled into.
 ///
-/// `input_count` and `output_count` are the body's declared arities, which fix
+/// `input_count` and `outputs` are the body's declared arities, which fix
 /// the tape layout. The tangent-carrying form has
 /// its own body, its own native function, and its own input coordinate,
 /// so it is compiled as a separate unit from the primal form of the same
@@ -52,10 +80,14 @@ struct TypedProgramCompilation<'a> {
     function: FuncId,
     program: &'a solve::TypedProgram,
     input_count: usize,
-    output_count: usize,
+    outputs: &'a [solve::SolvePureCallOutput],
     coordinate: solve::SolvePureCallInputCoordinate,
     /// The SOLVE-C62 group whose depth-carrying member form this unit is.
     recursion: Option<solve::SolveRecursiveGroup>,
+    /// Whether this unit is the assertion-observation form of its owner.
+    observation: bool,
+    /// The table a call may inline its callee from (primal forms only).
+    table: Option<&'a solve::SolvePureCallTable>,
 }
 
 /// Member-to-member calls inside one SOLVE-C62 group body: each passes the
@@ -70,6 +102,10 @@ struct RecursiveCalls<'a> {
 #[derive(Clone)]
 pub(super) struct PureCallImport {
     pub(super) function: FuncId,
+    /// The helper an assertion observation runs, when the owner has one: its
+    /// observation form, or its primal form for an owner that publishes no
+    /// predicate.
+    pub(super) observation: Option<FuncId>,
     pub(super) inputs: Box<[solve::SolveValueType]>,
     pub(super) outputs: Box<[solve::SolvePureCallOutput]>,
     pub(super) directional: Option<Box<PureCallDirectionalImport>>,
@@ -92,8 +128,12 @@ struct PureCallSymbol {
 
 /// Owns the code memory for one completely compiled checked call table.
 pub(crate) struct CompiledPureCallTable {
-    symbols: Box<[PureCallSymbol]>,
+    scratch: scratch::ScratchOwner,
+    symbols: Box<[Option<PureCallSymbol>]>,
     directional_symbols: Box<[Option<PureCallSymbol>]>,
+    observation_symbols: Box<[Option<PureCallSymbol>]>,
+    support: Box<[NativeOwnerSupport]>,
+    _source: solve::SolvePureCallTable,
     _input_results: Vec<InputResults>,
     _module: OwnedJitModule,
 }
@@ -113,16 +153,43 @@ pub(super) fn take_import_declarations() -> usize {
 impl CompiledPureCallTable {
     pub(crate) fn compile(table: &solve::SolvePureCallTable) -> Result<Self, CompileError> {
         let table_id = NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed);
-        let mut compiler = TableCompiler::new(table_id, table)?;
-        compiler.compile_all(table)?;
-        compiler.finish(table)
+        let support = support::decide(table_id, table)?;
+        let mut compiler = TableCompiler::new(table_id, table, Emission::Define, &support)?;
+        compiler.compile_all(table, &support)?;
+        compiler.finish(table, support)
+    }
+
+    pub(crate) fn source_matches(&self, table: &solve::SolvePureCallTable) -> bool {
+        self._source.shares_table_owner(table)
+    }
+
+    pub(crate) fn owner_support(
+        &self,
+        owner: solve::SolvePureCallOwnerId,
+    ) -> Option<&NativeOwnerSupport> {
+        self.support.get(owner.index() as usize)
+    }
+
+    /// Whether the native adapter owns the form `site` invokes, as admitted
+    /// when the table was built.
+    pub(crate) fn executes(&self, site: rumoca_eval_solve::PureCallInvocation<'_>) -> bool {
+        self.owner_support(site.owner())
+            .is_some_and(|support| match site {
+                rumoca_eval_solve::PureCallInvocation::Primal(_) => support.primal_is_native(),
+                rumoca_eval_solve::PureCallInvocation::Directional(_) => {
+                    support.directional_is_native()
+                }
+            })
     }
 
     pub(super) fn register_symbols(&self, builder: &mut JITBuilder) {
-        for symbol in &self.symbols {
+        for symbol in self.symbols.iter().flatten() {
             builder.symbol(&symbol.name, symbol.address);
         }
         for symbol in self.directional_symbols.iter().flatten() {
+            builder.symbol(&symbol.name, symbol.address);
+        }
+        for symbol in self.observation_symbols.iter().flatten() {
             builder.symbol(&symbol.name, symbol.address);
         }
     }
@@ -138,8 +205,9 @@ impl CompiledPureCallTable {
         signature.returns.push(AbiParam::new(types::I8));
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
         let mut imports = HashMap::with_capacity(self.symbols.len());
-        for symbol in &self.symbols {
+        for symbol in self.symbols.iter().flatten() {
             let function = module
                 .declare_function(&symbol.name, Linkage::Import, &signature)
                 .map_err(to_backend_err)?;
@@ -154,6 +222,7 @@ impl CompiledPureCallTable {
                 symbol.owner,
                 PureCallImport {
                     function,
+                    observation: self.declare_observation_import(module, &signature, symbol)?,
                     inputs: symbol.inputs.clone(),
                     outputs: symbol.outputs.clone(),
                     directional,
@@ -170,9 +239,10 @@ impl CompiledPureCallTable {
         output: &mut [u64],
     ) -> Result<(), CompileError> {
         let symbol = match site {
-            rumoca_eval_solve::PureCallInvocation::Primal(_) => {
-                self.symbols.get(site.owner().index() as usize)
-            }
+            rumoca_eval_solve::PureCallInvocation::Primal(_) => self
+                .symbols
+                .get(site.owner().index() as usize)
+                .and_then(Option::as_ref),
             rumoca_eval_solve::PureCallInvocation::Directional(_) => self
                 .directional_symbols
                 .get(site.owner().index() as usize)
@@ -202,15 +272,18 @@ impl CompiledPureCallTable {
                 output.len()
             )));
         }
-        type TypedCall = unsafe extern "C" fn(*const u64, *mut u64) -> u8;
+        type TypedCall =
+            unsafe extern "C" fn(*const u64, *mut u64, *mut scratch::NativeScratch) -> u8;
         // SAFETY: `symbol.address` is the finalized address of a Cranelift
-        // function constructed with exactly the two-pointer/status `TypedCall` ABI.
+        // function constructed with exactly the input/output/scratch-pointer/status `TypedCall` ABI.
         // The checked site/interface and cell extents are proved above, and
         // the owning JIT module remains alive in `self` for this call.
         let call: TypedCall = unsafe { std::mem::transmute(symbol.address) };
         // SAFETY: both slices have the exact checked cell extents required by
         // the compiled owner and remain valid for the duration of the call.
-        let status = unsafe { call(input.as_ptr(), output.as_mut_ptr()) };
+        let status = self
+            .scratch
+            .invoke(|arena| unsafe { call(input.as_ptr(), output.as_mut_ptr(), arena) });
         status::check(status)
     }
 }
@@ -244,19 +317,35 @@ fn scalar_type_count(
     })
 }
 
+/// Whether lowered bodies are defined in the module or only lowered to find
+/// which forms the adapter owns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Emission {
+    Define,
+    Probe,
+}
+
 struct TableCompiler {
     table_id: usize,
+    emission: Emission,
     module: OwnedJitModule,
     math: MathImports,
-    functions: Vec<FuncId>,
+    functions: Vec<Option<FuncId>>,
     directional_functions: Vec<Option<FuncId>>,
+    /// Assertion-observation form of each owner that publishes predicates.
+    observation_functions: Vec<Option<FuncId>>,
     /// Depth-carrying form of each SOLVE-C62 group member.
     recursive_functions: Vec<Option<FuncId>>,
     input_results: Vec<InputResults>,
 }
 
 impl TableCompiler {
-    fn new(table_id: usize, table: &solve::SolvePureCallTable) -> Result<Self, CompileError> {
+    fn new(
+        table_id: usize,
+        table: &solve::SolvePureCallTable,
+        emission: Emission,
+        support: &[NativeOwnerSupport],
+    ) -> Result<Self, CompileError> {
         let mut builder = host_jit_builder()?;
         register_math_symbols(&mut builder);
         let mut module = OwnedJitModule::new(JITModule::new(builder));
@@ -265,12 +354,23 @@ impl TableCompiler {
         signature.returns.push(AbiParam::new(types::I8));
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
         let mut recursive_signature = signature.clone();
-        recursive_signature.params.push(AbiParam::new(types::I64));
+        recursive_signature
+            .params
+            .insert(2, AbiParam::new(types::I64));
         let mut functions = Vec::with_capacity(table.owners().len());
         let mut directional_functions = Vec::with_capacity(table.owners().len());
         let mut recursive_functions = Vec::with_capacity(table.owners().len());
-        for owner in table.owners() {
+        let mut observation_functions = Vec::with_capacity(table.owners().len());
+        for (owner, admitted) in table.owners().iter().zip(support) {
+            if !admitted.primal_is_native() {
+                functions.push(None);
+                observation_functions.push(None);
+                recursive_functions.push(None);
+                directional_functions.push(None);
+                continue;
+            }
             recursive_functions.push(match table.recursive_group(owner.id()) {
                 Some(_) => Some(
                     module
@@ -283,13 +383,19 @@ impl TableCompiler {
                 ),
                 None => None,
             });
+            observation_functions.push(declare_observation(
+                &mut module,
+                (table_id, owner),
+                admitted,
+                &signature,
+            )?);
             let name = owner_symbol(table_id, owner.id());
-            functions.push(
+            functions.push(Some(
                 module
                     .declare_function(&name, Linkage::Export, &signature)
                     .map_err(to_backend_err)?,
-            );
-            let directional_function = if owner.directional().is_some() {
+            ));
+            let directional_function = if admitted.directional_is_native() {
                 Some(
                     module
                         .declare_function(
@@ -306,43 +412,116 @@ impl TableCompiler {
         }
         Ok(Self {
             table_id,
+            emission,
             module,
             math: MathImports::default(),
             functions,
             directional_functions,
+            observation_functions,
             recursive_functions,
             input_results: Vec::new(),
         })
     }
 
-    fn compile_all(&mut self, table: &solve::SolvePureCallTable) -> Result<(), CompileError> {
-        for owner in table.owners() {
-            if let Some(group) = table.recursive_group(owner.id()) {
-                self.compile_recursive_owner(owner, *group)?;
-                continue;
+    fn compile_all(
+        &mut self,
+        table: &solve::SolvePureCallTable,
+        support: &[NativeOwnerSupport],
+    ) -> Result<(), CompileError> {
+        for (owner, admitted) in table.owners().iter().zip(support) {
+            if admitted.primal_is_native() {
+                self.lower_primal(table, owner)?;
             }
-            self.compile_owner(owner)?;
-            if owner.directional().is_some() {
-                self.compile_directional_owner(owner)?;
+            if admitted.primal_is_native()
+                && publishes_predicates(owner)
+                && admitted.observation_is_native()
+            {
+                self.lower_observation(owner)?;
+            }
+            if admitted.directional_is_native() {
+                self.lower_directional(table, owner)?;
             }
         }
         finalize_jit_module(&mut self.module)
     }
 
-    fn compile_owner(&mut self, owner: &solve::SolvePureCallOwner) -> Result<(), CompileError> {
-        let function = *self
-            .functions
+    fn lower_primal(
+        &mut self,
+        table: &solve::SolvePureCallTable,
+        owner: &solve::SolvePureCallOwner,
+    ) -> Result<(), CompileError> {
+        match table.recursive_group(owner.id()) {
+            Some(group) => self.compile_recursive_owner(owner, *group),
+            None => self.compile_owner(table, owner),
+        }
+    }
+
+    fn lower_directional(
+        &mut self,
+        table: &solve::SolvePureCallTable,
+        owner: &solve::SolvePureCallOwner,
+    ) -> Result<(), CompileError> {
+        if table.recursive_group(owner.id()).is_some() {
+            return Err(CompileError::Backend(
+                "a recursive group has no native directional form".into(),
+            ));
+        }
+        self.compile_directional_owner(owner)
+    }
+
+    /// The owner's assertion-observation form: its primal body, stopping at the
+    /// first failed Error-level assertion, calling the observation form of every
+    /// callee that publishes predicates.
+    fn lower_observation(&mut self, owner: &solve::SolvePureCallOwner) -> Result<(), CompileError> {
+        let function = self
+            .observation_functions
             .get(owner.id().index() as usize)
-            .ok_or_else(|| CompileError::Backend("typed owner function is missing".into()))?;
-        let functions = self.functions.iter().copied().map(Some).collect::<Vec<_>>();
+            .copied()
+            .flatten()
+            .ok_or_else(|| CompileError::Backend("typed observation function is missing".into()))?;
+        let functions: Vec<_> = self
+            .observation_functions
+            .iter()
+            .zip(&self.functions)
+            .map(|(observation, primal)| observation.or(*primal))
+            .collect();
         self.compile_program(
             TypedProgramCompilation {
                 function,
                 program: owner.body(),
                 input_count: owner.inputs().len(),
-                output_count: owner.outputs().len(),
+                outputs: owner.outputs(),
                 coordinate: owner.input_coordinate(),
                 recursion: None,
+                observation: true,
+                table: None,
+            },
+            &functions,
+        )
+    }
+
+    fn compile_owner(
+        &mut self,
+        table: &solve::SolvePureCallTable,
+        owner: &solve::SolvePureCallOwner,
+    ) -> Result<(), CompileError> {
+        let function = self
+            .functions
+            .get(owner.id().index() as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| CompileError::Backend("typed owner function is missing".into()))?;
+        let functions = self.functions.clone();
+        self.compile_program(
+            TypedProgramCompilation {
+                function,
+                program: owner.body(),
+                input_count: owner.inputs().len(),
+                outputs: owner.outputs(),
+                coordinate: owner.input_coordinate(),
+                recursion: None,
+                observation: false,
+                table: Some(table),
             },
             &functions,
         )
@@ -361,19 +540,29 @@ impl TableCompiler {
             .copied()
             .flatten()
             .ok_or_else(|| CompileError::Backend("typed recursive owner is missing".into()))?;
-        let functions = self.functions.iter().copied().map(Some).collect::<Vec<_>>();
+        let functions = self.functions.clone();
         self.compile_program(
             TypedProgramCompilation {
                 function: recursive,
                 program: owner.body(),
                 input_count: owner.inputs().len(),
-                output_count: owner.outputs().len(),
+                outputs: owner.outputs(),
                 coordinate: owner.input_coordinate(),
                 recursion: Some(group),
+                observation: false,
+                table: None,
             },
             &functions,
         )?;
-        let public = self.functions[owner.id().index() as usize];
+        if self.emission == Emission::Probe {
+            return Ok(());
+        }
+        let public = self
+            .functions
+            .get(owner.id().index() as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| CompileError::Backend("typed owner function is missing".into()))?;
         self.compile_group_entry(public, recursive)
     }
 
@@ -399,6 +588,11 @@ impl TableCompiler {
             .signature
             .params
             .push(AbiParam::new(pointer_type));
+        context
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(pointer_type)); // caller-owned scratch
         let mut builder_context = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
@@ -407,17 +601,18 @@ impl TableCompiler {
             builder.switch_to_block(entry);
             builder.seal_block(entry);
             let parameters = builder.block_params(entry).to_vec();
+            scratch::enter(&mut builder);
             let depth = builder.ins().iconst(types::I64, 1);
             let local = declare_far_call_in_func(&mut self.module, recursive, builder.func);
             let call = builder
                 .ins()
-                .call(local, &[parameters[0], parameters[1], depth]);
+                .call(local, &[parameters[0], parameters[1], depth, parameters[2]]);
             let status = builder.inst_results(call)[0];
+            scratch::leave(&mut builder);
             builder.ins().return_(&[status]);
             builder.finalize();
         }
-        self.module
-            .define_function(public, &mut context)
+        crate::emit::register_allocation::define_function(&mut *self.module, public, &mut context)
             .map_err(to_backend_err)?;
         self.module.clear_context(&mut context);
         Ok(())
@@ -442,9 +637,11 @@ impl TableCompiler {
                 function,
                 program: directional.body(),
                 input_count: directional.inputs().len(),
-                output_count: directional.outputs().len(),
+                outputs: directional.outputs(),
                 coordinate: directional.input_coordinate(),
                 recursion: None,
+                observation: false,
+                table: None,
             },
             &functions,
         )
@@ -459,36 +656,21 @@ impl TableCompiler {
             function,
             program,
             input_count,
-            output_count,
+            outputs,
             coordinate,
             recursion,
+            observation,
+            table,
         } = unit;
         let config = self.module.target_config();
         let pointer_type = config.pointer_type();
         let input_results = InputResults::new(coordinate)?;
         let mut context = self.module.make_context();
-        context
-            .func
-            .signature
-            .returns
-            .push(AbiParam::new(types::I8));
-        context
-            .func
-            .signature
-            .params
-            .push(AbiParam::new(pointer_type));
-        context
-            .func
-            .signature
-            .params
-            .push(AbiParam::new(pointer_type));
-        if recursion.is_some() {
-            context
-                .func
-                .signature
-                .params
-                .push(AbiParam::new(types::I64));
-        }
+        program_signature(
+            &mut context.func.signature,
+            pointer_type,
+            recursion.is_some(),
+        );
         let mut builder_context = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
@@ -497,25 +679,26 @@ impl TableCompiler {
             builder.switch_to_block(entry);
             builder.seal_block(entry);
             let parameters = builder.block_params(entry).to_vec();
-            let recursive_calls = match recursion {
-                Some(group) => {
-                    let depth = parameters[2];
-                    let within = builder.ins().icmp_imm(
-                        IntCC::SignedLessThanOrEqual,
-                        depth,
-                        i64::from(group.depth_limit()),
-                    );
-                    status::require_recursion_depth(&mut builder, within);
-                    Some(RecursiveCalls {
-                        group,
-                        functions: &self.recursive_functions,
-                        depth,
-                    })
-                }
-                None => None,
+            scratch::enter(&mut builder);
+            let recursive_calls = recursion.map(|group| {
+                enter_group(
+                    &mut builder,
+                    group,
+                    &self.recursive_functions,
+                    parameters[2],
+                )
+            });
+            let cache = if observation {
+                None
+            } else {
+                Some(input_results.enter(&mut builder, config, parameters[0], parameters[1])?)
             };
-            let cache = input_results.enter(&mut builder, config, parameters[0], parameters[1])?;
-            let layout = ProgramLayout::new(program, input_count, output_count)?;
+            let ObservationCells {
+                cells,
+                slots: predicate_slots,
+            } = observation_cells(observation, input_count, outputs)?;
+            let layout =
+                ProgramLayout::new(program, (input_count, outputs.len()), &predicate_slots)?;
             let tape = create_tape(&mut builder, pointer_type, layout.tape_cells)?;
             let mut lowerer = ProgramLowerer {
                 builder: &mut builder,
@@ -526,49 +709,72 @@ impl TableCompiler {
                 output: parameters[1],
                 tape,
                 layout: &layout,
+                outputs,
                 functions,
                 recursive_calls,
                 flags: MemFlags::new(),
+                operation: std::ptr::null(),
+                observation: observation.then(|| ObservationLowering {
+                    owner_output: parameters[1],
+                    input_slots: input_count,
+                    cells,
+                    root: true,
+                }),
+                input_placement: None,
+                output_placement: None,
+                // Admission probes compile each owner without inlining, so a
+                // declined callee declines its callers by name; the defined
+                // forms of admitted owners then only inline admitted callees.
+                table: table.filter(|_| !observation && self.emission == Emission::Define),
+                inline_depth: 0,
             };
+            lowerer.initialize_observation()?;
             lowerer.lower(program)?;
-            input_results.publish(&mut builder, config, cache, parameters[0], parameters[1])?;
+            if let Some(cache) = cache {
+                input_results.publish(&mut builder, config, cache, parameters[0], parameters[1])?;
+            }
             status::succeed(&mut builder);
             builder.finalize();
         }
-        self.module
-            .define_function(function, &mut context)
+        if self.emission == Emission::Define {
+            crate::emit::register_allocation::define_function(
+                &mut *self.module,
+                function,
+                &mut context,
+            )
             .map_err(to_backend_err)?;
+            self.input_results.push(input_results);
+        }
         self.module.clear_context(&mut context);
-        self.input_results.push(input_results);
         Ok(())
     }
 
     fn finish(
         self,
         table: &solve::SolvePureCallTable,
+        support: Vec<NativeOwnerSupport>,
     ) -> Result<CompiledPureCallTable, CompileError> {
         let mut symbols = Vec::with_capacity(table.owners().len());
         let mut directional_symbols = Vec::with_capacity(table.owners().len());
+        let mut observation_symbols = Vec::with_capacity(table.owners().len());
         for owner in table.owners() {
-            let function = self.functions[owner.id().index() as usize];
-            let address = self.module.get_finalized_function(function);
-            if address.is_null() {
-                return Err(CompileError::Backend(format!(
-                    "Cranelift returned a null typed owner {} function",
-                    owner.id().index()
-                )));
-            }
-            symbols.push(PureCallSymbol {
-                owner: owner.id(),
-                name: owner_symbol(self.table_id, owner.id()),
-                address,
-                inputs: owner.inputs().into(),
-                outputs: owner.outputs().into(),
-            });
-            let directional_symbol = match (
-                owner.directional(),
-                self.directional_functions[owner.id().index() as usize],
-            ) {
+            let index = owner.id().index() as usize;
+            let symbol = self.functions[index]
+                .map(|function| {
+                    let address = self.module.get_finalized_function(function);
+                    validate_finalized_address(address, "primal", owner.id().index())?;
+                    Ok(PureCallSymbol {
+                        owner: owner.id(),
+                        name: owner_symbol(self.table_id, owner.id()),
+                        address,
+                        inputs: owner.inputs().into(),
+                        outputs: owner.outputs().into(),
+                    })
+                })
+                .transpose()?;
+            symbols.push(symbol);
+            let directional_symbol = match (owner.directional(), self.directional_functions[index])
+            {
                 (Some(directional), Some(function)) => {
                     let address = self.module.get_finalized_function(function);
                     validate_finalized_address(address, "directional", owner.id().index())?;
@@ -580,18 +786,32 @@ impl TableCompiler {
                         outputs: directional.outputs().into(),
                     })
                 }
-                (None, None) => None,
-                _ => {
-                    return Err(CompileError::Backend(
-                        "typed directional owner/function mismatch".into(),
-                    ));
-                }
+                _ => None,
             };
             directional_symbols.push(directional_symbol);
+            observation_symbols.push(
+                self.observation_functions[index]
+                    .map(|function| {
+                        let address = self.module.get_finalized_function(function);
+                        validate_finalized_address(address, "observation", owner.id().index())?;
+                        Ok(PureCallSymbol {
+                            owner: owner.id(),
+                            name: observation_owner_symbol(self.table_id, owner.id()),
+                            address,
+                            inputs: owner.inputs().into(),
+                            outputs: owner.outputs().into(),
+                        })
+                    })
+                    .transpose()?,
+            );
         }
         Ok(CompiledPureCallTable {
+            scratch: Default::default(),
             symbols: symbols.into_boxed_slice(),
             directional_symbols: directional_symbols.into_boxed_slice(),
+            observation_symbols: observation_symbols.into_boxed_slice(),
+            support: support.into_boxed_slice(),
+            _source: table.clone(),
             _input_results: self.input_results,
             _module: self.module,
         })
@@ -643,18 +863,32 @@ struct ValueLocation {
 struct ProgramLayout {
     slots: Box<[ValueLocation]>,
     registers: Box<[ValueLocation]>,
+    assigned_states: Box<[assigned_state::AssignedLocation]>,
+    assigned_inputs: Box<[assigned_state::AssignedLocation]>,
+    assigned_outputs: Box<[assigned_state::AssignedLocation]>,
     tape_cells: u32,
+    /// The operation each fused register defers (see [`fusion`]); such a
+    /// register is never stored.
+    fused: Box<[Option<solve::SolveOperation>]>,
+    /// Last reading operation of each register, extended over fusion.
+    last_uses: Box<[Option<usize>]>,
 }
 
 impl ProgramLayout {
     fn region(region: &solve::SolveProgramRegion) -> Result<Self, CompileError> {
-        Self::new(region.body(), region.inputs().len(), region.outputs().len())
+        Self::new(
+            region.body(),
+            (region.inputs().len(), region.outputs().len()),
+            &[],
+        )
     }
 
+    /// `unaliased_slots` are output slots whose cells are written outside the
+    /// program's stores, so no register may be placed in them.
     fn new(
         program: &solve::TypedProgram,
-        input_slots: usize,
-        output_slots: usize,
+        (input_slots, output_slots): (usize, usize),
+        unaliased_slots: &[usize],
     ) -> Result<Self, CompileError> {
         let mut input_cell = 0u32;
         let mut output_cell = 0u32;
@@ -696,15 +930,42 @@ impl ProgramLayout {
                 value_type: value_type.clone(),
             });
         }
-        let (last_uses, definitions) = register_flow(program, registers.len())?;
+        let (mut last_uses, definitions) = register_flow(program, registers.len())?;
+        let fused = fusion::plan(program, &mut last_uses)?;
         alias_read_only_loads(program, &slots, &mut registers)?;
-        alias_final_output_stores(program, &slots, &last_uses, &definitions, &mut registers)?;
+        alias_final_output_stores(
+            program,
+            (&slots, unaliased_slots),
+            (&last_uses, &definitions),
+            &mut registers,
+        )?;
         alias_consumed_functional_updates(program, &last_uses, &mut registers)?;
+        storage::alias_consumed_fold_carries(program, &last_uses, &mut registers);
         tape_cell = compact_register_tape(register_base, &last_uses, &definitions, &mut registers)?;
+        let assigned_states = assigned_state::layout(
+            program.assigned_state_types(),
+            StorageBase::Tape,
+            &mut tape_cell,
+        )?;
+        let assigned_inputs = assigned_state::layout(
+            program.assigned_state_inputs(),
+            StorageBase::Input,
+            &mut input_cell,
+        )?;
+        let assigned_outputs = assigned_state::layout(
+            program.assigned_state_outputs(),
+            StorageBase::Output,
+            &mut output_cell,
+        )?;
         Ok(Self {
             slots: slots.into_boxed_slice(),
             registers: registers.into_boxed_slice(),
+            assigned_states,
+            assigned_inputs,
+            assigned_outputs,
             tape_cells: tape_cell,
+            fused: fused.into_boxed_slice(),
+            last_uses: last_uses.into_boxed_slice(),
         })
     }
 }
@@ -780,15 +1041,17 @@ fn alias_read_only_loads(
 
 fn alias_final_output_stores(
     program: &solve::TypedProgram,
-    slots: &[ValueLocation],
-    last_uses: &[Option<usize>],
-    definitions: &[Option<usize>],
+    (slots, unaliased_slots): (&[ValueLocation], &[usize]),
+    (last_uses, definitions): (&[Option<usize>], &[Option<usize>]),
     registers: &mut [ValueLocation],
 ) -> Result<(), CompileError> {
     for (operation_index, operation) in program.operations().iter().enumerate() {
         let solve::SolveOperation::Store { slot, source } = operation.operation() else {
             continue;
         };
+        if unaliased_slots.contains(&slot.index()) {
+            continue;
+        }
         if last_uses.get(source.index()) != Some(&Some(operation_index)) {
             continue;
         }
@@ -887,6 +1150,14 @@ fn alias_consumed_functional_updates(
     Ok(())
 }
 
+fn reads_fused(fused: &[Option<solve::SolveOperation>], operation: &solve::SolveOperation) -> bool {
+    let mut reads = false;
+    operation.visit_input_registers(|register| {
+        reads |= fused.get(register.index()).is_some_and(Option::is_some);
+    });
+    reads
+}
+
 fn checked_cells(start: u32, count: u32, context: &str) -> Result<u32, CompileError> {
     start
         .checked_add(count)
@@ -902,9 +1173,8 @@ fn create_tape(
         .max(1)
         .checked_mul(CELL_BYTES as u32)
         .ok_or_else(|| CompileError::Backend("typed native tape size overflows".into()))?;
-    let slot =
-        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3));
-    Ok(builder.ins().stack_addr(pointer_type, slot, 0))
+    let slot = scratch::create_slot(builder, bytes)?;
+    Ok(scratch::stack_addr(builder, pointer_type, slot, 0))
 }
 
 fn cell_offset(cell: u32, context: &str) -> Result<i32, CompileError> {
@@ -937,14 +1207,29 @@ struct ProgramLowerer<'a, 'b> {
     output: Value,
     tape: Value,
     layout: &'a ProgramLayout,
+    /// The owner form's declared outputs, which fix each assertion's level.
+    outputs: &'a [solve::SolvePureCallOutput],
     functions: &'a [Option<FuncId>],
     recursive_calls: Option<RecursiveCalls<'a>>,
     flags: MemFlags,
+    /// Present when lowering the assertion-observation form of an owner.
+    observation: Option<ObservationLowering>,
+    operation: *const solve::SolveSpannedOperation,
+    /// The table whose owners a call may be lowered inline from.
+    table: Option<&'a solve::SolvePureCallTable>,
+    /// Calls lowered inline around this program.
+    inline_depth: u32,
+    /// Input slots placed on enclosing cells instead of `input` (see
+    /// [`placement`]).
+    input_placement: Option<Vec<placement::PlacedSlot>>,
+    /// Output slots placed on enclosing cells instead of `output`.
+    output_placement: Option<Vec<placement::PlacedSlot>>,
 }
 
 impl ProgramLowerer<'_, '_> {
     fn lower(&mut self, program: &solve::TypedProgram) -> Result<(), CompileError> {
         for operation in program.operations() {
+            self.operation = operation as *const _;
             self.lower_operation(operation.operation())?;
         }
         Ok(())
@@ -954,7 +1239,48 @@ impl ProgramLowerer<'_, '_> {
     // SPEC_0021: Exception - cohesive exhaustive flow stays contiguous so ordering remains auditable.
     #[allow(clippy::too_many_lines)]
     fn lower_operation(&mut self, operation: &solve::SolveOperation) -> Result<(), CompileError> {
+        let mut destination = None;
+        operation.visit_output_registers(|register| destination = Some(register));
+        if let Some(destination) = destination
+            && self
+                .layout
+                .fused
+                .get(destination.index())
+                .is_some_and(Option::is_some)
+        {
+            // Evaluated per element by the operation that reads it.
+            return Ok(());
+        }
+        if let Some(destination) = destination
+            && !matches!(
+                operation,
+                solve::SolveOperation::Reduce { .. } | solve::SolveOperation::MatrixMultiply { .. }
+            )
+            && (reads_fused(&self.layout.fused, operation)
+                || (self.register(destination)?.value_type.scalar_count() >= 4
+                    && self.vectorizes(operation)?))
+        {
+            return self.lower_fused(operation, destination);
+        }
         match operation {
+            solve::SolveOperation::AssignedState { operation } => {
+                self.lower_assigned_state(operation)
+            }
+            solve::SolveOperation::AssignedConditional { program } => {
+                self.lower_assigned_conditional(program)
+            }
+            solve::SolveOperation::CheckAssertion {
+                predicate_output,
+                condition,
+                captures,
+                destinations,
+                message,
+                ..
+            } => self.lower_assertion(
+                (*predicate_output, *condition),
+                (captures, destinations),
+                message,
+            ),
             solve::SolveOperation::Constant { destination, value } => {
                 self.lower_constant(*destination, value)
             }
@@ -962,6 +1288,14 @@ impl ProgramLowerer<'_, '_> {
                 let source = self.slot(*slot)?.clone();
                 let destination = self.register(*destination)?.clone();
                 self.copy(&source, &destination)
+            }
+            solve::SolveOperation::Store { slot, .. }
+                if self
+                    .observation
+                    .as_ref()
+                    .is_some_and(|observation| observation.publishes_slot(*slot)) =>
+            {
+                Ok(())
             }
             solve::SolveOperation::Store { slot, source } => {
                 let source = self.register(*source)?.clone();
@@ -1013,6 +1347,7 @@ impl ProgramLowerer<'_, '_> {
                 domain,
                 initial,
                 captures,
+                state_captures,
                 destinations,
                 transition,
                 continuation,
@@ -1020,6 +1355,7 @@ impl ProgramLowerer<'_, '_> {
                 domain,
                 initial,
                 captures,
+                state_captures,
                 destinations,
                 (transition, continuation.as_deref()),
             ),
@@ -1135,7 +1471,8 @@ impl ProgramLowerer<'_, '_> {
                 owner,
                 arguments,
                 destinations,
-            } => self.lower_call(*owner, arguments, destinations),
+                assertion_forwarding,
+            } => self.lower_call(*owner, arguments, destinations, assertion_forwarding),
         }
     }
 
@@ -1154,11 +1491,14 @@ impl ProgramLowerer<'_, '_> {
     }
 
     fn base(&self, location: &ValueLocation) -> Value {
-        match location.base {
-            StorageBase::Input => self.input,
-            StorageBase::Output => self.output,
-            StorageBase::Tape => self.tape,
-        }
+        let (placed, base) = match location.base {
+            StorageBase::Input => (self.input_placement.as_deref(), self.input),
+            StorageBase::Output => (self.output_placement.as_deref(), self.output),
+            StorageBase::Tape => return self.tape,
+        };
+        placed
+            .and_then(|slots| placement::placed_slot(slots, location.cell))
+            .map_or(base, |slot| slot.adjusted)
     }
 
     fn lower_constant(
@@ -1167,7 +1507,13 @@ impl ProgramLowerer<'_, '_> {
         value: &solve::SolveValue,
     ) -> Result<(), CompileError> {
         let destination = self.register(destination)?.clone();
-        let scalar = match value.kind() {
+        let scalar = self.scalar_constant(value);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        self.store_scalar(&destination, zero, scalar)
+    }
+
+    pub(super) fn scalar_constant(&mut self, value: &solve::SolveValue) -> Value {
+        match value.kind() {
             solve::SolveValueKind::Real32(bits) => {
                 self.builder.ins().f32const(f32::from_bits(bits))
             }
@@ -1178,9 +1524,7 @@ impl ProgramLowerer<'_, '_> {
             solve::SolveValueKind::Boolean(value) => {
                 self.builder.ins().iconst(types::I64, i64::from(value))
             }
-        };
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        self.store_scalar(&destination, zero, scalar)
+        }
     }
 
     fn lower_unary(
@@ -1292,10 +1636,24 @@ impl ProgramLowerer<'_, '_> {
         owner: solve::SolvePureCallOwnerId,
         arguments: &[solve::SolveRegisterId],
         destinations: &[solve::SolveRegisterId],
+        forwarding: &[solve::SolveAssertionForwarding],
     ) -> Result<(), CompileError> {
+        if let Some(table) = self.table
+            && self.observation.is_none()
+            && forwarding.is_empty()
+            && self.inline_depth < 3
+            && self.recursive_calls.is_none()
+            && let Some(callee) = inline_call::inline_callee(table, owner, arguments, destinations)
+        {
+            return self.lower_inline_call(callee, arguments, destinations);
+        }
         let output_cells = self.register_cell_count(destinations, "nested typed output")?;
         let output = create_tape(self.builder, self.pointer_type, output_cells)?;
-        self.call_owner_into(owner, arguments, output)?;
+        if self.observation.is_some() {
+            self.observe_call(owner, arguments, destinations, forwarding, output)?;
+        } else {
+            self.call_owner_into(owner, arguments, output)?;
+        }
         self.unpack_registers(output, destinations)
     }
 
@@ -1305,7 +1663,28 @@ impl ProgramLowerer<'_, '_> {
         arguments: &[solve::SolveRegisterId],
         output: Value,
     ) -> Result<(), CompileError> {
+        let status = self.emit_owner_call(owner, arguments, output)?;
+        status::propagate(self.builder, status);
+        Ok(())
+    }
+
+    /// Call `owner` and return its status, unexamined.
+    pub(super) fn emit_owner_call(
+        &mut self,
+        owner: solve::SolvePureCallOwnerId,
+        arguments: &[solve::SolveRegisterId],
+        output: Value,
+    ) -> Result<Value, CompileError> {
         let input = self.packed_tape(arguments, "nested typed input")?;
+        if self.observation.is_some() {
+            let width = self.register_cell_count(arguments, "native child invocation")?;
+            self.carrier_event(
+                super::observation_carrier::CALL_ENTER,
+                input,
+                width as usize,
+                None,
+            )?;
+        }
         let call = match self
             .recursive_calls
             .filter(|calls| calls.group.contains(owner))
@@ -1321,7 +1700,12 @@ impl ProgramLowerer<'_, '_> {
                     })?;
                 let local = declare_far_call_in_func(self.module, function, self.builder.func);
                 let depth = self.builder.ins().iadd_imm(calls.depth, 1);
-                self.builder.ins().call(local, &[input, output, depth])
+                {
+                    let arena = scratch::parameter(self.builder);
+                    self.builder
+                        .ins()
+                        .call(local, &[input, output, depth, arena])
+                }
             }
             None => {
                 let function = self
@@ -1333,12 +1717,15 @@ impl ProgramLowerer<'_, '_> {
                         CompileError::Backend("nested typed call owner is missing".into())
                     })?;
                 let local = declare_far_call_in_func(self.module, function, self.builder.func);
-                self.builder.ins().call(local, &[input, output])
+                {
+                    let arena = scratch::parameter(self.builder);
+                    self.builder.ins().call(local, &[input, output, arena])
+                }
             }
         };
         let status = self.builder.inst_results(call)[0];
-        status::propagate(self.builder, status);
-        Ok(())
+        self.carrier_event(super::observation_carrier::CALL_EXIT, input, 0, None)?;
+        Ok(status)
     }
 
     fn copy(
@@ -1346,6 +1733,13 @@ impl ProgramLowerer<'_, '_> {
         source: &ValueLocation,
         destination: &ValueLocation,
     ) -> Result<(), CompileError> {
+        // A placed region can hold a source and its destination on the same
+        // cells under different bases; copying them onto themselves is a no-op.
+        if source.value_type == destination.value_type
+            && self.physical(source) == self.physical(destination)
+        {
+            return Ok(());
+        }
         self.copy_between_bases(
             source,
             destination,
@@ -1370,6 +1764,22 @@ impl ProgramLowerer<'_, '_> {
             && source.cell == destination.cell
             && source_base == destination_base
         {
+            return Ok(());
+        }
+        let count = source.value_type.scalar_count();
+        if count > 16 {
+            // Cells are 64-bit whatever the element type, so a value is one
+            // contiguous byte range; a block move beats the scalar loop.
+            let source_address = cell_pointer(self.builder, source_base, source.cell, "copy")?;
+            let destination_address =
+                cell_pointer(self.builder, destination_base, destination.cell, "copy")?;
+            let bytes = self
+                .builder
+                .ins()
+                .iconst(self.pointer_type, i64::from(count) * CELL_BYTES as i64);
+            let config = self.module.target_config();
+            self.builder
+                .call_memmove(config, destination_address, source_address, bytes);
             return Ok(());
         }
         self.for_each_element(source.value_type.scalar_count(), |this, index| {
@@ -1463,206 +1873,16 @@ impl ProgramLowerer<'_, '_> {
         let bytes = self.builder.ins().imul_imm(index, CELL_BYTES as i64);
         self.builder.ins().iadd(base, bytes)
     }
+}
 
-    fn unary_element(
-        &mut self,
-        operator: solve::SolveUnaryOperator,
-        scalar: solve::SolveScalarType,
-        value: Value,
-    ) -> Result<Value, CompileError> {
-        match scalar {
-            solve::SolveScalarType::Real { format, .. } => {
-                let promoted = promote_real(self.builder, format, value);
-                let result = emit_unary_op(
-                    self.builder,
-                    self.module,
-                    self.math,
-                    map_unary(operator),
-                    promoted,
-                )?;
-                Ok(demote_real(self.builder, format, result))
-            }
-            solve::SolveScalarType::Integer(_) => Ok(match operator {
-                solve::SolveUnaryOperator::Negate => self.builder.ins().ineg(value),
-                solve::SolveUnaryOperator::Abs => {
-                    let negative = self.builder.ins().icmp_imm(IntCC::SignedLessThan, value, 0);
-                    let negated = self.builder.ins().ineg(value);
-                    self.builder.ins().select(negative, negated, value)
-                }
-                solve::SolveUnaryOperator::Sign => {
-                    let zero = self.builder.ins().iconst(types::I64, 0);
-                    let one = self.builder.ins().iconst(types::I64, 1);
-                    let negative_one = self.builder.ins().iconst(types::I64, -1);
-                    let positive = self
-                        .builder
-                        .ins()
-                        .icmp_imm(IntCC::SignedGreaterThan, value, 0);
-                    let negative = self.builder.ins().icmp_imm(IntCC::SignedLessThan, value, 0);
-                    let nonpositive = self.builder.ins().select(negative, negative_one, zero);
-                    self.builder.ins().select(positive, one, nonpositive)
-                }
-                _ => {
-                    return Err(CompileError::Backend(
-                        "invalid typed Integer unary operator".into(),
-                    ));
-                }
-            }),
-            solve::SolveScalarType::Boolean => match operator {
-                solve::SolveUnaryOperator::Not => {
-                    let condition = self.builder.ins().icmp_imm(IntCC::Equal, value, 0);
-                    Ok(self.builder.ins().uextend(types::I64, condition))
-                }
-                _ => Err(CompileError::Backend(
-                    "invalid typed Boolean unary operator".into(),
-                )),
-            },
+fn is_binary64(scalar: solve::SolveScalarType) -> bool {
+    matches!(
+        scalar,
+        solve::SolveScalarType::Real {
+            format: solve::SolveRealFormat::Binary64,
+            ..
         }
-    }
-
-    fn binary_element(
-        &mut self,
-        operator: solve::SolveBinaryOperator,
-        scalar: solve::SolveScalarType,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value, CompileError> {
-        match scalar {
-            solve::SolveScalarType::Real { format, .. } => {
-                let lhs = promote_real(self.builder, format, lhs);
-                let rhs = promote_real(self.builder, format, rhs);
-                let result = emit_binary_op(
-                    self.builder,
-                    self.module,
-                    self.math,
-                    map_binary(operator).ok_or_else(|| {
-                        CompileError::Backend("invalid typed Real binary operator".into())
-                    })?,
-                    lhs,
-                    rhs,
-                )?;
-                Ok(demote_real(self.builder, format, result))
-            }
-            solve::SolveScalarType::Integer(_) => Ok(match operator {
-                solve::SolveBinaryOperator::Add => self.builder.ins().iadd(lhs, rhs),
-                solve::SolveBinaryOperator::Subtract => self.builder.ins().isub(lhs, rhs),
-                solve::SolveBinaryOperator::Multiply => self.builder.ins().imul(lhs, rhs),
-                solve::SolveBinaryOperator::IntegerQuotient => {
-                    // `sdiv` traps on a zero divisor and on `MIN / -1`; both are
-                    // reported through the kernel status instead.
-                    let ty = self.builder.func.dfg.value_type(rhs);
-                    let nonzero = self.builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0);
-                    let minus_one = self.builder.ins().icmp_imm(IntCC::Equal, rhs, -1);
-                    let minimum = self.builder.ins().icmp_imm(
-                        IntCC::Equal,
-                        lhs,
-                        i64::MIN >> (64 - ty.bits()),
-                    );
-                    let overflow = self.builder.ins().band(minus_one, minimum);
-                    let representable = self.builder.ins().bnot(overflow);
-                    let valid = self.builder.ins().band(nonzero, representable);
-                    status::require_integer_quotient(self.builder, valid);
-                    self.builder.ins().sdiv(lhs, rhs)
-                }
-                solve::SolveBinaryOperator::Min | solve::SolveBinaryOperator::Max => {
-                    let code = if operator == solve::SolveBinaryOperator::Min {
-                        IntCC::SignedLessThan
-                    } else {
-                        IntCC::SignedGreaterThan
-                    };
-                    let condition = self.builder.ins().icmp(code, lhs, rhs);
-                    self.builder.ins().select(condition, lhs, rhs)
-                }
-                _ => {
-                    return Err(CompileError::Backend(
-                        "typed Integer binary operator is unsupported".into(),
-                    ));
-                }
-            }),
-            solve::SolveScalarType::Boolean => Ok(match operator {
-                // MLS §10.3.4 orders `false < true`: the least of two Booleans
-                // is their conjunction and the greatest their disjunction.
-                solve::SolveBinaryOperator::And | solve::SolveBinaryOperator::Min => {
-                    self.builder.ins().band(lhs, rhs)
-                }
-                solve::SolveBinaryOperator::Or | solve::SolveBinaryOperator::Max => {
-                    self.builder.ins().bor(lhs, rhs)
-                }
-                _ => {
-                    return Err(CompileError::Backend(
-                        "invalid typed Boolean binary operator".into(),
-                    ));
-                }
-            }),
-        }
-    }
-
-    fn compare_element(
-        &mut self,
-        operator: solve::SolveCompareOperator,
-        scalar: solve::SolveScalarType,
-        lhs: Value,
-        rhs: Value,
-    ) -> Value {
-        match scalar {
-            solve::SolveScalarType::Real { format, .. } => {
-                let lhs = promote_real(self.builder, format, lhs);
-                let rhs = promote_real(self.builder, format, rhs);
-                self.builder
-                    .ins()
-                    .fcmp(map_float_compare(operator), lhs, rhs)
-            }
-            solve::SolveScalarType::Integer(_) => {
-                self.builder.ins().icmp(map_int_compare(operator), lhs, rhs)
-            }
-            solve::SolveScalarType::Boolean => {
-                let code = if operator == solve::SolveCompareOperator::Equal {
-                    IntCC::Equal
-                } else {
-                    IntCC::NotEqual
-                };
-                self.builder.ins().icmp(code, lhs, rhs)
-            }
-        }
-    }
-
-    fn convert_element(
-        &mut self,
-        operator: solve::SolveConversionOperator,
-        source: solve::SolveScalarType,
-        destination: &solve::SolveValueType,
-        value: Value,
-    ) -> Result<Value, CompileError> {
-        Ok(match operator {
-            solve::SolveConversionOperator::IntegerToReal => {
-                let value = self.builder.ins().fcvt_from_sint(types::F64, value);
-                match destination.element_type() {
-                    solve::SolveScalarType::Real { format, .. } => {
-                        demote_real(self.builder, format, value)
-                    }
-                    _ => {
-                        return Err(CompileError::Backend(
-                            "invalid Integer-to-Real destination".into(),
-                        ));
-                    }
-                }
-            }
-            solve::SolveConversionOperator::RealToIntegerTowardZero => {
-                let source = promote_conversion_source(self.builder, source, value)?;
-                self.builder.ins().fcvt_to_sint(types::I64, source)
-            }
-            solve::SolveConversionOperator::RealToIntegerTowardNegativeInfinity => {
-                let source = promote_conversion_source(self.builder, source, value)?;
-                let floored = emit_unary_op(
-                    self.builder,
-                    self.module,
-                    self.math,
-                    rumoca_ir_solve::UnaryOp::Floor,
-                    source,
-                )?;
-                self.builder.ins().fcvt_to_sint(types::I64, floored)
-            }
-        })
-    }
+    )
 }
 
 fn scalar_cranelift_type(scalar: solve::SolveScalarType) -> Type {
@@ -1714,220 +1934,37 @@ fn promote_conversion_source(
     }
 }
 
-fn map_unary(operator: solve::SolveUnaryOperator) -> rumoca_ir_solve::UnaryOp {
-    use rumoca_ir_solve::UnaryOp as Target;
-    match operator {
-        solve::SolveUnaryOperator::Negate => Target::Neg,
-        solve::SolveUnaryOperator::Not => Target::Not,
-        solve::SolveUnaryOperator::Abs => Target::Abs,
-        solve::SolveUnaryOperator::Sign => Target::Sign,
-        solve::SolveUnaryOperator::Sqrt => Target::Sqrt,
-        solve::SolveUnaryOperator::Floor => Target::Floor,
-        solve::SolveUnaryOperator::Ceiling => Target::Ceil,
-        solve::SolveUnaryOperator::Truncate => Target::Trunc,
-        solve::SolveUnaryOperator::Sin => Target::Sin,
-        solve::SolveUnaryOperator::Cos => Target::Cos,
-        solve::SolveUnaryOperator::Tan => Target::Tan,
-        solve::SolveUnaryOperator::Asin => Target::Asin,
-        solve::SolveUnaryOperator::Acos => Target::Acos,
-        solve::SolveUnaryOperator::Atan => Target::Atan,
-        solve::SolveUnaryOperator::Sinh => Target::Sinh,
-        solve::SolveUnaryOperator::Cosh => Target::Cosh,
-        solve::SolveUnaryOperator::Tanh => Target::Tanh,
-        solve::SolveUnaryOperator::Exp => Target::Exp,
-        solve::SolveUnaryOperator::Log => Target::Log,
-        solve::SolveUnaryOperator::Log10 => Target::Log10,
+/// Bound the depth of a SOLVE-C62 group member form on entry, and name the
+/// calls it makes to its own group.
+fn enter_group<'a>(
+    builder: &mut FunctionBuilder<'_>,
+    group: solve::SolveRecursiveGroup,
+    functions: &'a [Option<FuncId>],
+    depth: Value,
+) -> RecursiveCalls<'a> {
+    let within = builder.ins().icmp_imm(
+        IntCC::SignedLessThanOrEqual,
+        depth,
+        i64::from(group.depth_limit()),
+    );
+    status::require_recursion_depth(builder, within);
+    RecursiveCalls {
+        group,
+        functions,
+        depth,
     }
 }
 
-/// The Real binary operation of a typed operator; the Integer quotient has none.
-fn map_binary(operator: solve::SolveBinaryOperator) -> Option<rumoca_ir_solve::BinaryOp> {
-    use rumoca_ir_solve::BinaryOp as Target;
-    Some(match operator {
-        solve::SolveBinaryOperator::Add => Target::Add,
-        solve::SolveBinaryOperator::Subtract => Target::Sub,
-        solve::SolveBinaryOperator::Multiply => Target::Mul,
-        solve::SolveBinaryOperator::Divide => Target::Div,
-        solve::SolveBinaryOperator::Power => Target::Pow,
-        solve::SolveBinaryOperator::And => Target::And,
-        solve::SolveBinaryOperator::Or => Target::Or,
-        solve::SolveBinaryOperator::Atan2 => Target::Atan2,
-        solve::SolveBinaryOperator::Min => Target::Min,
-        solve::SolveBinaryOperator::Max => Target::Max,
-        solve::SolveBinaryOperator::IntegerQuotient
-        | solve::SolveBinaryOperator::IntegerModulo
-        | solve::SolveBinaryOperator::IntegerRemainder => return None,
-    })
-}
-
-fn map_float_compare(operator: solve::SolveCompareOperator) -> FloatCC {
-    match operator {
-        solve::SolveCompareOperator::Equal => FloatCC::Equal,
-        solve::SolveCompareOperator::NotEqual => FloatCC::NotEqual,
-        solve::SolveCompareOperator::Less => FloatCC::LessThan,
-        solve::SolveCompareOperator::LessEqual => FloatCC::LessThanOrEqual,
-        solve::SolveCompareOperator::Greater => FloatCC::GreaterThan,
-        solve::SolveCompareOperator::GreaterEqual => FloatCC::GreaterThanOrEqual,
+fn program_signature(
+    signature: &mut cranelift_codegen::ir::Signature,
+    pointer_type: cranelift_codegen::ir::Type,
+    recursive: bool,
+) {
+    signature.returns.push(AbiParam::new(types::I8));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    if recursive {
+        signature.params.push(AbiParam::new(types::I64));
     }
-}
-
-fn map_int_compare(operator: solve::SolveCompareOperator) -> IntCC {
-    match operator {
-        solve::SolveCompareOperator::Equal => IntCC::Equal,
-        solve::SolveCompareOperator::NotEqual => IntCC::NotEqual,
-        solve::SolveCompareOperator::Less => IntCC::SignedLessThan,
-        solve::SolveCompareOperator::LessEqual => IntCC::SignedLessThanOrEqual,
-        solve::SolveCompareOperator::Greater => IntCC::SignedGreaterThan,
-        solve::SolveCompareOperator::GreaterEqual => IntCC::SignedGreaterThanOrEqual,
-    }
-}
-
-#[cfg(test)]
-mod storage_tests {
-    use super::*;
-    use rumoca_core::{SourceId, Span};
-
-    fn span(offset: usize) -> Span {
-        Span::from_offsets(
-            SourceId::from_source_name("typed_storage.modelica"),
-            offset,
-            offset + 1,
-        )
-    }
-
-    fn arithmetic() -> solve::SolveArithmeticProfile {
-        solve::SolveArithmeticProfile::construct(
-            solve::SolveRealFormat::Binary64,
-            solve::SolveIntegerDomain::construct(i32::MIN.into(), i32::MAX.into()).unwrap(),
-        )
-    }
-
-    #[test]
-    fn checked_storage_forwards_one_functional_update_without_mutating_input() {
-        let arithmetic = arithmetic();
-        let tensor =
-            solve::SolveValueType::tensor(solve::SolveScalarType::real(arithmetic), vec![4])
-                .unwrap();
-        let program = solve::TypedProgram::construct(arithmetic, |builder| {
-            let input = builder.declare_slot(
-                tensor.clone(),
-                solve::SolveStorageClass::Input,
-                solve::SolveSlotAccess::ReadOnly,
-                span(0),
-            )?;
-            let output = builder.declare_slot(
-                tensor.clone(),
-                solve::SolveStorageClass::Output,
-                solve::SolveSlotAccess::ReadWrite,
-                span(1),
-            )?;
-            let aggregate = builder.load(input, span(2))?;
-            let index =
-                builder.constant(solve::SolveValue::integer(arithmetic, 2).unwrap(), span(3))?;
-            let value = builder.constant(solve::SolveValue::real(arithmetic, 9.0), span(4))?;
-            let updated = builder.update_element(aggregate, value, &[index], span(5))?;
-            builder.store(output, updated, span(6))
-        })
-        .unwrap();
-
-        let layout = ProgramLayout::new(&program, 1, 1).unwrap();
-        let solve::SolveOperation::Load {
-            destination: aggregate,
-            ..
-        } = program.operations()[0].operation()
-        else {
-            panic!("first operation is the aggregate load")
-        };
-        let solve::SolveOperation::UpdateElement {
-            destination: updated,
-            ..
-        } = program.operations()[3].operation()
-        else {
-            panic!("fourth operation is the functional update")
-        };
-        let aggregate = &layout.registers[aggregate.index()];
-        let updated = &layout.registers[updated.index()];
-        assert_eq!(aggregate.base, StorageBase::Input);
-        assert_eq!(aggregate.cell, 0);
-        assert_eq!(updated.base, StorageBase::Output);
-        assert_eq!(updated.cell, 0);
-    }
-
-    #[test]
-    fn checked_storage_never_aliases_a_read_only_constant_tape_slot() {
-        let arithmetic = arithmetic();
-        let tensor =
-            solve::SolveValueType::tensor(solve::SolveScalarType::real(arithmetic), vec![4])
-                .unwrap();
-        let program = solve::TypedProgram::construct(arithmetic, |builder| {
-            let constant = builder.declare_slot(
-                tensor,
-                solve::SolveStorageClass::Constant,
-                solve::SolveSlotAccess::ReadOnly,
-                span(10),
-            )?;
-            let aggregate = builder.load(constant, span(11))?;
-            let index =
-                builder.constant(solve::SolveValue::integer(arithmetic, 2).unwrap(), span(12))?;
-            let value = builder.constant(solve::SolveValue::real(arithmetic, 9.0), span(13))?;
-            let _updated = builder.update_element(aggregate, value, &[index], span(14))?;
-            Ok(())
-        })
-        .unwrap();
-
-        let layout = ProgramLayout::new(&program, 0, 0).unwrap();
-        let solve::SolveOperation::Load {
-            destination: aggregate,
-            slot,
-        } = program.operations()[0].operation()
-        else {
-            panic!("first operation is the constant-slot load")
-        };
-        let slot = &layout.slots[slot.index()];
-        let aggregate = &layout.registers[aggregate.index()];
-        assert_eq!(slot.base, StorageBase::Tape);
-        assert_eq!(aggregate.base, StorageBase::Tape);
-        assert_ne!(aggregate.cell, slot.cell);
-    }
-
-    #[test]
-    fn checked_storage_reuses_tape_only_after_the_last_use() {
-        let arithmetic = arithmetic();
-        let program = solve::TypedProgram::construct(arithmetic, |builder| {
-            let first = builder.constant(solve::SolveValue::real(arithmetic, 2.0), span(20))?;
-            let live = builder.unary(solve::SolveUnaryOperator::Negate, first, span(21))?;
-            let reused = builder.constant(solve::SolveValue::real(arithmetic, 3.0), span(22))?;
-            let _result =
-                builder.binary(solve::SolveBinaryOperator::Add, live, reused, span(23))?;
-            Ok(())
-        })
-        .unwrap();
-
-        let layout = ProgramLayout::new(&program, 0, 0).unwrap();
-        let first = &layout.registers[0];
-        let live = &layout.registers[1];
-        let reused = &layout.registers[2];
-        assert_eq!(first.cell, reused.cell);
-        assert_ne!(first.cell, live.cell);
-    }
-
-    #[test]
-    fn checked_storage_keeps_same_operation_inputs_and_output_disjoint() {
-        let arithmetic = arithmetic();
-        let program = solve::TypedProgram::construct(arithmetic, |builder| {
-            let lhs = builder.constant(solve::SolveValue::real(arithmetic, 2.0), span(30))?;
-            let rhs = builder.constant(solve::SolveValue::real(arithmetic, 3.0), span(31))?;
-            let _result = builder.binary(solve::SolveBinaryOperator::Add, lhs, rhs, span(32))?;
-            Ok(())
-        })
-        .unwrap();
-
-        let layout = ProgramLayout::new(&program, 0, 0).unwrap();
-        let cells = layout
-            .registers
-            .iter()
-            .map(|location| location.cell)
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(cells.len(), 3);
-    }
+    signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
 }

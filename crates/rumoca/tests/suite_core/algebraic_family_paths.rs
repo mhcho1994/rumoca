@@ -151,6 +151,10 @@ const OPERATORS: &[Operator] = &[
     ("sq", "s[{i}]^2", 1),
     ("cu", "s[{i}]^3", 1),
     ("pow4", "s[{i}]^4", 1),
+    ("p17", "s[{i}]^17", 1),
+    ("p31", "s[{i}]^31", 1),
+    ("pm3", "s[{i}]^(-3)", 1),
+    ("p0", "s[{i}]^0", 1),
     ("ex", "exp(-s[{i}])", 1),
     ("lg", "log(s[{i}] + 1)", 1),
     ("lg10", "log10(s[{i}] + 1)", 1),
@@ -165,9 +169,9 @@ const OPERATORS: &[Operator] = &[
 ];
 
 // A binder-valued exponent (`s[i]^i`) is not in the table: the scalar spelling
-// sees a literal Integer exponent, which lowers as a product for 2 and 3
-// (`product_power_factors`), while the owner evaluates the binder at run time
-// with `powf`, so the two may differ in the last bit by construction.
+// sees a literal Integer exponent, which lowers as the plan of
+// `modelica_integer_power` (SOLVE-C86), and the owner evaluates the binder at
+// run time with the same recurrence.
 
 const FAMILY_SIZE: usize = 4;
 
@@ -218,9 +222,12 @@ fn owner_and_scalar_rows_agree_bit_for_bit_for_every_admitted_operator() {
             "{name}: the explicit spelling is no family: {:?}",
             scalar.interiors
         );
+        // SOLVE-C86: a Real power with a literal Integer exponent lowers as the
+        // plan of `modelica_integer_power` in the scalar rows, so no operator
+        // in the table issues owners in the explicit spelling.
         assert_eq!(
             scalar.residual_calls, 0,
-            "{name}: the explicit spelling has no owner"
+            "{name}: owners of the explicit spelling"
         );
         let names = (1..=FAMILY_SIZE)
             .map(|i| format!("{name}[{i}]"))
@@ -418,7 +425,8 @@ fn a_der_read_target_stays_materialized_and_a_dependent_range_unrolls_its_outer_
 
 /// A consumer of the scalar equation view rejects a family whose interiors
 /// are placeholders at the family's span (SPEC_0043 §6c row 2); the same
-/// equations written as scalars render.
+/// equations written as scalars render, and so does a template that never
+/// reads the model or that reads the loop-aware `flat_equation_rows`.
 #[test]
 fn a_flat_template_over_placeholder_rows_rejects_the_family_at_its_span() {
     use rumoca_compile::codegen::{CodegenError, render_flat_template_with_name};
@@ -437,7 +445,7 @@ fn a_flat_template_over_placeholder_rows_rejects_the_family_at_its_span() {
             .unwrap_or_else(|error| panic!("placeholder compiles: {error:?}"))
             .flat
     };
-    let template = "{{ model_name }}";
+    let template = "{% for eq in flat.equations %}{{ eq.scalar_count }}{% endfor %}";
     match render_flat_template_with_name(&flat(true), template, "Placeholder") {
         Err(CodegenError::NonMaterializedStructuredFamily {
             partition, span, ..
@@ -449,4 +457,13 @@ fn a_flat_template_over_placeholder_rows_rejects_the_family_at_its_span() {
     }
     render_flat_template_with_name(&flat(false), template, "Placeholder")
         .expect("materialized rows render");
+    render_flat_template_with_name(&flat(true), "{{ model_name }}", "Placeholder")
+        .expect("a template that reads no equations reads no placeholder");
+    let loops = render_flat_template_with_name(
+        &flat(true),
+        "{% for row in flat_equation_rows.regular %}{{ row.loop.headers[0] if \"loop\" in row }}{% endfor %}{{ flat.variables | length }}",
+        "Placeholder",
+    )
+    .expect("the loop-aware rows print the family as a loop");
+    assert!(loops.starts_with("for i in 1:4 loop"), "{loops}");
 }

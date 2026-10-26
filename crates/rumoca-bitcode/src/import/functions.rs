@@ -21,6 +21,9 @@
 //! from the artifact instead of from the DAE's private storage, and every
 //! step goes through the checked constructor a compiler would call.
 
+mod conditionals;
+pub(super) use conditionals::verify_conditional_outputs;
+
 use super::*;
 
 /// Functions rebuilt so far, as later expressions address them.
@@ -218,6 +221,7 @@ fn body_scope(node: &RbcExprNode) -> Option<u32> {
     match node {
         RbcExprNode::FunctionValue { function, .. }
         | RbcExprNode::FunctionFoldParameter { function, .. }
+        | RbcExprNode::FunctionConditionalOutput { function, .. }
         | RbcExprNode::FunctionFoldOutput { function, .. } => Some(function.0),
         _ => None,
     }
@@ -301,7 +305,8 @@ fn roots(function: &RbcFunction) -> Vec<ExprId> {
 fn statement_roots(statements: &[RbcFunctionStatement], found: &mut Vec<ExprId>) {
     for statement in statements {
         match statement {
-            RbcFunctionStatement::Assignment { expression, .. } => found.push(*expression),
+            RbcFunctionStatement::RequireAssigned { expression, .. }
+            | RbcFunctionStatement::Assignment { expression, .. } => found.push(*expression),
             RbcFunctionStatement::Assertion {
                 condition, message, ..
             } => found.extend([*condition, *message]),
@@ -315,6 +320,19 @@ fn statement_roots(statements: &[RbcFunctionStatement], found: &mut Vec<ExprId>)
                     found.extend(conditional.conditions.iter().copied());
                     found.extend(conditional.branches.iter().flatten().copied());
                     found.extend(conditional.fallback.iter().copied());
+                }
+            }
+            RbcFunctionStatement::Conditional {
+                conditions,
+                branches,
+                fallback,
+                outputs,
+                ..
+            } => {
+                found.extend(conditions.iter().copied());
+                found.extend(outputs.iter().map(|output| output.expression));
+                for branch in branches.iter().chain(std::iter::once(fallback)) {
+                    statement_roots(&branch.statements, found);
                 }
             }
             RbcFunctionStatement::For { statements, .. } => statement_roots(statements, found),
@@ -405,6 +423,8 @@ fn rebuild_function<'dae>(
                     next: 0,
                     capability: Some(Capability::Body(body)),
                     depth: 0,
+                    branches: Vec::new(),
+                    conditionals: Vec::new(),
                 };
                 replay.run(c, ctx, stream, end)?;
                 replay.finish(c, ctx, stream, declaration)
@@ -443,6 +463,22 @@ enum Operation<'m> {
         condition: ExprId,
         message: ExprId,
         level: RbcAssertionLevel,
+        provenance: RbcProvenance,
+    },
+    BeginConditional {
+        ordinal: u32,
+        conditions: &'m [ExprId],
+        outputs: &'m [RbcFunctionDefinition],
+        provenance: RbcProvenance,
+    },
+    BeginBranch {
+        provenance: RbcProvenance,
+    },
+    EndBranch,
+    EndConditional,
+    RequireAssigned {
+        value: u32,
+        expression: ExprId,
         provenance: RbcProvenance,
     },
     Open {
@@ -494,6 +530,40 @@ fn push_operations<'m>(statements: &'m [RbcFunctionStatement], out: &mut Vec<Ope
                 level: *level,
                 provenance: *provenance,
             }),
+            RbcFunctionStatement::Conditional {
+                ordinal,
+                conditions,
+                branches,
+                fallback,
+                outputs,
+                provenance,
+            } => {
+                out.push(Operation::BeginConditional {
+                    ordinal: *ordinal,
+                    conditions,
+                    outputs,
+                    provenance: *provenance,
+                });
+                for branch in branches.iter().chain(std::iter::once(fallback)) {
+                    out.push(Operation::BeginBranch {
+                        provenance: branch.provenance,
+                    });
+                    push_operations(&branch.statements, out);
+                    out.push(Operation::EndBranch);
+                }
+                out.push(Operation::EndConditional);
+            }
+            RbcFunctionStatement::RequireAssigned {
+                value,
+                expression,
+                provenance,
+            } => {
+                out.push(Operation::RequireAssigned {
+                    value: *value,
+                    expression: *expression,
+                    provenance: *provenance,
+                });
+            }
             RbcFunctionStatement::For {
                 fold,
                 statements,
@@ -540,9 +610,11 @@ struct Replay<'m, 'dae> {
     /// Open loops. Closing the outermost returns a body capability, closing
     /// an inner one returns the enclosing loop, and the constructors differ.
     depth: usize,
+    branches: Vec<(conditionals::BranchFinish<'dae>, usize)>,
+    conditionals: Vec<conditionals::Conditional<'m, 'dae>>,
 }
 
-impl<'dae> Replay<'_, 'dae> {
+impl<'m, 'dae> Replay<'m, 'dae> {
     /// Rebuild the arena forward to `end`, issuing statements as the nodes
     /// that depend on them arrive.
     fn run(
@@ -564,6 +636,9 @@ impl<'dae> Replay<'_, 'dae> {
                 } => self.read(construction, ctx, stream, *value, *definition, expression)?,
                 RbcExprNode::FunctionFoldParameter { .. } => {
                     self.transition(construction, ctx, stream, Transition::Open)?;
+                }
+                RbcExprNode::FunctionConditionalOutput { .. } => {
+                    self.conditional_transition(construction, ctx, stream)?;
                 }
                 RbcExprNode::FunctionFoldOutput { .. } => {
                     self.transition(construction, ctx, stream, Transition::Close)?;
@@ -676,7 +751,8 @@ impl<'dae> Replay<'_, 'dae> {
             if current == Some(definition) {
                 break;
             }
-            if current.is_some_and(|current| current > definition) {
+            // Closing a sibling branch restores its parent's incoming definitions.
+            if self.branches.is_empty() && current.is_some_and(|current| current > definition) {
                 return Err(ctx.unsupported(format!(
                     "expression {} reads definition {definition} of value {value}, which \
                      a later statement has already replaced",
@@ -709,6 +785,15 @@ impl<'dae> Replay<'_, 'dae> {
         let ready = |id: &ExprId| (id.0 as usize) < stream.built.len();
         let expression = |id: ExprId| resolve(&stream.built, id.0, "expression", ctx);
         match operation {
+            operation @ (Operation::BeginConditional { .. }
+            | Operation::BeginBranch { .. }
+            | Operation::EndBranch
+            | Operation::EndConditional
+            | Operation::RequireAssigned { .. }) => {
+                if !self.apply_conditional_operation(construction, ctx, stream, operation)? {
+                    return Ok(false);
+                }
+            }
             Operation::Assign {
                 value,
                 expression: rhs,
@@ -810,38 +895,13 @@ impl<'dae> Replay<'_, 'dae> {
             .zip(expressions)
             .map(|(value, rhs)| Ok((self.value(ctx, *value)?, expression(*rhs)?)))
             .collect::<Result<Vec<_>, dae::DaeConstructionError>>()?;
-        let list = |ids: &[ExprId]| {
-            ids.iter()
-                .map(|id| expression(*id))
-                .collect::<Result<Vec<_>, _>>()
-        };
-        let correlation = match conditional {
-            Some(c) => Some((
-                list(&c.conditions)?,
-                c.branches
-                    .iter()
-                    .map(|branch| list(branch))
-                    .collect::<Result<Vec<_>, _>>()?,
-                list(&c.fallback)?,
-            )),
-            None => None,
-        };
+        if let Some(correlation) = conditional {
+            conditionals::check_legacy_group(ctx, expressions, correlation)?;
+        }
         let capability = self.capability_mut(ctx)?;
-        construction.functions(|f| match (capability, &correlation) {
-            (Capability::Body(body), Some((conditions, branches, fallback))) => {
-                f.replay_conditional_all(body, &assignments, conditions, branches, fallback, at)
-            }
-            (Capability::Loop(body), Some((conditions, branches, fallback))) => f
-                .replay_conditional_all_loop(
-                    body,
-                    &assignments,
-                    conditions,
-                    branches,
-                    fallback,
-                    at,
-                ),
-            (Capability::Body(body), None) => f.assign_all(body, &assignments, at),
-            (Capability::Loop(body), None) => f.assign_all_loop(body, &assignments, at),
+        construction.functions(|f| match capability {
+            Capability::Body(body) => f.assign_all(body, &assignments, at),
+            Capability::Loop(body) => f.assign_all_loop(body, &assignments, at),
         })?;
         Ok(true)
     }

@@ -114,6 +114,7 @@
             doCheck = false;
           }))
           ps.numpy
+          ps.matplotlib
           ps.pandas
           ps.pip
           ps.sympy
@@ -188,13 +189,7 @@
         mlirCpuTestArgs = builtins.concatStringsSep " " [
           "--package rumoca-exec-mlir"
           "--features required-mlir-cpu"
-          "--test benchmark_matmul"
-          "--test compile_basic"
-          "--test implicit_euler"
-          "--test integrate"
-          "--test linsolve_mlir"
-          "--test multi_fn_mlir"
-          "--test options"
+          "--test suite_mlir"
         ];
         mlirCpuTests =
           assert pkgs.lib.hasInfix ".#checks.x86_64-linux.mlir-cpu" (
@@ -206,6 +201,7 @@
               inherit cargoArtifacts;
               pname = "rumoca-mlir-cpu-tests";
               cargoExtraArgs = mlirCpuTestArgs;
+              cargoTestExtraArgs = "-- cpu::";
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ mlirCpuTools ];
               preCheck = ''
                 for tool in clang-18 llc-18 mlir-opt-18 mlir-translate-18; do
@@ -362,12 +358,15 @@
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ openModelicaCli ]
         );
-        docsShell = mkDevShell [
-          pkgs.binaryen
-          pkgs.mdbook
-          pkgs.nodejs_22
-          pkgs.wasm-pack
-        ];
+        docsShell = mkDevShell (
+          [
+            pkgs.binaryen
+            pkgs.mdbook
+            pkgs.nodejs_22
+            pkgs.wasm-pack
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ]
+        );
         fullShell = templateRuntimeShell (
           pkgs.lib.optionals pkgs.stdenv.isLinux [
             ciJulia
@@ -381,6 +380,7 @@
             pkgs.cargo-expand
             pkgs.cargo-llvm-cov
             pkgs.cargo-nextest
+            pkgs.cmake
             pkgs.hyperfine
             pkgs.jq
             pkgs.libxml2
@@ -454,6 +454,7 @@
         devShells.ci-python-wheel = mkDevShell [
           pkgs.maturin
           pkgs.python312
+          pkgs.cmake
           # `zig` lets `maturin build --zig` cross-link the Linux wheels
           # against an older glibc, so they carry a real manylinux platform
           # tag that PyPI accepts instead of a bare `linux_*` tag.
@@ -488,6 +489,7 @@
           in
           (templateRuntimeShell [
             pkgs.wasm-tools
+            pkgs.libxml2
             wasiCc
           ]).overrideAttrs
             (old: {

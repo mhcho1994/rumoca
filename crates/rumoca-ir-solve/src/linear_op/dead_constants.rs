@@ -1,15 +1,15 @@
-//! Removal of literal stores and unary ops no later op reads.
+//! Removal of pure scalar arithmetic no later op reads.
 //!
 //! Liveness is read off the same source checks that prove a program's register
 //! flow, so an op kind cannot read a register this pass misses: a literal
 //! register stays pending until an op's source check would fail without it.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::*;
 
-/// Drop every `Const` and `Unary` op of a top-level scalar program whose
-/// register no later op reads before it is redefined. Both are pure register
+/// Drop every `Const`, `Unary`, and `Binary` op of a top-level scalar program whose
+/// register no later op reads before it is redefined. These are pure register
 /// computations, so an unread one has no effect. Dropping an unread unary op can
 /// leave its operand unread in turn (the inner negation of a folded `-(-x)`), so
 /// pruning repeats until nothing changes. A program the register-flow checks
@@ -33,15 +33,18 @@ pub fn prune_dead_constants(mut program: Vec<LinearOp>) -> Vec<LinearOp> {
 
 /// A pure register computation this pass may drop when unread.
 fn prunable(op: &LinearOp) -> bool {
-    matches!(op, LinearOp::Const { .. } | LinearOp::Unary { .. })
+    matches!(
+        op,
+        LinearOp::Const { .. } | LinearOp::Unary { .. } | LinearOp::Binary { .. }
+    ) && op.fault_class().is_prunable()
 }
 
 /// Per op, whether it is kept: every op this pass cannot drop, and each
 /// prunable op whose register a later op reads.
 fn live_pure_ops(program: &[LinearOp]) -> Option<Vec<bool>> {
     let mut live = program.iter().map(|op| !prunable(op)).collect::<Vec<_>>();
-    let mut initialized = Vec::new();
-    let mut pending: HashMap<Reg, usize> = HashMap::new();
+    let mut initialized = DefinedRegisters::default();
+    let mut pending: BTreeMap<Reg, usize> = BTreeMap::new();
     let mut validation = ScalarProgramValidationCache::default();
     for (op_index, op) in program.iter().enumerate() {
         loop {
@@ -50,7 +53,7 @@ fn live_pure_ops(program: &[LinearOp]) -> Option<Vec<bool>> {
                 Err(ScalarProgramRegisterError::UndefinedRegister { register, .. }) => {
                     let defining = pending.remove(&register)?;
                     live[defining] = true;
-                    mark_register_initialized(&mut initialized, register);
+                    initialized.insert(register, 1);
                 }
                 Err(_) => return None,
             }
@@ -64,7 +67,7 @@ fn live_pure_ops(program: &[LinearOp]) -> Option<Vec<bool>> {
         if prunable(op) {
             pending.insert(dst, op_index);
         } else {
-            mark_register_range_initialized(&mut initialized, dst, op.dst_register_count());
+            initialized.insert(dst, op.dst_register_count());
         }
     }
     Some(live)
@@ -73,6 +76,47 @@ fn live_pure_ops(program: &[LinearOp]) -> Option<Vec<bool>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_binary_chains_drop_but_live_arithmetic_and_faulting_reads_remain() {
+        let retained = vec![
+            LinearOp::LoadTime { dst: 0 },
+            LinearOp::Const { dst: 1, value: 2.0 },
+            LinearOp::Binary {
+                dst: 2,
+                op: BinaryOp::Div,
+                lhs: 0,
+                rhs: 1,
+            },
+            LinearOp::LoadIndexedRegister {
+                dst: 3,
+                base: 0,
+                stride: 1,
+                dimensions: Box::new([1]),
+                indices: Box::new([TensorIndex::Runtime(1)]),
+            },
+            LinearOp::StoreOutput { src: 2 },
+        ];
+        let mut program = retained[..4].to_vec();
+        program.extend([
+            LinearOp::Const { dst: 4, value: 3.0 },
+            LinearOp::Binary {
+                dst: 5,
+                op: BinaryOp::Add,
+                lhs: 0,
+                rhs: 4,
+            },
+            LinearOp::Binary {
+                dst: 6,
+                op: BinaryOp::Mul,
+                lhs: 5,
+                rhs: 4,
+            },
+            retained[4].clone(),
+        ]);
+        assert!(ScalarProgramRegisterFlow::derive(&program).is_ok());
+        assert_eq!(prune_dead_constants(program), retained);
+    }
 
     #[test]
     fn an_unread_literal_is_dropped_and_a_read_one_kept() {

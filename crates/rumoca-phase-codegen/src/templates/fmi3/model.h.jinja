@@ -10,6 +10,8 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+{# Typed pure-function bodies may call the helpers; the solve-IR scan cannot see them. #}
+#include <inttypes.h>
 {{ real_extremum_prelude("c") }}#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>

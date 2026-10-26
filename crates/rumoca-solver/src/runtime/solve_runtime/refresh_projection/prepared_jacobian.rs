@@ -16,35 +16,105 @@ pub(crate) fn projection_jacobian_source(
     to_scalar_program_block(canonical).map_err(Into::into)
 }
 
-pub(crate) fn prepare_projection_jacobians(
+/// Backend preparation follows the issued value-execution paths. A complete
+/// causal certificate returns before projection; initialization row probes
+/// additionally project their recorded settled-read cones directly.
+pub(crate) fn projection_jacobian_demand(
+    model: &solve::SolveModel,
+    settled_read_cones: Option<&[Box<[usize]>]>,
+) -> Result<BTreeSet<usize>, EvalSolveError> {
+    let owners = &model.problem.continuous.refresh_owners;
+    let mut demanded = BTreeSet::new();
+    let plans = [
+        owners.algebraic(),
+        owners.derivative(),
+        owners.root(),
+        owners.event(),
+    ]
+    .into_iter()
+    .chain(owners.clock_events())
+    .chain(
+        owners
+            .root_after_derivative()
+            .map(|relation| relation.remainder()),
+    )
+    .chain(
+        owners
+            .algebraic_after_derivative()
+            .map(|relation| relation.remainder()),
+    )
+    .chain(
+        owners
+            .clock_events_after_event()
+            .iter()
+            .map(|relation| relation.remainder()),
+    );
+    for plan in plans {
+        if !plan.causal_solution_certified {
+            demanded.extend(&plan.simultaneous_block_indices);
+        }
+    }
+    if let Some(cones) = settled_read_cones {
+        for &position in cones.iter().flat_map(|cone| cone.iter()) {
+            let index = owners
+                .algebraic()
+                .simultaneous_block_indices
+                .get(position)
+                .ok_or_else(|| EvalSolveError::InvalidRow {
+                    message: "initialization read cone is outside its algebraic refresh plan"
+                        .into(),
+                    span: None,
+                })?;
+            demanded.insert(*index);
+        }
+    }
+    Ok(demanded)
+}
+
+pub(in crate::runtime::solve_runtime) fn prepare_projection_jacobians(
     structures: &solve::ContinuousStructuralArtifacts,
-    primal: &PreparedScalarProgramBlock,
-    source: &solve::ScalarProgramBlock,
-    compiled: Option<&dyn CompiledSolveJacobianExpression>,
+    primal: ProgramAnalysis<'_>,
+    owner: &DirectionalProgram,
+    demanded: &BTreeSet<usize>,
 ) -> Result<Vec<Option<Rc<dyn CompiledSolveProjectionJacobian>>>, EvalSolveError> {
     let blocks = structures.algebraic_projection();
+    if demanded.iter().any(|&slot| slot >= blocks.len()) {
+        return Err(EvalSolveError::InvalidRow {
+            message: "projection demand is outside its continuous structural owner".into(),
+            span: None,
+        });
+    }
     let mut prepared = vec![None; blocks.len()];
-    let Some(compiled) = compiled else {
+    if !owner.is_compiled() {
         return Ok(prepared);
-    };
+    }
     let (slots, applications): (Vec<usize>, Vec<&solve::ProjectionJacobianApplication>) = blocks
         .iter()
         .enumerate()
         .filter_map(|(slot, structure)| {
+            if !demanded.contains(&slot) {
+                return None;
+            }
             let application = structure.jacobian_application()?;
             let all_forward = application.rows().iter().all(|&row| {
                 primal
                     .row_output_position(row)
                     .is_some_and(|(program, _)| !primal.reverse_row_y_gradient_supported(program))
             });
-            (source.shares_program_owner(application.canonical_source()) && all_forward)
+            (owner
+                .source()
+                .shares_program_owner(application.canonical_source())
+                && all_forward)
                 .then_some((slot, application))
         })
         .unzip();
-    // One preparation for every application, so a native backend compiles
+    if applications.is_empty() {
+        return Ok(prepared);
+    }
+    // One preparation for every demanded application, so a native backend compiles
     // them into one module and finalizes it once.
-    let compiled = compiled
-        .prepare_projections(&applications)
+    let compiled = owner
+        .prepare_projection_entries(&applications)
         .map_err(|message| EvalSolveError::InvalidRow {
             message,
             span: applications
@@ -60,7 +130,7 @@ pub(crate) fn prepare_projection_jacobians(
 impl RefreshProjectionModel<'_> {
     pub(super) fn eval_prepared_jacobian(
         &self,
-        structure: &solve::JacobianStructure,
+        structure: &solve::ColoredJacobianStructure,
         (rows, y_indices): (&[usize], &[usize]),
         y: &[f64],
         p: &[f64],
@@ -73,6 +143,7 @@ impl RefreshProjectionModel<'_> {
         let compiled = structure.jacobian_application().and_then(|application| {
             let compiled = self
                 .runtime
+                .scalar
                 .compiled_algebraic_jacobians
                 .get(application.block_index())?
                 .as_ref()?;
@@ -84,6 +155,7 @@ impl RefreshProjectionModel<'_> {
         let index = application.block_index();
         let owns_structure = self
             .runtime
+            .scalar
             .continuous_structural
             .algebraic_projection()
             .get(index)
@@ -93,9 +165,7 @@ impl RefreshProjectionModel<'_> {
                 "prepared Jacobian source coordinates differ",
             ));
         }
-        compiled
-            .call(y, p, t, self.runtime.model.external_tables.as_slice(), out)
-            .map_err(RuntimeSolveError::solve_ir)?;
+        compiled.call(y, p, t, self.runtime.model.external_tables.as_slice(), out)?;
         Ok(true)
     }
 }
@@ -106,7 +176,7 @@ impl RefreshProjectionModel<'_> {
     /// when no backend compiled the projection JVP.
     pub(super) fn eval_colored_tangent_entries(
         &self,
-        structure: &solve::JacobianStructure,
+        structure: &solve::ColoredJacobianStructure,
         (rows, y_indices): (&[usize], &[usize]),
         (y, p, t): (&[f64], &[f64], f64),
     ) -> Result<Option<crate::runtime::projection::JacobianEntries>, RuntimeSolveError> {
@@ -117,12 +187,17 @@ impl RefreshProjectionModel<'_> {
         // the interpreted runtime.
         if self
             .runtime
-            .compiled_implicit_projection_jacobian_v
-            .is_some()
+            .scalar
+            .implicit_projection_scalar_jacobian_v
+            .is_compiled()
         {
             return Ok(None);
         }
-        let owned = self.runtime.continuous_structural.algebraic_projection();
+        let owned = self
+            .runtime
+            .scalar
+            .continuous_structural
+            .algebraic_projection();
         let Some(index) = owned
             .iter()
             .position(|owned| std::ptr::eq(owned, structure))
@@ -130,13 +205,14 @@ impl RefreshProjectionModel<'_> {
             return Ok(None);
         };
         let (Some(Some(evaluator)), Some(block)) = (
-            self.runtime.colored_tangents.get(index),
+            self.runtime.scalar.colored_tangents.get(index),
             self.runtime
                 .model
                 .problem
                 .continuous
                 .algebraic_projection_plan
                 .blocks
+                .scalar_blocks()
                 .get(index),
         ) else {
             return Ok(None);
@@ -172,7 +248,7 @@ pub(crate) fn validate_projection_primal_source(
     for application in structures
         .algebraic_projection()
         .iter()
-        .filter_map(solve::JacobianStructure::jacobian_application)
+        .filter_map(solve::ColoredJacobianStructure::jacobian_application)
     {
         if application
             .primal_source()

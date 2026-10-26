@@ -16,6 +16,8 @@
 //!   declaration order, so appending or reordering variants cannot silently
 //!   change how an older file decodes.
 
+mod records;
+
 use serde::{Deserialize, Serialize};
 
 /// Container magic. Present so a reader can reject a non-RBC file before
@@ -347,17 +349,6 @@ pub struct RbcSummary {
 }
 
 // ── Provenance ───────────────────────────────────────────────────────────────
-
-impl SourceId {
-    /// The first entry of this artifact's own source table.
-    ///
-    /// A parser has to put *something* in a span before it reads the item that
-    /// carries one, and every such span is overwritten before it is stored.
-    /// Naming it says so, where a bare `SourceId(0)` reads as a source nobody
-    /// bothered to resolve. This indexes `RbcModel::sources`; it is not a
-    /// `rumoca_core::SourceId` and names no file on its own.
-    pub const PLACEHOLDER: SourceId = SourceId(0);
-}
 
 /// One source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -992,6 +983,17 @@ pub enum RbcExprNode {
         carried: u32,
         definition: u32,
     },
+    /// A value produced by an ordered function conditional or an assigned read.
+    FunctionConditionalOutput {
+        /// Function owning the conditional and its value table.
+        function: FunctionId,
+        /// Owner-local ordinal of the conditional.
+        conditional: u32,
+        /// Owner-local ordinal of the assigned value.
+        value: u32,
+        /// Owner-local ordinal of the resulting SSA definition.
+        definition: u32,
+    },
     /// A node this schema version cannot represent. A consumer must treat the
     /// containing model as not fully understood rather than assume a default.
     /// Producers only emit this when explicitly asked to tolerate gaps.
@@ -1010,16 +1012,6 @@ pub enum RbcSubscript {
     Index { expression: ExprId },
     Whole,
     Slice { expression: ExprId },
-}
-
-impl RbcSubscript {
-    /// The expression this subscript evaluates, if any. `Whole` evaluates none.
-    pub fn expression(self) -> Option<ExprId> {
-        match self {
-            Self::Index { expression } | Self::Slice { expression } => Some(expression),
-            Self::Whole => None,
-        }
-    }
 }
 
 /// One `condition -> value` arm of a conditional expression.
@@ -1468,7 +1460,7 @@ pub enum RbcAssertionLevel {
 
 /// One statement of a lowered function body.
 ///
-/// The four forms `rumoca_ir_dae::FunctionStatementView` distinguishes. A
+/// The forms `rumoca_ir_dae::FunctionStatementView` distinguishes. A
 /// consumer that only needs to *read* a body — reachability, coverage, a
 /// constant-folding pass — works from these without reconstructing a DAE.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1511,6 +1503,30 @@ pub enum RbcFunctionStatement {
         expressions: Vec<ExprId>,
         provenance: RbcProvenance,
     },
+    /// Source-ordered branches, including assertions and partial assignments.
+    Conditional {
+        /// Owner-local ordinal assigned when the conditional closes.
+        ordinal: u32,
+        /// Guards in source order; the first true guard selects its branch.
+        conditions: Vec<ExprId>,
+        /// One scoped statement list per guard.
+        branches: Vec<RbcFunctionBranch>,
+        /// Statement list selected when every guard is false.
+        fallback: RbcFunctionBranch,
+        /// Complete changed values issued when the conditional closes.
+        outputs: Vec<RbcFunctionDefinition>,
+        /// Source location of the conditional.
+        provenance: RbcProvenance,
+    },
+    /// Read a partially assigned value, failing if the selected path left it unset.
+    RequireAssigned {
+        /// Owner-local ordinal of the partially assigned value.
+        value: u32,
+        /// Conditional output issued by the checked read.
+        expression: ExprId,
+        /// Source location of the read.
+        provenance: RbcProvenance,
+    },
     /// A bounded loop. `fold` is an owner-local ordinal into the function's
     /// fold table, which carries the transition; the body is here, because
     /// that is where the DAE keeps it and a second home would let the two
@@ -1521,6 +1537,15 @@ pub enum RbcFunctionStatement {
         /// Where the loop closes; the fold carries where it opens.
         provenance: RbcProvenance,
     },
+}
+
+/// One source-ordered conditional branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RbcFunctionBranch {
+    /// Actions executed in source order inside this branch.
+    pub statements: Vec<RbcFunctionStatement>,
+    /// Source location of the branch.
+    pub provenance: RbcProvenance,
 }
 
 /// A fold over a compact domain: the bounded loop a function body can hold.
@@ -1943,23 +1968,4 @@ pub struct RbcTracePoint {
     /// itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_by: Option<String>,
-}
-
-impl RbcFile {
-    /// Reject a file that is not RBC, or is a version this build cannot read.
-    pub fn check_header(&self) -> Result<(), String> {
-        if self.magic != RBC_MAGIC {
-            return Err(format!(
-                "not a Rumoca Bitcode file: magic is {:?}, expected {RBC_MAGIC:?}",
-                self.magic
-            ));
-        }
-        if self.bitcode_version != RBC_VERSION {
-            return Err(format!(
-                "unsupported bitcode version {}: this build reads version {RBC_VERSION}",
-                self.bitcode_version
-            ));
-        }
-        Ok(())
-    }
 }

@@ -302,6 +302,7 @@ fn compact_fold_owner_is_certified_without_domain_expansion() {
     let fold = solve::FunctionFoldProgram::checked(
         StructuredIndexDomain {
             binders: vec![StructuredIndexBinder {
+                provenance: rumoca_core::IndexBinderProvenance::Generated,
                 id: 0,
                 display_name: "i".to_string(),
                 lower: 1,
@@ -397,6 +398,7 @@ fn conditional_regions_contribute_every_solver_y_input_range() {
 fn affine_compute_dependencies_include_every_shifted_solver_y_coordinate() {
     let domain = StructuredIndexDomain {
         binders: vec![StructuredIndexBinder {
+            provenance: rumoca_core::IndexBinderProvenance::Generated,
             id: 0,
             display_name: "i".to_string(),
             lower: 1,
@@ -441,6 +443,7 @@ fn affine_compute_dependencies_include_every_shifted_solver_y_coordinate() {
 fn map_dependencies_accumulate_negative_stride_terms_without_expansion() {
     let domain = StructuredIndexDomain {
         binders: vec![StructuredIndexBinder {
+            provenance: rumoca_core::IndexBinderProvenance::Generated,
             id: 0,
             display_name: "i".to_string(),
             lower: 1,
@@ -494,6 +497,7 @@ fn map_dependencies_accumulate_negative_stride_terms_without_expansion() {
 fn affine_dependency_storage_is_independent_of_domain_cardinality() {
     let domain = StructuredIndexDomain {
         binders: vec![StructuredIndexBinder {
+            provenance: rumoca_core::IndexBinderProvenance::Generated,
             id: 0,
             display_name: "i".to_string(),
             lower: 1,
@@ -535,6 +539,7 @@ fn affine_dependency_storage_is_independent_of_domain_cardinality() {
 fn empty_affine_domain_has_no_runtime_y_dependencies() {
     let domain = StructuredIndexDomain {
         binders: vec![StructuredIndexBinder {
+            provenance: rumoca_core::IndexBinderProvenance::Generated,
             id: 0,
             display_name: "i".to_string(),
             lower: 1,
@@ -646,10 +651,18 @@ fn construction_issues_event_base_and_clock_remainder_plans() {
     let mut problem = solve::SolveProblem::default();
     problem.solve_layout.state_scalar_count = 0;
     problem.solve_layout.algebraic_scalar_count = 2;
-    problem.solve_layout.solver_maps.names = vec!["a".to_string(), "b".to_string()];
+    problem.layout = solve::VarLayout::from_parts(
+        [
+            ("a".into(), solve::scalar_slot_y(0)),
+            ("b".into(), solve::scalar_slot_y(1)),
+        ]
+        .into(),
+        2,
+        problem.layout.p_scalars(),
+    );
     problem.continuous.implicit_rhs = solve::ComputeBlock::from_scalar_program_block(implicit);
     problem.continuous.implicit_row_targets =
-        vec![Some(solve::scalar_slot_y(0)), Some(solve::scalar_slot_y(1))];
+        vec![Some(solve::scalar_slot_y(0)), Some(solve::scalar_slot_y(1))].into();
     problem.clocks.periodic_event_schedules = vec![
         solve::PeriodicEventSchedule::from_seconds(0.01, 0.0)
             .expect("fixture period is an exact positive schedule"),
@@ -853,4 +866,17 @@ fn tearing_normalization_promotes_every_step_when_none_are_exact() {
     assert!(tearing.causal_steps.is_empty());
     assert_eq!(tearing.tear_y_indices, vec![5, 0]);
     assert_eq!(tearing.residual_rows, vec![6, 0]);
+}
+
+#[test]
+fn a_refused_compact_refresh_construction_becomes_an_unspanned_invalid_row() {
+    let refusal = solve::RefreshRowSelection::checked(1, [5]).unwrap_err();
+    let reason = refusal.to_string();
+    match compact_refresh_error(refusal) {
+        EvalSolveError::InvalidRow {
+            message,
+            span: None,
+        } => assert_eq!(message, reason),
+        other => panic!("expected an unspanned invalid row, got {other:?}"),
+    }
 }

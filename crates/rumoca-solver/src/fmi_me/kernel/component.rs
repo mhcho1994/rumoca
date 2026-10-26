@@ -1,8 +1,67 @@
+mod caches;
+
+mod indicators;
+#[cfg(test)]
+mod tests;
+
 use rumoca_ir_solve::ScalarSlot;
 
 use super::event_boundary::event_boundary_horizon;
 use super::*;
-use rumoca_ir_solve::fmi::{FmiIndicatorPlan, IndicatorReading, IndicatorZeroSide};
+use rumoca_ir_solve::fmi::{FmiIndicatorPlan, IndicatorZeroSide};
+
+#[cfg(test)]
+pub(crate) use indicators::IndicatorStorageIdentity;
+use indicators::{indicator_reading_value, reserve_indicator_scratch};
+
+#[cfg(all(test, feature = "native-wasm"))]
+thread_local! {
+    static FAIL_INITIALIZATION_ENTRY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The next kernel Initialization Mode entry on this thread fails.
+#[cfg(all(test, feature = "native-wasm"))]
+pub(in crate::fmi_me) fn fail_initialization_entry() {
+    FAIL_INITIALIZATION_ENTRY.with(|fault| fault.set(true));
+}
+
+pub(super) struct ResolvedInstanceFacts {
+    root_location: rumoca_ir_solve::fmi::RootLocationPlan,
+    indicator_plan: FmiIndicatorPlan,
+    max_step_duration_value_reference: Option<u32>,
+    lifecycle: MeLifecycle,
+}
+
+#[cfg(feature = "native-wasm")]
+impl ResolvedInstanceFacts {
+    pub(super) fn lifecycle(&self) -> MeLifecycle {
+        self.lifecycle
+    }
+    pub(super) fn restore_lifecycle(&mut self, state: MeState) {
+        self.lifecycle.restore(state);
+    }
+
+    #[cfg(feature = "native-wasm")]
+    pub(super) fn recover_native(
+        mut kernel: SolveMeKernel,
+    ) -> (Self, rumoca_exec_wasm::NativeTransport) {
+        let resource = kernel
+            .native_transport
+            .take()
+            .expect("adopted kernel owns its native resource")
+            .into_inner();
+        (Self::recover_facts(kernel), resource)
+    }
+
+    pub(super) fn recover_facts(kernel: SolveMeKernel) -> Self {
+        Self {
+            root_location: kernel.root_location,
+            indicator_plan: kernel.indicator_plan,
+            max_step_duration_value_reference: kernel.max_step_duration_value_reference,
+            lifecycle: kernel.lifecycle,
+        }
+    }
+}
 
 impl SolveMeKernel {
     pub(crate) fn continuous_state_derivatives_into(
@@ -45,17 +104,18 @@ impl SolveMeKernel {
             return Ok(());
         }
         let time = self.continuous_eval_time();
-        if self.copy_cached_root_conditions_into(time, &self.states, indicators) {
-            return Ok(());
-        }
-        let mut settled_guess = self.cached_continuous_solver_y(time, &self.states, &self.params);
         self.with_delay_evaluation_params(time, &self.states, |params| {
-            self.evaluate_inventory_indicators(time, params, &mut settled_guess, indicators)
+            if self.copy_cached_root_conditions_into(time, &self.states, params, indicators) {
+                return Ok(());
+            }
+            let mut settled_guess = self.cached_continuous_solver_y(time, &self.states, params);
+            self.evaluate_inventory_indicators(time, params, &mut settled_guess, indicators)?;
+            self.apply_indicator_zero_sides(params, indicators);
+            self.cache_root_conditions_at_parameters(time, &self.states, params, indicators);
+            Ok(())
         })
         .map_err(|error| error.at_stage(MeStage::Integration))?
-        .map_err(|error| error.at_stage(MeStage::Integration))?;
-        self.apply_indicator_zero_sides(indicators);
-        self.cache_root_conditions(time, &self.states, indicators);
+        .map_err(|error: MeError| error.at_stage(MeStage::Integration))?;
         Ok(())
     }
 
@@ -70,7 +130,7 @@ impl SolveMeKernel {
         &self,
         time: f64,
         params: &[f64],
-        settled_guess: &mut Option<Vec<f64>>,
+        settled_guess: &mut Option<SettledIndicatorCoordinate>,
         indicators: &mut [f64],
     ) -> Result<(), MeError> {
         // A dynamic-time deadline needs a settled coordinate of its own, and
@@ -80,7 +140,23 @@ impl SolveMeKernel {
         // restricted refresh.
         let needs_settled = self.indicator_plan.reads_deadlines() || self.seed_active();
         if needs_settled && settled_guess.is_none() {
-            *settled_guess = Some(self.solver_y_at_parameters(time, params)?);
+            *settled_guess = Some(SettledIndicatorCoordinate {
+                kind: SettledCoordinateKind::Algebraic,
+                values: self.solver_y_at_parameters(time, params)?,
+            });
+        }
+        if self.indicator_plan.reads_deadlines()
+            && let Some(coordinate) = settled_guess
+            && coordinate.kind == SettledCoordinateKind::Derivative
+        {
+            self.runtime.complete_algebraic_after_derivative(
+                time,
+                &mut coordinate.values,
+                params,
+                ALGEBRAIC_REFRESH_TOL,
+                UPDATE_MAX_ITERS,
+            )?;
+            coordinate.kind = SettledCoordinateKind::Algebraic;
         }
         let mut root_values = self.indicator_root_scratch.borrow_mut();
         let mut deadlines = self.indicator_deadline_scratch.borrow_mut();
@@ -89,9 +165,12 @@ impl SolveMeKernel {
             self.evaluate_root_conditions(time, params, settled_guess, &mut root_values)?;
         }
         if self.indicator_plan.reads_deadlines() {
-            let guess = settled_guess.as_deref().ok_or_else(|| {
-                contract("FMI dynamic-time indicators need a settled algebraic coordinate")
-            })?;
+            let guess = settled_guess
+                .as_ref()
+                .map(|coordinate| coordinate.values.as_slice())
+                .ok_or_else(|| {
+                    contract("FMI dynamic-time indicators need a settled algebraic coordinate")
+                })?;
             self.runtime
                 .eval_dynamic_time_event_rows_into(time, guess, params, &mut deadlines)?;
         }
@@ -102,7 +181,7 @@ impl SolveMeKernel {
     }
 
     /// Report an exact zero on the side the plan assigned that position.
-    fn apply_indicator_zero_sides(&self, indicators: &mut [f64]) {
+    fn apply_indicator_zero_sides(&self, params: &[f64], indicators: &mut [f64]) {
         for (position, (indicator, entry)) in indicators
             .iter_mut()
             .zip(self.indicator_plan.entries())
@@ -114,13 +193,23 @@ impl SolveMeKernel {
             *indicator = match entry.zero_side() {
                 IndicatorZeroSide::Positive => f64::EPSILON,
                 IndicatorZeroSide::NonPositive => -f64::EPSILON,
-                IndicatorZeroSide::Frozen => self.frozen_indicator_zero(position),
+                IndicatorZeroSide::Frozen => self.frozen_indicator_zero(position, params),
             };
         }
     }
 
     /// The side the previous completed point froze one indicator on.
-    fn frozen_indicator_zero(&self, position: usize) -> f64 {
+    fn frozen_indicator_zero(&self, position: usize, params: &[f64]) -> f64 {
+        if let Some(ScalarSlot::P { index, .. }) =
+            self.indicator_plan.relation_memory_target(position)
+            && let Some(memory) = params.get(index)
+        {
+            return if *memory > 0.5 {
+                -f64::EPSILON
+            } else {
+                f64::EPSILON
+            };
+        }
         if self
             .frozen_indicator_positive
             .get(position)
@@ -137,7 +226,7 @@ impl SolveMeKernel {
         &self,
         time: f64,
         params: &[f64],
-        settled_guess: &mut Option<Vec<f64>>,
+        settled_guess: &mut Option<SettledIndicatorCoordinate>,
         indicators: &mut [f64],
     ) -> Result<(), MeError> {
         // Solve retains relation roots that are useful during initialization
@@ -147,16 +236,17 @@ impl SolveMeKernel {
         // cannot turn a parameter-static or purely algebraic relation into a
         // spurious state event.
         match settled_guess {
-            Some(guess)
-                if self
-                    .runtime
-                    .derivative_settled_coordinate_can_refresh_roots() =>
+            Some(coordinate)
+                if coordinate.kind == SettledCoordinateKind::Algebraic
+                    && self
+                        .runtime
+                        .algebraic_settled_coordinate_can_refresh_roots()? =>
             {
                 self.runtime
-                    .eval_root_search_conditions_after_derivative_settle_into(
+                    .eval_root_search_conditions_after_algebraic_settle_into(
                         time,
                         params,
-                        guess,
+                        &mut coordinate.values,
                         ALGEBRAIC_REFRESH_TOL,
                         UPDATE_MAX_ITERS,
                         indicators,
@@ -164,13 +254,31 @@ impl SolveMeKernel {
                     .map_err(MeError::from)?;
                 Ok(())
             }
-            Some(guess) => {
+            Some(coordinate)
+                if coordinate.kind == SettledCoordinateKind::Derivative
+                    && self
+                        .runtime
+                        .derivative_settled_coordinate_can_refresh_roots()? =>
+            {
+                self.runtime
+                    .eval_root_search_conditions_after_derivative_settle_into(
+                        time,
+                        params,
+                        &mut coordinate.values,
+                        ALGEBRAIC_REFRESH_TOL,
+                        UPDATE_MAX_ITERS,
+                        indicators,
+                    )
+                    .map_err(MeError::from)?;
+                Ok(())
+            }
+            Some(coordinate) => {
                 self.runtime
                     .eval_root_search_conditions_with_guess_into(
                         time,
                         &self.states,
                         params,
-                        guess,
+                        &mut coordinate.values,
                         ALGEBRAIC_REFRESH_TOL,
                         UPDATE_MAX_ITERS,
                         indicators,
@@ -275,7 +383,6 @@ impl SolveMeKernel {
             self.frozen_indicator_positive.clear();
             return Ok(());
         }
-        let previous = self.frozen_indicator_positive.clone();
         let mut indicators = std::mem::take(&mut self.indicator_value_scratch);
         let read = self.event_indicators_into(&mut indicators);
         self.indicator_value_scratch = indicators;
@@ -283,18 +390,7 @@ impl SolveMeKernel {
         let settled = self
             .indicator_value_scratch
             .iter()
-            .enumerate()
-            .map(|(position, indicator)| {
-                match self.indicator_plan.relation_memory_target(position) {
-                    Some(ScalarSlot::P {
-                        index: parameter, ..
-                    }) => self
-                        .params
-                        .get(parameter)
-                        .is_none_or(|memory| *memory <= 0.5),
-                    _ => previous.get(position).copied().unwrap_or(*indicator > 0.0),
-                }
-            })
+            .map(|indicator| *indicator > 0.0)
             .collect();
         self.frozen_indicator_positive = settled;
         Ok(())
@@ -479,12 +575,7 @@ impl SolveMeKernel {
     }
 
     pub(super) fn require_active_lifecycle(&self, operation: &'static str) -> Result<(), MeError> {
-        if self.lifecycle.is_terminated() {
-            return Err(contract(format!(
-                "{operation} called after the component was terminated"
-            )));
-        }
-        Ok(())
+        self.lifecycle.require_active(operation)
     }
 
     pub(super) fn require_observation_brand(
@@ -529,6 +620,29 @@ impl SolveMeKernel {
         config: &MeInstanceConfig,
         execution_backend: Option<Rc<dyn crate::SolveExecutionBackend>>,
     ) -> Result<Self, MeError> {
+        let (model, facts) = Self::resolve_instance_source(source, config)?;
+        let runtime = SolveRuntime::new_with_model_owner(model, execution_backend)?;
+        Self::finish_instantiation(runtime, facts, config)
+    }
+
+    pub(super) fn resolve_instance_source(
+        source: MeModelSource<'_>,
+        config: &MeInstanceConfig,
+    ) -> Result<(crate::SolveRuntimeModel, ResolvedInstanceFacts), MeError> {
+        let (model, facts) = Self::instance_source_facts(source)?;
+        let model = model
+            .resolve_start_time(config.start_time)
+            .map_err(|error| {
+                contract(format!(
+                    "periodic schedule cannot be anchored at FMI startTime: {error}"
+                ))
+            })?;
+        Ok((model, facts))
+    }
+
+    pub(super) fn instance_source_facts(
+        source: MeModelSource<'_>,
+    ) -> Result<(crate::SolveRuntimeModel, ResolvedInstanceFacts), MeError> {
         let root_location = source.root_location();
         let (model, indicator_plan, max_step_duration_value_reference, configuration) = source
             .into_parts()
@@ -542,24 +656,70 @@ impl SolveMeKernel {
             }));
         }
         rumoca_eval_solve::reset_solve_row_eval_trace();
-        validate_explicit_solve_model(model)?;
-        let model = model
-            .resolved_periodic_schedules_at(config.start_time)
-            .map_err(|error| {
-                contract(format!(
-                    "periodic schedule cannot be anchored at FMI startTime: {error}"
-                ))
-            })?;
-        let runtime = Rc::new(SolveRuntime::new_with_execution_backend(
-            &model,
-            execution_backend,
-        )?);
-        let state_count = runtime.state_count;
-        let states = runtime.model.initial_y[..state_count].to_vec();
-        let params = runtime.model.parameters.clone();
-        let stop_schedule =
-            SolveStopSchedule::new(&runtime.model.problem, config.start_time, config.stop_time);
-        let output_meta = convert_variable_meta(&runtime.model.variable_meta);
+        validate_explicit_solve_model(&model)?;
+        Ok((
+            model,
+            ResolvedInstanceFacts {
+                root_location,
+                indicator_plan,
+                max_step_duration_value_reference,
+                lifecycle: MeLifecycle::instantiated(configuration),
+            },
+        ))
+    }
+
+    pub(super) fn finish_instantiation(
+        runtime: SolveRuntime,
+        facts: ResolvedInstanceFacts,
+        config: &MeInstanceConfig,
+    ) -> Result<Self, MeError> {
+        Self::finish_instantiation_adopting(
+            runtime,
+            facts,
+            config,
+            #[cfg(feature = "native-wasm")]
+            &mut None,
+        )
+    }
+
+    pub(super) fn finish_instantiation_adopting(
+        runtime: SolveRuntime,
+        facts: ResolvedInstanceFacts,
+        config: &MeInstanceConfig,
+        #[cfg(feature = "native-wasm")] adoption: &mut Option<rumoca_exec_wasm::NativeTransport>,
+    ) -> Result<Self, MeError> {
+        Self::finish_instantiation_owned(
+            runtime,
+            &mut Some(facts),
+            config,
+            #[cfg(feature = "native-wasm")]
+            adoption,
+        )
+    }
+
+    pub(super) fn finish_instantiation_owned(
+        runtime: SolveRuntime,
+        source: &mut Option<ResolvedInstanceFacts>,
+        config: &MeInstanceConfig,
+        #[cfg(feature = "native-wasm")] adoption: &mut Option<rumoca_exec_wasm::NativeTransport>,
+    ) -> Result<Self, MeError> {
+        let runtime = Rc::new(runtime);
+        let facts = source
+            .as_ref()
+            .expect("constructor owns its checked source facts");
+        let indicator_plan = &facts.indicator_plan;
+        let state_count = runtime.state_count();
+        let (initial_y, params) = Self::instantiation_coordinates(
+            &runtime,
+            #[cfg(feature = "native-wasm")]
+            adoption.as_ref(),
+        )?;
+        let states = initial_y[..state_count].to_vec();
+        let stop_schedule = SolveStopSchedule::new(
+            &runtime.model().problem,
+            config.start_time,
+            config.stop_time,
+        );
         // The Solve IR resolved the indicator table against the model's root
         // and delay rows; this runtime's root vector must be that vector.
         if runtime.root_condition_count() != indicator_plan.root_value_count() {
@@ -567,28 +727,41 @@ impl SolveMeKernel {
                 "the runtime root-condition vector differs from the resolved indicator table",
             ));
         }
-        let scratch = reserve_indicator_scratch(&indicator_plan)?;
+        let scratch = reserve_indicator_scratch(indicator_plan)?;
         let reduced_charts = dynamic_chart::build_reduced_charts(&runtime, state_count)
             .map_err(|error| contract(error.to_string()))?;
+        #[cfg(feature = "native-wasm")]
+        let native_transport =
+            Self::finalize_native_transport(&runtime, &initial_y, &params, adoption)?;
+        let ResolvedInstanceFacts {
+            root_location,
+            indicator_plan,
+            max_step_duration_value_reference,
+            lifecycle,
+        } = source
+            .take()
+            .expect("all fallible checks precede source transfer");
         Ok(Self {
+            #[cfg(feature = "native-wasm")]
+            native_transport,
             reduced_charts,
             active_chart: 0,
             active_reference: None,
             pending_basis_change: None,
-            solver_y_guess: RefCell::new(runtime.model.initial_y.clone()),
+            solver_y_guess: RefCell::new(initial_y.clone()),
             committed_seed: RefCell::default(),
             indicator_root_scratch: RefCell::new(scratch.indicator_root_scratch),
             indicator_deadline_scratch: RefCell::new(scratch.indicator_deadline_scratch),
             indicator_value_scratch: scratch.indicator_value_scratch,
             indicator_domain_scratch: scratch.indicator_domain_scratch,
             delay_params_scratch: RefCell::new(params.clone()),
-            delay_solver_y_scratch: RefCell::new(runtime.model.initial_y.clone()),
+            delay_solver_y_scratch: RefCell::new(initial_y.clone()),
             runtime,
             indicator_plan,
             root_location,
             instance_brand: Rc::new(()),
-            instance_name: config.instance_name,
-            lifecycle: MeLifecycle::instantiated(configuration),
+            instance_name: config.instance_name.clone(),
+            lifecycle,
             tolerance: config.tolerance,
             stop_time: config.stop_time,
             refresh_executor: config.executor,
@@ -620,9 +793,52 @@ impl SolveMeKernel {
             max_step_duration_value_reference,
             last_projection_changed: false,
             termination: None,
-            output_meta,
+            visible_report: OnceCell::new(),
             settled_initialization_y: None,
         })
+    }
+
+    #[cfg(feature = "native-wasm")]
+    fn finalize_native_transport(
+        runtime: &SolveRuntime,
+        initial_y: &[f64],
+        params: &[f64],
+        adoption: &mut Option<rumoca_exec_wasm::NativeTransport>,
+    ) -> Result<Option<RefCell<rumoca_exec_wasm::NativeTransport>>, MeError> {
+        match adoption.take() {
+            Some(transport) => Ok(Some(RefCell::new(transport))),
+            None => runtime
+                .native_host()
+                .map(|host| {
+                    host.transport_from_source(initial_y, params)
+                        .map(RefCell::new)
+                        .map_err(native_typed::transport_error)
+                })
+                .transpose(),
+        }
+    }
+
+    fn instantiation_coordinates(
+        runtime: &SolveRuntime,
+        #[cfg(feature = "native-wasm")] adoption: Option<&rumoca_exec_wasm::NativeTransport>,
+    ) -> Result<(Vec<f64>, Vec<f64>), MeError> {
+        #[cfg(feature = "native-wasm")]
+        if let Some(transport) = adoption {
+            let host = runtime.native_host().ok_or_else(|| {
+                contract("native adoption requires the actual native runtime owner")
+            })?;
+            if !std::ptr::eq(host.product(), transport.product()) {
+                return Err(contract(
+                    "native adoption transport belongs to another prepared product",
+                ));
+            }
+            let (y, p) = transport.coordinates();
+            return Ok((y.to_vec(), p.to_vec()));
+        }
+        Ok((
+            runtime.model().initial_y.to_vec(),
+            runtime.model().parameters.to_vec(),
+        ))
     }
 
     // -- internal time model ---------------------------------------------
@@ -709,7 +925,43 @@ impl SolveMeKernel {
         f(&mut self.solver_y_guess.borrow_mut(), settled.as_deref())
     }
 
+    /// A parameter-static state Jacobian (see `StateJacobianMemo`) forms each
+    /// product once per parameter snapshot and seed; the coordinate and time
+    /// do not enter it.
     pub(super) fn directional_derivative_at_parameters(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        settle: AlgebraicSettle,
+        seed: &[f64],
+        sensitivity: &mut [f64],
+    ) -> Result<(), MeError> {
+        let memo = self.runtime.state_jacobian_memo();
+        if memo.is_some_and(|memo| memo.get(parameters, seed, sensitivity)) {
+            // Debug builds form the product at this point and require the
+            // retained one, up to the sign of an exact zero.
+            #[cfg(debug_assertions)]
+            {
+                let mut formed = vec![0.0; sensitivity.len()];
+                self.directional_derivative_formed(time, parameters, settle, seed, &mut formed)?;
+                assert!(
+                    formed
+                        .iter()
+                        .zip(sensitivity.iter())
+                        .all(|(a, b)| a == b || a.to_bits() == b.to_bits()),
+                    "a retained parameter-static state Jacobian product is the one formed here"
+                );
+            }
+            return Ok(());
+        }
+        self.directional_derivative_formed(time, parameters, settle, seed, sensitivity)?;
+        if let Some(memo) = memo {
+            memo.put(parameters, seed, sensitivity);
+        }
+        Ok(())
+    }
+
+    fn directional_derivative_formed(
         &self,
         time: f64,
         parameters: &[f64],
@@ -724,17 +976,15 @@ impl SolveMeKernel {
         };
         {
             let cache = self.continuous_linearization_cache.borrow();
-            if cache
-                .as_ref()
-                .filter(|cached| cached.matches(time, &self.states, parameters))
-                .is_some()
-            {
-                let solver_y = self.solver_y_guess.borrow();
+            if let Some(cached) = cache.as_ref().filter(|cached| {
+                cached.kind == SettledCoordinateKind::Derivative
+                    && cached.matches(time, &self.states, parameters)
+            }) {
                 return self
                     .runtime
                     .eval_state_jacobian_v_at_settled_solver_y_into(
                         lin,
-                        &solver_y,
+                        &cached.solver_y,
                         seed,
                         sensitivity,
                     )
@@ -829,12 +1079,17 @@ impl SolveMeKernel {
         mut parameters: Vec<f64>,
         time: f64,
     ) -> Result<(Vec<f64>, Vec<f64>), MeError> {
+        #[cfg(feature = "native-wasm")]
+        if self.native_transport.is_some() {
+            let y = self.native_coordinate(time, &solver_y, &parameters)?;
+            return Ok((y, parameters));
+        }
         let settle = self.numerics_settle();
-        if solver_y.len() != self.runtime.solver_count {
+        if solver_y.len() != self.runtime.solver_count() {
             return Err(contract(format!(
                 "observation solver vector has {} entries for {} solver values",
                 solver_y.len(),
-                self.runtime.solver_count
+                self.runtime.solver_count()
             )));
         }
         if self.runtime.has_delay_channels() {
@@ -842,7 +1097,7 @@ impl SolveMeKernel {
                 .refresh_delay_values(time, &solver_y, &mut parameters)
                 .map_err(MeError::from)?;
         }
-        write_observation_clock_activation_params(&self.runtime.model, &mut parameters);
+        write_observation_clock_activation_params(self.runtime.model(), &mut parameters);
         // Seed the coupled public fixed point from the already settled
         // component coordinate. Direct activation aliases therefore update
         // before the first algebraic projection, while a row that depends on
@@ -871,7 +1126,7 @@ impl SolveMeKernel {
             .map_err(MeError::from)?;
         if !self
             .runtime
-            .model
+            .model()
             .problem
             .discrete
             .observation_refresh_reads_y
@@ -933,10 +1188,14 @@ impl SolveMeKernel {
     }
 
     fn solver_y_at_parameters(&self, time: f64, params: &[f64]) -> Result<Vec<f64>, MeError> {
+        #[cfg(feature = "native-wasm")]
+        if self.native_transport.is_some() {
+            return self.native_coordinate(time, &self.solver_y_guess.borrow(), params);
+        }
         let settle = self.numerics_settle();
         self.with_callback_solver_y(time, |guess, _| {
             self.runtime
-                .full_solver_y_with_guess(
+                .full_solver_y_with_guess_certified(
                     time,
                     &self.states,
                     params,
@@ -994,6 +1253,7 @@ impl SolveMeKernel {
             )));
         }
         solver_y[..state.len()].copy_from_slice(state);
+        self.copy_cached_algebraic_solver_y(time, state, &self.params, &mut solver_y);
         self.runtime
             .refresh_delay_values(time, &solver_y, &mut params)?;
         Ok(f(&params))
@@ -1013,12 +1273,19 @@ impl SolveMeKernel {
             )));
         }
         solver_y[..self.states.len()].copy_from_slice(&self.states);
+        self.copy_cached_algebraic_solver_y(self.time, &self.states, &self.params, &mut solver_y);
         self.max_step_duration =
             self.runtime
                 .refresh_delay_values(self.time, &solver_y, &mut self.params)?;
-        if !self.continuous_linearization_cache_matches(self.time, &self.states, &self.params) {
+        let algebraic_cached = self.copy_cached_algebraic_solver_y(
+            self.time,
+            &self.states,
+            &self.params,
+            &mut solver_y,
+        );
+        if !algebraic_cached {
             self.invalidate_continuous_linearization();
-            self.runtime.full_solver_y_with_guess(
+            self.runtime.full_solver_y_with_guess_certified(
                 self.time,
                 &self.states,
                 &self.params,
@@ -1026,154 +1293,11 @@ impl SolveMeKernel {
                 settle.tol,
                 settle.max_iters,
             )?;
-            self.cache_continuous_linearization(self.time, &self.states, &self.params, &solver_y);
+            self.cache_algebraic_coordinate(self.time, &self.states, &self.params, &solver_y);
         }
         self.runtime
             .commit_delay_history(self.time, &solver_y, &self.params)?;
         Ok(())
-    }
-
-    // -- caches ------------------------------------------------------------
-
-    fn copy_cached_derivative_into(&self, time: f64, state: &[f64], out: &mut [f64]) -> bool {
-        let cache = self.derivative_cache.borrow();
-        let Some(cached) = cache.as_ref() else {
-            return false;
-        };
-        if cached.time.to_bits() != time.to_bits()
-            || !state_values_match(&cached.state, state)
-            || cached.derivative.len() != out.len()
-        {
-            return false;
-        }
-        out.copy_from_slice(&cached.derivative);
-        true
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_derivative(&self, time: f64, state: &[f64]) -> Option<Vec<f64>> {
-        let cache = self.derivative_cache.borrow();
-        let cached = cache.as_ref()?;
-        (cached.time.to_bits() == time.to_bits() && state_values_match(&cached.state, state))
-            .then(|| cached.derivative.clone())
-    }
-
-    pub(crate) fn cache_derivative(&self, time: f64, state: &[f64], derivative: &[f64]) {
-        let mut cache = self.derivative_cache.borrow_mut();
-        if let Some(cached) = cache.as_mut() {
-            cached.time = time;
-            cached.state.clone_from_slice(state);
-            cached.derivative.clone_from_slice(derivative);
-        } else {
-            *cache = Some(CachedDerivative {
-                time,
-                state: state.to_vec(),
-                derivative: derivative.to_vec(),
-            });
-        }
-    }
-
-    pub(super) fn clear_derivative_cache(&self) {
-        *self.derivative_cache.borrow_mut() = None;
-        *self.continuous_linearization_cache.borrow_mut() = None;
-    }
-
-    pub(super) fn clear_runtime_caches(&self) {
-        self.clear_callback_value_caches();
-        *self.continuous_linearization_cache.borrow_mut() = None;
-    }
-
-    pub(super) fn clear_callback_value_caches(&self) {
-        *self.derivative_cache.borrow_mut() = None;
-        *self.root_cache.borrow_mut() = None;
-    }
-
-    fn copy_cached_root_conditions_into(&self, time: f64, state: &[f64], out: &mut [f64]) -> bool {
-        let cache = self.root_cache.borrow();
-        let Some(cached) = cache.as_ref() else {
-            return false;
-        };
-        if cached.time.to_bits() != time.to_bits()
-            || !state_values_match(&cached.state, state)
-            || cached.values.len() != out.len()
-        {
-            return false;
-        }
-        out.copy_from_slice(&cached.values);
-        true
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_root_conditions(&self, time: f64, state: &[f64]) -> Option<Vec<f64>> {
-        let cache = self.root_cache.borrow();
-        let cached = cache.as_ref()?;
-        (cached.time.to_bits() == time.to_bits() && state_values_match(&cached.state, state))
-            .then(|| cached.values.clone())
-    }
-
-    pub(crate) fn cache_root_conditions(&self, time: f64, state: &[f64], values: &[f64]) {
-        let mut cache = self.root_cache.borrow_mut();
-        if let Some(cached) = cache.as_mut() {
-            cached.time = time;
-            cached.state.clone_from_slice(state);
-            cached.values.clone_from_slice(values);
-        } else {
-            *cache = Some(CachedRootConditions {
-                time,
-                state: state.to_vec(),
-                values: values.to_vec(),
-            });
-        }
-    }
-
-    pub(super) fn cache_continuous_linearization(
-        &self,
-        time: f64,
-        state: &[f64],
-        parameters: &[f64],
-        _solver_y: &[f64],
-    ) {
-        let mut cache = self.continuous_linearization_cache.borrow_mut();
-        if let Some(cached) = cache.as_mut() {
-            cached.time = time;
-            cached.state.clone_from_slice(state);
-            cached.parameters.clone_from_slice(parameters);
-        } else {
-            *cache = Some(CachedContinuousLinearization {
-                time,
-                state: state.to_vec(),
-                parameters: parameters.to_vec(),
-            });
-        }
-    }
-
-    pub(super) fn invalidate_continuous_linearization(&self) {
-        *self.continuous_linearization_cache.borrow_mut() = None;
-    }
-
-    fn continuous_linearization_cache_matches(
-        &self,
-        time: f64,
-        state: &[f64],
-        parameters: &[f64],
-    ) -> bool {
-        self.continuous_linearization_cache
-            .borrow()
-            .as_ref()
-            .is_some_and(|cached| cached.matches(time, state, parameters))
-    }
-
-    fn cached_continuous_solver_y(
-        &self,
-        time: f64,
-        state: &[f64],
-        parameters: &[f64],
-    ) -> Option<Vec<f64>> {
-        self.continuous_linearization_cache
-            .borrow()
-            .as_ref()
-            .filter(|cached| cached.matches(time, state, parameters))
-            .map(|_| self.solver_y_guess.borrow().clone())
     }
 
     // -- initialization ----------------------------------------------------
@@ -1181,10 +1305,14 @@ impl SolveMeKernel {
     /// `fmi3EnterInitializationMode`, unannotated; the trait method attaches
     /// [`MeStage::Initialization`].
     pub(super) fn enter_initialization_mode_inner(&mut self) -> Result<(), MeError> {
+        #[cfg(all(test, feature = "native-wasm"))]
+        if FAIL_INITIALIZATION_ENTRY.with(|fault| fault.replace(false)) {
+            return Err(contract("injected Initialization Mode entry failure"));
+        }
         self.runtime.reset_diagnostics();
         self.runtime.initialize_delay_history(
             self.time,
-            &self.runtime.model.initial_y,
+            &self.runtime.model().initial_y,
             &mut self.params,
         )?;
         self.runtime.set_initial_event_flag(&mut self.params, true);
@@ -1195,6 +1323,12 @@ impl SolveMeKernel {
     /// [`MeStage::Initialization`].
     pub(super) fn exit_initialization_mode_inner(&mut self) -> Result<(), MeError> {
         let mut solver_y = self.initialization_solver_y()?;
+        #[cfg(feature = "native-wasm")]
+        if self.native_transport.is_some() {
+            solver_y = self.native_coordinate(self.time, &solver_y, &self.params)?;
+            self.retain_settled_initialization(solver_y);
+            return Ok(());
+        }
         let policy = self.algebraic_projection_policy();
         let settle = policy.settle;
         self.runtime.settle_initialization_system(
@@ -1219,6 +1353,11 @@ impl SolveMeKernel {
             self.tolerance,
             settle.max_iters,
         )?;
+        self.retain_settled_initialization(solver_y);
+        Ok(())
+    }
+
+    fn retain_settled_initialization(&mut self, solver_y: Vec<f64>) {
         self.copy_states_from_solver_y(&solver_y);
         self.invalidate_continuous_linearization();
         *self.solver_y_guess.borrow_mut() = solver_y.clone();
@@ -1229,7 +1368,6 @@ impl SolveMeKernel {
         self.pending_event_pre_p = Some(self.params.clone());
         self.settled_initialization_y = Some(solver_y);
         self.initial_event_pending = true;
-        Ok(())
     }
 
     // -- continuous time mode ----------------------------------------------
@@ -1346,9 +1484,8 @@ impl SolveMeKernel {
             },
             move |y, p| project_event_algebraics(&projection_runtime, y, p, event_time, policy),
         )?;
-        // Unrelated algebraic/output lanes remain lazy in the retained solver
-        // seed. Their owning callback refresh plan materializes them if and
-        // when a derivative, root, or visible-value consumer asks for them.
+        // Event iteration uses its scoped closure; the commit certifies the
+        // full post-event geometry shared by root and visible-value consumers.
         self.commit_event_runtime_state(event_time, solver_y, &mut root_overrides)?;
         self.record_event_action_outcome(outcome, event_time)?;
         // `commit_event_runtime_state` leaves a checked post-event
@@ -1374,23 +1511,19 @@ impl SolveMeKernel {
         mut solver_y: Vec<f64>,
         root_overrides: &mut Vec<(usize, f64)>,
     ) -> Result<(), MeError> {
-        let history_changed = commit_pre_params_after_event_at(
-            &self.runtime.model,
+        self.runtime.commit_pre_params_after_event_at(
             &solver_y,
             &mut self.params,
             Some(event_time),
             self.tolerance,
         );
-        if history_changed {
-            self.canonicalize_committed_event_view(event_time, &mut solver_y, root_overrides)?;
-        }
+        // A root query and the committed relation side must share the same
+        // certified full geometry, even when no pre-history slot changed.
+        self.canonicalize_committed_event_view(event_time, &mut solver_y, root_overrides)?;
         self.copy_states_from_solver_y(&solver_y);
         self.invalidate_continuous_linearization();
+        self.cache_algebraic_coordinate(event_time, &self.states, &self.params, &solver_y);
         *self.solver_y_guess.borrow_mut() = solver_y;
-        if history_changed {
-            let solver_y = self.solver_y_guess.borrow();
-            self.cache_continuous_linearization(event_time, &self.states, &self.params, &solver_y);
-        }
         self.commit_delay_point()?;
         Ok(())
     }
@@ -1533,7 +1666,7 @@ impl SolveMeKernel {
     pub(super) fn clear_all_scheduled_root_relation_memory(&mut self) -> Result<(), MeError> {
         let root_indices = self
             .runtime
-            .model
+            .model()
             .problem
             .events
             .scheduled_root_conditions
@@ -1547,7 +1680,7 @@ impl SolveMeKernel {
         &mut self,
         root_indices: &[usize],
     ) -> Result<(), MeError> {
-        clear_scheduled_root_relation_memory(&self.runtime.model, root_indices, &mut self.params)
+        clear_scheduled_root_relation_memory(self.runtime.model(), root_indices, &mut self.params)
             .map_err(contract)
     }
 
@@ -1569,12 +1702,29 @@ impl SolveMeKernel {
 
     pub(super) fn scheduled_root_indices_at_time(&self, event_time: f64) -> Vec<usize> {
         timeline::scheduled_root_indices_at_time(
-            &self.runtime.model.problem.events.scheduled_root_conditions,
+            &self
+                .runtime
+                .model()
+                .problem
+                .events
+                .scheduled_root_conditions,
             event_time,
         )
     }
 
     pub(super) fn run_initial_event_boundary(&mut self) -> Result<MeDiscreteStates, MeError> {
+        #[cfg(feature = "native-wasm")]
+        if self.native_transport.is_some() {
+            let solver_y = self.settled_initialization_y.take().ok_or_else(|| {
+                contract("native initial event requires the checked initialization result")
+            })?;
+            let solver_y = self.native_coordinate(self.time, &solver_y, &self.params)?;
+            *self.solver_y_guess.borrow_mut() = solver_y;
+            self.pending_event_pre_y = None;
+            self.pending_event_pre_p = None;
+            self.initial_event_pending = false;
+            return self.discrete_states_after_update(false);
+        }
         let continuous_states_before = self.states.clone();
         let event_time = self.time;
         let mut solver_y = self
@@ -1635,6 +1785,18 @@ impl SolveMeKernel {
         &mut self,
         entry: MeEventEntry,
     ) -> Result<MeDiscreteStates, MeError> {
+        #[cfg(feature = "native-wasm")]
+        if self.native_transport.is_some() {
+            if entry.cause != MeEventCause::InputEvent {
+                return Err(contract(
+                    "native stateless entry does not own this event cause",
+                ));
+            }
+            let y =
+                self.native_coordinate(self.time, &self.solver_y_guess.borrow(), &self.params)?;
+            *self.solver_y_guess.borrow_mut() = y;
+            return self.discrete_states_after_update(false);
+        }
         let continuous_states_before = self.states.clone();
         if entry.cause == MeEventCause::InputEvent {
             // Reconcile the changed input's domains without replacing the
@@ -1744,95 +1906,6 @@ struct IndicatorScratch {
     frozen_indicator_positive: Vec<bool>,
 }
 
-/// Reserve every indicator working buffer, each sized to the plan so a read
-/// reserves nothing proportional to the model.
-fn reserve_indicator_scratch(
-    indicator_plan: &FmiIndicatorPlan,
-) -> Result<IndicatorScratch, MeError> {
-    Ok(IndicatorScratch {
-        indicator_value_scratch: reserved_indicator_values(
-            indicator_plan.len(),
-            "event-indicator values",
-        )?,
-        indicator_root_scratch: reserved_indicator_values(
-            indicator_plan.root_value_len(),
-            "event-indicator roots",
-        )?,
-        indicator_deadline_scratch: reserved_indicator_values(
-            indicator_plan.deadline_len(),
-            "event-indicator dynamic-time deadlines",
-        )?,
-        indicator_domain_scratch: reserved_indicator_domains(indicator_plan.len())?,
-        frozen_indicator_positive: reserved_indicator_domains(indicator_plan.len())?,
-    })
-}
-
-/// The scalar value one resolved indicator position reports.
-fn indicator_reading_value(
-    reading: IndicatorReading,
-    time: f64,
-    root_values: &[f64],
-    deadlines: &[f64],
-) -> Result<f64, MeError> {
-    match reading {
-        IndicatorReading::RootValue { index } => root_values
-            .get(index)
-            .copied()
-            .ok_or_else(|| contract("FMI root indicator source is out of range")),
-        IndicatorReading::DeadlineDistance { index } => deadlines
-            .get(index)
-            .copied()
-            .map(|deadline| deadline - time)
-            .ok_or_else(|| contract("FMI dynamic-time indicator source is out of range")),
-    }
-}
-
-/// The resolved indicator table together with the addresses of the buffers
-/// every indicator read uses.
-#[cfg(test)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IndicatorStorageIdentity {
-    entries: Vec<(IndicatorReading, IndicatorZeroSide, Option<usize>)>,
-    root_value_len: usize,
-    deadline_len: usize,
-    root_buffer: usize,
-    deadline_buffer: usize,
-    value_buffer: usize,
-    /// The frozen-domain buffer and its working buffer, which the completed-step
-    /// callback swaps, so the pair is compared as a set.
-    domain_buffers: [usize; 2],
-}
-
-/// Reserve one indicator working buffer at instantiation.
-///
-/// Every FMI event-indicator buffer this component reads is sized here, so a
-/// reservation failure is an instantiation refusal rather than a per-step
-/// abort, and the step path never grows a buffer.
-fn reserved_indicator_values(entries: usize, context: &'static str) -> Result<Vec<f64>, MeError> {
-    let mut values = Vec::new();
-    values
-        .try_reserve_exact(entries)
-        .map_err(|_| MeError::Allocation { context, entries })?;
-    values.resize(entries, 0.0);
-    Ok(values)
-}
-
-/// Reserve one indicator-domain buffer at instantiation.
-///
-/// The completed-step callback swaps the frozen domains with their working
-/// buffer, so both start with the whole inventory reserved and neither grows
-/// afterward.
-fn reserved_indicator_domains(entries: usize) -> Result<Vec<bool>, MeError> {
-    let mut domains = Vec::new();
-    domains
-        .try_reserve_exact(entries)
-        .map_err(|_| MeError::Allocation {
-            context: "event-indicator domains",
-            entries,
-        })?;
-    Ok(domains)
-}
-
 fn merge_coincident_event_stops(
     scheduled: Option<(f64, RuntimeEventStop)>,
     pending: Option<(f64, RuntimeEventStop)>,
@@ -1846,6 +1919,3 @@ fn merge_coincident_event_stops(
         (None, None) => None,
     }
 }
-
-#[cfg(test)]
-mod tests;

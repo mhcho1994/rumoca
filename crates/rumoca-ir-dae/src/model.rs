@@ -2,21 +2,32 @@ mod construction_checks;
 mod domains;
 mod evaluable;
 mod external_functions;
+mod function_assigned_reads;
 mod function_checks;
-mod function_conditionals;
 mod function_derivatives;
 mod function_loop_capability;
 mod function_loops;
 mod function_reads;
+mod function_region_views;
+mod function_regions;
+use function_regions::FunctionRegion;
 mod function_scopes;
 pub(crate) mod initial_parameters;
+mod model_conditionals;
 mod runtime_quotients;
+pub use model_conditionals::{ModelArm, ModelConditional};
+pub(crate) mod scoped_conditionals;
 mod storage;
 mod value_types;
 mod variable_types;
+mod variables;
+pub use variables::Variables;
+pub(crate) use variables::{scalar_fixed, uniform_fixed};
 mod view;
 mod wire;
 
+pub use function_region_views::{FunctionBranchView, FunctionConditionalBodyView};
+pub use function_regions::{FunctionAssignedState, FunctionBranchFinish, FunctionBranchOwner};
 use initial_parameters::InitialParameterValueEntry;
 use std::marker::PhantomData;
 
@@ -59,10 +70,11 @@ use crate::{
     AlgebraicId, ClockId, ClockOwnershipId, ConditionId, ContinuousEquationId, ContinuousFamilyId,
     DaeConstructionError, DaeGeneration, DaeLiteral, DaeProvenance, DelayId, DiscreteRealId,
     DiscreteValueId, DiscreteValueOwnerId, DomainBinderId, DomainId, EventActionId, ExprId,
-    FunctionDefinitionId, FunctionDerivativeId, FunctionFoldId, FunctionId, FunctionParameterId,
-    FunctionValueId, InitializationEquationId, InitializationFamilyId, InputId,
-    ModelEventTransactionId, ModelEventTransactions, ParameterId, PreviousId, RelationId, RootId,
-    ScalarType, StateId, StructuredRootId, TerminalId, TimeEventId, ValueTypeId, VariableId,
+    FunctionConditionalId, FunctionDefinitionId, FunctionDerivativeId, FunctionFoldId, FunctionId,
+    FunctionParameterId, FunctionValueId, InitializationEquationId, InitializationFamilyId,
+    InputId, ModelEventTransactionId, ModelEventTransactions, ParameterId, PreviousId, RelationId,
+    RootId, ScalarType, StateId, StructuredRootId, TerminalId, TimeEventId, ValueTypeId,
+    VariableId,
 };
 
 pub(crate) use construction_checks::{
@@ -165,8 +177,19 @@ pub(crate) use construction_checks::{
 /// 43 marks a B.1c owner whose targets are unread observations of a
 /// continuous-time definition, evaluated at every output point.
 /// 44 adds an optional continuation predicate to compact function folds: a
-/// bounded `while` loop is one fold that ends at its first false predicate.
-pub const DAE_SCHEMA_VERSION: u16 = 44;
+/// bounded `while` loop is one fold that ends at its first false predicate,
+/// which may read the pass's own binders (a run-time `for` bound).
+/// 45 requires source/generated provenance on every structured domain binder.
+/// 46 replays compact quotient boundaries through structured owner markers.
+/// 47 replays issued model conditional arm contexts and guarded quotient owners.
+/// 48 retains ordered function branch statements and reissues conditional
+/// output projections from their checked source owner during wire replay.
+/// 49 adds constructor-issued executed-path assignedness actions before
+/// partial value projections, without any operand for an unwritten path.
+/// 50 removes the superseded value-only conditional assignment-group wire;
+/// ordered conditional statements are the only function-branch owners.
+/// 52 retains constructor-checked whole or scalar B.1c target selections.
+pub const DAE_SCHEMA_VERSION: u16 = 52;
 
 pub use domains::Domains;
 pub(crate) use domains::insert_domain;
@@ -187,14 +210,14 @@ pub use value_types::ValueTypes;
 use variable_types::VariableTypeCapability;
 
 pub use view::{
-    ContinuousOwnerView, CoordinateView, DaeView, DomainView, ExpressionKind, ExpressionOperands,
-    ExpressionOperation, ExpressionView, ExternalArgumentView, ExternalFunctionView,
-    FunctionConditionalView, FunctionDefinitionValues, FunctionDefinitionView, FunctionFoldView,
+    ConditionalExpressionOperands, ContinuousOwnerView, CoordinateView, DaeView, DomainView,
+    ExpressionKind, ExpressionOperands, ExpressionOperation, ExpressionView, ExternalArgumentView,
+    ExternalFunctionView, FunctionDefinitionValues, FunctionDefinitionView, FunctionFoldView,
     FunctionParameterView, FunctionStatementView, FunctionStatements, FunctionValueView,
-    FunctionView, InitializationOwnerView, NativeBodyView, RangeBoundView, RangeView,
-    RecordFieldLayout, ResidualEquationView, RuntimeQuotientOwnerKind, RuntimeQuotientOwnerView,
-    StringConversionFormatView, StructuredFamilyView, SubscriptView, SubscriptsView,
-    ValueTypeOperands, VariableIdentity, VariableView, broadcast_scalar_values,
+    FunctionView, InitializationOwnerView, ModelConditionalView, NativeBodyView, RangeBoundView,
+    RangeView, RecordFieldLayout, ResidualEquationView, RuntimeQuotientOwnerKind,
+    RuntimeQuotientOwnerView, StringConversionFormatView, StructuredFamilyView, SubscriptView,
+    SubscriptsView, ValueTypeOperands, VariableIdentity, VariableView, broadcast_scalar_values,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -298,8 +321,9 @@ pub enum VariableCausality {
 /// of where the declaration sits in the instance hierarchy.
 ///
 /// [`VariableCausality`] is the exported causality, which is `Input` or
-/// `Output` only for a top-level declaration; a nested `output` is exported
-/// `Local` and keeps its prefix here.
+/// `Output` only for a public top-level interface, including inherited record
+/// fields; an internal component's `output` is exported `Local` and keeps its
+/// prefix here (SPEC_0040 DAE-C24).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclaredCausality {
@@ -354,6 +378,8 @@ pub struct VariableReservation<'dae> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FunctionEntry {
+    construction_start: u32,
+    construction_end: u32,
     name: VarName,
     parameters: Vec<u32>,
     results: Vec<u32>,
@@ -364,11 +390,15 @@ pub(crate) struct FunctionEntry {
     /// Region that owned each definition when construction issued it.
     ///
     /// Element `n` answers for `definitions[n]`: `None` when the definition was
-    /// issued by the function's top-level body, and `Some(fold)` when the
-    /// lexically innermost open loop was that fold. The vector always advances
+    /// issued by the function's top-level body, and `Some(scope)` for the
+    /// lexically innermost open region. The vector always advances
     /// with `definitions`, so a definition identity and its issuing scope are
     /// one construction fact and cannot drift apart.
     pub(crate) definition_scopes: Vec<Option<u32>>,
+    scopes: Vec<FunctionScopeEntry>,
+    branches: Vec<FunctionBranchEntry>,
+    conditionals: Vec<ScopedFunctionConditionalEntry>,
+    unfilled_branches: usize,
     pub(crate) folds: Vec<u32>,
     declaration: DaeProvenance,
     inline: InlineAnnotation,
@@ -406,7 +436,7 @@ impl FunctionBodyEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 struct FunctionBuildState {
-    current_values: Vec<Option<u32>>,
+    current_values: Vec<FunctionValueState>,
     statements: Vec<FunctionStatementWire>,
     carried_targets: rustc_hash::FxHashSet<u32>,
     iteration_local_targets: rustc_hash::FxHashSet<u32>,
@@ -415,15 +445,58 @@ struct FunctionBuildState {
     /// Every definition insertion reads this one field, so the issuing scope is
     /// recorded by the same act that issues the definition identity.
     active_fold: Option<u32>,
+    active_scope: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FunctionValueState {
+    Unassigned,
+    Assigned(u32),
+    Conditional { owner: u32, value: u32 },
+}
+
+impl FunctionValueState {
+    const fn definition(self) -> Option<u32> {
+        match self {
+            Self::Assigned(definition) => Some(definition),
+            Self::Unassigned | Self::Conditional { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FunctionScopeEntry {
+    parent: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FunctionBranchEntry {
+    scope: u32,
+    incoming: Vec<FunctionValueState>,
+    outgoing: Vec<FunctionValueState>,
+    statements: Vec<FunctionStatementWire>,
+    declaration: DaeProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ScopedFunctionConditionalEntry {
+    outputs: std::ops::Range<usize>,
+    conditions: Vec<u32>,
+    branches: Vec<u32>,
+    fallback: u32,
+    outgoing: Vec<FunctionValueState>,
+    domain: Option<u32>,
+    declaration: DaeProvenance,
 }
 
 struct FunctionLoopParent<'dae> {
     domain: Option<DomainId<'dae>>,
-    current_values: Vec<Option<u32>>,
+    current_values: Vec<FunctionValueState>,
     statements: Vec<FunctionStatementWire>,
     carried_targets: rustc_hash::FxHashSet<u32>,
     iteration_local_targets: rustc_hash::FxHashSet<u32>,
     active_fold: Option<u32>,
+    active_scope: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -457,12 +530,16 @@ pub(crate) struct FunctionDefinitionEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 enum FunctionStatementWire {
+    RequireAssigned {
+        owner: u32,
+        target: u32,
+        definition: u32,
+    },
     Assignment {
         definition: u32,
     },
     AssignmentGroup {
         definitions: Vec<u32>,
-        conditional: Option<FunctionConditionalWire>,
     },
     Assertion {
         condition: u32,
@@ -475,13 +552,9 @@ enum FunctionStatementWire {
         statements: Vec<FunctionStatementWire>,
         provenance: DaeProvenance,
     },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct FunctionConditionalWire {
-    conditions: Vec<u32>,
-    branches: Vec<Vec<u32>>,
-    fallback: Vec<u32>,
+    ScopedConditional {
+        owner: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -494,6 +567,7 @@ pub(crate) struct FunctionDefinitionWire {
 pub(crate) struct FunctionFoldEntry {
     pub(crate) function: u32,
     pub(crate) ordinal: u32,
+    scope: u32,
     /// Owner-local ordinal of the loop this one is lexically nested inside.
     pub(crate) parent: Option<u32>,
     pub(crate) domain: u32,
@@ -527,6 +601,13 @@ struct DomainEntry {
 
 #[derive(Debug, Default)]
 pub(crate) struct Storage {
+    pub(crate) model_conditionals: Vec<model_conditionals::ModelConditionalEntry>,
+    pub(crate) model_arms: Vec<model_conditionals::ModelArmEntry>,
+    pub(crate) active_model_arm: Option<u32>,
+    pub(crate) active_model_ancestors: rustc_hash::FxHashSet<u32>,
+    pub(crate) closing_model_conditional: Option<u32>,
+    pub(crate) owned_quotient_surface: Option<DaeProvenance>,
+    pub(crate) active_function_boundary: bool,
     pub(crate) predefined_string_declaration: Option<rumoca_core::DefId>,
     pub(crate) value_types: Vec<ValueType>,
     flat_type_ids: Vec<Option<TypeId>>,
@@ -549,7 +630,7 @@ pub(crate) struct Storage {
     pub(crate) initial_parameter_value_by_variable: rustc_hash::FxHashMap<u32, u32>,
     pub(crate) discrete_real_equations: Vec<DiscreteRealEquationEntry>,
     pub(crate) discrete_value_owners: Vec<DiscreteValueOwnerEntry>,
-    pub(crate) discrete_value_targets: Vec<u32>,
+    pub(crate) discrete_value_targets: Vec<crate::discrete_values::DiscreteValueTargetEntry>,
     pub(crate) discrete_value_branches: Vec<DiscreteValueBranchEntry>,
     pub(crate) discrete_value_branch_values: Vec<u32>,
     pub(crate) discrete_value_branch_value_provenance: Vec<DaeProvenance>,
@@ -563,7 +644,6 @@ pub(crate) struct Storage {
     pub(crate) equation_family_bodies: Vec<u32>,
     pub(crate) relations: Vec<RelationEntry>,
     pub(crate) conditions: Vec<ConditionEntry>,
-    pub(crate) condition_owner_clocks: Vec<Option<u32>>,
     pub(crate) roots: Vec<RootEntry>,
     pub(crate) runtime_quotient_owners: Vec<runtime_quotients::RuntimeQuotientOwnerEntry>,
     pub(crate) runtime_quotient_owner_by_expression: rustc_hash::FxHashMap<u32, u32>,
@@ -590,10 +670,18 @@ pub(crate) struct Storage {
 
 #[derive(Debug, PartialEq)]
 struct FrozenStorage {
+    model_conditionals: Box<[model_conditionals::ClosedModelConditional]>,
+    model_arms: Box<[model_conditionals::ModelArmEntry]>,
     predefined_string_declaration: Option<rumoca_core::DefId>,
     value_types: Box<[ValueType]>,
     flat_type_ids: Box<[Option<TypeId>]>,
     value_type_provenance: Box<[DaeProvenance]>,
+    /// Packed scalar width of every value type, derived once at freeze.
+    packed_value_counts: Box<[Option<usize>]>,
+    /// Per record type, the running sum of its field packed widths (one entry
+    /// past the last field), derived once at freeze; `None` for a non-record or
+    /// a record whose layout does not fit.
+    record_field_prefixes: Box<[Option<Box<[usize]>>]>,
     variables: Box<[VariableEntry]>,
     functions: Box<[FunctionEntry]>,
     function_folds: Box<[FunctionFoldEntry]>,
@@ -605,7 +693,7 @@ struct FrozenStorage {
     initial_parameter_values: Box<[InitialParameterValueEntry]>,
     discrete_real_equations: Box<[DiscreteRealEquationEntry]>,
     discrete_value_owners: Box<[DiscreteValueOwnerEntry]>,
-    discrete_value_targets: Box<[u32]>,
+    discrete_value_targets: Box<[crate::discrete_values::DiscreteValueTargetEntry]>,
     discrete_value_branches: Box<[DiscreteValueBranchEntry]>,
     discrete_value_branch_values: Box<[u32]>,
     discrete_value_branch_value_provenance: Box<[DaeProvenance]>,
@@ -665,8 +753,8 @@ impl Dae {
             };
             build(&mut construction)?;
         }
-        storage.finish_construction()?;
-        let storage = storage.freeze();
+        let model_conditionals = storage.finish_construction()?;
+        let storage = storage.freeze(model_conditionals);
         let active_discrete_scalar_count = active_discrete_scalar_count(&storage);
         Ok(Self {
             schema_version: DAE_SCHEMA_VERSION,
@@ -863,10 +951,18 @@ impl<'dae> DaeConstruction<'dae> {
     ) -> Result<(FunctionId<'dae>, R), DaeConstructionError> {
         let declaration = signature.declaration;
         let function = self.functions(|functions| functions.insert_header(signature))?;
-        let result = build(
-            self,
-            FunctionReservation::new(function, FunctionConstruction::Acyclic),
+        let result = self.without_model_arm(|construction| {
+            build(
+                construction,
+                FunctionReservation::new(function, FunctionConstruction::Acyclic),
+            )
+        })?;
+        let construction_end = checked_u32(
+            self.storage.expressions.nodes.len(),
+            "function construction boundary",
+            declaration,
         )?;
+        self.storage.functions[function.index() as usize].construction_end = construction_end;
         expect_complete_function(self.storage, function, declaration)?;
         Ok((function, result))
     }
@@ -908,8 +1004,14 @@ impl<'dae> DaeConstruction<'dae> {
             .copied()
             .map(|function| FunctionReservation::new(function, construction))
             .collect();
-        let result = build(self, reservations)?;
+        let result = self.without_model_arm(|construction| build(construction, reservations))?;
+        let construction_end = checked_u32(
+            self.storage.expressions.nodes.len(),
+            "function construction boundary",
+            owner,
+        )?;
         for &function in &functions {
+            self.storage.functions[function.index() as usize].construction_end = construction_end;
             expect_complete_function(self.storage, function, owner)?;
         }
         validate_recursive_function_group(self.storage, &functions, owner)?;
@@ -921,318 +1023,30 @@ impl<'dae> DaeConstruction<'dae> {
         plan: impl IntoIterator<Item = DiscreteValueId<'dae>>,
         build: impl FnOnce(&mut DiscreteValueTopology<'_, 'dae>) -> Result<(), DaeConstructionError>,
     ) -> Result<(), DaeConstructionError> {
+        build_discrete_value_topology(
+            self.source_map,
+            self.storage,
+            plan.into_iter().map(Into::into),
+            build,
+        )
+    }
+
+    pub fn b1c_selected(
+        &mut self,
+        plan: impl IntoIterator<Item = crate::DiscreteValueTarget<'dae>>,
+        build: impl FnOnce(&mut DiscreteValueTopology<'_, 'dae>) -> Result<(), DaeConstructionError>,
+    ) -> Result<(), DaeConstructionError> {
         build_discrete_value_topology(self.source_map, self.storage, plan, build)
     }
-}
 
-pub struct Variables<'storage, 'dae> {
-    source_map: &'storage SourceMap,
-    storage: &'storage mut Storage,
-    marker: PhantomData<&'dae mut &'dae ()>,
-}
-
-macro_rules! variable_role_constructors {
-    ($(
-        $complete:ident / $reserve:ident
-        ($($argument:ident: $argument_type:ty),*)
-        => $id:ident, $role:path, $variability:expr
-    );+ $(;)?) => {
-        $(pub fn $complete(
-            &mut self,
-            name: VarName,
-            value_type: ValueTypeId<'dae>,
-            $($argument: $argument_type,)*
-            declaration: DaeProvenance,
-            attributes: VariableAttributes<'dae>,
-        ) -> Result<$id<'dae>, DaeConstructionError> {
-            self.add_complete(
-                name,
-                $role,
-                $variability,
-                value_type,
-                declaration,
-                attributes,
-            )
-            .map(|id| $id::from_raw(id.index()))
-        }
-
-        pub fn $reserve(
-            &mut self,
-            name: VarName,
-            value_type: ValueTypeId<'dae>,
-            $($argument: $argument_type,)*
-            declaration: DaeProvenance,
-        ) -> Result<($id<'dae>, VariableReservation<'dae>), DaeConstructionError> {
-            let id = self.reserve_forward(
-                name,
-                $role,
-                $variability,
-                value_type,
-                declaration,
-            )?;
-            Ok((
-                $id::from_raw(id.index()),
-                VariableReservation { variable: id },
-            ))
-        })+
-    };
-}
-
-impl<'dae> Variables<'_, 'dae> {
-    variable_role_constructors! {
-        parameter / reserve_parameter ()
-            => ParameterId, VariableRole::Parameter, ExpressionVariability::Parameter;
-        constant / reserve_constant ()
-            => ParameterId, VariableRole::Constant, ExpressionVariability::Constant;
-        input / reserve_input (variability: InputVariability)
-            => InputId, VariableRole::Input, variability.expression_variability();
-        state / reserve_state ()
-            => StateId, VariableRole::State, ExpressionVariability::Continuous;
-        algebraic / reserve_algebraic ()
-            => AlgebraicId, VariableRole::Algebraic, ExpressionVariability::Continuous;
-        output / reserve_output ()
-            => AlgebraicId, VariableRole::Output, ExpressionVariability::Continuous;
-        discrete_real / reserve_discrete_real ()
-            => DiscreteRealId, VariableRole::DiscreteReal, ExpressionVariability::Discrete;
-        discrete_value / reserve_discrete_value ()
-            => DiscreteValueId, VariableRole::DiscreteValue, ExpressionVariability::Discrete;
-    }
-
-    pub fn define(
+    pub fn discrete_value_element(
         &mut self,
-        reservation: VariableReservation<'dae>,
-        attributes: VariableAttributes<'dae>,
+        variable: DiscreteValueId<'dae>,
+        indices: &[i64],
         provenance: DaeProvenance,
-    ) -> Result<(), DaeConstructionError> {
+    ) -> Result<crate::DiscreteValueTarget<'dae>, DaeConstructionError> {
         check_provenance(self.source_map, provenance)?;
-        let variable = reservation.variable;
-        self.validate_attributes(variable, &attributes, provenance)?;
-        let role = self
-            .storage
-            .variables
-            .get(variable.index() as usize)
-            .map(|entry| entry.role)
-            .ok_or_else(|| unknown("variable", variable.index(), provenance))?;
-        let requires_discrete_value_owner =
-            role == VariableRole::DiscreteValue && attributes.causality != VariableCausality::Input;
-        if requires_discrete_value_owner {
-            self.storage
-                .expect_discrete_value_topology_open(provenance)?;
-        }
-        let Some(entry) = self.storage.variables.get_mut(variable.index() as usize) else {
-            return Err(unknown("variable", variable.index(), provenance));
-        };
-        if entry.attributes.is_some() {
-            return Err(duplicate("variable", variable.index(), provenance));
-        }
-        entry.attributes = Some(erase_variable_attributes(attributes));
-        if requires_discrete_value_owner {
-            self.storage
-                .register_required_discrete_value(variable.index(), provenance);
-        }
-        self.storage.unfilled_variables -= 1;
-        Ok(())
-    }
-
-    fn add_complete(
-        &mut self,
-        name: VarName,
-        role: VariableRole,
-        variability: ExpressionVariability,
-        value_type: ValueTypeId<'dae>,
-        declaration: DaeProvenance,
-        attributes: VariableAttributes<'dae>,
-    ) -> Result<VariableId<'dae>, DaeConstructionError> {
-        let requires_discrete_value_owner =
-            role == VariableRole::DiscreteValue && attributes.causality != VariableCausality::Input;
-        if requires_discrete_value_owner {
-            self.storage
-                .expect_discrete_value_topology_open(declaration)?;
-        }
-        let id = self.reserve_forward(name, role, variability, value_type, declaration)?;
-        self.validate_attributes(id, &attributes, declaration)?;
-        self.storage.variables[id.index() as usize].attributes =
-            Some(erase_variable_attributes(attributes));
-        if requires_discrete_value_owner {
-            self.storage
-                .register_required_discrete_value(id.index(), declaration);
-        }
-        self.storage.unfilled_variables -= 1;
-        Ok(id)
-    }
-
-    fn reserve_forward(
-        &mut self,
-        name: VarName,
-        role: VariableRole,
-        variability: ExpressionVariability,
-        value_type: ValueTypeId<'dae>,
-        declaration: DaeProvenance,
-    ) -> Result<VariableId<'dae>, DaeConstructionError> {
-        check_provenance(self.source_map, declaration)?;
-        let capability = self.storage.variable_type_capability(
-            &name,
-            role,
-            variability,
-            value_type,
-            declaration,
-        )?;
-        self.insert_reservation(name, capability, declaration)
-    }
-
-    fn insert_reservation(
-        &mut self,
-        name: VarName,
-        capability: VariableTypeCapability<'dae>,
-        declaration: DaeProvenance,
-    ) -> Result<VariableId<'dae>, DaeConstructionError> {
-        if self.storage.variable_by_name.contains_key(&name) {
-            return Err(DaeConstructionError::DuplicateKey {
-                kind: "variable",
-                key: name.to_string(),
-                span: declaration.span(),
-            });
-        }
-        let raw = checked_u32(self.storage.variables.len(), "variable arena", declaration)?;
-        self.storage.variable_by_name.insert(name.clone(), raw);
-        self.storage.variables.push(VariableEntry {
-            name,
-            role: capability.role(),
-            variability: capability.variability(),
-            value_type: capability.value_type().index(),
-            declaration,
-            attributes: None,
-        });
-        self.storage.unfilled_variables += 1;
-        Ok(VariableId::from_raw(raw))
-    }
-
-    fn validate_attributes(
-        &self,
-        variable: VariableId<'dae>,
-        attributes: &VariableAttributes<'dae>,
-        provenance: DaeProvenance,
-    ) -> Result<(), DaeConstructionError> {
-        let expected = self
-            .storage
-            .variables
-            .get(variable.index() as usize)
-            .map(|entry| entry.value_type)
-            .ok_or_else(|| unknown("variable", variable.index(), provenance))?;
-        if attributes.is_held {
-            let entry = &self.storage.variables[variable.index() as usize];
-            if !matches!(
-                entry.role,
-                VariableRole::DiscreteReal | VariableRole::DiscreteValue
-            ) || attributes.start.is_none()
-            {
-                return Err(DaeConstructionError::InvalidVariableRole {
-                    name: entry.name.clone(),
-                    span: provenance.span(),
-                });
-            }
-        }
-        self.validate_evaluable(variable, attributes, provenance)?;
-        self.validate_declared_causality(variable, attributes, provenance)?;
-        if let Some(binding) = attributes.binding {
-            self.storage.expect_closed_expression(binding, provenance)?;
-            let found = self
-                .storage
-                .expressions
-                .value_types
-                .get(binding.index() as usize)
-                .copied()
-                .ok_or_else(|| unknown("expression", binding.index(), provenance))?;
-            self.storage
-                .expect_value_type_compatible(expected, found, provenance)?;
-        }
-        for expression in [
-            attributes.start,
-            attributes.min,
-            attributes.max,
-            attributes.nominal,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            self.storage
-                .expect_closed_expression(expression, provenance)?;
-            let found = self
-                .storage
-                .expressions
-                .value_types
-                .get(expression.index() as usize)
-                .copied()
-                .ok_or_else(|| unknown("expression", expression.index(), provenance))?;
-            self.storage
-                .expect_attribute_type_compatible(expected, found, provenance)?;
-        }
-        Ok(())
-    }
-
-    /// An exported `Input` or `Output` causality exists only for a declaration
-    /// carrying the same prefix (SPEC_0040 DAE-C24).
-    fn validate_declared_causality(
-        &self,
-        variable: VariableId<'dae>,
-        attributes: &VariableAttributes<'dae>,
-        provenance: DaeProvenance,
-    ) -> Result<(), DaeConstructionError> {
-        let required = match attributes.causality {
-            VariableCausality::Input => DeclaredCausality::Input,
-            VariableCausality::Output => DeclaredCausality::Output,
-            _ => return Ok(()),
-        };
-        if attributes.declared_causality == required {
-            return Ok(());
-        }
-        let entry = self.storage.variable(variable.index(), provenance)?;
-        Err(DaeConstructionError::InvalidDeclaredCausality {
-            name: entry.name.clone(),
-            span: provenance.span(),
-        })
-    }
-}
-
-/// Reduce a scalarized `fixed` attribute to a single value when every element
-/// agrees (MLS §4.8). Absent attributes and differing elements both yield
-/// `None`, which a whole-declaration decision cannot represent.
-pub(crate) fn uniform_fixed(values: Option<&[bool]>) -> Option<bool> {
-    let values = values?;
-    let first = *values.first()?;
-    values.iter().all(|&value| value == first).then_some(first)
-}
-
-/// Select the `fixed` value for one scalar element, broadcasting a single
-/// stored value over every element (MLS §4.8.6).
-pub(crate) fn scalar_fixed(values: Option<&[bool]>, scalar: usize) -> Option<bool> {
-    let values = values?;
-    if values.len() == 1 {
-        values.first().copied()
-    } else {
-        values.get(scalar).copied()
-    }
-}
-
-fn erase_variable_attributes(attributes: VariableAttributes<'_>) -> VariableAttributesWire {
-    VariableAttributesWire {
-        component_ref: attributes.component_ref,
-        binding: attributes.binding.map(ExprId::index),
-        start: attributes.start.map(ExprId::index),
-        fixed: attributes.fixed,
-        min: attributes.min.map(ExprId::index),
-        max: attributes.max.map(ExprId::index),
-        nominal: attributes.nominal.map(ExprId::index),
-        unit: attributes.unit,
-        state_select: attributes.state_select,
-        description: attributes.description,
-        enumeration: attributes.enumeration,
-        causality: attributes.causality,
-        declared_causality: attributes.declared_causality,
-        is_tunable: attributes.is_tunable,
-        is_held: attributes.is_held,
-        evaluable: attributes.evaluable,
-        origin: attributes.origin,
+        crate::discrete_values::select_element(self.storage, variable, indices, provenance)
     }
 }
 
@@ -1274,6 +1088,7 @@ pub struct FunctionBody<'dae> {
     function: FunctionId<'dae>,
     construction: FunctionConstruction,
     domain: Option<DomainId<'dae>>,
+    scope: Option<u32>,
 }
 
 /// Non-owning linear capability for one compact function-loop transition.
@@ -1347,7 +1162,14 @@ impl<'dae> Functions<'_, 'dae> {
             self.storage.value_type_at(ty, declaration)?;
         }
         let raw = checked_u32(self.storage.functions.len(), "function arena", declaration)?;
+        let construction_start = checked_u32(
+            self.storage.expressions.nodes.len(),
+            "function construction boundary",
+            declaration,
+        )?;
         self.storage.functions.push(FunctionEntry {
+            construction_start,
+            construction_end: construction_start,
             name,
             parameters,
             results,
@@ -1356,6 +1178,10 @@ impl<'dae> Functions<'_, 'dae> {
             output_values: Vec::new(),
             definitions: Vec::new(),
             definition_scopes: Vec::new(),
+            scopes: Vec::new(),
+            branches: Vec::new(),
+            conditionals: Vec::new(),
+            unfilled_branches: 0,
             folds: Vec::new(),
             declaration,
             inline,
@@ -1519,16 +1345,18 @@ impl<'dae> Functions<'_, 'dae> {
             });
         }
         entry.build = Some(FunctionBuildState {
-            current_values: vec![None; entry.values.len()],
+            current_values: vec![FunctionValueState::Unassigned; entry.values.len()],
             statements: Vec::new(),
             carried_targets: rustc_hash::FxHashSet::default(),
             iteration_local_targets: rustc_hash::FxHashSet::default(),
             active_fold: None,
+            active_scope: None,
         });
         Ok(FunctionBody {
             function: reservation.function,
             construction: reservation.construction,
             domain: None,
+            scope: None,
         })
     }
 
@@ -1579,7 +1407,7 @@ impl<'dae> Functions<'_, 'dae> {
             .current_values
             .get(value.ordinal() as usize)
             .copied()
-            .flatten()
+            .and_then(FunctionValueState::definition)
             .ok_or(DaeConstructionError::IncompleteDefinition {
                 kind: "function value",
                 index: value.ordinal(),
@@ -1640,6 +1468,7 @@ impl<'dae> Functions<'_, 'dae> {
         check_provenance(self.source_map, provenance)?;
         for (target, value) in assignments {
             check_function_value_owner(body.function, *target, provenance)?;
+            check_function_assignment_target(self.storage, body, *target, provenance)?;
             let entry = function_value_entry(self.storage, *target, provenance)?;
             expect_function_body_expression(self.storage, body, *value, provenance)?;
             validate_function_value_reads(self.storage, body, *value, provenance)?;
@@ -1657,16 +1486,14 @@ impl<'dae> Functions<'_, 'dae> {
         for (target, value) in assignments {
             let definition = insert_function_definition(self.storage, *target, *value, provenance)?;
             let build = function_build_state_mut(self.storage, body);
-            build.current_values[target.ordinal() as usize] = Some(definition.ordinal());
+            build.current_values[target.ordinal() as usize] =
+                FunctionValueState::Assigned(definition.ordinal());
             definitions.push(definition.ordinal());
         }
         if !definitions.is_empty() {
             function_build_state_mut(self.storage, body)
                 .statements
-                .push(FunctionStatementWire::AssignmentGroup {
-                    definitions,
-                    conditional: None,
-                });
+                .push(FunctionStatementWire::AssignmentGroup { definitions });
         }
         Ok(())
     }
@@ -1684,8 +1511,8 @@ impl<'dae> Functions<'_, 'dae> {
 
     /// Append one MLS §8.3.7 assertion at its level to a Modelica function.
     ///
-    /// The mutable top-level body capability makes the action call-scoped and
-    /// prevents it from being inserted into a loop without a loop-action owner.
+    /// The linear body capability binds the action to its exact current region,
+    /// including the active compact loop domain when constructed inside a loop.
     /// Both expressions must belong to the exact current function-value state;
     /// the constructor stores no untyped call or rendered-name surrogate.
     pub fn assertion_with_level(
@@ -1696,13 +1523,6 @@ impl<'dae> Functions<'_, 'dae> {
         level: AssertionLevel,
         provenance: DaeProvenance,
     ) -> Result<(), DaeConstructionError> {
-        if body.domain.is_some() {
-            return Err(DaeConstructionError::InvalidBinderScope {
-                expected_domain: None,
-                found_domain: body.domain.map(DomainId::index).unwrap_or_default(),
-                span: provenance.span(),
-            });
-        }
         self.append_assertion(body, condition, message, level, provenance)
     }
 
@@ -1801,6 +1621,7 @@ impl<'dae> Functions<'_, 'dae> {
         value: ExprId<'dae>,
         provenance: DaeProvenance,
     ) -> Result<(), DaeConstructionError> {
+        check_function_assignment_target(self.storage, body, target, provenance)?;
         let entry = function_value_entry(self.storage, target, provenance)?;
         expect_function_body_expression(self.storage, body, value, provenance)?;
         validate_function_value_reads(self.storage, body, value, provenance)?;
@@ -1815,7 +1636,8 @@ impl<'dae> Functions<'_, 'dae> {
             .expect_value_type_compatible(entry.value_type, found, provenance)?;
         let definition = insert_function_definition(self.storage, target, value, provenance)?;
         let build = function_build_state_mut(self.storage, body);
-        build.current_values[target.ordinal() as usize] = Some(definition.ordinal());
+        build.current_values[target.ordinal() as usize] =
+            FunctionValueState::Assigned(definition.ordinal());
         build.statements.push(FunctionStatementWire::Assignment {
             definition: definition.ordinal(),
         });
@@ -1828,8 +1650,15 @@ impl<'dae> Functions<'_, 'dae> {
         provenance: DaeProvenance,
     ) -> Result<(), DaeConstructionError> {
         check_provenance(self.source_map, provenance)?;
-        validate_function_dependencies(self.storage, &body, provenance)?;
         let function = body.function;
+        if self.storage.functions[function.index() as usize].unfilled_branches != 0 {
+            return Err(DaeConstructionError::IncompleteDefinition {
+                kind: "function branch attachment",
+                index: function.index(),
+                span: provenance.span(),
+            });
+        }
+        validate_function_dependencies(self.storage, &body, provenance)?;
         let output_values = self.storage.functions[function.index() as usize]
             .output_values
             .clone();
@@ -1839,7 +1668,7 @@ impl<'dae> Functions<'_, 'dae> {
         let results = output_values
             .iter()
             .map(|value| {
-                build.current_values[*value as usize].ok_or(
+                build.current_values[*value as usize].definition().ok_or(
                     DaeConstructionError::IncompleteDefinition {
                         kind: "function output",
                         index: *value,

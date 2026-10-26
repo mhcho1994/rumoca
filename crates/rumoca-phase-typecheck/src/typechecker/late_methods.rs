@@ -14,8 +14,10 @@ mod expression_types;
 mod modifier_spans;
 mod operator_checks;
 mod parameter_branches;
+mod subscript_types;
 mod type_resolution;
 mod variability;
+mod when_coordinates;
 
 use super::traversal_adapter::{
     TypeCheckTraversalCallbacks, walk_equations, walk_expression, walk_statements,
@@ -50,6 +52,9 @@ pub(in crate::typechecker) enum ComponentReferenceTypeError {
 }
 
 impl TypeCheckTraversalCallbacks for TypeChecker {
+    const WHEN_ASSIGNMENT: Option<fn(&mut Self, &Expression)> =
+        Some(Self::check_when_target_variability);
+
     fn on_component_reference(
         &mut self,
         comp: &rumoca_ir_ast::ComponentReference,
@@ -67,6 +72,7 @@ impl TypeCheckTraversalCallbacks for TypeChecker {
             return;
         }
         self.validate_component_reference(comp, type_table);
+        self.check_component_subscript_types(comp, type_table);
     }
 
     fn on_field_access(&mut self, base: &Expression, field: &str, type_table: &TypeTable) {
@@ -90,15 +96,18 @@ impl TypeCheckTraversalCallbacks for TypeChecker {
 
     fn on_expression(&mut self, expression: &Expression, type_table: &TypeTable) {
         self.check_expression_operator_types(expression, type_table);
+        self.check_array_index_types(expression, type_table);
     }
 
-    fn push_integer_iterator(&mut self, name: &str) {
-        self.current_integer_iterators.push(name.to_string());
+    fn push_iterator(&mut self, index: &rumoca_ir_ast::ForIndex, types: &TypeTable) {
+        let element_type = self.infer_iterator_type(&index.range, types);
+        self.current_iterators
+            .push((index.binder, index.ident.text.to_string(), element_type));
     }
 
-    fn pop_integer_iterators(&mut self, count: usize) {
-        let keep = self.current_integer_iterators.len().saturating_sub(count);
-        self.current_integer_iterators.truncate(keep);
+    fn pop_iterators(&mut self, count: usize) {
+        let keep = self.current_iterators.len().saturating_sub(count);
+        self.current_iterators.truncate(keep);
     }
 
     fn on_expression_function_call(
@@ -107,6 +116,7 @@ impl TypeCheckTraversalCallbacks for TypeChecker {
         args: &[Expression],
         type_table: &TypeTable,
     ) {
+        self.queue_function_bindings(comp);
         self.check_builtin_function_call(comp, args, type_table);
         self.check_user_function_call_argument_types(comp, args, type_table);
     }
@@ -281,6 +291,8 @@ impl TypeChecker {
             .values()
             .filter_map(ComponentSemantics::from_declaration)
             .collect();
+
+        self.check_declaration_bindings(class, type_table);
 
         // Validate known builtin modifier value types now that local component
         // types are available in scope (e.g., `Real x(start = y)`).

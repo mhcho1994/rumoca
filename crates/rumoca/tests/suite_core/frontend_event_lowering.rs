@@ -531,6 +531,8 @@ fn rounding_a_continuous_argument_updates_discrete_integers_at_each_crossing() {
 fn an_empty_when_body_array_constructor_exports() {
     let source = WHEN_BODY_COMPREHENSION
         .replace("parameter Integer n = 3;", "parameter Integer n = 0;")
+        // Keep the independent scalar index valid while testing the empty array.
+        .replace("mod(pre(iSample), n)", "mod(pre(iSample), max(n, 1))")
         .replace("TriggeredRing", "EmptyRing");
     let compiled = compile("EmptyRing", &source);
     let exported = rumoca_bitcode::export(

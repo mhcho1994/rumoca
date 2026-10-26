@@ -17,7 +17,7 @@ mod parity_sweep_tests;
 #[cfg(test)]
 mod template_runtime_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand, ValueEnum};
@@ -514,10 +514,22 @@ const VERIFY_SUITE_STEPS: &[VerifyStep] = &[
         include_in_quick: true,
     },
     // MSL parity is the highest-signal gate for compiler/simulator changes, so
-    // it runs before lower-risk heavyweight surfaces.
+    // it runs before lower-risk heavyweight surfaces. It runs two stage and
+    // two simulation workers, as the CI shards do: the quality baseline's
+    // speed ratios and timing margins were measured under that contention.
     VerifyStep {
         label: "MSL parity",
-        args: &["verify", "msl-parity", "--no-remote-quality-baseline"],
+        args: &[
+            "verify",
+            "msl-parity",
+            "--budget-profile",
+            "ci",
+            "--no-remote-quality-baseline",
+            "--stage-parallelism",
+            "2",
+            "--sim-parallelism",
+            "2",
+        ],
         include_in_full: true,
         include_in_quick: true,
     },
@@ -560,6 +572,12 @@ const VERIFY_SUITE_STEPS: &[VerifyStep] = &[
     VerifyStep {
         label: "template runtime checks",
         args: &["verify", "template-runtimes"],
+        include_in_full: true,
+        include_in_quick: false,
+    },
+    VerifyStep {
+        label: "installed Python wheel and guide checks",
+        args: &["python", "test", "--require-guide"],
         include_in_full: true,
         include_in_quick: false,
     },
@@ -815,7 +833,7 @@ const TEMPLATE_RUNTIME_GROUPS: &[TemplateRuntimeTestGroup] = &[
     TemplateRuntimeTestGroup {
         backend: TemplateRuntimeBackend::C,
         test: TEMPLATE_RUNTIME_TEST,
-        filters: &["c_ode_"],
+        filters: &["c_ode_", "ode_targets_"],
     },
     TemplateRuntimeTestGroup {
         backend: TemplateRuntimeBackend::Casadi,
@@ -997,7 +1015,7 @@ fn trim_template_runtime_artifacts(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cargo_target_dir(root: &Path) -> PathBuf {
+pub(crate) fn cargo_target_dir(root: &Path) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .map(|path| {

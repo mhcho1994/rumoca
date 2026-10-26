@@ -44,7 +44,7 @@ pub enum ToDaeError {
 
     #[error("the model requires the derivative of top-level input `{name}`")]
     #[diagnostic(
-        code(rumoca::todae::ED024),
+        code(rumoca::todae::ED026),
         help(
             "a top-level input is supplied by the environment and is not a state (MLS §4.4.2.2); \
              der(...) of it needs the input's derivative, which the canonical DAE does not carry. \
@@ -188,6 +188,17 @@ pub enum ToDaeError {
     ContinuousDiscreteDefinition {
         detail: String,
         #[label("continuous-time definition of a discrete-valued variable")]
+        span: Span,
+    },
+
+    #[error("declared discrete Real `{name}` has no when-clause owner")]
+    #[diagnostic(
+        code(rumoca::todae::ED024),
+        help("MLS 3.7 §4.5.3: assign a declared discrete Real in a when-clause")
+    )]
+    DiscreteRealWithoutWhen {
+        name: String,
+        #[label("discrete Real declared without a when owner")]
         span: Span,
     },
 
@@ -343,6 +354,7 @@ impl ToDaeError {
             | Self::UnsupportedFlatSemantics { span, .. }
             | Self::UninitializedFunctionValue { span, .. }
             | Self::ContinuousDiscreteDefinition { span, .. }
+            | Self::DiscreteRealWithoutWhen { span, .. }
             | Self::Construction { span, .. } => std::slice::from_ref(span),
             Self::Unbalanced { .. }
             | Self::Internal { .. }

@@ -70,6 +70,7 @@ fn assign(target: &str, value: Expression) -> rumoca_core::Statement {
 fn for_loop(index: &str, count: i64, body: Vec<rumoca_core::Statement>) -> rumoca_core::Statement {
     rumoca_core::Statement::For {
         indices: vec![rumoca_core::ForIndex {
+            binder: rumoca_core::IndexBinderProvenance::Generated,
             ident: index.to_string(),
             range: Expression::Range {
                 start: Box::new(integer(1)),
@@ -791,4 +792,46 @@ fn an_enclosing_back_edge_keeps_an_inner_prefix_definition() {
         "the definition the outer back edge reads was folded away: {}",
         super::liveness_corpus::render(&compacted)
     );
+}
+
+fn selected_read_step() -> rumoca_core::Statement {
+    assign(
+        "step",
+        Expression::If {
+            branches: vec![(var("enabled"), var("scratch"))],
+            else_branch: Box::new(real(-1.0)),
+            span: span(),
+        },
+    )
+}
+
+#[test]
+fn straight_line_substitution_retains_the_selected_read_assignment_owner() {
+    let body = vec![selected_read_step(), assign("y", var("step"))];
+    let compacted = inline_straight_line_scalar_definitions(&body, &[], &names(&["step"]), false);
+    assert_eq!(compacted, body);
+    let selected = super::super::assignment_conditionals::normalize(
+        &compacted,
+        &["scratch", "step", "y"].map(VarName::new),
+    );
+    assert!(matches!(
+        selected.first(),
+        Some(rumoca_core::Statement::If { .. })
+    ));
+}
+
+#[test]
+fn loop_prefix_substitution_retains_the_selected_read_assignment_owner() {
+    let body = vec![selected_read_step(), assign("y", var("step"))];
+    let source = vec![for_loop("pass", 2, body.clone())];
+    let compacted = inline_loop_local_prefixes(&source, &names(&["step"]), &names(&["y"]));
+    assert_eq!(loop_body(&compacted), body);
+    let selected = super::super::assignment_conditionals::normalize(
+        &compacted,
+        &["scratch", "step", "y"].map(VarName::new),
+    );
+    assert!(matches!(
+        loop_body(&selected).first(),
+        Some(rumoca_core::Statement::If { .. })
+    ));
 }

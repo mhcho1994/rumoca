@@ -15,7 +15,7 @@ impl RefreshProjectionModel<'_> {
                 "grouped Jacobian output extent mismatch",
             ));
         }
-        let mut values = self.runtime.compiled_output_scratch.borrow_mut();
+        let mut values = self.runtime.scalar.compiled_output_scratch.borrow_mut();
         for program in selection.programs() {
             if !program.placements().iter().any(|&(_, row)| enabled[row]) {
                 continue;
@@ -44,31 +44,11 @@ impl RefreshProjectionModel<'_> {
         inputs: solve_eval::JacobianEvalInputs<'_>,
         out: &mut Vec<f64>,
     ) -> Result<(), RuntimeSolveError> {
-        if let Some(compiled) = self.jacobian_v.compiled(self.runtime)
-            && compiled
-                .call_program_outputs(
-                    program,
-                    inputs,
-                    self.runtime.model.external_tables.as_slice(),
-                    out,
-                )
-                .map_err(RuntimeSolveError::solve_ir)?
-        {
-            return Ok(());
-        }
-        self.jacobian_v
-            .scalar()
-            .eval_row_outputs_unchecked_with_context(
-                program,
-                inputs.y,
-                inputs.p,
-                inputs.t,
-                RowEvalContext {
-                    seed: Some(inputs.seed),
-                    ..self.runtime.row_eval_context()
-                },
-                out,
-            )
-            .map_err(Into::into)
+        self.jacobian_v.owner().eval_program_outputs(
+            program,
+            inputs,
+            self.runtime.row_eval_context(),
+            out,
+        )
     }
 }

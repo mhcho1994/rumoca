@@ -77,14 +77,7 @@ impl<'a> Listing<'a> {
         match &expression.node {
             RbcExprNode::Literal { value } => literal(value),
             RbcExprNode::Coordinate { coordinate } => self.coordinate(*coordinate),
-            RbcExprNode::Unary { op, operand } => {
-                let inner = self.expression(*operand);
-                match op {
-                    RbcUnaryOp::Negate => format!("-{inner}"),
-                    RbcUnaryOp::Plus => format!("+{inner}"),
-                    RbcUnaryOp::Not => format!("not {inner}"),
-                }
-            }
+            RbcExprNode::Unary { op, operand } => self.unary(*op, *operand),
             RbcExprNode::Binary { op, lhs, rhs } => format!(
                 "({} {} {})",
                 self.expression(*lhs),
@@ -148,6 +141,12 @@ impl<'a> Listing<'a> {
             RbcExprNode::FunctionValue {
                 function, value, ..
             } => format!("fnvalue ${}#{}", function.0, value),
+            RbcExprNode::FunctionConditionalOutput {
+                function,
+                conditional,
+                value,
+                ..
+            } => format!("condout ${}#{}[{}]", function.0, conditional, value),
             RbcExprNode::FunctionFoldParameter {
                 function,
                 fold,
@@ -173,6 +172,15 @@ impl<'a> Listing<'a> {
                 self.expression(*source)
             ),
             RbcExprNode::Unsupported { detail } => format!("<unsupported: {detail}>"),
+        }
+    }
+
+    fn unary(&self, op: RbcUnaryOp, operand: ExprId) -> String {
+        let inner = self.expression(operand);
+        match op {
+            RbcUnaryOp::Negate => format!("-{inner}"),
+            RbcUnaryOp::Plus => format!("+{inner}"),
+            RbcUnaryOp::Not => format!("not {inner}"),
         }
     }
 

@@ -22,9 +22,9 @@ fn explicit_freeze_profile_reaches_file_and_in_memory_compilation() {
         let Commands::Compile(args) = cli.command else {
             panic!("expected compile command");
         };
-        let (artifact, _) =
+        let artifact =
             compile_early_ir_with_inferred_model(&args.input, CompilePhase::Flat, false).unwrap();
-        let EarlyIrArtifact::Flat(flat) = artifact else {
+        let EarlyIrArtifact::Flat { flat, .. } = artifact else {
             panic!("expected flat artifact");
         };
         let file_value = serde_json::to_value(flat).unwrap();

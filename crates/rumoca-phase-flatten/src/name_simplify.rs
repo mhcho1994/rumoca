@@ -59,6 +59,7 @@ fn protected_semantic_prefixes(flat: &flat::Model) -> HashSet<String> {
         .top_level_connectors
         .iter()
         .chain(flat.top_level_input_components.iter())
+        .chain(flat.top_level_output_components.iter())
         .cloned()
         .collect::<HashSet<_>>();
     prefixes.extend(
@@ -356,6 +357,16 @@ fn remap_when_equations(
         match equation {
             flat::WhenEquation::Assign { target, value, .. } => {
                 *target = remap_var_name(target, ctx.rename_map);
+                remap_expression(value, ctx)?;
+            }
+            flat::WhenEquation::AssignElement {
+                target,
+                subscripts,
+                value,
+                ..
+            } => {
+                *target = remap_reference(target, ctx.rename_map);
+                remap_subscripts(subscripts, ctx, &HashSet::new())?;
                 remap_expression(value, ctx)?;
             }
             flat::WhenEquation::Reinit { state, value, .. } => {

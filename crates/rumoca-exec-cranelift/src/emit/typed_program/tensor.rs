@@ -1,7 +1,7 @@
 mod matrix;
 
 use super::super::status;
-use super::{CompileError, ProgramLowerer, scalar_cranelift_type};
+use super::{CompileError, ProgramLowerer, ValueLocation, scalar_cranelift_type};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{InstBuilder, Value, types};
 use rumoca_ir_solve as solve;
@@ -31,7 +31,7 @@ impl ProgramLowerer<'_, '_> {
         let destination = self.register(destination)?.clone();
         let aggregate = self.register(aggregate)?.clone();
         let (offset, valid) =
-            self.dynamic_row_major_offset(aggregate.value_type.dimensions(), indices)?;
+            self.dynamic_row_major_offset(aggregate.value_type.dimensions(), indices, true)?;
         status::require_index(self.builder, valid);
         let value = self.load_scalar(&aggregate, offset)?;
         let zero = self.builder.ins().iconst(types::I64, 0);
@@ -95,7 +95,7 @@ impl ProgramLowerer<'_, '_> {
         let aggregate = self.register(aggregate)?.clone();
         let fallback = self.register(out_of_range)?.clone();
         let (offset, valid) =
-            self.dynamic_row_major_offset(aggregate.value_type.dimensions(), indices)?;
+            self.dynamic_row_major_offset(aggregate.value_type.dimensions(), indices, false)?;
         let zero = self.builder.ins().iconst(types::I64, 0);
         let safe_offset = self.builder.ins().select(valid, offset, zero);
         let selected = self.load_scalar(&aggregate, safe_offset)?;
@@ -116,7 +116,7 @@ impl ProgramLowerer<'_, '_> {
         let value = self.register(value)?.clone();
         self.copy(&aggregate, &destination)?;
         let (offset, valid) =
-            self.dynamic_row_major_offset(aggregate.value_type.dimensions(), indices)?;
+            self.dynamic_row_major_offset(aggregate.value_type.dimensions(), indices, true)?;
         status::require_index(self.builder, valid);
         let zero = self.builder.ins().iconst(types::I64, 0);
         let value = self.load_scalar(&value, zero)?;
@@ -175,6 +175,7 @@ impl ProgramLowerer<'_, '_> {
         &mut self,
         dimensions: &[u32],
         indices: &[solve::SolveRegisterId],
+        checked: bool,
     ) -> Result<(Value, Value), CompileError> {
         if dimensions.len() != indices.len() {
             return Err(CompileError::Backend(
@@ -186,8 +187,8 @@ impl ProgramLowerer<'_, '_> {
         for (&extent, index) in dimensions.iter().zip(indices) {
             let location = self.register(*index)?.clone();
             let zero = self.builder.ins().iconst(types::I64, 0);
-            let coordinate = self.load_scalar(&location, zero)?;
-            let coordinate = self.builder.ins().iadd_imm(coordinate, -1);
+            let one_based = self.load_scalar(&location, zero)?;
+            let coordinate = self.builder.ins().iadd_imm(one_based, -1);
             let nonnegative =
                 self.builder
                     .ins()
@@ -196,8 +197,16 @@ impl ProgramLowerer<'_, '_> {
                 self.builder
                     .ins()
                     .icmp_imm(IntCC::SignedLessThan, coordinate, i64::from(extent));
-            valid = self.builder.ins().band(valid, nonnegative);
-            valid = self.builder.ins().band(valid, below_extent);
+            let axis_valid = self.builder.ins().band(nonnegative, below_extent);
+            valid = self.builder.ins().band(valid, axis_valid);
+            if checked {
+                super::super::native_fault::checked_index(
+                    self.module,
+                    self.builder,
+                    (axis_valid, one_based, extent),
+                    self.operation,
+                )?;
+            }
             offset = self.builder.ins().imul_imm(offset, i64::from(extent));
             offset = self.builder.ins().iadd(offset, coordinate);
         }
@@ -224,8 +233,8 @@ impl ProgramLowerer<'_, '_> {
                 solve::SolveTensorViewAxis::Index(register) => {
                     let location = self.register(*register)?.clone();
                     let zero = self.builder.ins().iconst(types::I64, 0);
-                    let coordinate = self.load_scalar(&location, zero)?;
-                    let coordinate = self.builder.ins().iadd_imm(coordinate, -1);
+                    let one_based = self.load_scalar(&location, zero)?;
+                    let coordinate = self.builder.ins().iadd_imm(one_based, -1);
                     let nonnegative =
                         self.builder
                             .ins()
@@ -235,8 +244,14 @@ impl ProgramLowerer<'_, '_> {
                         coordinate,
                         i64::from(aggregate_extent),
                     );
-                    valid = self.builder.ins().band(valid, nonnegative);
-                    valid = self.builder.ins().band(valid, below_extent);
+                    let axis_valid = self.builder.ins().band(nonnegative, below_extent);
+                    valid = self.builder.ins().band(valid, axis_valid);
+                    super::super::native_fault::checked_index(
+                        self.module,
+                        self.builder,
+                        (axis_valid, one_based, aggregate_extent),
+                        self.operation,
+                    )?;
                     coordinate
                 }
                 solve::SolveTensorViewAxis::Span { origin, .. } => {
@@ -341,6 +356,44 @@ impl ProgramLowerer<'_, '_> {
         })
     }
 
+    /// A large transpose moves cells in a host loop: the generated form
+    /// divides each output index back into its source coordinates.
+    fn lower_host_transpose(
+        &mut self,
+        destination: &ValueLocation,
+        operand: &ValueLocation,
+        (rows, columns, trailing): (u32, u32, u32),
+    ) -> Result<(), CompileError> {
+        use cranelift_codegen::ir::AbiParam;
+        use cranelift_module::{Linkage, Module};
+        let pointer = self.pointer_type;
+        let mut signature = self.module.make_signature();
+        signature
+            .params
+            .extend([pointer, pointer, types::I64, types::I64, types::I64].map(AbiParam::new));
+        let function = self
+            .module
+            .declare_function("rumoca_host_transpose_cells", Linkage::Import, &signature)
+            .map_err(crate::emit::to_backend_err)?;
+        let callee = crate::emit::owned_jit_module::declare_far_call_in_func(
+            self.module,
+            function,
+            self.builder.func,
+        );
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let destination_base = self.base(destination);
+        let destination = self.cell_address(destination_base, destination.cell, zero);
+        let operand_base = self.base(operand);
+        let operand = self.cell_address(operand_base, operand.cell, zero);
+        let rows = self.builder.ins().iconst(types::I64, i64::from(rows));
+        let columns = self.builder.ins().iconst(types::I64, i64::from(columns));
+        let trailing = self.builder.ins().iconst(types::I64, i64::from(trailing));
+        self.builder
+            .ins()
+            .call(callee, &[destination, operand, rows, columns, trailing]);
+        Ok(())
+    }
+
     pub(super) fn lower_transpose(
         &mut self,
         destination: solve::SolveRegisterId,
@@ -359,6 +412,13 @@ impl ProgramLowerer<'_, '_> {
             .ok_or_else(|| {
                 CompileError::Backend("typed transpose trailing width overflows".into())
             })?;
+        if destination.value_type.scalar_count() > 16 {
+            return self.lower_host_transpose(
+                &destination,
+                &operand,
+                (*rows, *columns, trailing_width),
+            );
+        }
         let rows = i64::from(*rows);
         let columns = i64::from(*columns);
         let trailing_width_i64 = i64::from(trailing_width);
@@ -439,10 +499,11 @@ impl ProgramLowerer<'_, '_> {
         operand: solve::SolveRegisterId,
     ) -> Result<(), CompileError> {
         let destination = self.register(destination)?.clone();
+        let operand_register = operand;
         let operand = self.register(operand)?.clone();
         let count = operand.value_type.scalar_count();
         let zero = self.builder.ins().iconst(types::I64, 0);
-        let initial = self.load_scalar(&operand, zero)?;
+        let initial = self.element_value(operand_register, zero)?;
         let header = self.builder.create_block();
         let body = self.builder.create_block();
         let exit = self.builder.create_block();
@@ -468,7 +529,7 @@ impl ProgramLowerer<'_, '_> {
             .brif(in_range, body, &[], exit, &[accumulator.into()]);
         self.builder.switch_to_block(body);
         self.builder.seal_block(body);
-        let element = self.load_scalar(&operand, index)?;
+        let element = self.element_value(operand_register, index)?;
         let next_accumulator =
             self.binary_element(reduction_binary(operator), scalar, accumulator, element)?;
         let next = self.builder.ins().iadd_imm(index, 1);

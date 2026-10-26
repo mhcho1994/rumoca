@@ -31,9 +31,32 @@ fn evaluate(package: &LoweredSolvePackage, input: f64, value: f64, predicates: &
         output[0].elements(),
         [SolveValueKind::Real64(value.to_bits())]
     );
-    assert_eq!(output.len(), 1 + predicates.len());
-    for (actual, expected) in output[1..].iter().zip(predicates) {
-        assert_eq!(actual.elements(), [SolveValueKind::Boolean(*expected)]);
+    // Ordered source checks now report a failure directly. Value-only calls
+    // retain the numeric result without materializing an accumulated predicate.
+    let checked = rumoca_eval_solve::eval_pure_call_checked(
+        &package.pure_calls,
+        owner.id(),
+        &[TypedValue::construct(
+            owner.inputs()[0].clone(),
+            vec![SolveValueKind::Real64(input.to_bits())],
+        )
+        .unwrap()],
+    );
+    if predicates.iter().all(|predicate| *predicate) {
+        assert!(checked.is_ok(), "{checked:?}");
+        assert_eq!(request(package, input), EventActionRequest::Continue);
+    } else {
+        assert!(
+            matches!(
+                checked,
+                Err(rumoca_eval_solve::TypedProgramEvalError::AssertionFailed { .. })
+            ),
+            "{checked:?}"
+        );
+        assert!(matches!(
+            request(package, input),
+            EventActionRequest::AssertionFailed { .. }
+        ));
     }
 }
 

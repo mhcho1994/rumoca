@@ -2,15 +2,27 @@ use super::*;
 
 fn allocates_register_tape(row: &[LinearOp]) -> bool {
     let mut context = cranelift_codegen::Context::new();
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(types::I64));
+    context
+        .func
+        .signature
+        .returns
+        .push(AbiParam::new(types::I8));
     let mut frontend = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
     let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
     builder.switch_to_block(entry);
     builder.seal_block(entry);
+    scratch::enter(&mut builder);
     let allocated = create_row_register_tape(&mut builder, types::I64, row)
         .expect("native register storage")
         .is_some();
-    builder.ins().return_(&[]);
+    status::succeed(&mut builder);
     builder.finalize();
     allocated
 }
@@ -161,4 +173,189 @@ fn identity_tensors_lower_statically_and_through_the_tape() {
         compiled.call(&[], &[], 0.0, &mut out).unwrap();
         assert_eq!(out, [1.0, 0.0, 1.0, 1.0], "size {size}");
     }
+}
+
+#[test]
+fn full_width_tapes_execute_assignments_residual_batches_and_jvp_on_default_stack() {
+    let count = 512 * 512;
+    let row = vec![
+        LinearOp::TensorLoad {
+            dst_start: 0,
+            input: rumoca_ir_solve::TensorInputKind::P,
+            input_start: 0,
+            count,
+            seed_start: None,
+            lanes: 1,
+        },
+        LinearOp::StoreOutput { src: 0 },
+        LinearOp::StoreOutput {
+            src: count as u32 - 1,
+        },
+    ];
+    let assignments = compile_assignment_schedule(std::slice::from_ref(&row), &[0, 1]).unwrap();
+    let residuals = compile_residual_rows(&[row.clone(), row.clone()]).unwrap();
+    let jacobian = compile_jacobian_rows(std::slice::from_ref(&row)).unwrap();
+    for value in [-0.0_f64, 1.25, -7.0] {
+        let mut parameters = vec![value; count];
+        parameters[count - 1] = -value;
+        let expected = [value.to_bits(), (-value).to_bits()];
+        let mut y = [f64::NAN; 2];
+        assignments.call(&mut y, &parameters, 0.0).unwrap();
+        assert_eq!(y.map(f64::to_bits), expected);
+        let mut residual = [f64::NAN; 4];
+        residuals
+            .call(&[], &parameters, 0.0, &mut residual)
+            .unwrap();
+        assert_eq!(
+            residual.map(f64::to_bits),
+            [expected[0], expected[1], expected[0], expected[1]]
+        );
+        let mut direction = [f64::NAN; 2];
+        jacobian
+            .call(&[], &parameters, 0.0, &[], &mut direction)
+            .unwrap();
+        assert_eq!(direction.map(f64::to_bits), expected);
+    }
+}
+
+#[test]
+fn large_contiguous_output_ranges_compile_and_preserve_batch_offsets_and_bits() {
+    let count = 270_347;
+    let row = vec![
+        LinearOp::TensorLoad {
+            dst_start: 0,
+            input: rumoca_ir_solve::TensorInputKind::P,
+            input_start: 0,
+            count,
+            seed_start: None,
+            lanes: 1,
+        },
+        LinearOp::StoreOutput {
+            src: count as u32 - 1,
+        },
+        LinearOp::StoreOutputRange {
+            start: 1,
+            count: count - 2,
+            stride: 1,
+        },
+        LinearOp::StoreOutput { src: 0 },
+    ];
+    let compiled = compile_residual_rows(&[row.clone(), row]).unwrap();
+    for scale in [-0.0_f64, 1.25, -7.0] {
+        let mut parameters = vec![scale; count];
+        parameters[0] = -scale;
+        parameters[count - 1] = scale * 2.0;
+        let mut expected = parameters.clone();
+        expected.swap(0, count - 1);
+        let mut output = vec![f64::NAN; 2 * count];
+        compiled.call(&[], &parameters, 0.0, &mut output).unwrap();
+        for batch in output.chunks_exact(count) {
+            assert!(
+                batch
+                    .iter()
+                    .zip(&expected)
+                    .all(|(actual, expected)| { actual.to_bits() == expected.to_bits() })
+            );
+        }
+    }
+}
+
+/// `[-1 … -1] · [0 … 0]`: every product, and every tangent term
+/// `du_l·r + l·du_r` for seeds `(-1, 0)`, is `-0.0`, so the first-term
+/// convention gives `-0.0` where a `+0.0` start would give `+0.0`.
+fn signed_zero_dot(inner: usize, lanes: usize) -> Vec<LinearOp> {
+    let width = (2 * inner * lanes) as u32;
+    vec![
+        LinearOp::TensorLoad {
+            dst_start: 0,
+            input: rumoca_ir_solve::TensorInputKind::Y,
+            input_start: 0,
+            count: 2 * inner,
+            seed_start: (lanes == 2).then_some(0),
+            lanes,
+        },
+        LinearOp::MatrixMultiply {
+            dst_start: width,
+            lhs_start: 0,
+            rhs_start: (inner * lanes) as u32,
+            rows: 1,
+            inner,
+            columns: 1,
+            lanes,
+        },
+        LinearOp::StoreOutputRange {
+            start: width,
+            count: lanes,
+            stride: 1,
+        },
+    ]
+}
+
+/// The interpreter's and the JIT's bits for [`signed_zero_dot`], for a static
+/// product and one looped over the register tape, primal and dual.
+/// A case label with its interpreted and native result bits.
+type SignedZeroDotResult = (String, Vec<u64>, Vec<u64>);
+
+fn signed_zero_dot_results() -> Vec<SignedZeroDotResult> {
+    let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let mut results = Vec::new();
+    for inner in [2, 600] {
+        let mut y = vec![-1.0; inner];
+        y.extend(vec![0.0; inner]);
+        let seed = y.clone();
+        for lanes in [1, 2] {
+            let row = signed_zero_dot(inner, lanes);
+            assert_eq!(allocates_register_tape(&row), inner == 600, "inner {inner}");
+            let plan = plan_row(&row).unwrap();
+            let mut interpreted = vec![f64::NAN; lanes];
+            execute_row(
+                &plan,
+                &mut Vec::new(),
+                RowInputs {
+                    y: &y,
+                    p: &[],
+                    t: 0.0,
+                    seed: (lanes == 2).then_some(&seed[..]),
+                    external_tables: &[],
+                },
+                &mut interpreted,
+            )
+            .unwrap();
+            let mut native = vec![f64::NAN; lanes];
+            if lanes == 2 {
+                let compiled = compile_jacobian_rows(&[row]).unwrap();
+                compiled.call(&y, &[], 0.0, &seed, &mut native).unwrap();
+            } else {
+                let compiled = compile_residual_rows(&[row]).unwrap();
+                compiled.call(&y, &[], 0.0, &mut native).unwrap();
+            }
+            results.push((
+                format!("inner {inner} lanes {lanes}"),
+                bits(&interpreted),
+                bits(&native),
+            ));
+        }
+    }
+    results
+}
+
+/// Every case whose `pick`ed bits are not all `-0.0`.
+fn signed_zero_dot_mismatches(pick: fn(&SignedZeroDotResult) -> &Vec<u64>) -> Vec<String> {
+    signed_zero_dot_results()
+        .iter()
+        .filter(|result| pick(result).iter().any(|&b| b != (-0.0f64).to_bits()))
+        .map(|result| format!("{}: {:x?}", result.0, pick(result)))
+        .collect()
+}
+
+#[test]
+fn native_linear_matrix_products_start_each_output_from_its_first_term() {
+    let mismatches = signed_zero_dot_mismatches(|result| &result.2);
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+#[test]
+fn interpreted_linear_matrix_products_start_each_output_from_its_first_term() {
+    let mismatches = signed_zero_dot_mismatches(|result| &result.1);
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }

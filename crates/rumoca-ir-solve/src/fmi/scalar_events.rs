@@ -12,6 +12,9 @@
 //! clock schedules are the component's time events. Dynamic time events,
 //! delays, structured updates, and event transactions are refused here.
 
+#[cfg(test)]
+mod tests;
+
 use serde::Serialize;
 
 use crate::{
@@ -34,6 +37,10 @@ pub(super) struct ScalarEventProfile {
     /// Per discrete output: whether it is a condition memory, the rows
     /// initialization seeds with `pre` following the current value.
     condition_memory_rows: Vec<bool>,
+    /// Pulse-memory outputs and their checked producing programs. Only these
+    /// programs are evaluated when the event releases its clock pulses.
+    pulse_rows: Vec<usize>,
+    pulse_programs: Vec<usize>,
     /// Per discrete output: whether a public observation recomputes it from
     /// the observed coordinate (an unread B.1c owner, SPEC_0022 EXPR-012).
     observation_rows: Vec<bool>,
@@ -50,11 +57,11 @@ pub(super) struct ScalarEventProfile {
     guarded_clocks: Vec<Option<usize>>,
     /// The time events the component announces and stops at.
     time_events: super::time_events::TimeEvents,
-    /// Every scalar of a discrete-valued external input, as a parameter
-    /// index. A discrete-time input changes only at events (MLS §4.5), so a
+    /// Source storage runs of discrete-valued external inputs. A
+    /// discrete-time input changes only at events (MLS §4.5), so a
     /// change the importer makes between Co-Simulation steps is an event at
     /// the next step's first instant.
-    discrete_inputs: Vec<usize>,
+    discrete_input_runs: DiscreteInputRuns,
     post_commit_targets: Vec<Slot>,
     /// The parameters actions read at their event-entry value.
     condition_memories: Vec<usize>,
@@ -136,21 +143,7 @@ pub(super) fn validate(model: &SolveModel) -> Result<ScalarEventProfile, &'stati
             _ => Err("a discrete row writes outside the parameters"),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if discrete.row_roles.iter().any(|role| {
-        !matches!(
-            role,
-            DiscreteRowRole::Equation | DiscreteRowRole::ConditionMemory
-        )
-    }) {
-        return Err("the C profile executes only discrete equations and condition memories");
-    }
-    if discrete
-        .pre_modes
-        .iter()
-        .any(|mode| *mode != DiscreteEventPreMode::FollowCurrent)
-    {
-        return Err("the C profile executes only discrete rows whose pre follows the current pass");
-    }
+    validate_scalar_discrete_rows(discrete)?;
     let layout = &problem.solve_layout;
     let pre_bindings = layout
         .pre_param_bindings
@@ -185,6 +178,7 @@ pub(super) fn validate(model: &SolveModel) -> Result<ScalarEventProfile, &'stati
         }
         iteration_lanes.extend(lanes);
     }
+    let (pulse_rows, pulse_programs) = pulse_producers(discrete)?;
     Ok(ScalarEventProfile {
         roots,
         pre_bindings,
@@ -192,8 +186,10 @@ pub(super) fn validate(model: &SolveModel) -> Result<ScalarEventProfile, &'stati
         condition_memory_rows: discrete
             .row_roles
             .iter()
-            .map(|role| *role == DiscreteRowRole::ConditionMemory)
+            .map(|role| role.is_condition_memory())
             .collect(),
+        pulse_rows,
+        pulse_programs,
         discrete_targets,
         observation_rows: discrete.observation_refresh.clone(),
         observation_reads_y: discrete.observation_refresh_reads_y,
@@ -204,13 +200,59 @@ pub(super) fn validate(model: &SolveModel) -> Result<ScalarEventProfile, &'stati
             model.problem.clocks.periodic_event_schedules.len(),
         )?,
         time_events: super::time_events::derive(model)?,
-        discrete_inputs: discrete_inputs(&problem.solve_layout)?,
+        discrete_input_runs: discrete_inputs(problem)?,
         post_commit_targets: slots(&discrete.post_commit_assignment_targets)?,
         condition_memories: events.condition_memory_parameter_indices.clone(),
         schedule: discrete.event_iteration_plan.schedule.clone(),
         root_neighborhoods: crate::root_neighborhoods(&events.root_conditions)
             .map_err(|_| "a root condition's coordinate reads cannot be derived")?,
     })
+}
+
+fn validate_scalar_discrete_rows(
+    discrete: &crate::DiscreteSolveSystem,
+) -> Result<(), &'static str> {
+    if discrete.row_roles.iter().any(|role| {
+        !matches!(
+            role,
+            DiscreteRowRole::Equation
+                | DiscreteRowRole::ConditionMemory
+                | DiscreteRowRole::PulseConditionMemory
+        )
+    }) {
+        return Err("the C profile executes only discrete equations and condition memories");
+    }
+    if discrete
+        .pre_modes
+        .iter()
+        .any(|mode| *mode != DiscreteEventPreMode::FollowCurrent)
+    {
+        return Err("the C profile executes only discrete rows whose pre follows the current pass");
+    }
+    Ok(())
+}
+
+fn pulse_producers(
+    discrete: &crate::DiscreteSolveSystem,
+) -> Result<(Vec<usize>, Vec<usize>), &'static str> {
+    let pulse_rows = discrete
+        .row_roles
+        .iter()
+        .enumerate()
+        .filter_map(|(row, role)| (*role == DiscreteRowRole::PulseConditionMemory).then_some(row))
+        .collect::<Vec<_>>();
+    let pulse_programs = pulse_rows
+        .iter()
+        .map(|row| {
+            discrete
+                .rhs
+                .program_index_for_output(*row)
+                .ok_or("a pulse condition memory has no checked producing program")
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?
+        .into_iter()
+        .collect();
+    Ok((pulse_rows, pulse_programs))
 }
 
 fn refuse_unsupported_owners(model: &SolveModel) -> Result<(), &'static str> {
@@ -259,9 +301,6 @@ fn refuse_unsupported_owners(model: &SolveModel) -> Result<(), &'static str> {
         .any(|binding| binding.clock_schedule.is_some())
     {
         return Err("the C profile cannot execute clocked previous() history");
-    }
-    if problem.solve_layout.initial_event_parameter_index.is_some() {
-        return Err("the C profile cannot execute an initial event yet");
     }
     Ok(())
 }
@@ -342,10 +381,27 @@ fn guarded_clocks(
     Ok(clocks)
 }
 
-/// The parameter index of every scalar of a discrete-valued external input.
-fn discrete_inputs(layout: &crate::SolveLayout) -> Result<Vec<usize>, &'static str> {
-    let mut inputs = Vec::new();
-    for run in &layout.variable_storage_runs {
+/// A checked projection of the same problem's discrete input storage runs.
+#[derive(Debug, Serialize)]
+struct DiscreteInputRuns {
+    runs: Vec<DiscreteInputRun>,
+    scalar_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct DiscreteInputRun {
+    p_base: usize,
+    count: usize,
+    seen_offset: usize,
+}
+
+/// Preserve storage order and repeated mappings; each owns its seen lanes.
+fn discrete_inputs(problem: &crate::SolveProblem) -> Result<DiscreteInputRuns, &'static str> {
+    let mut inputs = DiscreteInputRuns {
+        runs: Vec::new(),
+        scalar_count: 0,
+    };
+    for run in &problem.solve_layout.variable_storage_runs {
         let discrete = matches!(
             run.value_kind,
             crate::SolveVariableValueKind::Integer
@@ -358,7 +414,22 @@ fn discrete_inputs(layout: &crate::SolveLayout) -> Result<Vec<usize>, &'static s
         let ScalarSlot::P { index, .. } = run.base else {
             return Err("a discrete input lives outside the parameters");
         };
-        inputs.extend(index..index + run.scalar_count);
+        let end = index
+            .checked_add(run.scalar_count)
+            .ok_or("a discrete input parameter range overflowed")?;
+        if end > problem.layout.p_scalars() {
+            return Err("a discrete input parameter range exceeds its storage");
+        }
+        let seen_end = inputs
+            .scalar_count
+            .checked_add(run.scalar_count)
+            .ok_or("the discrete input history size overflowed")?;
+        inputs.runs.push(DiscreteInputRun {
+            p_base: index,
+            count: run.scalar_count,
+            seen_offset: inputs.scalar_count,
+        });
+        inputs.scalar_count = seen_end;
     }
     Ok(inputs)
 }

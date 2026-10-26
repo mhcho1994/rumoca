@@ -25,10 +25,13 @@ mod record_alias;
 mod record_alias_postprocess_tests;
 #[cfg(test)]
 mod substitute_constant_tests;
+mod when_discrete_reads;
 
 use super::*;
 
 pub(crate) use array_domain_comprehensions::rewrite_array_domain_comprehensions;
+pub(crate) use when_discrete_reads::freeze_current_discrete_selections;
+
 pub(crate) use constant_lookup::constant_expr_preserves_array_shape;
 pub(crate) use constant_substituter::substitute_known_constants_expr;
 pub(crate) use constructor_calls::mark_record_constructor_calls;
@@ -463,7 +466,9 @@ fn substitute_known_constants_when_equation(
     locals: &HashSet<String>,
 ) -> Result<(), FlattenError> {
     match equation {
-        flat::WhenEquation::Assign { value, .. } | flat::WhenEquation::Reinit { value, .. } => {
+        flat::WhenEquation::Assign { value, .. }
+        | flat::WhenEquation::AssignElement { value, .. }
+        | flat::WhenEquation::Reinit { value, .. } => {
             *value = substitute_known_constants_expr(value.clone(), ctx, live_vars, locals, "")?;
         }
         flat::WhenEquation::Assert {

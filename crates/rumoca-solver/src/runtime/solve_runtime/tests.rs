@@ -1,9 +1,25 @@
 //! Runtime projection and event regression tests.
+mod fixture_owners;
+pub(super) use fixture_owners::{
+    install_mock_initial_jacobian, install_mock_initial_primal, install_mock_jacobian,
+    install_mock_primal, prepare_mock_jacobian, prepare_mock_primal, reset_mock_jacobian,
+};
 
+mod admitted_errors;
+mod backend_capabilities;
+mod compact_owner_preparation;
+mod execution_owner_queries;
+mod lifecycle_preparation;
 mod native_manifold;
 mod native_projection_residual;
+mod reverse_preparation;
+mod root_remainders;
 mod seed_linearization;
+mod selected_preparation;
 mod state_jacobian_pattern;
+mod target_queries;
+mod torn_preparation;
+mod torn_tangent_failures;
 
 use super::*;
 use rumoca_eval_solve::refresh_plan::{
@@ -44,6 +60,36 @@ fn mirror_scalar_implicit_jvp(model: &mut solve::SolveModel) {
     );
 }
 
+/// A fixture's explicitly declared affine derivative; this does not inspect
+/// or differentiate a primal program.
+fn affine_seed_row(terms: &[(usize, f64)]) -> Vec<solve::LinearOp> {
+    use solve::LinearOp::{Binary, Const, LoadSeed, StoreOutput};
+    let mut ops = vec![Const { dst: 0, value: 0.0 }];
+    for &(index, coefficient) in terms {
+        ops.extend([
+            LoadSeed { dst: 1, index },
+            Const {
+                dst: 2,
+                value: coefficient,
+            },
+            Binary {
+                dst: 3,
+                op: solve::BinaryOp::Mul,
+                lhs: 1,
+                rhs: 2,
+            },
+            Binary {
+                dst: 0,
+                op: solve::BinaryOp::Add,
+                lhs: 0,
+                rhs: 3,
+            },
+        ]);
+    }
+    ops.push(StoreOutput { src: 0 });
+    ops
+}
+
 fn set_test_implicit_jvp(
     model: &mut solve::SolveModel,
     rows: Vec<Vec<solve::LinearOp>>,
@@ -53,13 +99,7 @@ fn set_test_implicit_jvp(
     mirror_scalar_implicit_jvp(model);
 }
 
-fn derive_test_structural_artifacts(model: &mut solve::SolveModel) {
-    let (continuous, initialization) =
-        solve_eval::derive_solve_structural_artifacts(&model.problem, &model.artifacts)
-            .expect("fixture programs derive their structural artifacts");
-    model.artifacts.continuous.structural = continuous;
-    model.artifacts.initialization.structural = initialization;
-}
+use crate::test_fixtures::derive_structural_artifacts as derive_test_structural_artifacts;
 
 fn set_complete_test_projection_plan(model: &mut solve::SolveModel) {
     let state_count = model.state_scalar_count();
@@ -69,12 +109,13 @@ fn set_complete_test_projection_plan(model: &mut solve::SolveModel) {
         solve::AlgebraicProjectionPlan::default()
     } else {
         solve::AlgebraicProjectionPlan {
-            blocks: vec![solve::AlgebraicProjectionBlock {
+            blocks: (vec![solve::AlgebraicProjectionBlock {
                 y_indices: rows.clone(),
                 rows,
                 tearing: None,
                 alternate_charts: Vec::new(),
-            }],
+            }])
+            .into(),
         }
     };
 }
@@ -83,25 +124,26 @@ fn set_causal_test_projection_plan(model: &mut solve::SolveModel) {
     let state_count = model.state_scalar_count();
     let solver_count = model.solver_scalar_count();
     model.problem.continuous.algebraic_projection_plan = solve::AlgebraicProjectionPlan {
-        blocks: (state_count..solver_count)
+        blocks: ((state_count..solver_count)
             .map(|index| solve::AlgebraicProjectionBlock {
                 rows: vec![index],
                 y_indices: vec![index],
                 tearing: None,
                 alternate_charts: Vec::new(),
             })
-            .collect(),
+            .collect::<Vec<_>>())
+        .into(),
     };
 }
 
-fn warm_start_test_model() -> solve::SolveModel {
+pub(super) fn warm_start_test_model() -> solve::SolveModel {
     let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec!["x".to_string(), "z".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string(), "z".to_string()],
-                    ..Default::default()
-                },
                 state_scalar_count: 1,
                 algebraic_scalar_count: 1,
                 ..Default::default()
@@ -114,10 +156,11 @@ fn warm_start_test_model() -> solve::SolveModel {
                     ],
                     "solver_y_warm_start.mo",
                 )),
-                implicit_row_targets: vec![
+                implicit_row_targets: (vec![
                     Some(solve::scalar_slot_y(0)),
                     Some(solve::scalar_slot_y(1)),
-                ],
+                ])
+                .into(),
                 derivative_rhs: solve::ComputeBlock::from_scalar_program_block(spanned_block(
                     vec![derivative_placeholder_row(0)],
                     "solver_y_warm_start_derivative.mo",
@@ -126,7 +169,7 @@ fn warm_start_test_model() -> solve::SolveModel {
             },
             ..Default::default()
         },
-        initial_y: vec![1.0, 2.0],
+        initial_y: vec![1.0, 2.0].into(),
         ..Default::default()
     };
     set_test_implicit_jvp(
@@ -143,7 +186,12 @@ fn warm_start_test_model() -> solve::SolveModel {
         ],
         "solver_y_warm_start_jvp.mo",
     );
+    model.artifacts.continuous.full_jacobian_v = spanned_block(
+        vec![affine_seed_row(&[(0, 1.0)])],
+        "solver_y_warm_start_derivative_jvp.mo",
+    );
     set_complete_test_projection_plan(&mut model);
+    derive_test_structural_artifacts(&mut model);
     model
 }
 
@@ -154,6 +202,8 @@ fn solver_y_warm_start_preserves_algebraic_guess() {
     let mut solver_y = vec![10.0, 42.0];
 
     runtime
+        .scalar_execution()
+        .unwrap()
         .update_solver_y_guess_from_state(&mut solver_y, &[3.0])
         .expect("state update should preserve a compatible algebraic guess");
 
@@ -180,6 +230,8 @@ fn solver_y_warm_start_rejects_layout_mismatch() {
     let mut solver_y = vec![9.0];
 
     let error = runtime
+        .scalar_execution()
+        .unwrap()
         .update_solver_y_guess_from_state(&mut solver_y, &[3.0])
         .expect_err("an established warm start must match the Solve-IR layout");
 
@@ -193,6 +245,7 @@ fn runtime_new_reports_invalid_native_stride_metadata() {
         rumoca_core::Span::from_offsets(rumoca_core::SourceId::from_source_name("bad.mo"), 3, 8);
     let domain = rumoca_core::StructuredIndexDomain {
         binders: vec![rumoca_core::StructuredIndexBinder {
+            provenance: rumoca_core::IndexBinderProvenance::Generated,
             id: 0,
             display_name: "i".to_string(),
             lower: 1,
@@ -248,16 +301,16 @@ mod event_iteration;
 fn derivative_refresh_keeps_coupled_dependency_block_but_drops_unrelated_output() {
     let model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec![
+                    "x".to_string(),
+                    "a".to_string(),
+                    "b".to_string(),
+                    "unrelated".to_string(),
+                ],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec![
-                        "x".to_string(),
-                        "a".to_string(),
-                        "b".to_string(),
-                        "unrelated".to_string(),
-                    ],
-                    ..Default::default()
-                },
                 state_scalar_count: 1,
                 algebraic_scalar_count: 2,
                 output_scalar_count: 1,
@@ -275,9 +328,10 @@ fn derivative_refresh_keeps_coupled_dependency_block_but_drops_unrelated_output(
                 )),
                 implicit_row_targets: (0..4)
                     .map(|index| Some(solve::scalar_slot_y(index)))
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                    blocks: vec![
+                    blocks: (vec![
                         solve::AlgebraicProjectionBlock {
                             rows: vec![1, 2],
                             y_indices: vec![1, 2],
@@ -290,13 +344,14 @@ fn derivative_refresh_keeps_coupled_dependency_block_but_drops_unrelated_output(
                             tearing: None,
                             alternate_charts: Vec::new(),
                         },
-                    ],
+                    ])
+                    .into(),
                 },
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![0.0; 4],
+        initial_y: vec![0.0; 4].into(),
         ..Default::default()
     };
     let implicit =
@@ -321,19 +376,25 @@ fn derivative_refresh_keeps_coupled_dependency_block_but_drops_unrelated_output(
     assert!(!plan.causal_solution_certified);
     assert_eq!(plan.simultaneous_plan.blocks.len(), 1);
     assert_eq!(plan.simultaneous_block_indices, vec![0]);
-    assert_eq!(plan.simultaneous_plan.blocks[0].rows, vec![1, 2]);
-    assert_eq!(plan.simultaneous_plan.blocks[0].y_indices, vec![1, 2]);
+    assert_eq!(
+        plan.simultaneous_plan.blocks.scalar_blocks()[0].rows,
+        vec![1, 2]
+    );
+    assert_eq!(
+        plan.simultaneous_plan.blocks.scalar_blocks()[0].y_indices,
+        vec![1, 2]
+    );
 }
 
 #[test]
 fn derivative_refresh_rejects_missing_owner_without_exact_isolation() {
     let model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec!["x".to_string(), "a".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string(), "a".to_string()],
-                    ..Default::default()
-                },
                 state_scalar_count: 1,
                 algebraic_scalar_count: 1,
                 ..Default::default()
@@ -346,20 +407,21 @@ fn derivative_refresh_rejects_missing_owner_without_exact_isolation() {
                     ],
                     "missing_exact_dependency_owner.mo",
                 )),
-                implicit_row_targets: vec![Some(solve::scalar_slot_y(0)), None],
+                implicit_row_targets: (vec![Some(solve::scalar_slot_y(0)), None]).into(),
                 algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                    blocks: vec![solve::AlgebraicProjectionBlock {
+                    blocks: (vec![solve::AlgebraicProjectionBlock {
                         rows: vec![1],
                         y_indices: vec![1],
                         tearing: None,
                         alternate_charts: Vec::new(),
-                    }],
+                    }])
+                    .into(),
                 },
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![1.0, 1.0],
+        initial_y: vec![1.0, 1.0].into(),
         ..Default::default()
     };
     let implicit =
@@ -377,19 +439,25 @@ fn derivative_refresh_rejects_missing_owner_without_exact_isolation() {
     assert!(plan.rows.is_empty());
     assert!(!plan.causal_solution_certified);
     assert_eq!(plan.value_projection_plan.blocks.len(), 1);
-    assert_eq!(plan.value_projection_plan.blocks[0].rows, vec![1]);
-    assert_eq!(plan.value_projection_plan.blocks[0].y_indices, vec![1]);
+    assert_eq!(
+        plan.value_projection_plan.blocks.scalar_blocks()[0].rows,
+        vec![1]
+    );
+    assert_eq!(
+        plan.value_projection_plan.blocks.scalar_blocks()[0].y_indices,
+        vec![1]
+    );
 }
 
 #[test]
 fn refresh_plan_accepts_scaled_affine_residual_target() {
     let model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 2),
+                vec!["x".to_string(), "a".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string(), "a".to_string()],
-                    ..Default::default()
-                },
                 state_scalar_count: 1,
                 algebraic_scalar_count: 1,
                 parameter_count: 2,
@@ -404,10 +472,11 @@ fn refresh_plan_accepts_scaled_affine_residual_target() {
                     ],
                     "scaled_affine_residual.mo",
                 )),
-                implicit_row_targets: vec![
+                implicit_row_targets: (vec![
                     Some(solve::scalar_slot_y(0)),
                     Some(solve::scalar_slot_y(1)),
-                ],
+                ])
+                .into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -440,11 +509,11 @@ fn refresh_plan_accepts_scaled_affine_residual_target() {
 fn causal_certificate_keeps_equation_rows_distinct_from_solver_y_indices() {
     let model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec!["state".to_string(), "algebraic".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["state".to_string(), "algebraic".to_string()],
-                    ..Default::default()
-                },
                 state_scalar_count: 1,
                 algebraic_scalar_count: 1,
                 ..Default::default()
@@ -454,20 +523,21 @@ fn causal_certificate_keeps_equation_rows_distinct_from_solver_y_indices() {
                     vec![shifted_variable_residual_row(1, 3.0)],
                     "distinct_equation_and_y_namespaces.mo",
                 )),
-                implicit_row_targets: vec![Some(solve::scalar_slot_y(1))],
+                implicit_row_targets: (vec![Some(solve::scalar_slot_y(1))]).into(),
                 algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                    blocks: vec![solve::AlgebraicProjectionBlock {
+                    blocks: (vec![solve::AlgebraicProjectionBlock {
                         rows: vec![0],
                         y_indices: vec![1],
                         tearing: None,
                         alternate_charts: Vec::new(),
-                    }],
+                    }])
+                    .into(),
                 },
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![0.0; 2],
+        initial_y: vec![0.0; 2].into(),
         ..Default::default()
     };
     let implicit =
@@ -486,11 +556,11 @@ fn causal_certificate_keeps_equation_rows_distinct_from_solver_y_indices() {
 fn batched_assignment_refresh_preserves_row_order_dependencies() {
     let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec!["x".to_string(), "a".to_string(), "b".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string(), "a".to_string(), "b".to_string()],
-                    ..Default::default()
-                },
                 state_scalar_count: 1,
                 algebraic_scalar_count: 1,
                 output_scalar_count: 1,
@@ -505,22 +575,30 @@ fn batched_assignment_refresh_preserves_row_order_dependencies() {
                     ],
                     "batched_assignment_refresh.mo",
                 )),
-                implicit_row_targets: vec![
+                implicit_row_targets: (vec![
                     Some(solve::scalar_slot_y(0)),
                     Some(solve::scalar_slot_y(1)),
                     Some(solve::scalar_slot_y(2)),
-                ],
+                ])
+                .into(),
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![1.0, 0.0, 0.0],
+        initial_y: vec![1.0, 0.0, 0.0].into(),
         ..Default::default()
     };
     set_causal_test_projection_plan(&mut model);
     let runtime = SolveRuntime::new_fixture(&model).expect("runtime should prepare");
-    assert!(runtime.algebraic_refresh.causal_solution_certified);
-    let mut solver_y = model.initial_y.clone();
+    assert!(
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .causal_solution_certified
+    );
+    let mut solver_y = model.initial_y.to_vec();
 
     runtime
         .refresh_algebraic_and_output_slots(0.0, &mut solver_y, &[], 1.0e-12, 4)
@@ -533,11 +611,11 @@ fn batched_assignment_refresh_preserves_row_order_dependencies() {
 fn certified_assignment_refresh_rejects_nonfinite_value_and_restores_input() {
     let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec!["x".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string()],
-                    ..Default::default()
-                },
                 algebraic_scalar_count: 1,
                 ..Default::default()
             },
@@ -546,18 +624,25 @@ fn certified_assignment_refresh_rejects_nonfinite_value_and_restores_input() {
                     vec![nonfinite_assignment_residual_row(0)],
                     "nonfinite_certified_assignment.mo",
                 )),
-                implicit_row_targets: vec![Some(solve::scalar_slot_y(0))],
+                implicit_row_targets: (vec![Some(solve::scalar_slot_y(0))]).into(),
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![7.0],
+        initial_y: vec![7.0].into(),
         ..Default::default()
     };
     set_causal_test_projection_plan(&mut model);
     let runtime = SolveRuntime::new_fixture(&model).expect("runtime should prepare");
-    assert!(runtime.algebraic_refresh.causal_solution_certified);
-    let mut solver_y = model.initial_y.clone();
+    assert!(
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .causal_solution_certified
+    );
+    let mut solver_y = model.initial_y.to_vec();
 
     let error = runtime
         .refresh_algebraic_and_output_slots(0.0, &mut solver_y, &[], 1.0e-12, 4)
@@ -572,13 +657,13 @@ fn certified_assignment_refresh_rejects_nonfinite_value_and_restores_input() {
 
 #[test]
 fn causal_certificate_rejects_swapped_blt_equation_target_pairs() {
-    let model = solve::SolveModel {
+    let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec!["x".to_string(), "y".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string(), "y".to_string()],
-                    ..Default::default()
-                },
                 algebraic_scalar_count: 2,
                 ..Default::default()
             },
@@ -590,12 +675,13 @@ fn causal_certificate_rejects_swapped_blt_equation_target_pairs() {
                     ],
                     "swapped_blt_pairs.mo",
                 )),
-                implicit_row_targets: vec![
+                implicit_row_targets: (vec![
                     Some(solve::scalar_slot_y(0)),
                     Some(solve::scalar_slot_y(1)),
-                ],
+                ])
+                .into(),
                 algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                    blocks: vec![
+                    blocks: (vec![
                         solve::AlgebraicProjectionBlock {
                             rows: vec![0],
                             y_indices: vec![1],
@@ -608,77 +694,95 @@ fn causal_certificate_rejects_swapped_blt_equation_target_pairs() {
                             tearing: None,
                             alternate_charts: Vec::new(),
                         },
-                    ],
+                    ])
+                    .into(),
                 },
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![0.0; 2],
+        initial_y: vec![0.0; 2].into(),
         ..Default::default()
     };
 
+    set_test_implicit_jvp(
+        &mut model,
+        vec![affine_seed_row(&[(0, 1.0)]), affine_seed_row(&[(1, 1.0)])],
+        "swapped_blt_pairs_jvp.mo",
+    );
+    derive_test_structural_artifacts(&mut model);
     let runtime = SolveRuntime::new_fixture(&model).expect("runtime should prepare");
-    assert!(!runtime.algebraic_refresh.causal_solution_certified);
+    assert!(
+        !runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .causal_solution_certified
+    );
+}
+
+fn uncertified_seed_residual_block(span: rumoca_core::Span) -> solve::ComputeBlock {
+    solve::ComputeBlock::from_scalar_program_block(
+        solve::ScalarProgramBlock::with_output_indices(
+            vec![
+                vec![
+                    solve::LinearOp::LoadP { dst: 0, index: 0 },
+                    solve::LinearOp::LoadY { dst: 1, index: 0 },
+                    solve::LinearOp::Binary {
+                        dst: 2,
+                        op: solve::BinaryOp::Sub,
+                        lhs: 0,
+                        rhs: 1,
+                    },
+                    solve::LinearOp::StoreOutput { src: 2 },
+                ],
+                vec![
+                    solve::LinearOp::LoadY { dst: 0, index: 0 },
+                    solve::LinearOp::Const { dst: 1, value: 2.0 },
+                    solve::LinearOp::Binary {
+                        dst: 2,
+                        op: solve::BinaryOp::Mul,
+                        lhs: 0,
+                        rhs: 1,
+                    },
+                    solve::LinearOp::LoadY { dst: 3, index: 1 },
+                    solve::LinearOp::Binary {
+                        dst: 4,
+                        op: solve::BinaryOp::Sub,
+                        lhs: 2,
+                        rhs: 3,
+                    },
+                    solve::LinearOp::StoreOutput { src: 4 },
+                ],
+            ],
+            vec![span, span],
+            vec![0, 1],
+        )
+        .expect("fixture scalar programs satisfy register flow"),
+    )
 }
 
 #[test]
 fn uncertified_seed_keeps_its_projection_block_after_dependency_projection() {
     let span = test_span("uncertified_seed_projection.mo");
-    let model = solve::SolveModel {
+    let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 1),
+                vec!["a".to_string(), "b".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["a".to_string(), "b".to_string()],
-                    ..Default::default()
-                },
                 algebraic_scalar_count: 2,
                 parameter_count: 1,
                 compiled_parameter_len: 1,
                 ..Default::default()
             },
             continuous: solve::ContinuousSolveSystem {
-                implicit_rhs: solve::ComputeBlock::from_scalar_program_block(
-                    solve::ScalarProgramBlock::with_output_indices(
-                        vec![
-                            vec![
-                                solve::LinearOp::LoadP { dst: 0, index: 0 },
-                                solve::LinearOp::LoadY { dst: 1, index: 0 },
-                                solve::LinearOp::Binary {
-                                    dst: 2,
-                                    op: solve::BinaryOp::Sub,
-                                    lhs: 0,
-                                    rhs: 1,
-                                },
-                                solve::LinearOp::StoreOutput { src: 2 },
-                            ],
-                            vec![
-                                solve::LinearOp::LoadY { dst: 0, index: 0 },
-                                solve::LinearOp::Const { dst: 1, value: 2.0 },
-                                solve::LinearOp::Binary {
-                                    dst: 2,
-                                    op: solve::BinaryOp::Mul,
-                                    lhs: 0,
-                                    rhs: 1,
-                                },
-                                solve::LinearOp::LoadY { dst: 3, index: 1 },
-                                solve::LinearOp::Binary {
-                                    dst: 4,
-                                    op: solve::BinaryOp::Sub,
-                                    lhs: 2,
-                                    rhs: 3,
-                                },
-                                solve::LinearOp::StoreOutput { src: 4 },
-                            ],
-                        ],
-                        vec![span, span],
-                        vec![0, 1],
-                    )
-                    .expect("fixture scalar programs satisfy register flow"),
-                ),
-                implicit_row_targets: vec![None, Some(solve::scalar_slot_y(1))],
+                implicit_rhs: uncertified_seed_residual_block(span),
+                implicit_row_targets: (vec![None, Some(solve::scalar_slot_y(1))]).into(),
                 algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                    blocks: vec![
+                    blocks: (vec![
                         solve::AlgebraicProjectionBlock {
                             rows: vec![0],
                             y_indices: vec![0],
@@ -691,23 +795,47 @@ fn uncertified_seed_keeps_its_projection_block_after_dependency_projection() {
                             tearing: None,
                             alternate_charts: Vec::new(),
                         },
-                    ],
+                    ])
+                    .into(),
                 },
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![0.0, 0.0],
-        parameters: vec![3.0],
+        initial_y: vec![0.0, 0.0].into(),
+        parameters: vec![3.0].into(),
         ..Default::default()
     };
+    set_test_implicit_jvp(
+        &mut model,
+        vec![
+            affine_seed_row(&[(0, -1.0)]),
+            affine_seed_row(&[(0, 2.0), (1, -1.0)]),
+        ],
+        "uncertified_seed_projection_jvp.mo",
+    );
+    derive_test_structural_artifacts(&mut model);
     let runtime = SolveRuntime::new_fixture(&model).expect("runtime should prepare");
-    assert!(!runtime.algebraic_refresh.causal_solution_certified);
+    assert!(
+        !runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .causal_solution_certified
+    );
     assert_eq!(
-        runtime.algebraic_refresh.value_projection_plan.blocks.len(),
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .value_projection_plan
+            .blocks
+            .len(),
         2
     );
-    let mut solver_y = model.initial_y.clone();
+    let mut solver_y = model.initial_y.to_vec();
 
     runtime
         .refresh_algebraic_and_output_slots(0.0, &mut solver_y, &model.parameters, 1.0e-12, 4)
@@ -721,11 +849,11 @@ fn uncertified_seed_keeps_its_projection_block_after_dependency_projection() {
 fn refresh_plan_accepts_direct_affine_residual_target() {
     let model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 1),
+                vec!["T1".to_string(), "T2".to_string(), "q".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["T1".to_string(), "T2".to_string(), "q".to_string()],
-                    ..Default::default()
-                },
                 state_scalar_count: 2,
                 algebraic_scalar_count: 1,
                 parameter_count: 1,
@@ -741,11 +869,12 @@ fn refresh_plan_accepts_direct_affine_residual_target() {
                     ],
                     "direct_affine_residual.mo",
                 )),
-                implicit_row_targets: vec![
+                implicit_row_targets: (vec![
                     Some(solve::scalar_slot_y(0)),
                     Some(solve::scalar_slot_y(1)),
                     Some(solve::scalar_slot_y(2)),
-                ],
+                ])
+                .into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -778,11 +907,11 @@ fn refresh_plan_accepts_direct_affine_residual_target() {
 fn refresh_residual_fallback_solves_positive_unit_coefficient() {
     let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 1),
+                vec!["x".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string()],
-                    ..Default::default()
-                },
                 algebraic_scalar_count: 1,
                 parameter_count: 1,
                 compiled_parameter_len: 1,
@@ -804,18 +933,19 @@ fn refresh_residual_fallback_solves_positive_unit_coefficient() {
                     "positive_residual.mo",
                 )),
                 algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                    blocks: vec![solve::AlgebraicProjectionBlock {
+                    blocks: (vec![solve::AlgebraicProjectionBlock {
                         rows: vec![0],
                         y_indices: vec![0],
                         tearing: None,
                         alternate_charts: Vec::new(),
-                    }],
+                    }])
+                    .into(),
                 },
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![10.0],
+        initial_y: vec![10.0].into(),
         ..Default::default()
     };
     set_test_implicit_jvp(
@@ -826,8 +956,9 @@ fn refresh_residual_fallback_solves_positive_unit_coefficient() {
         ]],
         "positive_residual_jvp.mo",
     );
+    derive_test_structural_artifacts(&mut model);
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
-    let mut solver_y = model.initial_y.clone();
+    let mut solver_y = model.initial_y.to_vec();
 
     runtime
         .refresh_algebraic_and_output_slots(0.0, &mut solver_y, &[4.0], 1.0e-12, 1)
@@ -921,11 +1052,11 @@ fn mode_dependent_repivot_jvp_rows() -> Vec<Vec<solve::LinearOp>> {
 fn mode_dependent_repivot_model() -> solve::SolveModel {
     let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 1),
+                vec!["x".to_string(), "y".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string(), "y".to_string()],
-                    ..Default::default()
-                },
                 algebraic_scalar_count: 2,
                 parameter_count: 1,
                 compiled_parameter_len: 1,
@@ -936,20 +1067,21 @@ fn mode_dependent_repivot_model() -> solve::SolveModel {
                     mode_dependent_repivot_residual_rows(),
                     "mode_dependent_repivot.mo",
                 )),
-                implicit_row_targets: vec![None, Some(solve::scalar_slot_y(1))],
+                implicit_row_targets: (vec![None, Some(solve::scalar_slot_y(1))]).into(),
                 algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                    blocks: vec![solve::AlgebraicProjectionBlock {
+                    blocks: (vec![solve::AlgebraicProjectionBlock {
                         rows: vec![0, 1],
                         y_indices: vec![0, 1],
                         tearing: None,
                         alternate_charts: Vec::new(),
-                    }],
+                    }])
+                    .into(),
                 },
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![0.0, 0.0],
+        initial_y: vec![0.0, 0.0].into(),
         ..Default::default()
     };
     set_test_implicit_jvp(
@@ -970,16 +1102,57 @@ fn refresh_newton_repivots_mode_dependent_coupled_residuals() {
     // The second row now exposes y = 3 - x, but x still has no causal seed.
     // The stage owns both residuals and unknowns, so its Newton solve does
     // not need an isolatable assignment for every initial guess.
-    assert_eq!(runtime.algebraic_refresh.rows.len(), 1);
-    assert_eq!(runtime.algebraic_refresh.rows[0].target_index(), 1);
+    assert_eq!(
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .rows
+            .len(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .rows[0]
+            .target_index(),
+        1
+    );
     assert!(matches!(
-        runtime.algebraic_refresh.rows[0].assignment_shape(),
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .rows[0]
+            .assignment_shape(),
         Some(solve::TargetAssignmentShape::Additive { .. })
     ));
-    assert!(runtime.value_stage_schedule_is_certified(&runtime.algebraic_refresh));
-    assert_eq!(runtime.algebraic_refresh.simultaneous_plan.blocks.len(), 1);
+    assert!(
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .value_stage_schedule_is_certified(
+                &runtime.scalar_execution().unwrap().scalar.algebraic_refresh
+            )
+    );
+    assert_eq!(
+        runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .simultaneous_plan
+            .blocks
+            .len(),
+        1
+    );
 
-    let mut solver_y = model.initial_y.clone();
+    let mut solver_y = model.initial_y.to_vec();
     for k in [0.0, 1.0, 3.0, 0.0] {
         runtime
             .refresh_algebraic_and_output_slots_certified(0.0, &mut solver_y, &[k], 1.0e-10, 4)
@@ -994,18 +1167,79 @@ fn refresh_with_value_stages(
     solver_y: &mut [f64],
 ) -> Result<(), RuntimeSolveError> {
     let incoming = solver_y.to_vec();
-    runtime.refresh_slots_with_stages(
-        &runtime.algebraic_refresh,
-        &mut RefreshSlotArgs {
-            t: 0.0,
-            solver_y,
-            params: &[],
-            tol: 1.0e-10,
-            max_iters: 8,
-            certify_coordinates: false,
-        },
-        &incoming,
-    )
+    runtime
+        .scalar_execution()
+        .unwrap()
+        .refresh_slots_with_stages(
+            &runtime.scalar_execution().unwrap().scalar.algebraic_refresh,
+            &mut RefreshSlotArgs {
+                t: 0.0,
+                solver_y,
+                params: &[],
+                tol: 1.0e-10,
+                max_iters: 8,
+                certify_coordinates: false,
+            },
+            &incoming,
+        )
+}
+
+fn causal_newton_seed_jvp_rows() -> Vec<Vec<solve::LinearOp>> {
+    vec![
+        vec![
+            solve::LinearOp::LoadSeed { dst: 0, index: 0 },
+            solve::LinearOp::StoreOutput { src: 0 },
+        ],
+        vec![
+            solve::LinearOp::LoadSeed { dst: 0, index: 1 },
+            solve::LinearOp::LoadSeed { dst: 1, index: 2 },
+            solve::LinearOp::Binary {
+                dst: 2,
+                op: solve::BinaryOp::Sub,
+                lhs: 0,
+                rhs: 1,
+            },
+            solve::LinearOp::LoadSeed { dst: 3, index: 0 },
+            solve::LinearOp::LoadY { dst: 4, index: 0 },
+            solve::LinearOp::Binary {
+                dst: 5,
+                op: solve::BinaryOp::Mul,
+                lhs: 4,
+                rhs: 4,
+            },
+            solve::LinearOp::Binary {
+                dst: 6,
+                op: solve::BinaryOp::Div,
+                lhs: 3,
+                rhs: 5,
+            },
+            solve::LinearOp::Binary {
+                dst: 7,
+                op: solve::BinaryOp::Add,
+                lhs: 2,
+                rhs: 6,
+            },
+            solve::LinearOp::StoreOutput { src: 7 },
+        ],
+        vec![
+            solve::LinearOp::LoadSeed { dst: 0, index: 2 },
+            solve::LinearOp::Const { dst: 1, value: 2.0 },
+            solve::LinearOp::LoadSeed { dst: 2, index: 1 },
+            solve::LinearOp::Binary {
+                dst: 3,
+                op: solve::BinaryOp::Mul,
+                lhs: 1,
+                rhs: 2,
+            },
+            solve::LinearOp::Binary {
+                dst: 4,
+                op: solve::BinaryOp::Sub,
+                lhs: 0,
+                rhs: 3,
+            },
+            solve::LinearOp::StoreOutput { src: 4 },
+        ],
+    ]
 }
 
 #[test]
@@ -1016,11 +1250,11 @@ fn refresh_newton_keeps_finite_causal_values_from_first_sweep() {
     // non-finite even though the first ordered sweep established epsilon = 1.
     let mut model = solve::SolveModel {
         problem: solve::SolveProblem {
+            layout: crate::fixture_layout::named_y_layout(
+                rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                vec!["eps".to_string(), "x".to_string(), "y".to_string()],
+            ),
             solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["eps".to_string(), "x".to_string(), "y".to_string()],
-                    ..Default::default()
-                },
                 algebraic_scalar_count: 3,
                 ..Default::default()
             },
@@ -1033,81 +1267,36 @@ fn refresh_newton_keeps_finite_causal_values_from_first_sweep() {
                     ],
                     "causal_newton_seed.mo",
                 )),
-                implicit_row_targets: vec![
+                implicit_row_targets: (vec![
                     Some(solve::scalar_slot_y(0)),
                     Some(solve::scalar_slot_y(1)),
                     Some(solve::scalar_slot_y(2)),
-                ],
+                ])
+                .into(),
                 ..Default::default()
             },
             ..Default::default()
         },
-        initial_y: vec![0.0, 0.0, 0.0],
+        initial_y: vec![0.0, 0.0, 0.0].into(),
         ..Default::default()
     };
     set_test_implicit_jvp(
         &mut model,
-        vec![
-            vec![
-                solve::LinearOp::LoadSeed { dst: 0, index: 0 },
-                solve::LinearOp::StoreOutput { src: 0 },
-            ],
-            vec![
-                solve::LinearOp::LoadSeed { dst: 0, index: 1 },
-                solve::LinearOp::LoadSeed { dst: 1, index: 2 },
-                solve::LinearOp::Binary {
-                    dst: 2,
-                    op: solve::BinaryOp::Sub,
-                    lhs: 0,
-                    rhs: 1,
-                },
-                solve::LinearOp::LoadSeed { dst: 3, index: 0 },
-                solve::LinearOp::LoadY { dst: 4, index: 0 },
-                solve::LinearOp::Binary {
-                    dst: 5,
-                    op: solve::BinaryOp::Mul,
-                    lhs: 4,
-                    rhs: 4,
-                },
-                solve::LinearOp::Binary {
-                    dst: 6,
-                    op: solve::BinaryOp::Div,
-                    lhs: 3,
-                    rhs: 5,
-                },
-                solve::LinearOp::Binary {
-                    dst: 7,
-                    op: solve::BinaryOp::Add,
-                    lhs: 2,
-                    rhs: 6,
-                },
-                solve::LinearOp::StoreOutput { src: 7 },
-            ],
-            vec![
-                solve::LinearOp::LoadSeed { dst: 0, index: 2 },
-                solve::LinearOp::Const { dst: 1, value: 2.0 },
-                solve::LinearOp::LoadSeed { dst: 2, index: 1 },
-                solve::LinearOp::Binary {
-                    dst: 3,
-                    op: solve::BinaryOp::Mul,
-                    lhs: 1,
-                    rhs: 2,
-                },
-                solve::LinearOp::Binary {
-                    dst: 4,
-                    op: solve::BinaryOp::Sub,
-                    lhs: 0,
-                    rhs: 3,
-                },
-                solve::LinearOp::StoreOutput { src: 4 },
-            ],
-        ],
+        causal_newton_seed_jvp_rows(),
         "causal_newton_seed_jvp.mo",
     );
     set_complete_test_projection_plan(&mut model);
+    derive_test_structural_artifacts(&mut model);
     let runtime = SolveRuntime::new_fixture(&model).expect("valid runtime should prepare");
-    assert!(!runtime.algebraic_refresh.causal_solution_certified);
-    let mut solver_y = model.initial_y.clone();
+    assert!(
+        !runtime
+            .scalar_execution()
+            .unwrap()
+            .scalar
+            .algebraic_refresh
+            .causal_solution_certified
+    );
+    let mut solver_y = model.initial_y.to_vec();
     refresh_with_value_stages(&runtime, &mut solver_y)
         .expect("a numerical stage should retain its finite causal epsilon seed");
 
@@ -1618,11 +1807,14 @@ fn direct_assignment_residual_row() -> Vec<solve::LinearOp> {
 // Jacobian is d(der)/dx = d(a)/dx = k, which a states-only seed would miss
 // (it would yield 0) — so this pins the projection forward-sensitivity.
 
+mod chart_composite_fault;
 mod chart_sharing;
 mod grouped_projection_jvp;
 mod native_projection_assignments;
-mod native_projection_jvp;
+pub(super) mod native_projection_jvp;
+mod precompiled_declines;
 mod prepared_projection_jacobian;
 mod projection_output_mapping;
 mod projection_sensitivity;
+mod scalar_dispatch;
 mod slot_updates;

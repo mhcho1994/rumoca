@@ -523,6 +523,7 @@ pub fn operands(node: &RbcExprNode) -> Vec<ExprId> {
         // ordinal, not by expression id, so there is no operand to walk.
         RbcExprNode::FunctionValue { .. }
         | RbcExprNode::FunctionFoldParameter { .. }
+        | RbcExprNode::FunctionConditionalOutput { .. }
         | RbcExprNode::FunctionFoldOutput { .. } => Vec::new(),
         RbcExprNode::Unsupported { .. } => Vec::new(),
     }

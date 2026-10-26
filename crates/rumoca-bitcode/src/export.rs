@@ -714,6 +714,7 @@ fn expression_node(
         // Values inside a function body: see `function_body`.
         ref inner @ (dae::ExpressionOperation::FunctionValue { .. }
         | dae::ExpressionOperation::FunctionFoldParameter { .. }
+        | dae::ExpressionOperation::FunctionConditionalOutput { .. }
         | dae::ExpressionOperation::FunctionFoldOutput { .. }) => {
             function_body::function_node(inner)?
         }

@@ -5,7 +5,10 @@
 //! Cranelift is a programmatic JIT API rather than a textual-code target, and
 //! it must not own Modelica semantics, DAE lowering, or structural rewrites.
 
+mod checked_observation;
 mod compute_block;
+mod selected_program;
+pub use checked_observation::{CompiledEventObservation, compile_event_observation};
 mod emit;
 
 pub use compute_block::{
@@ -21,6 +24,24 @@ use std::{cell::RefCell, rc::Rc};
 pub enum CompileError {
     Backend(String),
     Input(String),
+    MessageFormatting(rumoca_eval_solve::EvalSolveError),
+    SourceOperation {
+        kind: NativeSourceFault,
+        message: String,
+        span: Option<rumoca_core::Span>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSourceFault {
+    TensorIndex,
+    LinearSolve,
+    IntegerQuotient,
+    ForeignBody,
+    RecursionDepth,
+    ScalarPayload,
+    IntegerArithmetic,
+    ExternalTable,
 }
 
 impl std::fmt::Display for CompileError {
@@ -28,6 +49,8 @@ impl std::fmt::Display for CompileError {
         match self {
             Self::Backend(msg) => write!(f, "cranelift execution error: {msg}"),
             Self::Input(msg) => write!(f, "invalid input: {msg}"),
+            Self::MessageFormatting(error) => std::fmt::Display::fmt(error, f),
+            Self::SourceOperation { message, .. } => write!(f, "invalid input: {message}"),
         }
     }
 }
@@ -35,6 +58,20 @@ impl std::fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 impl CompiledPureCallTable {
+    /// The admission of `owner`, decided once when the table was built.
+    pub fn owner_support(
+        &self,
+        owner: rumoca_ir_solve::SolvePureCallOwnerId,
+    ) -> Option<&NativeOwnerSupport> {
+        self.jit.owner_support(owner)
+    }
+
+    /// Whether the native helpers run the form `site` invokes; a form without
+    /// one runs in the typed interpreter.
+    pub fn executes(&self, site: rumoca_eval_solve::PureCallInvocation<'_>) -> bool {
+        self.jit.executes(site)
+    }
+
     /// Invoke one exact checked owner from flattened runtime storage values.
     ///
     /// `input_cells` and `output_cells` are caller-owned reusable final-ABI
@@ -73,6 +110,14 @@ impl CompiledPureCallTable {
         output_cells.clear();
         output_cells.resize(output_count, 0);
         self.jit.call_cells(site, input_cells, output_cells)?;
+        let mut checked_offset = 0;
+        for value in site.outputs() {
+            let end = checked_offset + value.value_type().scalar_count() as usize;
+            for &cell in &output_cells[checked_offset..end] {
+                checked_typed_scalar(value.value_type(), cell)?;
+            }
+            checked_offset = end;
+        }
         let mut output_offset = 0usize;
         for value in site.outputs() {
             let count = value.value_type().scalar_count() as usize;
@@ -81,7 +126,7 @@ impl CompiledPureCallTable {
                 value.value_type(),
                 &output_cells[output_offset..end],
                 &mut output[output_offset..end],
-            );
+            )?;
             output_offset = end;
         }
         Ok(())
@@ -93,39 +138,16 @@ fn encode_typed_cells(
     values: &[f64],
     cells: &mut Vec<u64>,
 ) -> Result<(), CompileError> {
-    use rumoca_ir_solve::{SolveRealFormat, SolveScalarType};
-    match value_type.element_type() {
-        SolveScalarType::Real {
-            format: SolveRealFormat::Binary32,
-            ..
-        } => cells.extend(
-            values
-                .iter()
-                .map(|value| u64::from((*value as f32).to_bits())),
-        ),
-        SolveScalarType::Real {
-            format: SolveRealFormat::Binary64,
-            ..
-        } => cells.extend(values.iter().map(|value| value.to_bits())),
-        SolveScalarType::Integer(domain) => {
-            for &value in values {
-                if !value.is_finite() || value.fract() != 0.0 {
-                    return Err(CompileError::Input(
-                        "typed Integer input is not integral".into(),
-                    ));
-                }
-                let integer = value as i64;
-                if !domain.contains(integer) || integer as f64 != value {
-                    return Err(CompileError::Input(
-                        "typed Integer input is outside its domain".into(),
-                    ));
-                }
-                cells.push(integer as u64);
-            }
-        }
-        SolveScalarType::Boolean => {
-            cells.extend(values.iter().map(|value| u64::from(*value != 0.0)));
-        }
+    use rumoca_ir_solve::SolveValueKind;
+    for &value in values {
+        let value = rumoca_eval_solve::typed_kind_from_scalar(value, value_type)
+            .map_err(|error| CompileError::Input(error.to_string()))?;
+        cells.push(match value {
+            SolveValueKind::Real32(bits) => u64::from(bits),
+            SolveValueKind::Real64(bits) => bits,
+            SolveValueKind::Integer(integer) => integer as u64,
+            SolveValueKind::Boolean(value) => u64::from(value),
+        });
     }
     Ok(())
 }
@@ -134,22 +156,32 @@ fn decode_typed_cells(
     value_type: &rumoca_ir_solve::SolveValueType,
     cells: &[u64],
     values: &mut [f64],
-) {
-    use rumoca_ir_solve::{SolveRealFormat, SolveScalarType};
+) -> Result<(), CompileError> {
     for (value, cell) in values.iter_mut().zip(cells) {
-        *value = match value_type.element_type() {
-            SolveScalarType::Real {
-                format: SolveRealFormat::Binary32,
-                ..
-            } => f32::from_bits(*cell as u32) as f64,
-            SolveScalarType::Real {
-                format: SolveRealFormat::Binary64,
-                ..
-            } => f64::from_bits(*cell),
-            SolveScalarType::Integer(_) => *cell as i64 as f64,
-            SolveScalarType::Boolean => f64::from(*cell != 0),
-        };
+        *value = checked_typed_scalar(value_type, *cell)?;
     }
+    Ok(())
+}
+
+fn checked_typed_scalar(
+    value_type: &rumoca_ir_solve::SolveValueType,
+    cell: u64,
+) -> Result<f64, CompileError> {
+    use rumoca_ir_solve::{SolveRealFormat, SolveScalarType, SolveValueKind};
+    let value = match value_type.element_type() {
+        SolveScalarType::Real {
+            format: SolveRealFormat::Binary32,
+            ..
+        } => SolveValueKind::Real32(cell as u32),
+        SolveScalarType::Real {
+            format: SolveRealFormat::Binary64,
+            ..
+        } => SolveValueKind::Real64(cell),
+        SolveScalarType::Integer(_) => SolveValueKind::Integer(cell as i64),
+        SolveScalarType::Boolean => SolveValueKind::Boolean(cell != 0),
+    };
+    rumoca_eval_solve::checked_scalar_payload_value(value)
+        .map_err(|error| CompileError::Input(error.to_string()))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -179,6 +211,7 @@ pub struct CompiledJacobianV {
 }
 
 pub use emit::projection_jacobian::CompiledProjectionJacobian;
+pub use emit::typed_program::{NativeFormDecline, NativeFormSupport, NativeOwnerSupport};
 
 impl CompiledJacobianV {
     /// Retain one exact colored application of this compiled source owner.
@@ -300,9 +333,12 @@ impl CompiledJacobianV {
 }
 
 pub struct CompiledExpressionRows {
-    jit: emit::CompiledResidualRows,
+    jit: Rc<emit::CompiledResidualRows>,
+    source: ScalarProgramBlock,
     output_placement: Option<OutputPlacement>,
 }
+
+pub use selected_program::{CompiledExpressionProgram, CompiledJacobianProgram};
 
 struct OutputPlacement {
     indices: Box<[usize]>,
@@ -481,7 +517,8 @@ pub fn compile_expression_scalar_program_block(
 ) -> Result<CompiledExpressionRows, CompileError> {
     let jit = emit::compile_residual_rows(rows.programs())?;
     Ok(CompiledExpressionRows {
-        jit,
+        jit: Rc::new(jit),
+        source: rows.clone(),
         output_placement: OutputPlacement::for_block(rows),
     })
 }
@@ -498,7 +535,8 @@ pub fn compile_selectable_expression_scalar_program_block(
         pure_calls.map(|table| table.jit.clone()),
     )?;
     Ok(CompiledExpressionRows {
-        jit,
+        jit: Rc::new(jit),
+        source: rows.clone(),
         output_placement: OutputPlacement::for_block(rows),
     })
 }
@@ -509,7 +547,8 @@ pub fn compile_expression_scalar_program_block_with_pure_calls(
 ) -> Result<CompiledExpressionRows, CompileError> {
     let jit = emit::compile_residual_rows_with_pure_calls(rows.programs(), pure_calls.jit.clone())?;
     Ok(CompiledExpressionRows {
-        jit,
+        jit: Rc::new(jit),
+        source: rows.clone(),
         output_placement: OutputPlacement::for_block(rows),
     })
 }
@@ -572,9 +611,14 @@ mod tangent_lane_refusal_tests;
 
 #[cfg(test)]
 mod tests {
+    mod assertions;
+    mod observation;
+    mod owner_admission;
     mod projection_jacobian;
     mod recursive_groups;
     mod register_constants;
+    mod scalar_integer_payload;
+    mod selected_faults;
     mod selected_jvp;
     mod selected_residual;
 
@@ -1265,3 +1309,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod native_admission_tests;

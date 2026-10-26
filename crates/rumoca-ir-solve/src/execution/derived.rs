@@ -3,7 +3,7 @@
 //! Not part of the wire. v1 serialized this beside the authored program,
 //! which put one lowering's output for one backend into a public artifact;
 //! v2 rebuilds it at load from the equation IR and the recorded profile
-//! (`rumoca_phase_solve::execution::export`). It lives in its own module so
+//! (`rumoca_eval_solve::execution::numerical::export`). It lives in its own module so
 //! that `execution.rs` contains wire types only, and so the §9 grep for
 //! `observations` in the wire module finds nothing.
 //!

@@ -1,3 +1,6 @@
+mod jax_lazy_conditionals;
+mod selected_regions;
+
 use rumoca::Compiler;
 use rumoca_compile::codegen::targets::RenderedTargetFile;
 use std::fs;
@@ -16,8 +19,16 @@ fn checked_decay() -> rumoca::CompilationResult {
 
 fn rendered_target(target: &str) -> (tempfile::TempDir, Vec<RenderedTargetFile>) {
     let result = checked_decay();
-    let files = rumoca::render_target_files(&result, "Decay", target, None)
-        .expect("checked target renders");
+    rendered_model_target(&result, "Decay", target)
+}
+
+fn rendered_model_target(
+    result: &rumoca::CompilationResult,
+    model: &str,
+    target: &str,
+) -> (tempfile::TempDir, Vec<RenderedTargetFile>) {
+    let files =
+        rumoca::render_target_files(result, model, target, None).expect("checked target renders");
     let directory = tempfile::tempdir().expect("temporary target directory");
     for file in &files {
         let path = directory.path().join(&file.path);
@@ -133,6 +144,8 @@ end ExactAlgebraic;
         assert!(assign_c.contains("if (!isfinite(m->y[1]))"));
     }
 
+    // The scalar ODE right-hand-side targets consume the same schedule: they
+    // assign every algebraic slot in-function before the derivative rows.
     for target in [
         "c-ode",
         "rust-ode",
@@ -140,17 +153,392 @@ end ExactAlgebraic;
         "casadi-ode",
         "jax-ode",
         "cuda-ode",
-        "wgsl-ode",
     ] {
-        let error = rumoca::render_target_files(&compiled, "ExactAlgebraic", target, None)
-            .expect_err("a target without an exact-assignment consumer must fail closed");
+        let files = rumoca::render_target_files(&compiled, "ExactAlgebraic", target, None)
+            .unwrap_or_else(|error| panic!("{target} consumes the exact schedule: {error:#}"));
         assert!(
-            error
-                .to_string()
-                .contains("unsupported-feature:residual_equations"),
-            "target {target} returned the wrong diagnostic: {error:#}"
+            files
+                .iter()
+                .any(|file| file.content.contains("Algebraic refresh")),
+            "{target} must emit the in-function algebraic refresh"
         );
     }
+    execute_c_ode_algebraic_refresh(&compiled);
+
+    // wgsl-ode renders rows as expressions over a read-only `y` buffer and has
+    // no exact-assignment consumer, so it still fails closed.
+    let error = rumoca::render_target_files(&compiled, "ExactAlgebraic", "wgsl-ode", None)
+        .expect_err("a target without an exact-assignment consumer must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported-feature:residual_equations"),
+        "wgsl-ode returned the wrong diagnostic: {error:#}"
+    );
+}
+
+/// Compile and call the emitted c-ode RHS with a deliberately stale algebraic
+/// slot: `y = 2*x` must be recomputed in-function, so `der(x) = -y = -3` at
+/// `x = 1.5` whatever the caller left in `y[1]`.
+fn execute_c_ode_algebraic_refresh(compiled: &rumoca::CompilationResult) {
+    let files = rumoca::render_target_files(compiled, "ExactAlgebraic", "c-ode", None)
+        .expect("c-ode renders the exact algebraic model");
+    let header = files
+        .iter()
+        .find(|file| file.path == "ExactAlgebraic_ode.h")
+        .expect("c-ode emits its header")
+        .content
+        .clone();
+    let source = files
+        .iter()
+        .find(|file| file.path == "ExactAlgebraic_ode.c")
+        .expect("c-ode emits its source")
+        .content
+        .replace("#include \"ExactAlgebraic_ode.h\"", "");
+    let driver = format!(
+        r#"{header}
+{source}
+int main(void) {{
+    double y[RUMOCA_EXACTALGEBRAIC_Y_LEN] = {{0}};
+    double p[RUMOCA_EXACTALGEBRAIC_P_LEN + 1] = {{0}};
+    double out[RUMOCA_EXACTALGEBRAIC_DERIVATIVE_LEN] = {{0}};
+    y[0] = 1.5;
+    y[1] = 999.0;
+    if (ExactAlgebraic_derivative_rhs(0.0, y, p, out) != 0) return 1;
+    return fabs(out[0] + 3.0) < 1e-12 ? 0 : 2;
+}}
+"#
+    );
+    compile_and_run_c(&driver, "c-ode exact algebraic refresh");
+}
+
+/// `der(x) = -y` with the exact algebraic assignment `y = 2*x`.
+fn exact_algebraic() -> rumoca::CompilationResult {
+    Compiler::new()
+        .model("ExactAlgebraic")
+        .compile_str(
+            "model ExactAlgebraic Real x(start = 1); Real y(start = 2); \
+             equation der(x) = -y; 0 = y - 2 * x; end ExactAlgebraic;",
+            "ExactAlgebraic.mo",
+        )
+        .expect("the compiler accepts an exactly isolable algebraic model")
+}
+
+/// The fixed Rust ODE target refreshes algebraic slots for the host and names
+/// every slot, so a host reads `y = 2*x = 3` at `x = 1.5` by name.
+#[test]
+fn rust_fixed_ode_refreshes_algebraics_into_named_slots() {
+    let (directory, files) =
+        rendered_model_target(&exact_algebraic(), "ExactAlgebraic", "rust-fixed-ode");
+    let module = files
+        .iter()
+        .find(|file| file.path.ends_with(".rs"))
+        .expect("fixed Rust ODE target emits a Rust module");
+    fs::copy(
+        directory.path().join(&module.path),
+        directory.path().join("generated.rs"),
+    )
+    .expect("copy fixed Rust ODE module beside its normal module root");
+    let harness = directory.path().join("main.rs");
+    fs::write(
+        &harness,
+        r#"mod generated;
+
+fn main() {
+    let x = generated::slot(generated::Y_SLOTS, "x").expect("state slot is named");
+    let y_slot = generated::slot(generated::Y_SLOTS, "y").expect("algebraic slot is named");
+    assert_eq!(generated::slot(generated::Y_SLOTS, "missing"), None);
+    assert_eq!(generated::slot(generated::P_SLOTS, "x"), None);
+    let mut y = [0.0; generated::Y_LEN];
+    y[x] = 1.5;
+    y[y_slot] = 999.0;
+    generated::refresh_algebraics(0.0, &mut y, &generated::DEFAULT_P).unwrap();
+    assert!((y[y_slot] - 3.0).abs() < 1e-12);
+    assert_eq!(y[x], 1.5);
+}
+"#,
+    )
+    .expect("write fixed Rust ODE refresh harness");
+    let executable = directory.path().join("rust-fixed-ode-refresh");
+    run_checked(
+        Command::new("rustc")
+            .args(["--edition=2024", "-Dwarnings"])
+            .arg(&harness)
+            .arg("-o")
+            .arg(&executable)
+            .current_dir(directory.path()),
+        "compile fixed Rust ODE refresh harness",
+    );
+    run_checked(
+        &mut Command::new(executable),
+        "execute fixed Rust ODE refresh harness",
+    );
+}
+
+/// The c-ode target refreshes algebraic slots for the host and resolves slot
+/// names, so a host reads `y = 2*x = 3` at `x = 1.5` by name.
+#[test]
+fn c_ode_refreshes_algebraics_into_named_slots() {
+    let files = rumoca::render_target_files(&exact_algebraic(), "ExactAlgebraic", "c-ode", None)
+        .expect("c-ode renders the exact algebraic model");
+    let header = source_unit(&files, "ExactAlgebraic_ode.h");
+    let source = source_unit(&files, "ExactAlgebraic_ode.c")
+        .replace("#include \"ExactAlgebraic_ode.h\"", "");
+    let driver = format!(
+        r#"{header}
+{source}
+int main(void) {{
+    double y[RUMOCA_EXACTALGEBRAIC_Y_LEN] = {{0}};
+    double p[RUMOCA_EXACTALGEBRAIC_P_LEN + 1] = {{0}};
+    int x = ExactAlgebraic_y_slot("x");
+    int y_slot = ExactAlgebraic_y_slot("y");
+    if (x < 0 || y_slot < 0) return 1;
+    if (ExactAlgebraic_y_slot("missing") != -1 || ExactAlgebraic_p_slot("x") != -1) return 2;
+    y[x] = 1.5;
+    y[y_slot] = 999.0;
+    if (ExactAlgebraic_refresh_algebraics(0.0, y, p) != 0) return 3;
+    return fabs(y[y_slot] - 3.0) < 1e-12 && y[x] == 1.5 ? 0 : 4;
+}}
+"#
+    );
+    compile_and_run_c(&driver, "c-ode algebraic refresh into named slots");
+}
+
+/// `der(x) = -b` through the chain `m = a*x`, `b = m + 1` with a tunable `a`.
+fn chained_tunable_algebraic() -> rumoca::CompilationResult {
+    Compiler::new()
+        .model("ChainedTunable")
+        .compile_str(
+            "model ChainedTunable parameter Real a = 2; Real x(start = 1); \
+             Real m(start = 2); output Real b(start = 3); \
+             equation der(x) = -b; 0 = m - a * x; 0 = b - (m + 1); end ChainedTunable;",
+            "ChainedTunable.mo",
+        )
+        .expect("the compiler accepts a chained algebraic model with a tunable coefficient")
+}
+
+/// Writes the fixed Rust ODE module beside `main.rs` and runs `main_body`
+/// against it as `mod generated`.
+fn run_fixed_rust_ode_harness(
+    result: &rumoca::CompilationResult,
+    model: &str,
+    main_body: &str,
+    label: &str,
+) {
+    let (directory, files) = rendered_model_target(result, model, "rust-fixed-ode");
+    let module = files
+        .iter()
+        .find(|file| file.path.ends_with(".rs"))
+        .expect("fixed Rust ODE target emits a Rust module");
+    fs::copy(
+        directory.path().join(&module.path),
+        directory.path().join("generated.rs"),
+    )
+    .expect("copy fixed Rust ODE module beside its normal module root");
+    let harness = directory.path().join("main.rs");
+    fs::write(
+        &harness,
+        format!("mod generated;\n\nfn main() {{\n{main_body}\n}}\n"),
+    )
+    .expect("write fixed Rust ODE harness");
+    let executable = directory.path().join("rust-fixed-ode-harness");
+    run_checked(
+        Command::new("rustc")
+            .args(["--edition=2024", "-Dwarnings"])
+            .arg(&harness)
+            .arg("-o")
+            .arg(&executable)
+            .current_dir(directory.path()),
+        &format!("compile {label}"),
+    );
+    run_checked(&mut Command::new(executable), &format!("execute {label}"));
+}
+
+/// A chained algebraic refresh runs in dependency order, reads the tunable
+/// parameter the host passes in `p`, and exposes the output by name.
+#[test]
+fn rust_fixed_ode_refresh_follows_chain_and_tunable_parameter() {
+    run_fixed_rust_ode_harness(
+        &chained_tunable_algebraic(),
+        "ChainedTunable",
+        r#"
+    let x = generated::slot(generated::Y_SLOTS, "x").expect("state slot is named");
+    let m = generated::slot(generated::Y_SLOTS, "m").expect("algebraic slot is named");
+    let b = generated::slot(generated::Y_SLOTS, "b").expect("output slot is named");
+    let a = generated::slot(generated::P_SLOTS, "a").expect("parameter slot is named");
+    assert_eq!(generated::slot(generated::Y_SLOTS, "a"), None);
+    let mut p = generated::DEFAULT_P;
+    let mut y = [0.0; generated::Y_LEN];
+    y[x] = 1.5;
+    generated::refresh_algebraics(0.0, &mut y, &p).unwrap();
+    assert!((y[m] - 3.0).abs() < 1e-12 && (y[b] - 4.0).abs() < 1e-12);
+    p[a] = 4.0;
+    generated::refresh_algebraics(0.0, &mut y, &p).unwrap();
+    assert!((y[m] - 6.0).abs() < 1e-12 && (y[b] - 7.0).abs() < 1e-12);
+    assert_eq!(y[x], 1.5);
+"#,
+        "fixed Rust ODE chained refresh harness",
+    );
+}
+
+/// Every slot name maps to a distinct in-bounds slot, so a host never aliases
+/// two variables or indexes past `State`.
+#[test]
+fn rust_fixed_ode_slot_tables_are_unique_and_in_bounds() {
+    run_fixed_rust_ode_harness(
+        &chained_tunable_algebraic(),
+        "ChainedTunable",
+        r#"
+    for (table, len) in [
+        (generated::Y_SLOTS, generated::Y_LEN),
+        (generated::P_SLOTS, generated::P_LEN),
+    ] {
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, slot) in table {
+            assert!(*slot < len, "{name} slot {slot} is outside 0..{len}");
+            assert!(seen.insert(*slot), "{name} aliases slot {slot}");
+        }
+    }
+    assert_eq!(generated::Y_SLOTS.len(), generated::Y_LEN);
+"#,
+        "fixed Rust ODE slot table harness",
+    );
+}
+
+/// A model with no algebraics refreshes as a no-op and names only its state.
+#[test]
+fn rust_fixed_ode_refresh_is_a_no_op_without_algebraics() {
+    run_fixed_rust_ode_harness(
+        &checked_decay(),
+        "Decay",
+        r#"
+    assert_eq!(generated::Y_SLOTS, &[("x", 0)]);
+    let mut y = [1.25; generated::Y_LEN];
+    generated::refresh_algebraics(0.0, &mut y, &generated::DEFAULT_P).unwrap();
+    assert_eq!(y, [1.25; generated::Y_LEN]);
+"#,
+        "fixed Rust ODE no-algebraic refresh harness",
+    );
+}
+
+/// The c-ode refresh follows the same chain, honours a host-supplied
+/// parameter, and names the output; unknown names resolve to -1.
+#[test]
+fn c_ode_refresh_follows_chain_and_tunable_parameter() {
+    let files = rumoca::render_target_files(
+        &chained_tunable_algebraic(),
+        "ChainedTunable",
+        "c-ode",
+        None,
+    )
+    .expect("c-ode renders the chained algebraic model");
+    let header = source_unit(&files, "ChainedTunable_ode.h");
+    let source = source_unit(&files, "ChainedTunable_ode.c")
+        .replace("#include \"ChainedTunable_ode.h\"", "");
+    let driver = format!(
+        r#"{header}
+{source}
+int main(void) {{
+    double y[RUMOCA_CHAINEDTUNABLE_Y_LEN] = {{0}};
+    double p[RUMOCA_CHAINEDTUNABLE_P_LEN + 1] = {{0}};
+    int x = ChainedTunable_y_slot("x");
+    int m = ChainedTunable_y_slot("m");
+    int b = ChainedTunable_y_slot("b");
+    int a = ChainedTunable_p_slot("a");
+    if (x < 0 || m < 0 || b < 0 || a < 0) return 1;
+    if (ChainedTunable_y_slot("a") != -1 || ChainedTunable_p_slot("b") != -1) return 2;
+    y[x] = 1.5;
+    p[a] = 2.0;
+    if (ChainedTunable_refresh_algebraics(0.0, y, p) != 0) return 3;
+    if (fabs(y[m] - 3.0) > 1e-12 || fabs(y[b] - 4.0) > 1e-12) return 4;
+    p[a] = 4.0;
+    if (ChainedTunable_refresh_algebraics(0.0, y, p) != 0) return 5;
+    if (fabs(y[m] - 6.0) > 1e-12 || fabs(y[b] - 7.0) > 1e-12) return 6;
+    return y[x] == 1.5 ? 0 : 7;
+}}
+"#
+    );
+    compile_and_run_c(&driver, "c-ode chained algebraic refresh");
+}
+
+/// A model with no algebraics refreshes as a no-op and names only its state.
+#[test]
+fn c_ode_refresh_is_a_no_op_without_algebraics() {
+    let files = rumoca::render_target_files(&checked_decay(), "Decay", "c-ode", None)
+        .expect("c-ode renders the decay model");
+    let header = source_unit(&files, "Decay_ode.h");
+    let source = source_unit(&files, "Decay_ode.c").replace("#include \"Decay_ode.h\"", "");
+    let driver = format!(
+        r#"{header}
+{source}
+int main(void) {{
+    double y[RUMOCA_DECAY_Y_LEN] = {{1.25}};
+    double p[RUMOCA_DECAY_P_LEN + 1] = {{0}};
+    if (Decay_y_slot("x") != 0 || Decay_y_slot("y") != -1) return 1;
+    if (Decay_refresh_algebraics(0.0, y, p) != 0) return 2;
+    return y[0] == 1.25 ? 0 : 3;
+}}
+"#
+    );
+    compile_and_run_c(&driver, "c-ode no-algebraic refresh");
+}
+
+/// Solve lowering compacts an algebraic `for` family into one pure call
+/// (SPEC_0043 §6c). The scalar ODE targets inline its body, so the family
+/// stays renderable; c-ode evaluates it to the reference values.
+#[test]
+fn ode_targets_inline_a_compacted_algebraic_family_call() {
+    let compiled = Compiler::new()
+        .model("FamilyCall")
+        .compile_str(
+            r#"
+model FamilyCall
+  parameter Real b[3] = {0.1, 0.2, 0.3};
+  Real x[3](start = {1, 2, 3}, each fixed = true);
+  Real a[3];
+equation
+  for i in 1:3 loop
+    a[i] = tanh(x[i] + b[i]);
+  end for;
+  der(x) = -a;
+end FamilyCall;
+"#,
+            "FamilyCall.mo",
+        )
+        .expect("the compiler accepts an algebraic family");
+    for target in [
+        "c-ode",
+        "rust-ode",
+        "rust-fixed-ode",
+        "casadi-ode",
+        "jax-ode",
+        "cuda-ode",
+    ] {
+        rumoca::render_target_files(&compiled, "FamilyCall", target, None)
+            .unwrap_or_else(|error| panic!("{target} inlines the family call: {error:#}"));
+    }
+    let files = rumoca::render_target_files(&compiled, "FamilyCall", "c-ode", None)
+        .expect("c-ode renders the family call");
+    let header = source_unit(&files, "FamilyCall_ode.h");
+    let source =
+        source_unit(&files, "FamilyCall_ode.c").replace("#include \"FamilyCall_ode.h\"", "");
+    let driver = format!(
+        r#"{header}
+{source}
+int main(void) {{
+    double y[RUMOCA_FAMILYCALL_Y_LEN] = {{0}};
+    double out[RUMOCA_FAMILYCALL_DERIVATIVE_LEN] = {{0}};
+    const double b[3] = {{0.1, 0.2, 0.3}};
+    for (int i = 0; i < 3; ++i) y[i] = 1.0 + i;
+    if (FamilyCall_derivative_rhs(0.0, y, FamilyCall_default_p, out) != 0) return 1;
+    for (int i = 0; i < 3; ++i) {{
+        if (fabs(out[i] + tanh(y[i] + b[i])) > 1e-14) return 2;
+    }}
+    return 0;
+}}
+"#
+    );
+    compile_and_run_c(&driver, "c-ode inlined family call");
 }
 
 #[test]
@@ -199,9 +587,7 @@ end FinalStepAlgebraic;
 "#,
     );
     execute_emitted_fmi3_kernel(
-        (&rendered.model_c, &rendered.assign_c),
-        2,
-        1,
+        &rendered,
         r#"
     model.y[0] = 1.0; model.y[1] = 2.0;
     model.state = MODEL_STEP; model.type = INTERFACE_CS;
@@ -234,9 +620,7 @@ end FiniteTimeBlowUp;
 "#,
     );
     execute_emitted_fmi3_kernel(
-        (&rendered.model_c, &rendered.assign_c),
-        2,
-        1,
+        &rendered,
         r#"
     model.y[0] = 1.0; model.y[1] = 1.0;
     model.state = MODEL_STEP; model.type = INTERFACE_CS;
@@ -297,7 +681,7 @@ end NonfiniteFinalAlgebraic;
     if (fabs(last_time - 0.1) > 1.0e-12) return 12;
 "#
     );
-    execute_emitted_fmi3_kernel((&rendered.model_c, &rendered.assign_c), 2, 1, &body);
+    execute_emitted_fmi3_kernel(&rendered, &body);
 }
 
 #[test]
@@ -317,9 +701,7 @@ end ChainedSingletons;
 "#,
     );
     execute_emitted_fmi3_kernel(
-        (&rendered.model_c, &rendered.assign_c),
-        3,
-        1,
+        &rendered,
         r#"
     model.y[0] = 4.0; model.y[1] = 6.0; model.y[2] = 7.0;
     if (evaluate_derivatives(&model) != fmi3OK) return 1;
@@ -332,6 +714,7 @@ end ChainedSingletons;
 
 struct RenderedFmi3 {
     model_c: String,
+    model_h: String,
     assign_c: String,
     model_description: String,
 }
@@ -369,6 +752,7 @@ fn render_fmi3_model(model: &str, source: &str) -> RenderedFmi3 {
     };
     RenderedFmi3 {
         model_c: content("sources/model.c"),
+        model_h: content("sources/model.h"),
         assign_c: content("sources/rmc_assign.c").replace("#include \"model.h\"", ""),
         model_description: files
             .iter()
@@ -379,12 +763,12 @@ fn render_fmi3_model(model: &str, source: &str) -> RenderedFmi3 {
     }
 }
 
-fn execute_emitted_fmi3_kernel(
-    (model_c, assign_c): (&str, &str),
-    y_len: usize,
-    state_len: usize,
-    body: &str,
-) {
+fn execute_emitted_fmi3_kernel(rendered: &RenderedFmi3, body: &str) {
+    let model_c = &rendered.model_c;
+    let assign_c = &rendered.assign_c;
+    // Keep the emitted layout and observer declarations; this isolated driver
+    // supplies the FMI ABI types instead of linking the vendor entry points.
+    let model_h = rendered.model_h.replace("#include \"fmi3Functions.h\"", "");
     let kernel_start = model_c
         .find("#include \"model.h\"")
         .map(|offset| offset + "#include \"model.h\"".len())
@@ -417,8 +801,9 @@ fn execute_emitted_fmi3_kernel(
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#define FMI_EXPORT
+#define FMI3_Export
 typedef void* fmi3Instance;
+typedef void* fmi3InstanceEnvironment;
 typedef double fmi3Float64;
 typedef int32_t fmi3Int32;
 typedef int64_t fmi3Int64;
@@ -428,13 +813,7 @@ typedef unsigned int fmi3ValueReference;
 typedef enum {{ fmi3OK = 0, fmi3Discard = 2, fmi3Error = 3 }} fmi3Status;
 typedef void (*fmi3LogMessageCallback)(void*, fmi3Status, fmi3String, fmi3String);
 enum {{ fmi3False = 0, fmi3True = 1 }};
-enum ModelState {{ MODEL_INSTANTIATED, MODEL_INITIALIZATION, MODEL_EVENT, MODEL_CONTINUOUS, MODEL_STEP, MODEL_TERMINATED }};
-enum InterfaceType {{ INTERFACE_ME, INTERFACE_CS }};
-#define Y_LEN {y_len}
-#define P_LEN 1
-#define STATE_LEN {state_len}
-#define RMC_API
-typedef struct {{ bool assertions_initialized; bool assertion_failed; bool parameters_dirty; void* environment; fmi3LogMessageCallback logger; double time; double tolerance; double rmc_cs_substep; double y[Y_LEN]; double p[P_LEN]; double derivative[STATE_LEN]; enum ModelState state; enum InterfaceType type; }} ModelInstance;
+{model_h}
 {assign_c}
 {kernel}
 {value_helpers}
@@ -576,13 +955,9 @@ fn dae_template_context_exposes_checked_semantic_schema() {
         .render_template_str("{{ dae.schema.name }}:{{ dae.schema.version }}")
         .expect("checked DAE template renders");
 
-    // Pinned to `dae_backend::TEMPLATE_SCHEMA_VERSION`: every change to the
-    // projected template shape bumps that constant, and this literal must be
-    // bumped with it so template consumers see the break loudly. Version 6
-    // adds checked initialization parameter definitions on top of version 5's
-    // checked function owners, checked discrete ownership, and proved-projection
-    // gate.
-    assert_eq!(rendered, "rumoca.checked-dae-template:6");
+    // Pin the private `dae_backend::TEMPLATE_SCHEMA_VERSION` so a changed
+    // semantic projection requires an explicit review of this consumer.
+    assert_eq!(rendered, "rumoca.checked-dae-template:9");
 }
 
 #[test]
@@ -831,12 +1206,31 @@ assert float(derivative(ca.DM([1.0]))) == -2.0
 #[test]
 fn jax_ode_target_imports_jits_evaluates_and_differentiates() {
     let (directory, files) = rendered_target("jax-ode");
+    assert_jax_decay(directory.path(), &files);
+}
+
+#[test]
+fn jax_ode_target_handles_reported_explicit_algebraic_assignments() {
+    let compiled = Compiler::new()
+        .model("B")
+        .compile_str(
+            include_str!(
+                "../../../rumoca-compile/src/session/tests/fixtures/reported_bugs/issue_418.mo"
+            ),
+            "B.mo",
+        )
+        .expect("the original issue 418 model compiles");
+    let (directory, files) = rendered_model_target(&compiled, "B", "jax-ode");
+    assert_jax_decay(directory.path(), &files);
+}
+
+fn assert_jax_decay(directory: &Path, files: &[RenderedTargetFile]) {
     let module = files
         .iter()
         .find(|file| file.path.ends_with(".py"))
         .expect("JAX target emits Python");
     run_python(
-        &directory.path().join(&module.path),
+        &directory.join(&module.path),
         r#"
 import importlib.util, sys
 import jax

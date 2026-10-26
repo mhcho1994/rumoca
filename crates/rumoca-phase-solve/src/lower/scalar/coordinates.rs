@@ -19,6 +19,26 @@ struct CoordinateExtent {
     input_start: usize,
 }
 
+/// Whether binary64 holds `value` exactly.
+pub(in crate::lower) fn integer_is_exact_binary64(value: i64) -> bool {
+    value.unsigned_abs() <= 1 << 53
+}
+
+/// The Real value of an Integer, refused when binary64 cannot hold it exactly:
+/// scalar row programs store every coordinate as binary64, so an Integer
+/// beyond 2^53 would otherwise round silently.
+pub(super) fn integer_as_real(value: i64, span: Span) -> Result<f64, LowerError> {
+    if !integer_is_exact_binary64(value) {
+        return Err(LowerError::unsupported(
+            format!(
+                "Integer value {value} is not exactly representable in binary64 scalar row storage"
+            ),
+            span,
+        ));
+    }
+    Ok(value as f64)
+}
+
 fn tensor_coordinate_index(base: usize, scalar: usize, span: Span) -> Result<usize, LowerError> {
     base.checked_add(scalar)
         .ok_or_else(|| LowerError::contract("tensor coordinate storage extent overflow", span))
@@ -31,6 +51,9 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         coordinate: dae::CoordinateView<'dae>,
         span: Span,
     ) -> Result<Option<solve::Reg>, LowerError> {
+        if let Some(value) = self.pack_current_definition(coordinate, span)? {
+            return Ok(Some(value));
+        }
         if matches!(coordinate, dae::CoordinateView::Derivative(_)) {
             return Ok(None);
         }
@@ -99,14 +122,14 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             span,
         )?;
         let dst_start = self.register_range(count, span)?;
-        self.ops.push(solve::LinearOp::TensorLoad {
+        self.emit(solve::LinearOp::TensorLoad {
             dst_start,
             input,
             input_start,
             count,
             seed_start: None,
             lanes: 1,
-        });
+        })?;
         self.tensor_load_cache.insert(key, (dst_start, count));
         Ok(Some(dst_start))
     }
@@ -187,7 +210,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let value = start
             .checked_add(scaled)
             .ok_or_else(|| LowerError::contract("range scalar addition overflow", span))?;
-        self.constant(value as f64, span)
+        self.constant(integer_as_real(value, span)?, span)
     }
 
     pub(super) fn literal(
@@ -197,8 +220,9 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     ) -> Result<solve::Reg, LowerError> {
         let value = match value {
             dae::DaeLiteral::Real(value) => *value,
-            dae::DaeLiteral::Integer(value) => *value as f64,
-            dae::DaeLiteral::Enumeration(value) => *value as f64,
+            dae::DaeLiteral::Integer(value) | dae::DaeLiteral::Enumeration(value) => {
+                integer_as_real(*value, span)?
+            }
             dae::DaeLiteral::Boolean(value) => f64::from(*value),
             dae::DaeLiteral::String(_) => {
                 return Err(LowerError::unsupported(
@@ -208,6 +232,109 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             }
         };
         self.constant(value, span)
+    }
+
+    /// Bind the exact issued domain without entering its point values in the
+    /// constant-folding ledger. Selected arms capture these same registers.
+    pub(in crate::lower) fn bind_symbolic_domain(
+        &mut self,
+        id: dae::DomainId<'dae>,
+        point: Option<&[i64]>,
+        span: Span,
+    ) -> Result<Vec<solve::AffineStencilConstStride>, LowerError> {
+        let domain = self
+            .view
+            .domain(id)
+            .ok_or_else(|| LowerError::contract("symbolic domain is not issued by this DAE", span))?
+            .structured()
+            .clone();
+        if let Some(point) = point {
+            let ordinal = domain
+                .ordinal_of(point)
+                .map_err(|error| LowerError::contract(error.to_string(), span))?;
+            if ordinal.is_none() {
+                return Err(LowerError::contract(
+                    "symbolic point is outside its domain",
+                    span,
+                ));
+            }
+        }
+        let extents = domain
+            .extents()
+            .map_err(|error| LowerError::contract(error.to_string(), span))?;
+        let mut values = Vec::with_capacity(domain.binders.len());
+        let mut strides = Vec::with_capacity(domain.binders.len());
+        for (dimension, (binder, count)) in domain.binders.iter().zip(extents).enumerate() {
+            prove_exact_index_progression(binder, count, span)?;
+            let dst = self.register(span)?;
+            let position = self.ops.len();
+            self.ops.push(solve::LinearOp::Const {
+                dst,
+                value: point.map_or(binder.lower, |values| values[dimension]) as f64,
+            });
+            values.push(dst);
+            strides.push(solve::AffineStencilConstStride {
+                op_position: position,
+                terms: vec![solve::AffineStencilConstStrideTerm {
+                    dimension,
+                    stride: binder.step as f64,
+                }],
+            });
+        }
+        self.symbolic_domain_points.push((id, values));
+        Ok(strides)
+    }
+
+    pub(super) fn domain_coordinate(
+        &mut self,
+        id: dae::DomainId<'dae>,
+        ordinal: usize,
+        span: Span,
+    ) -> Result<solve::Reg, LowerError> {
+        if let Some((_, values)) = self
+            .symbolic_domain_points
+            .iter()
+            .rev()
+            .find(|(domain, _)| *domain == id)
+        {
+            return values.get(ordinal).copied().ok_or_else(|| {
+                LowerError::contract("symbolic binder ordinal is out of range", span)
+            });
+        }
+        if let Some(source) = self
+            .deferred_fold_captures
+            .as_ref()
+            .and_then(|deferred| {
+                deferred
+                    .symbolic_domain_points
+                    .iter()
+                    .rev()
+                    .find(|(domain, _)| *domain == id)
+            })
+            .and_then(|(_, values)| values.get(ordinal))
+            .copied()
+        {
+            return self.deferred_fold_capture(source, span);
+        }
+        if let Some(register) = self.region_symbolic_point(id, ordinal, span)? {
+            return Ok(register);
+        }
+        let Some((_, values)) = self
+            .domain_points
+            .iter()
+            .rev()
+            .find(|(domain, _)| *domain == id)
+        else {
+            return Err(LowerError::non_computable(
+                "domain binder escaped its structured owner",
+                span,
+            ));
+        };
+        let value = values
+            .get(ordinal)
+            .copied()
+            .ok_or_else(|| LowerError::contract("binder ordinal is out of range", span))?;
+        self.constant(integer_as_real(value, span)?, span)
     }
 
     // SPEC_0021: Exception - exhaustive coordinate dispatch, including scoped binders.
@@ -225,59 +352,11 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             return self.condition(condition);
         }
         if let dae::CoordinateView::Binder(binder) = coordinate {
-            if let Some((_, values)) = self
-                .symbolic_domain_points
-                .iter()
-                .rev()
-                .find(|(domain, _)| *domain == binder.domain())
-            {
-                return values
-                    .get(binder.ordinal() as usize)
-                    .copied()
-                    .ok_or_else(|| {
-                        LowerError::contract("symbolic binder ordinal is out of range", span)
-                    });
-            }
-            if let Some(source) = self
-                .deferred_fold_captures
-                .as_ref()
-                .and_then(|deferred| {
-                    deferred
-                        .symbolic_domain_points
-                        .iter()
-                        .rev()
-                        .find(|(domain, _)| *domain == binder.domain())
-                })
-                .and_then(|(_, values)| values.get(binder.ordinal() as usize))
-                .copied()
-            {
-                return self.deferred_fold_capture(source, span);
-            }
-            if let Some(register) =
-                self.region_symbolic_point(binder.domain(), binder.ordinal() as usize, span)?
-            {
-                return Ok(register);
-            }
-            let Some((_, values)) = self
-                .domain_points
-                .iter()
-                .rev()
-                .find(|(domain, _)| *domain == binder.domain())
-            else {
-                return Err(LowerError::non_computable(
-                    "domain binder escaped its structured owner",
-                    span,
-                ));
-            };
-            let value = values
-                .get(binder.ordinal() as usize)
-                .copied()
-                .ok_or_else(|| LowerError::contract("binder ordinal is out of range", span))?;
-            return self.constant(value as f64, span);
+            return self.domain_coordinate(binder.domain(), binder.ordinal() as usize, span);
         }
         if matches!(coordinate, dae::CoordinateView::Time) {
             let dst = self.register(span)?;
-            self.ops.push(solve::LinearOp::LoadTime { dst });
+            self.emit(solve::LinearOp::LoadTime { dst })?;
             return Ok(dst);
         }
         if let dae::CoordinateView::ClockInterval(clock) = coordinate {
@@ -292,6 +371,9 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 .and_then(|substitutions| substitutions.binding(parameter.index()))
         {
             return self.substituted_parameter_value(parameter.index(), binding, scalar, span);
+        }
+        if let Some(value) = self.current_definition(coordinate)? {
+            return self.current_definition_value(value, scalar, span);
         }
         let slot = if self.sampled_source
             && let Some(variable) = coordinate_variable(coordinate)
@@ -341,10 +423,10 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let dst = self.register(span)?;
         match slot {
             solve::ScalarSlot::Y { index, .. } => {
-                self.ops.push(solve::LinearOp::LoadY { dst, index });
+                self.emit(solve::LinearOp::LoadY { dst, index })?;
             }
             solve::ScalarSlot::P { index, .. } => {
-                self.ops.push(solve::LinearOp::LoadP { dst, index });
+                self.emit(solve::LinearOp::LoadP { dst, index })?;
             }
             solve::ScalarSlot::Time | solve::ScalarSlot::Constant(_) => {
                 unreachable!("variable layouts contain only Y/P slots")
@@ -511,4 +593,21 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             }
         }
     }
+}
+
+fn prove_exact_index_progression(
+    binder: &rumoca_core::StructuredIndexBinder,
+    count: usize,
+    span: Span,
+) -> Result<(), LowerError> {
+    let delta = i128::from(binder.step) * count.saturating_sub(1) as i128;
+    let last = i128::from(binder.lower) + delta;
+    let exact = 1_i128 << 53;
+    if i128::from(binder.lower).abs() > exact || delta.abs() > exact || last.abs() > exact {
+        return Err(LowerError::unsupported(
+            "symbolic indices require an exact scalar-ABI progression",
+            span,
+        ));
+    }
+    Ok(())
 }

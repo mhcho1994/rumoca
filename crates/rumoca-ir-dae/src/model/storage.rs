@@ -36,8 +36,17 @@ impl DeclaredEntry for ConditionEntry {
 }
 
 impl Storage {
-    pub(super) fn freeze(self) -> FrozenStorage {
+    pub(super) fn freeze(
+        self,
+        model_conditionals: Box<[model_conditionals::ClosedModelConditional]>,
+    ) -> FrozenStorage {
+        let packed_value_counts = packed_value_counts(&self.value_types);
+        let record_field_prefixes = record_field_prefixes(&self.value_types, &packed_value_counts);
         FrozenStorage {
+            packed_value_counts,
+            record_field_prefixes,
+            model_conditionals,
+            model_arms: self.model_arms.into_boxed_slice(),
             predefined_string_declaration: self.predefined_string_declaration,
             value_types: self.value_types.into_boxed_slice(),
             flat_type_ids: self.flat_type_ids.into_boxed_slice(),
@@ -254,6 +263,17 @@ impl Storage {
         expression: ExprId<'_>,
         at: DaeProvenance,
     ) -> Result<(), DaeConstructionError> {
+        self.expect_discharged_model_arm(expression, at)?;
+        self.expect_closed_coordinates(expression, at)
+    }
+
+    /// Closed coordinates may additionally belong to a separately checked
+    /// model activation owner. This helper does not discharge that owner.
+    pub(crate) fn expect_closed_coordinates(
+        &self,
+        expression: ExprId<'_>,
+        at: DaeProvenance,
+    ) -> Result<(), DaeConstructionError> {
         match self.expr_binder_domain(expression, at)? {
             None => {}
             Some(found_domain) => Err(DaeConstructionError::InvalidBinderScope {
@@ -262,6 +282,14 @@ impl Storage {
                 span: at.span(),
             })?,
         }
+        self.expect_closed_function_scope(expression, at)
+    }
+
+    fn expect_closed_function_scope(
+        &self,
+        expression: ExprId<'_>,
+        at: DaeProvenance,
+    ) -> Result<(), DaeConstructionError> {
         match self.expr_function_scope(expression, at)? {
             None => Ok(()),
             Some(found_function) => Err(DaeConstructionError::InvalidFunctionScope {
@@ -273,6 +301,16 @@ impl Storage {
     }
 
     pub(crate) fn expect_domain_expression(
+        &self,
+        expression: ExprId<'_>,
+        domain: DomainId<'_>,
+        at: DaeProvenance,
+    ) -> Result<(), DaeConstructionError> {
+        self.expect_discharged_model_arm(expression, at)?;
+        self.expect_domain_coordinates(expression, domain, at)
+    }
+
+    pub(crate) fn expect_domain_coordinates(
         &self,
         expression: ExprId<'_>,
         domain: DomainId<'_>,
@@ -538,7 +576,10 @@ impl Storage {
         relation: ExprId<'_>,
         at: DaeProvenance,
     ) -> Result<(), DaeConstructionError> {
-        self.expect_closed_expression(relation, at)?;
+        self.expect_relation_model_arm(relation, at)?;
+        for root in self.model_expression_roots(relation.index()) {
+            self.expect_closed_coordinates(ExprId::from_raw(root), at)?;
+        }
         self.expect_relation_node(relation, at)
     }
 
@@ -548,7 +589,12 @@ impl Storage {
         domain: DomainId<'_>,
         at: DaeProvenance,
     ) -> Result<(), DaeConstructionError> {
-        self.expect_domain_expression(relation, domain, at)?;
+        self.expect_relation_model_arm(relation, at)?;
+        for root in self.model_expression_roots(relation.index()) {
+            let root = ExprId::from_raw(root);
+            self.expect_domain_coordinates(root, domain, at)?;
+            self.expect_closed_function_scope(root, at)?;
+        }
         self.expect_relation_node(relation, at)
     }
 
@@ -626,6 +672,33 @@ impl Storage {
             .copied()
             .ok_or_else(|| unknown("expression", value.index(), at))?;
         self.expect_value_type_compatible(variable.value_type, found, at)
+    }
+
+    pub(crate) fn expect_discrete_target_value(
+        &self,
+        target: crate::discrete_values::DiscreteValueTargetEntry,
+        value: u32,
+        at: DaeProvenance,
+    ) -> Result<(), DaeConstructionError> {
+        if target.scalar_selection.is_none() {
+            return self.expect_discrete_value_raw(target.variable, value, at);
+        }
+        self.expect_discrete_value_target_id(target.variable, at)?;
+        self.expect_closed_expression(ExprId::from_raw(value), at)?;
+        let variable = &self.variables[target.variable as usize];
+        let expected = self.value_type_at(variable.value_type, at)?.scalar_type();
+        let found = self.expr_type(ExprId::from_raw(value), at)?;
+        if expected != found.scalar_type() {
+            return Err(DaeConstructionError::TypeMismatch {
+                expected,
+                found: found.scalar_type(),
+                span: at.span(),
+            });
+        }
+        if !found.is_scalar() {
+            return Err(DaeConstructionError::ShapeMismatch { span: at.span() });
+        }
+        Ok(())
     }
 
     pub(crate) fn expect_discrete_value_topology_open(
@@ -711,7 +784,33 @@ impl Storage {
             + self.discrete_real_equations.len()
     }
 
-    pub(super) fn finish_construction(&self) -> Result<(), DaeConstructionError> {
+    pub(super) fn finish_construction(
+        &self,
+    ) -> Result<Box<[model_conditionals::ClosedModelConditional]>, DaeConstructionError> {
+        let active_owner = self
+            .active_model_arm
+            .or_else(|| self.active_model_ancestors.iter().copied().min())
+            .map(|arm| self.model_arms[arm as usize].owner)
+            .or(self.closing_model_conditional);
+        let active_provenance = active_owner
+            .map(|owner| self.model_conditionals[owner as usize].provenance)
+            .or(self.owned_quotient_surface);
+        if let Some(provenance) = active_provenance {
+            return Err(DaeConstructionError::InvalidModelActivationScope {
+                span: provenance.span(),
+            });
+        }
+        let model_conditionals = self
+            .model_conditionals
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                entry
+                    .closed
+                    .clone()
+                    .ok_or_else(|| incomplete("model conditional", index, entry.provenance))
+            })
+            .collect::<Result<Box<[_]>, _>>()?;
         if self.unfilled_variables != 0 {
             return Err(self.incomplete_arena("variable", &self.variables));
         }
@@ -755,7 +854,7 @@ impl Storage {
                 span: declaration.span(),
             });
         }
-        Ok(())
+        Ok(model_conditionals)
     }
 
     fn incomplete_arena<T: DeclaredEntry>(
@@ -787,4 +886,69 @@ impl Storage {
             .get(raw as usize)
             .ok_or_else(|| unknown("value type", raw, at))
     }
+}
+
+/// Packed scalar width of every value type: `scalar_count` for non-records,
+/// the outer extent product times the summed field widths for records.
+fn packed_value_counts(value_types: &[ValueType]) -> Box<[Option<usize>]> {
+    #[derive(Clone, Copy)]
+    enum Slot {
+        Unvisited,
+        InProgress,
+        Done(Option<usize>),
+    }
+    fn width(types: &[ValueType], slots: &mut [Slot], index: usize) -> Option<usize> {
+        match slots.get(index).copied()? {
+            Slot::Done(count) => return count,
+            Slot::InProgress => return None,
+            Slot::Unvisited => {}
+        }
+        slots[index] = Slot::InProgress;
+        let value_type = &types[index];
+        let count = if value_type.is_record() {
+            let outer = value_type
+                .dimensions()
+                .iter()
+                .try_fold(1usize, |count, extent| count.checked_mul(*extent as usize));
+            let record = (0..value_type.record_field_count()).try_fold(0usize, |sum, ordinal| {
+                let field = value_type.record_field_type(ordinal)? as usize;
+                sum.checked_add(width(types, slots, field)?)
+            });
+            outer
+                .zip(record)
+                .and_then(|(outer, record)| outer.checked_mul(record))
+        } else {
+            value_type.scalar_count()
+        };
+        slots[index] = Slot::Done(count);
+        count
+    }
+    let mut slots = vec![Slot::Unvisited; value_types.len()];
+    (0..value_types.len())
+        .map(|index| width(value_types, &mut slots, index))
+        .collect()
+}
+
+/// The running sum of packed field widths of every record type, one entry
+/// past the last field. A type that is not a record, or whose field widths do
+/// not all exist and sum without overflow, has no table.
+fn record_field_prefixes(
+    value_types: &[ValueType],
+    packed_counts: &[Option<usize>],
+) -> Box<[Option<Box<[usize]>>]> {
+    value_types
+        .iter()
+        .map(|value_type| {
+            if !value_type.is_record() {
+                return None;
+            }
+            let mut prefixes = vec![0usize];
+            for ordinal in 0..value_type.record_field_count() {
+                let field = value_type.record_field_type(ordinal)? as usize;
+                let width = (*packed_counts.get(field)?)?;
+                prefixes.push(prefixes.last()?.checked_add(width)?);
+            }
+            Some(prefixes.into_boxed_slice())
+        })
+        .collect()
 }

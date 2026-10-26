@@ -377,7 +377,9 @@ fn canonicalize_when_equations(
 ) {
     for equation in equations.iter_mut() {
         match equation {
-            flat::WhenEquation::Assign { value, .. } | flat::WhenEquation::Reinit { value, .. } => {
+            flat::WhenEquation::Assign { value, .. }
+            | flat::WhenEquation::AssignElement { value, .. }
+            | flat::WhenEquation::Reinit { value, .. } => {
                 canonicalize_expr(value, enum_literals, variable_names);
             }
             flat::WhenEquation::Assert {
@@ -729,6 +731,7 @@ mod tests {
             .push(flat::StructuredEquationFamily {
                 domain: rumoca_core::StructuredIndexDomain {
                     binders: vec![rumoca_core::StructuredIndexBinder {
+                        provenance: rumoca_core::IndexBinderProvenance::Generated,
                         id: 0,
                         display_name: "i".to_string(),
                         lower: 1,

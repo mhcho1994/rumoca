@@ -1,0 +1,320 @@
+{
+  "schema": "rumoca_follow_main_integration_review",
+  "schema_version": 1,
+  "generated_at": "2026-10-26T16:51:14.315590+00:00",
+  "target_branch": "rumoca-bitcode-follow-main",
+  "merge_parents": [
+    "a142f9aadbbc2a49e695bab3debbb5b188d97f26",
+    "d4918832b7406792277957b805b07dba4c412125"
+  ],
+  "included_branches": {
+    "main": "d4918832b7406792277957b805b07dba4c412125",
+    "rumoca-bitcode-v1": "03a310a3924fa2eafd42055f985001dd6b8f49e8"
+  },
+  "validated_source_tree_before_this_evidence": "91dcea310e12b82c41cb9eafd3f264036ecf2c57",
+  "source_identity_note": "Validation was performed on the staged merge tree before its merge commit. Raw after reports therefore name the first parent; the source tree above identifies the merged code and tests, excluding only this evidence directory.",
+  "integration_notes": [
+    "Preserve bitcode v2 while adding checked ordered conditional and require-assigned transport, including nested-loop replay and forged-owner rejection.",
+    "Move numerical execution replay into rumoca-eval-solve and adapt current Solve projections, initial values, input metadata and checked builders.",
+    "Preserve main integer-step ownership and quotient certificates while retaining general inclusive-event roots and target-specific conditional dependencies.",
+    "Keep main ED024 for discrete Real ownership; assign the derivative-of-input diagnostic ED026; retain cyclic-parameter ED025.",
+    "Remove obsolete unreferenced lowering helpers, split oversized modules, and record the measured DAE LOC review without changing enforcement thresholds."
+  ],
+  "resource_limits": {
+    "CARGO_BUILD_JOBS": 4,
+    "RUST_TEST_THREADS": 4,
+    "RAYON_NUM_THREADS": 4
+  },
+  "checks": [
+    {
+      "check": "architecture",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rumoca",
+        "--test",
+        "architecture_hardening_test",
+        "--test",
+        "suite_gates"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-architecture-final.log",
+      "log_sha256": "8366cce7f333119d79ef9d292672424ff1351d2bb8cc93ee8f40ec6381685950",
+      "rust_test_summaries": [
+        "test result: ok. 251 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.15s",
+        "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s"
+      ]
+    },
+    {
+      "check": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "rumoca-bitcode",
+        "-p",
+        "rumoca-eval-solve",
+        "-p",
+        "rumoca-phase-dae",
+        "-p",
+        "rumoca-phase-solve",
+        "-p",
+        "rumoca-sim",
+        "-p",
+        "rumoca",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-clippy-final.log",
+      "log_sha256": "cdd1ee500bdec5721c05aca8a02a6e698e8f64439bfa93031a06707c48043ca8",
+      "rust_test_summaries": []
+    },
+    {
+      "check": "libraries",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rumoca-bitcode",
+        "-p",
+        "rumoca-phase-dae",
+        "-p",
+        "rumoca-phase-solve",
+        "--lib"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-libraries-final.log",
+      "log_sha256": "42f553f5caf69067110be45d507fadd858b0639cc138aa4bb4a747c97309968b",
+      "rust_test_summaries": [
+        "test result: ok. 82 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 506 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.66s",
+        "test result: ok. 271 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s"
+      ]
+    },
+    {
+      "check": "diagnostic-contract",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rumoca-contracts",
+        "--test",
+        "expr_contracts",
+        "der_of_top_level_input_is_diagnosed",
+        "--",
+        "--exact"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-diagnostic-contract.log",
+      "log_sha256": "5330ffa5edf4ea9fe8268e332859c9082113e639e254ebf394061e94d40db987",
+      "rust_test_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "check": "parameter-profile",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rumoca",
+        "--lib",
+        "parameter_profile"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-parameter-profile.log",
+      "log_sha256": "ec4118de7f4ce971d8ff3546a97dd1d1eab64630d49a8abf1509c83d777a3ebd",
+      "rust_test_summaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 0.01s"
+      ]
+    },
+    {
+      "check": "compiler-unit",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rumoca",
+        "--lib",
+        "compiler::tests"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-compiler-unit.log",
+      "log_sha256": "c93633c326c64cc678c1ce0837b5bb7ad1ee99205d50abb1c45952866bea757a",
+      "rust_test_summaries": [
+        "test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 118 filtered out; finished in 5.47s"
+      ]
+    },
+    {
+      "check": "array-shape",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rumoca",
+        "--test",
+        "suite_core",
+        "array_constructor_equation_shape"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-array-shape.log",
+      "log_sha256": "269ca4b4a38de1bb6d12c1f2c8453716b1ffdd5e1a4e9f94ca3f1cb9db5d06bd",
+      "rust_test_summaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1738 filtered out; finished in 0.02s"
+      ]
+    },
+    {
+      "check": "canary-after",
+      "command": [
+        "cargo",
+        "xtask",
+        "verify",
+        "msl-parity",
+        "--sim-targets-file",
+        "infra/verification/msl-canary-20.json",
+        "--results-dir",
+        "target/verification/follow-main-update-20261026/after",
+        "--no-remote-quality-baseline"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-canary-after.log",
+      "log_sha256": "904e3b1b4087887f6d8428cb457ddbe203eeed1aaef6cb8c23765ccc75db0994",
+      "rust_test_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 213 filtered out; finished in 17.05s"
+      ]
+    },
+    {
+      "check": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-format-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rust_test_summaries": []
+    },
+    {
+      "check": "bitcode-reference",
+      "command": [
+        "python3",
+        "tools/bitcode/gen_reference.py",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-bitcode-reference-final.log",
+      "log_sha256": "d2b9481374cf2bc4b6f62d6e90443ca012f33376f7aaffd06d52c00016412567",
+      "rust_test_summaries": []
+    },
+    {
+      "check": "diff-whitespace",
+      "command": [
+        "git",
+        "diff",
+        "--cached",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/rumoca-follow-main-diff-whitespace-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rust_test_summaries": []
+    }
+  ],
+  "additional_checks": [
+    {
+      "suite": "suite_core",
+      "log": "/tmp/rumoca-follow-main-core-final.log",
+      "log_sha256": "9ce05f7d6be3cb3198231b21c36814f4c43aea08a8f0280a05c169c44fb9b41e",
+      "summaries": [
+        "test result: ok. 1742 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 98.42s"
+      ]
+    },
+    {
+      "suite": "execution_link_clock_python",
+      "log": "/tmp/rumoca-follow-main-execution-python.log",
+      "log_sha256": "ff0d653dd1cbcc1494df2cf0436ecda533ad0ae2f492cac83ff8bc1d61f3911a",
+      "summaries": [
+        "50 passed in 3.27s"
+      ]
+    },
+    {
+      "suite": "modelsan",
+      "log": "/tmp/rumoca-follow-main-modelsan-final.log",
+      "log_sha256": "17f2f50dca04977d1f2ef3453f7b2f47b8aae281d8c40298e6d564187d2c767f",
+      "summaries": [
+        "354 passed, 3 skipped, 2 warnings in 73.13s (0:01:13)"
+      ]
+    },
+    {
+      "suite": "python_static_contracts",
+      "log": "/tmp/rumoca-follow-main-python-static.log",
+      "log_sha256": "c98726dcb0c9f0252e8160d23de79ed048961494c9d2bff5c5f7d6fc6c831163",
+      "summaries": [
+        "10 passed in 0.08s"
+      ]
+    },
+    {
+      "suite": "isolated_main_integer_event_control",
+      "log": "/tmp/rumoca-follow-main-main-control-isolated.log",
+      "log_sha256": "1e2aad4ca573e6b499490b7e889df0a97ad46263b0578780f32336fc9d463e2a",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1633 filtered out; finished in 0.01s"
+      ]
+    }
+  ],
+  "canary": {
+    "scope": "Tier 1 fixed 20 models, partial",
+    "roster": "infra/verification/msl-canary-20.json",
+    "roster_sha256": "536004933ce502f7a8a4317e5dd6de2b700a6b176e84d2d6e7bbe0dcdf61eafa",
+    "before": {
+      "cohort_models": 20,
+      "compared_models": 15,
+      "high": 15,
+      "near": 0,
+      "deviation": 0,
+      "fallback": 0,
+      "absent": 5,
+      "absent_by_reason": {
+        "excluded": 1,
+        "sim_failed": 4
+      }
+    },
+    "after": {
+      "cohort_models": 20,
+      "compared_models": 15,
+      "high": 15,
+      "near": 0,
+      "deviation": 0,
+      "fallback": 0,
+      "absent": 5,
+      "absent_by_reason": {
+        "excluded": 1,
+        "sim_failed": 4
+      }
+    },
+    "classification_changes": [],
+    "baseline_commit": "d4918832b7406792277957b805b07dba4c412125",
+    "omc_version": "OpenModelica 1.26.1",
+    "evidence_files_sha256": {
+      "baseline-msl_band_table.json": "2d678c8e5a7e085e649903ffaa312c85597ec31bd1159558a6105be75260eee7",
+      "baseline-msl_results.json": "36d00068d939aa2c550d8fb8fd98202d7eb3090fc388ba944d74c0efce6930a3",
+      "baseline-sim_trace_comparison.json": "7606e45114b83b32983dd88e07e3c5e391a8bbb3b783f43555734eac65c127e1",
+      "after-msl_band_table.json": "2433303229a2542efbbbe28115f079dc2c45f2ee8552f9cb725b3db110fdc0b9",
+      "after-msl_results.json": "2d58892a51bf50fbaa8f3fc9048844c05b36df9861eb18e7cc90a34862136c8e",
+      "after-sim_trace_comparison.json": "82610129722570fd4456957056706a78deedc2459320392d2e5d87e1c72f818b"
+    }
+  },
+  "not_run": [
+    {
+      "scope": "Full 566-model MSL cohort and full workspace CI",
+      "reason": "This local branch integration uses the required Tier 1 focused tests and fixed canary. It makes no full-cohort parity or full-workspace CI claim."
+    }
+  ]
+}

@@ -12,6 +12,8 @@ use crate::{DaeProvenanceOrigin, ScalarType, ValueType, VariableRole};
 /// Failure to construct or decode the DAE.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum DaeConstructionError {
+    #[error("model expression escaped its construction-issued conditional arm")]
+    InvalidModelActivationScope { span: Span },
     #[error("missing source provenance for {origin}")]
     MissingProvenance {
         origin: DaeProvenanceOrigin,
@@ -241,6 +243,8 @@ pub enum DaeConstructionError {
     },
     #[error("invalid B.1c topology plan at discrete-value target identity {target}")]
     InvalidDiscreteTopologyPlan { target: u32, span: Span },
+    #[error("invalid scalar selection of B.1c target identity {target}")]
+    InvalidDiscreteElementSelection { target: u32, span: Span },
     #[error("B.1c owner target order mismatch: expected {expected:?}, found {found:?}")]
     InvalidDiscreteTargetOrder {
         expected: Option<u32>,
@@ -255,6 +259,16 @@ pub enum DaeConstructionError {
     UndeclaredModelEventTarget { target: u32, span: Span },
     #[error("model-event transaction does not define every declared target")]
     IncompleteModelEventTransaction { span: Span },
+    #[error("algorithm target `{target}` has no value at the end of its `when` block")]
+    MissingAlgorithmBlockValue { target: VarName, span: Span },
+    #[error(
+        "algorithm target `{target}` written in a later `elsewhen` block has no model coordinate"
+    )]
+    UnresolvedAlgorithmHoldTarget { target: VarName, span: Span },
+    #[error(
+        "an event action (reinit, assert, terminate, print or a procedure call) in a later `elsewhen` block of an algorithm is not supported: suppressing it when an earlier block becomes active at the same instant (MLS §8.3.5) is not yet representable"
+    )]
+    UnsupportedLaterWhenAction { span: Span },
     #[error("an unconditional B.1c owner must contain exactly one `always` branch")]
     InvalidDiscreteBranchSet { span: Span },
     #[error("an observed B.1c owner must be unstructured and contain exactly one `always` branch")]
@@ -381,6 +395,7 @@ impl DaeConstructionError {
             | Self::InvalidEnumerationOrdinal { span, .. }
             | Self::InvalidBinderScope { span, .. }
             | Self::InvalidFunctionScope { span, .. }
+            | Self::InvalidModelActivationScope { span }
             | Self::InvalidFunctionValueRead { span, .. }
             | Self::InvalidFunctionCoordinate { span, .. }
             | Self::InvalidFunctionDependency { span, .. }
@@ -396,10 +411,14 @@ impl DaeConstructionError {
             | Self::MissingClockOwnership { span, .. }
             | Self::InvalidDiscreteTopologyPlan { span, .. }
             | Self::InvalidDiscreteTargetOrder { span, .. }
+            | Self::InvalidDiscreteElementSelection { span, .. }
             | Self::EmptyDiscreteValueOwner { span }
             | Self::EmptyModelEventTransaction { span }
             | Self::UndeclaredModelEventTarget { span, .. }
             | Self::IncompleteModelEventTransaction { span }
+            | Self::MissingAlgorithmBlockValue { span, .. }
+            | Self::UnresolvedAlgorithmHoldTarget { span, .. }
+            | Self::UnsupportedLaterWhenAction { span }
             | Self::InvalidDiscreteBranchSet { span }
             | Self::InvalidObservedDiscreteOwner { span }
             | Self::UnorderedSimultaneousStatements { span }

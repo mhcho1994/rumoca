@@ -15,6 +15,7 @@ impl Clone for PreparedScalarProgramBlock {
             row_requirements: self.row_requirements.clone(),
             row_reverse_y_gradient_supported: self.row_reverse_y_gradient_supported.clone(),
             row_is_causal: self.row_is_causal.clone(),
+            row_requires_checked_observation: self.row_requires_checked_observation.clone(),
             row_assignment_shapes: self.row_assignment_shapes.clone(),
             row_tensor_affine_assignments: self.row_tensor_affine_assignments.clone(),
             row_parameter_indices: self.row_parameter_indices.clone(),
@@ -25,6 +26,7 @@ impl Clone for PreparedScalarProgramBlock {
             requirements: self.requirements,
             scratch: RefCell::new(RowEvalScratch::default()),
             row_output_scratch: RefCell::new(Vec::new()),
+            target_value_families: RefCell::default(),
         }
     }
 }
@@ -36,6 +38,7 @@ struct PreparedRow {
     requirement: RowInputRequirements,
     reverse_y_gradient_supported: bool,
     is_causal: bool,
+    requires_checked_observation: bool,
     assignment_shapes: Box<[(usize, TargetAssignmentShape)]>,
     tensor_affine_assignments: tensor_affine_assignment::PreparedTensorAffineAssignments,
     parameter_indices: Box<[usize]>,
@@ -79,6 +82,9 @@ fn prepare_row(
         requirement,
         reverse_y_gradient_supported: reverse_y_gradient_supported(row),
         is_causal: !row.iter().any(non_causal_linear_op),
+        requires_checked_observation: row
+            .iter()
+            .any(|operation| matches!(operation, LinearOp::PureCallObservation { .. })),
         assignment_shapes,
         tensor_affine_assignments,
         parameter_static_y_gradient_params: parameter_static_y_gradient(row)
@@ -101,7 +107,7 @@ pub fn replaced_programs(
     }
     let mut replaced = Vec::new();
     for (index, (base, target)) in base.programs().iter().zip(target.programs()).enumerate() {
-        if base == target {
+        if base == target && constant_bits(base) == constant_bits(target) {
             continue;
         }
         if ScalarProgramBlock::program_output_count(base)
@@ -155,6 +161,11 @@ impl PreparedScalarProgramBlock {
                 "prepared row causality count",
                 block_span,
             )?,
+            row_requires_checked_observation: prepared_vec_with_capacity(
+                row_count,
+                "prepared row observation count",
+                block_span,
+            )?,
             row_assignment_shapes: prepared_vec_with_capacity(
                 row_count,
                 "prepared row assignment shape count",
@@ -175,6 +186,7 @@ impl PreparedScalarProgramBlock {
             requirements: RowInputRequirements::default(),
             scratch: RefCell::new(RowEvalScratch::default()),
             row_output_scratch: RefCell::new(Vec::new()),
+            target_value_families: RefCell::default(),
             block,
         };
         for row_idx in 0..row_count {
@@ -223,6 +235,8 @@ impl PreparedScalarProgramBlock {
         self.row_reverse_y_gradient_supported
             .push(row.reverse_y_gradient_supported);
         self.row_is_causal.push(row.is_causal);
+        self.row_requires_checked_observation
+            .push(row.requires_checked_observation);
         self.row_assignment_shapes.push(row.assignment_shapes);
         self.row_tensor_affine_assignments
             .push(row.tensor_affine_assignments);
@@ -237,6 +251,7 @@ impl PreparedScalarProgramBlock {
         self.row_requirements[row_idx] = row.requirement;
         self.row_reverse_y_gradient_supported[row_idx] = row.reverse_y_gradient_supported;
         self.row_is_causal[row_idx] = row.is_causal;
+        self.row_requires_checked_observation[row_idx] = row.requires_checked_observation;
         self.row_assignment_shapes[row_idx] = row.assignment_shapes;
         self.row_tensor_affine_assignments[row_idx] = row.tensor_affine_assignments;
         self.row_parameter_indices[row_idx] = row.parameter_indices;
@@ -363,5 +378,36 @@ impl PreparedEvaluationBlock {
     ) -> Result<(), EvalSolveError> {
         self.0
             .eval_row_outputs_unchecked_with_context(row_idx, y, p, t, context, out)
+    }
+}
+
+#[derive(Default)]
+struct ConstantBits(Vec<u64>);
+
+impl rumoca_ir_solve::visitor::SolveVisitor for ConstantBits {
+    type Error = std::convert::Infallible;
+
+    fn visit_linear_op(
+        &mut self,
+        _: rumoca_ir_solve::visitor::LinearOpSliceKind,
+        _: usize,
+        op: &LinearOp,
+    ) -> Result<(), Self::Error> {
+        if let LinearOp::Const { value, .. } = op {
+            self.0.push(value.to_bits());
+        }
+        Ok(())
+    }
+}
+
+fn constant_bits(ops: &[LinearOp]) -> Vec<u64> {
+    let mut bits = ConstantBits::default();
+    let kind = rumoca_ir_solve::visitor::LinearOpSliceKind::ScalarProgram {
+        program_index: 0,
+        span: None,
+    };
+    match rumoca_ir_solve::visitor::walk_linear_op_slice(&mut bits, kind, ops) {
+        Ok(()) => bits.0,
+        Err(infallible) => match infallible {},
     }
 }

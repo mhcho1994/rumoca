@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::source_root_api::sync_workspace_sources_with_cache_root_for_tests;
 
 mod compile_wire_tests;
+#[cfg(any(feature = "sim-wasm", feature = "sim-diffsol", feature = "sim-rk45"))]
+mod compiled_model_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-assignments"))]
 mod function_fold_scope_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-assignments"))]
@@ -26,9 +28,19 @@ mod portable_source_root_tests;
 mod scenario_config_tests;
 mod session_recovery_tests;
 mod simulation_runtime_tests;
+mod solve_render_tests;
 mod source_modelica_roundtrip_tests;
 mod source_root_api_tests;
+mod user_guide_config_fragment_tests;
 mod user_guide_examples_tests;
+#[cfg(feature = "sim-rk45")]
+mod user_guide_fragment_tests;
+mod user_guide_inline_tests;
+mod user_guide_inventory;
+mod user_guide_samples;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sim-rk45"))]
+mod user_guide_scenario_tests;
+mod user_guide_sources;
 mod wasm_cache_tests;
 mod workspace_config_api_tests;
 
@@ -232,13 +244,13 @@ fn test_get_version() {
 #[test]
 fn test_get_git_commit() {
     let _guard = session_test_guard();
-    let identity = rumoca_core::build_identity();
+    let identity = rumoca_tool_build_info::build_identity();
     assert_eq!(get_git_commit().as_deref(), identity);
     let provenance = crate::compiler_provenance();
     assert_eq!(provenance["git_commit"].as_str(), identity);
     assert_eq!(
         provenance["git_merge_parents"],
-        serde_json::json!(rumoca_core::build_merge_parents())
+        serde_json::json!(rumoca_tool_build_info::build_merge_parents())
     );
     assert_eq!(provenance["version"], env!("CARGO_PKG_VERSION"));
 }

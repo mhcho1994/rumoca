@@ -5,6 +5,7 @@
 //! rejection rather than a panic or an invalid model.
 
 mod clock_transport;
+mod conditional_transport;
 mod v0101_transport;
 
 use crate::build::Builder;
@@ -1027,6 +1028,7 @@ fn cost_of_node(node: &RbcExprNode) -> Cost {
         // `cost_of_body` classifies it there.
         RbcExprNode::FunctionValue { .. }
         | RbcExprNode::FunctionFoldParameter { .. }
+        | RbcExprNode::FunctionConditionalOutput { .. }
         | RbcExprNode::FunctionFoldOutput { .. } => Cost::Bounded,
         RbcExprNode::Unsupported { .. } => Cost::Opaque,
     }
@@ -1054,17 +1056,24 @@ fn cost_of_body(body: &RbcFunctionBody) -> Cost {
     }
 }
 
-/// Exhaustive on purpose: a fifth statement form fails to compile here until
+/// Exhaustive on purpose: a new statement form fails to compile here until
 /// someone decides whether it can iterate without a bound.
 fn statement_is_bounded(statement: &RbcFunctionStatement) -> bool {
     match statement {
         // Evaluate their expressions once each.
-        RbcFunctionStatement::Assignment { .. }
+        RbcFunctionStatement::RequireAssigned { .. }
+        | RbcFunctionStatement::Assignment { .. }
         | RbcFunctionStatement::Assertion { .. }
         | RbcFunctionStatement::AssignmentGroup { .. } => true,
         // A fold over a compact domain: the trip count is the domain's,
         // fixed before evaluation exactly as for `Comprehension`.
         RbcFunctionStatement::For { statements, .. } => statements.iter().all(statement_is_bounded),
+        RbcFunctionStatement::Conditional {
+            branches, fallback, ..
+        } => branches
+            .iter()
+            .chain(std::iter::once(fallback))
+            .all(|branch| branch.statements.iter().all(statement_is_bounded)),
     }
 }
 

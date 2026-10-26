@@ -6,11 +6,19 @@ use crate::lower::call_scoped_actions::{
     CollectedCallAssertionRoot,
 };
 
+#[derive(Clone, Copy)]
+pub(super) enum TypedCallInvocation<'dae> {
+    Call {
+        call: dae::ExprId<'dae>,
+        function: dae::FunctionId<'dae>,
+    },
+    Expression(dae::ExprId<'dae>),
+}
+
 impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     pub(super) fn schedule_typed_pure_call_assertions(
         &self,
-        call: dae::ExprId<'dae>,
-        function: dae::FunctionId<'dae>,
+        invocation: TypedCallInvocation<'dae>,
         registered: &crate::lower::typed_functions::RegisteredCall<'dae>,
         call_span: Span,
     ) -> Result<(), LowerError> {
@@ -18,34 +26,55 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             return Ok(());
         }
         let action_program =
-            self.typed_pure_call_assertion_program(call, function, registered, call_span, false)?;
+            self.typed_pure_call_assertion_program(invocation, registered, call_span, false)?;
         let action_program = std::sync::Arc::<[solve::LinearOp]>::from(action_program);
         let root_program = (registered
             .callee
             .assertions
             .iter()
-            .any(|assertion| self.event_root_owned(assertion.level)))
-        .then(|| {
-            self.typed_pure_call_assertion_program(call, function, registered, call_span, true)
-        })
+            .any(|assertion| self.typed_call_event_root_owned(assertion)))
+        .then(|| self.typed_pure_call_assertion_program(invocation, registered, call_span, true))
         .transpose()?
         .map(std::sync::Arc::<[solve::LinearOp]>::from);
         for (output_offset, assertion) in registered.callee.assertions.iter().enumerate() {
+            let projection = match invocation {
+                TypedCallInvocation::Call { .. } => CallAssertionProjection {
+                    owner: registered.callee.owner,
+                    output_offset,
+                },
+                TypedCallInvocation::Expression(expression) => self
+                    .layout
+                    .pure_calls
+                    .borrow()
+                    .exact_assertion_projection(expression, output_offset)
+                    .ok_or_else(|| {
+                        LowerError::contract(
+                            "typed expression lost its issued assertion projection",
+                            call_span,
+                        )
+                    })?,
+            };
+            let root_output_offset = registered.callee.assertions[..output_offset]
+                .iter()
+                .filter(|assertion| self.typed_call_event_root_owned(assertion))
+                .count();
             let message_owner = AssertionMessageOwner::Specialized {
-                call,
-                function,
+                invocation,
                 registered,
                 assertion,
             };
-            let message = self.assertion_message(&message_owner, assertion.message, call_span)?;
+            let message = match assertion.message {
+                crate::lower::typed_functions::FunctionAssertionMessage::Expression(message) => self.assertion_message(&message_owner, message, call_span)?,
+                source @ crate::lower::typed_functions::FunctionAssertionMessage::UnassignedValue(_) => solve::SolveEventMessage { parts: vec![solve::SolveEventMessagePart::Text(source.literal(self.view).ok_or_else(|| LowerError::contract("assigned-state diagnostic has no canonical value", call_span))?)] },
+            };
             self.insert_assertion(
                 root_program
                     .as_ref()
-                    .filter(|_| self.event_root_owned(assertion.level))
+                    .filter(|_| self.typed_call_event_root_owned(assertion))
                     .map(|program| CollectedCallAssertionRoot::Shared {
                         owner: registered.callee.owner,
                         program: std::sync::Arc::clone(program),
-                        output_offset,
+                        output_offset: root_output_offset,
                     }),
                 CollectedCallAssertionProgram::Shared {
                     owner: registered.callee.owner,
@@ -55,10 +84,16 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 message,
                 assertion.level,
                 assertion.provenance,
-                Some(CallAssertionProjection {
-                    owner: registered.callee.owner,
-                    output_offset,
-                }),
+                Some((
+                    projection,
+                    solve::SolveAssertionActionProjection::new(
+                        registered.site.clone(),
+                        assertion.predicate_output,
+                    )
+                    .ok_or_else(|| {
+                        LowerError::contract("call assertion lost its issued predicate", call_span)
+                    })?,
+                )),
             )?;
         }
         Ok(())
@@ -66,43 +101,82 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
 
     fn typed_pure_call_assertion_program(
         &self,
-        call: dae::ExprId<'dae>,
-        function: dae::FunctionId<'dae>,
+        invocation: TypedCallInvocation<'dae>,
         registered: &crate::lower::typed_functions::RegisteredCall<'dae>,
         span: Span,
         root: bool,
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
-        let arguments = match self.node(call).operation() {
-            dae::ExpressionOperation::Call { arguments, .. } => arguments,
-            _ => {
-                return Err(LowerError::contract(
-                    "typed pure-call assertion owner is not a call expression",
-                    span,
-                ));
-            }
-        };
+        let active =
+            self.active_typed_call_assertion_program(invocation, registered, span, root)?;
+        if self.activation_path.is_empty() && self.active_clock.is_none() {
+            return Ok(active);
+        }
+        let output_count = registered
+            .callee
+            .assertions
+            .iter()
+            .filter(|assertion| !root || self.typed_call_event_root_owned(assertion))
+            .count();
+        let mut compiler = self.fork_for_call_action();
+        let activation = compiler.activation(span)?;
+        let condition = vec![
+            solve::LinearOp::LoadFunctionConditionalCapture { dst: 0, index: 0 },
+            solve::LinearOp::StoreOutput { src: 0 },
+        ];
+        let mut fallback = vec![solve::LinearOp::Const {
+            dst: 0,
+            value: if root { -1.0 } else { 0.0 },
+        }];
+        fallback.extend((0..output_count).map(|_| solve::LinearOp::StoreOutput { src: 0 }));
+        let program = solve::FunctionConditionalProgram::checked(
+            1,
+            vec![1; output_count],
+            [(condition, active)],
+            fallback,
+        )
+        .map_err(|error| LowerError::contract(error.to_string(), span))?;
+        let start = compiler.register_range(output_count, span)?;
+        compiler.emit(solve::LinearOp::FunctionConditional {
+            dst_start: start,
+            capture_start: activation,
+            program: std::sync::Arc::new(program),
+        })?;
+        compiler.emit(solve::LinearOp::StoreOutputRange {
+            start,
+            count: output_count,
+            stride: 1,
+        })?;
+        compiler.finish_operations()
+    }
+
+    fn active_typed_call_assertion_program(
+        &self,
+        invocation: TypedCallInvocation<'dae>,
+        registered: &crate::lower::typed_functions::RegisteredCall<'dae>,
+        span: Span,
+        root: bool,
+    ) -> Result<Vec<solve::LinearOp>, LowerError> {
         let mut compiler = self.fork_for_call_action();
         compiler.call_action_compilation = true;
-        let (start, replayed) = compiler
-            .emit_typed_pure_call(call, function, arguments, span)?
-            .ok_or_else(|| {
-                LowerError::contract("typed pure-call assertion lost its issued invocation", span)
-            })?;
-        if replayed.callee.owner != registered.callee.owner || replayed.site != registered.site {
-            return Err(LowerError::contract(
-                "typed pure-call assertion changed its issued owner",
-                span,
-            ));
-        }
-        let activation = compiler.activation(span)?;
+        let input_starts = compiler.pack_assertion_invocation_inputs(invocation, span)?;
+        let observation = solve::SolveAssertionObservationSite::new(registered.site.clone())
+            .ok_or_else(|| LowerError::contract("assertion observation has no predicates", span))?;
+        let start = compiler.register_range(observation.output_scalar_count(), span)?;
+        let predicates = observation.predicate_outputs().to_vec();
+        compiler.emit(solve::LinearOp::PureCallObservation {
+            dst_start: start,
+            input_starts: input_starts.into_boxed_slice(),
+            site: observation,
+        })?;
         for assertion in registered.callee.assertions.iter() {
-            let predicate_offset = replayed.site.outputs()[..assertion.predicate_output]
+            if root && !self.typed_call_event_root_owned(assertion) {
+                continue;
+            }
+            let predicate_offset = predicates
                 .iter()
-                .try_fold(0usize, |count, output| {
-                    count.checked_add(output.value_type().scalar_count() as usize)
-                })
+                .position(|&output| output == assertion.predicate_output)
                 .ok_or_else(|| {
-                    LowerError::contract("typed pure-call predicate offset overflows", span)
+                    LowerError::contract("assertion observation lost its issued predicate", span)
                 })?;
             let predicate = u32::try_from(predicate_offset)
                 .ok()
@@ -113,17 +187,102 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             let result = if root {
                 let safe = compiler.constant(-1.0, span)?;
                 let failed = compiler.constant(1.0, span)?;
-                let active_indicator = compiler.select(predicate, safe, failed, span)?;
-                compiler.select(activation, active_indicator, safe, span)?
+                compiler.select(predicate, safe, failed, span)?
             } else {
-                let failed = compiler.unary(dae::UnaryOperator::Not, predicate, span)?;
-                compiler.binary(dae::BinaryOperator::And, activation, failed, span)?
+                compiler.unary(dae::UnaryOperator::Not, predicate, span)?
             };
-            compiler
-                .ops
-                .push(solve::LinearOp::StoreOutput { src: result });
+            compiler.emit(solve::LinearOp::StoreOutput { src: result })?;
         }
-        Ok(compiler.ops)
+        compiler.finish_operations()
+    }
+
+    /// The input registers of one invocation, packed as its owner reads them.
+    fn pack_assertion_invocation_inputs(
+        &mut self,
+        invocation: TypedCallInvocation<'dae>,
+        span: Span,
+    ) -> Result<Vec<solve::Reg>, LowerError> {
+        match invocation {
+            TypedCallInvocation::Call { call, function } => {
+                let dae::ExpressionOperation::Call { arguments, .. } = self.node(call).operation()
+                else {
+                    return Err(LowerError::contract(
+                        "typed pure-call assertion owner is not a call expression",
+                        span,
+                    ));
+                };
+                let definition = self.view.function(function).ok_or_else(|| {
+                    LowerError::contract("assertion observation function does not resolve", span)
+                })?;
+                let arguments = arguments.iter().collect::<Vec<_>>();
+                if arguments.len() != definition.parameter_types().len() {
+                    return Err(LowerError::contract(
+                        "assertion observation argument count changed",
+                        span,
+                    ));
+                }
+                let mut input_starts = Vec::new();
+                for (argument, value_type) in arguments
+                    .into_iter()
+                    .zip(definition.parameter_types().iter())
+                {
+                    self.pack_typed_call_input_leaves(
+                        argument,
+                        value_type,
+                        span,
+                        &mut input_starts,
+                    )?;
+                }
+                Ok(input_starts)
+            }
+            TypedCallInvocation::Expression(expression) => {
+                let form = crate::lower::typed_functions::ExactExpressionForm::try_admit(
+                    self.view, expression,
+                )
+                .map_err(|error| LowerError::contract(error.to_string(), span))?
+                .ok_or_else(|| {
+                    LowerError::contract("typed assertion lost its issued invocation", span)
+                })?;
+                form.input_readers()
+                    .map(|reader| {
+                        self.pack_typed_scalar_argument(
+                            reader,
+                            self.node(reader).value_type().scalar_type(),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn emit_assertion_invocation(
+        &mut self,
+        invocation: TypedCallInvocation<'dae>,
+        span: Span,
+    ) -> Result<
+        (
+            solve::Reg,
+            crate::lower::typed_functions::RegisteredCall<'dae>,
+        ),
+        LowerError,
+    > {
+        let emitted = match invocation {
+            TypedCallInvocation::Call { call, function } => {
+                let dae::ExpressionOperation::Call { arguments, .. } = self.node(call).operation()
+                else {
+                    return Err(LowerError::contract(
+                        "typed assertion invocation is not a call",
+                        span,
+                    ));
+                };
+                self.emit_typed_pure_call(call, function, arguments, span)?
+            }
+            TypedCallInvocation::Expression(expression) => {
+                self.emit_exact_integer_expression(expression)?
+            }
+        };
+        emitted
+            .ok_or_else(|| LowerError::contract("typed assertion lost its issued invocation", span))
     }
 
     pub(in crate::lower) fn deferred_call_action_program<'recipe>(
@@ -151,6 +310,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 .collect();
             compiler.active_clock = Some(recipe.active_clock);
             compiler.sampled_source = recipe.sampled_source;
+            compiler.same_tick_definitions = recipe.current_definitions.clone();
+            compiler.project_current_definitions = recipe.current_definitions.is_some();
             compiler.active_parameters = recipe.active_parameters.clone();
             compiler.active_call_assertions = recipe.active_call_assertions.clone();
             compiler.context_id = 0;
@@ -180,11 +341,9 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 }
             };
             let failed = compiler.unary(dae::UnaryOperator::Not, safe, span)?;
-            compiler
-                .ops
-                .push(solve::LinearOp::StoreOutput { src: failed });
+            compiler.emit(solve::LinearOp::StoreOutput { src: failed })?;
         }
-        Ok(compiler.ops)
+        compiler.finish_operations()
     }
 
     pub(super) fn schedule_function_assertions(
@@ -204,6 +363,15 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         call_span: Span,
     ) -> Result<(), LowerError> {
         match statement {
+            dae::FunctionStatementView::RequireAssigned { .. } => Ok(()),
+            dae::FunctionStatementView::Conditional { conditional }
+                if !has_conditional_check(conditional) =>
+            {
+                Ok(())
+            }
+            dae::FunctionStatementView::Conditional { conditional } => Err(
+                LowerError::unsupported(SOURCE_ORDERED_CHECKS, conditional.declaration().span()),
+            ),
             dae::FunctionStatementView::Assignment { .. }
             | dae::FunctionStatementView::AssignmentGroup { .. } => Ok(()),
             dae::FunctionStatementView::Assertion {
@@ -224,7 +392,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         statements: dae::FunctionStatements<'dae>,
         call_span: Span,
     ) -> Result<(), LowerError> {
-        if !has_assertion(statements.clone()) {
+        if !has_check(statements.clone()) {
             return Ok(());
         }
         self.schedule_fold_assertions(fold, statements, call_span)
@@ -249,6 +417,15 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         call_span: Span,
     ) -> Result<(), LowerError> {
         match statement {
+            dae::FunctionStatementView::RequireAssigned { .. } => Ok(()),
+            dae::FunctionStatementView::Conditional { conditional }
+                if !has_conditional_check(conditional) =>
+            {
+                Ok(())
+            }
+            dae::FunctionStatementView::Conditional { conditional } => Err(
+                LowerError::unsupported(SOURCE_ORDERED_CHECKS, conditional.declaration().span()),
+            ),
             dae::FunctionStatementView::Assignment { .. }
             | dae::FunctionStatementView::AssignmentGroup { .. } => Ok(()),
             dae::FunctionStatementView::Assertion {
@@ -259,9 +436,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             } => {
                 self.collect_fold_assertion(fold, condition, message, level, provenance, call_span)
             }
-            dae::FunctionStatementView::For { statements, .. }
-                if has_assertion(statements.clone()) =>
-            {
+            dae::FunctionStatementView::For { statements, .. } if has_check(statements.clone()) => {
                 Err(LowerError::non_computable(
                     "nested loop-carried function assertions do not yet have an exact Solve schedule",
                     call_span,
@@ -331,8 +506,17 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         message: solve::SolveEventMessage,
         level: dae::AssertionLevel,
         provenance: dae::DaeProvenance,
-        projection: Option<CallAssertionProjection>,
+        projection: Option<(
+            CallAssertionProjection,
+            solve::SolveAssertionActionProjection,
+        )>,
     ) -> Result<(), LowerError> {
+        let (projection, assertion_projection) = match projection {
+            Some((projection, assertion_projection)) => {
+                (Some(projection), Some(assertion_projection))
+            }
+            None => (None, None),
+        };
         self.layout
             .call_scoped_actions
             .borrow_mut()
@@ -345,6 +529,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                     span: provenance.span(),
                     origin: provenance.origin().to_string(),
                     clock_owner: None,
+                    assertion_projection,
                 },
                 clock_index: self.active_clock.map(|clock| clock.index() as usize),
                 projection,
@@ -364,10 +549,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let failed = compiler.constant(1.0, span)?;
         let active_indicator = compiler.select(condition, safe, failed, span)?;
         let root = compiler.select(activation, active_indicator, safe, span)?;
-        compiler
-            .ops
-            .push(solve::LinearOp::StoreOutput { src: root });
-        Ok(compiler.ops)
+        compiler.emit(solve::LinearOp::StoreOutput { src: root })?;
+        compiler.finish_operations()
     }
 
     fn assertion_action_program(
@@ -380,10 +563,10 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let condition = compiler.expression(condition, 0)?;
         let failed = compiler.unary(dae::UnaryOperator::Not, condition, span)?;
         let active_failure = compiler.binary(dae::BinaryOperator::And, activation, failed, span)?;
-        compiler.ops.push(solve::LinearOp::StoreOutput {
+        compiler.emit(solve::LinearOp::StoreOutput {
             src: active_failure,
-        });
-        Ok(compiler.ops)
+        })?;
+        compiler.finish_operations()
     }
 
     fn call_assertion_action(
@@ -429,6 +612,10 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 .active_clock
                 .expect("deferred call assertions are clock-owned"),
             sampled_source: self.sampled_source,
+            current_definitions: self
+                .project_current_definitions
+                .then(|| self.same_tick_definitions.clone())
+                .flatten(),
             active_parameters: self.active_parameters.clone(),
             active_call_assertions: self.active_call_assertions.clone(),
         }
@@ -548,10 +735,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let safe = compiler.constant(-1.0, span)?;
         let failed = compiler.constant(1.0, span)?;
         let root = compiler.select(condition, safe, failed, span)?;
-        compiler
-            .ops
-            .push(solve::LinearOp::StoreOutput { src: root });
-        Ok(compiler.ops)
+        compiler.emit(solve::LinearOp::StoreOutput { src: root })?;
+        compiler.finish_operations()
     }
 
     fn fold_assertion_action_program(
@@ -563,10 +748,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let mut compiler = self.fork_for_call_action();
         let condition = compiler.function_fold_assertion_result(fold, condition, span)?;
         let failed = compiler.unary(dae::UnaryOperator::Not, condition, span)?;
-        compiler
-            .ops
-            .push(solve::LinearOp::StoreOutput { src: failed });
-        Ok(compiler.ops)
+        compiler.emit(solve::LinearOp::StoreOutput { src: failed })?;
+        compiler.finish_operations()
     }
 
     pub(super) fn activation(&mut self, span: Span) -> Result<solve::Reg, LowerError> {
@@ -669,6 +852,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         compiler.function_arguments = self.function_arguments.clone();
         compiler.active_clock = self.active_clock;
         compiler.sampled_source = self.sampled_source;
+        compiler.inherit_current_definitions(self);
         compiler.derivative_definitions = self.derivative_definitions;
         compiler.affine_derivative_systems = self.affine_derivative_systems;
         compiler.active_derivatives = self.active_derivatives.clone();
@@ -823,12 +1007,15 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 self.node(value).provenance().span(),
             )),
             AssertionMessageOwner::Specialized {
-                call,
-                function,
+                invocation,
                 registered,
                 assertion,
             } => self.specialized_message_value_program(
-                *call, *function, registered, assertion, value, call_span,
+                *invocation,
+                registered,
+                assertion,
+                value,
+                call_span,
             ),
         }
     }
@@ -840,32 +1027,15 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     /// frame evaluated them.
     fn specialized_message_value_program(
         &self,
-        call: dae::ExprId<'dae>,
-        function: dae::FunctionId<'dae>,
+        invocation: TypedCallInvocation<'dae>,
         registered: &crate::lower::typed_functions::RegisteredCall<'dae>,
         assertion: &crate::lower::typed_functions::RegisteredAssertion<'dae>,
         value: dae::ExprId<'dae>,
         span: Span,
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
-        let arguments = match self.node(call).operation() {
-            dae::ExpressionOperation::Call { arguments, .. } => arguments,
-            _ => {
-                return Err(LowerError::contract(
-                    "typed pure-call assertion message owner is not a call expression",
-                    span,
-                ));
-            }
-        };
         let mut compiler = self.fork_for_call_action();
         compiler.call_action_compilation = true;
-        let (start, replayed) = compiler
-            .emit_typed_pure_call(call, function, arguments, span)?
-            .ok_or_else(|| {
-                LowerError::contract(
-                    "typed pure-call assertion message lost its issued invocation",
-                    span,
-                )
-            })?;
+        let (start, replayed) = compiler.emit_assertion_invocation(invocation, span)?;
         if replayed.callee.owner != registered.callee.owner || replayed.site != registered.site {
             return Err(LowerError::contract(
                 "typed pure-call assertion message changed its issued owner",
@@ -873,10 +1043,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             ));
         }
         let register = compiler.specialized_message_register(start, &replayed, assertion, value)?;
-        compiler
-            .ops
-            .push(solve::LinearOp::StoreOutput { src: register });
-        Ok(compiler.ops)
+        compiler.emit(solve::LinearOp::StoreOutput { src: register })?;
+        compiler.finish_operations()
     }
 
     fn specialized_message_register(
@@ -888,16 +1056,13 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     ) -> Result<solve::Reg, LowerError> {
         let node = self.node(value);
         let span = node.provenance().span();
-        if let dae::ExpressionOperation::Literal(literal) = node.operation() {
-            return self.specialized_message_literal(literal, span);
-        }
         let output = assertion
             .message_values
             .iter()
             .find_map(|&(candidate, output)| (candidate == value).then_some(output))
             .ok_or_else(|| {
                 LowerError::unsupported(
-                    "a call-specialized assertion message converts only values its declaring function evaluates without a call outside a loop, or literals",
+                    "a call-specialized assertion message has no issued capture for this value",
                     span,
                 )
             })?;
@@ -916,32 +1081,13 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             })?;
         Ok(offset)
     }
-
-    fn specialized_message_literal(
-        &mut self,
-        literal: &dae::DaeLiteral,
-        span: Span,
-    ) -> Result<solve::Reg, LowerError> {
-        match literal {
-            dae::DaeLiteral::Real(value) => self.constant(*value, span),
-            dae::DaeLiteral::Integer(value) => self.constant(*value as f64, span),
-            dae::DaeLiteral::Boolean(value) => self.constant(f64::from(u8::from(*value)), span),
-            dae::DaeLiteral::Enumeration(_) | dae::DaeLiteral::String(_) => {
-                Err(LowerError::unsupported(
-                    "a call-specialized assertion message converts only Real, Integer, and Boolean literals",
-                    span,
-                ))
-            }
-        }
-    }
 }
 
 /// Evaluation owner a function-assertion message renders against.
 enum AssertionMessageOwner<'call, 'dae> {
     /// The shared pure-call owner named by SOLVE-C25.
     Specialized {
-        call: dae::ExprId<'dae>,
-        function: dae::FunctionId<'dae>,
+        invocation: TypedCallInvocation<'dae>,
         registered: &'call crate::lower::typed_functions::RegisteredCall<'dae>,
         assertion: &'call crate::lower::typed_functions::RegisteredAssertion<'dae>,
     },
@@ -949,24 +1095,49 @@ enum AssertionMessageOwner<'call, 'dae> {
     TextOnly,
 }
 
-fn has_assertion(statements: dae::FunctionStatements<'_>) -> bool {
+/// A check under a source-ordered conditional belongs to the typed call owner
+/// (SOLVE-C25, SOLVE-C93); a scalar row cannot carry it.
+const SOURCE_ORDERED_CHECKS: &str = "a scalar row cannot carry a check under a source-ordered conditional; the typed call owner schedules it";
+
+fn has_conditional_check(conditional: dae::FunctionConditionalBodyView<'_>) -> bool {
+    conditional
+        .branches()
+        .chain(std::iter::once(conditional.fallback()))
+        .any(|branch| has_check(branch.statements()))
+}
+
+fn has_check(statements: dae::FunctionStatements<'_>) -> bool {
     statements.into_iter().any(|statement| match statement {
         dae::FunctionStatementView::Assignment { .. }
         | dae::FunctionStatementView::AssignmentGroup { .. } => false,
-        dae::FunctionStatementView::Assertion { .. } => true,
-        dae::FunctionStatementView::For { statements, .. } => has_assertion(statements),
+        dae::FunctionStatementView::Assertion { .. }
+        | dae::FunctionStatementView::RequireAssigned { .. } => true,
+        dae::FunctionStatementView::Conditional { conditional } => {
+            has_conditional_check(conditional)
+        }
+        dae::FunctionStatementView::For { statements, .. } => has_check(statements),
     })
 }
 
 impl ScalarCompiler<'_, '_> {
+    fn typed_call_event_root_owned(
+        &self,
+        assertion: &crate::lower::typed_functions::RegisteredAssertion<'_>,
+    ) -> bool {
+        self.event_root_owned(assertion.level)
+    }
+
     /// Whether an assertion at `level` owns an event root here.
     ///
     /// An error-level assertion outside a clock partition is checked at its
     /// crossing. A warning-level assertion "shall have no influence on the
     /// behavior of the model", so evaluating it never triggers an event
-    /// (MLS §8.3.7): it owns no root anywhere.
+    /// (MLS §8.3.7): it owns no root anywhere. The stateless native product has
+    /// no solver to localize a crossing, so its assertions own no root either.
     fn event_root_owned(&self, level: dae::AssertionLevel) -> bool {
-        level == dae::AssertionLevel::Error && self.active_clock.is_none()
+        self.layout.assertion_roots == crate::layout::AssertionRoots::Event
+            && level == dae::AssertionLevel::Error
+            && self.active_clock.is_none()
     }
 }
 

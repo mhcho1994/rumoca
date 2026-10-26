@@ -6,6 +6,7 @@ mod conditional_records;
 mod correlated_guards;
 mod dynamic_index_bounds;
 mod indexed_updates;
+mod scoped_function_branches;
 
 #[test]
 fn identity_element_is_integer_and_diagonal_by_index_equality() {
@@ -1756,6 +1757,7 @@ fn comprehension_projects_checked_binder_values() {
             domains.structured(
                 rumoca_core::StructuredIndexDomain {
                     binders: vec![rumoca_core::StructuredIndexBinder {
+                        provenance: rumoca_core::IndexBinderProvenance::Generated,
                         id: 0,
                         display_name: "i".to_owned(),
                         lower: -1,

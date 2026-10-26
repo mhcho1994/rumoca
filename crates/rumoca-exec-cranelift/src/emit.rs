@@ -3,20 +3,19 @@
 // lowering and memory/ABI helpers into focused emitter submodules.
 use super::CompileError;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{
-    AbiParam, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, types,
-};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, StackSlot, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Linkage, Module};
 use rumoca_core::ExternalTableData;
+#[cfg(test)]
 use rumoca_eval_solve::{
     eval_table_bound_value_in, eval_table_lookup_slope_value_in, eval_table_lookup_value_in,
     eval_time_table_next_event_value_in,
 };
 use rumoca_ir_solve::{
     BinaryOp, CompareOp, FoldTensorUpdateStore, LinearOp, MatrixProductShape, ScalarProgramBlock,
-    UnaryOp, resolve_indexed_slot,
+    UnaryOp,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -26,14 +25,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod host_runtime;
 mod input_validation;
+#[cfg(test)]
 mod interpreter;
+mod native_fault;
+pub(crate) mod observation_carrier;
+mod output_ranges;
 mod owned_jit_module;
 mod projection_batch;
 pub(crate) mod projection_jacobian;
+mod register_allocation;
 mod register_constants;
 mod register_storage;
 #[cfg(test)]
 mod register_storage_tests;
+mod scratch;
 mod selected_jvp;
 mod selected_residual;
 mod status;
@@ -42,14 +47,19 @@ pub(crate) mod typed_program;
 
 use host_runtime::{host_jit_builder, register_math_symbols, with_active_external_tables};
 pub(crate) use input_validation::InputRequirements as EmitInputRequirements;
+#[cfg(test)]
+use input_validation::input_compile_error;
 use input_validation::{
-    InputRequirements, input_compile_error, input_requirements_for_linear_ops,
-    input_requirements_for_plans, row_input_requirements, validate_input_requirements,
-    validate_output_len,
+    InputRequirements, input_requirements_for_linear_ops, input_requirements_for_plans,
+    row_input_requirements, validate_input_requirements, validate_output_len,
 };
+#[cfg(test)]
 use interpreter::execute_row;
 use owned_jit_module::{OwnedJitModule, declare_far_call_in_func};
 pub(crate) use projection_batch::SharedProjectionModule;
+#[cfg(test)]
+use rumoca_ir_solve::resolve_indexed_slot;
+pub(crate) use scratch::NativeScratch;
 pub(crate) use tensor_kernel::{
     CompiledTensorKernels, DirectionalKernels, KernelFrame, KernelId, KernelKind, KernelProgram,
     ResidualKernels,
@@ -57,10 +67,20 @@ pub(crate) use tensor_kernel::{
 
 // Each compiled program writes its outputs through the trailing `*mut f64`
 // pointer (one program may emit several outputs via consecutive StoreOutputs).
-type ResidualRowFn = unsafe extern "C" fn(*const f64, *const f64, f64, *mut f64) -> u8;
-type ResidualChunkFn = unsafe extern "C" fn(*const f64, *const f64, f64, *mut f64, *mut f64) -> u8;
-type JacobianRowFn = unsafe extern "C" fn(*const f64, *const f64, f64, *const f64, *mut f64) -> u8;
-type AssignmentScheduleFn = unsafe extern "C" fn(*mut f64, *const f64, f64) -> u8;
+type ResidualRowFn =
+    unsafe extern "C" fn(*const f64, *const f64, f64, *mut f64, *mut NativeScratch) -> u8;
+type ResidualChunkFn =
+    unsafe extern "C" fn(*const f64, *const f64, f64, *mut f64, *mut f64, *mut NativeScratch) -> u8;
+type JacobianRowFn = unsafe extern "C" fn(
+    *const f64,
+    *const f64,
+    f64,
+    *const f64,
+    *mut f64,
+    *mut NativeScratch,
+) -> u8;
+type AssignmentScheduleFn =
+    unsafe extern "C" fn(*mut f64, *const f64, f64, *mut NativeScratch) -> u8;
 
 #[derive(Clone)]
 enum RowPlan {
@@ -70,12 +90,13 @@ enum RowPlan {
 
 struct CompiledResidualRow {
     plan: RowPlan,
-    validate_with_interpreter: bool,
+    #[cfg(test)]
     interpreter_supported: bool,
 }
 
 struct CompiledResidualJit {
     jit: ResidualJit,
+    scratch: scratch::ScratchOwner,
     register_count: usize,
     output_start: usize,
     output_count: usize,
@@ -84,6 +105,12 @@ struct CompiledResidualJit {
 enum ResidualJit {
     Whole(ResidualRowFn),
     Chunked(Box<[ResidualChunkFn]>),
+}
+
+#[derive(Clone, Copy)]
+enum TensorOffsetPurpose {
+    Access,
+    PatchMatch,
 }
 
 enum LoweredConditionalOutput {
@@ -99,7 +126,8 @@ enum LoweredConditionalOutput {
 struct CompiledJacobianRow {
     plan: RowPlan,
     jit: JacobianRowFn,
-    validate_with_interpreter: bool,
+    scratch: scratch::ScratchOwner,
+    #[cfg(test)]
     interpreter_supported: bool,
 }
 
@@ -108,6 +136,7 @@ struct JacobianCallContext<'a> {
     p: &'a [f64],
     t: f64,
     v: &'a [f64],
+    #[cfg(test)]
     external_tables: &'a [ExternalTableData],
 }
 
@@ -120,12 +149,15 @@ struct RowInputs<'a> {
     y: &'a [f64],
     p: &'a [f64],
     t: f64,
+    #[cfg(test)]
     seed: Option<&'a [f64]>,
+    #[cfg(test)]
     external_tables: &'a [ExternalTableData],
 }
 
 #[derive(Clone)]
 struct SimpleRowPlan {
+    #[cfg(test)]
     ops: Box<[SimpleOp]>,
     reg_count: usize,
     output_srcs: Box<[usize]>,
@@ -134,6 +166,7 @@ struct SimpleRowPlan {
 
 #[derive(Clone)]
 struct GeneralRowPlan {
+    #[cfg(test)]
     ops: Box<[LinearOp]>,
     reg_count: usize,
     output_srcs: Box<[usize]>,
@@ -157,6 +190,7 @@ impl RowPlan {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 enum SimpleOp {
     Const {
@@ -202,11 +236,18 @@ enum SimpleOp {
 pub(crate) struct CompiledResidualRows {
     _pure_calls: Option<Rc<typed_program::CompiledPureCallTable>>,
     rows: Vec<CompiledResidualRow>,
+    /// The rows' total output count, fixed when they are compiled.
+    output_count: usize,
+    /// Whether the rows may read external tables (see
+    /// `CraneliftEmitter::reads_external_tables`); rows that cannot are called
+    /// without installing the caller's tables.
+    reads_external_tables: bool,
     jits: Vec<CompiledResidualJit>,
     selectable: bool,
     input_requirements: InputRequirements,
     regs_scratch: RefCell<Vec<f64>>,
     output_scratch: RefCell<Vec<f64>>,
+    transaction_scratch: RefCell<Vec<f64>>,
     jit_call_count: Cell<usize>,
     _module: OwnedJitModule,
 }
@@ -214,6 +255,7 @@ pub(crate) struct CompiledResidualRows {
 pub(crate) struct CompiledAssignmentSchedule {
     _pure_calls: Option<Rc<typed_program::CompiledPureCallTable>>,
     jit: AssignmentScheduleFn,
+    scratch: scratch::ScratchOwner,
     input_requirements: InputRequirements,
     required_y_len: usize,
     rows: usize,
@@ -240,12 +282,14 @@ impl CompiledAssignmentSchedule {
                 y.len()
             )));
         }
-        let status = with_active_external_tables(external_tables, || {
+        with_active_external_tables(external_tables, || {
             // SAFETY: compilation validates every input load and target offset;
             // the checks above establish both against these exact slices.
-            unsafe { (self.jit)(y.as_mut_ptr(), p.as_ptr(), t) }
-        });
-        status::check(status)
+            let status = self
+                .scratch
+                .invoke(|arena| unsafe { (self.jit)(y.as_mut_ptr(), p.as_ptr(), t, arena) });
+            status::check(status)
+        })
     }
 
     pub(crate) fn rows(&self) -> usize {
@@ -254,6 +298,15 @@ impl CompiledAssignmentSchedule {
 }
 
 impl CompiledResidualRows {
+    /// Run `call` with `tables` installed when these rows can read them.
+    fn with_tables<R>(&self, tables: &[ExternalTableData], call: impl FnOnce() -> R) -> R {
+        if self.reads_external_tables {
+            with_active_external_tables(tables, call)
+        } else {
+            call()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn call(
         &self,
@@ -273,18 +326,24 @@ impl CompiledResidualRows {
         external_tables: &[ExternalTableData],
         out: &mut [f64],
     ) -> Result<(), CompileError> {
-        let output_count: usize = self.rows.iter().map(|row| row.plan.output_count()).sum();
+        let output_count = self.output_count;
         validate_output_len(out, output_count)?;
         validate_input_requirements(self.input_requirements, y, p, None)?;
         let inputs = RowInputs {
             y,
             p,
             t,
+            #[cfg(test)]
             seed: None,
+            #[cfg(test)]
             external_tables,
         };
-        with_active_external_tables(external_tables, || {
-            self.call_active(inputs, output_count, out)
+        self.with_tables(external_tables, || {
+            let mut staged = self.transaction_scratch.borrow_mut();
+            resize_native_outputs(&mut staged, output_count)?;
+            self.call_active(inputs, output_count, &mut staged)?;
+            out[..output_count].copy_from_slice(&staged);
+            Ok(())
         })
     }
 
@@ -304,18 +363,16 @@ impl CompiledResidualRows {
     fn call_active(
         &self,
         inputs: RowInputs<'_>,
-        output_count: usize,
+        _output_count: usize,
         out: &mut [f64],
     ) -> Result<(), CompileError> {
         let mut regs_scratch = self.regs_scratch.borrow_mut();
-        let expected = self.interpreted_outputs(&mut regs_scratch, inputs, output_count)?;
         for compiled in &self.jits {
             let output =
                 &mut out[compiled.output_start..compiled.output_start + compiled.output_count];
             let status = unsafe {
                 call_residual_jit(
-                    &compiled.jit,
-                    compiled.register_count,
+                    compiled,
                     &mut regs_scratch,
                     inputs.y,
                     inputs.p,
@@ -326,23 +383,23 @@ impl CompiledResidualRows {
             self.record_jit_call();
             status::check(status)?;
         }
-        if let Some(expected) = expected {
+        #[cfg(test)]
+        if let Some(expected) =
+            self.interpreted_outputs(&mut regs_scratch, inputs, _output_count)?
+        {
             validate_interpreted_outputs(out, &expected)?;
         }
         Ok(())
     }
 
+    #[cfg(test)]
     fn interpreted_outputs(
         &self,
         regs_scratch: &mut Vec<f64>,
         inputs: RowInputs<'_>,
         output_count: usize,
     ) -> Result<Option<Vec<f64>>, CompileError> {
-        let validate = self.rows.iter().all(|row| row.interpreter_supported)
-            && self
-                .rows
-                .iter()
-                .any(|row| should_validate_jit_row(row.validate_with_interpreter));
+        let validate = self.rows.iter().all(|row| row.interpreter_supported);
         if !validate {
             return Ok(None);
         }
@@ -367,6 +424,22 @@ impl CompiledResidualRows {
     }
 }
 
+fn reserve_native_outputs(values: &mut Vec<f64>, len: usize) -> Result<(), CompileError> {
+    if len > values.len() {
+        values.try_reserve(len - values.len()).map_err(|_| {
+            CompileError::Backend("native output workspace allocation failed".into())
+        })?;
+    }
+    Ok(())
+}
+
+fn resize_native_outputs(values: &mut Vec<f64>, len: usize) -> Result<(), CompileError> {
+    reserve_native_outputs(values, len)?;
+    values.resize(len, 0.0);
+    Ok(())
+}
+
+#[cfg(test)]
 fn validate_interpreted_outputs(actual: &[f64], expected: &[f64]) -> Result<(), CompileError> {
     for (&actual, &expected) in actual.iter().zip(expected) {
         validate_jit_matches_interpreter("residual", actual, expected)?;
@@ -377,14 +450,30 @@ fn validate_interpreted_outputs(actual: &[f64], expected: &[f64]) -> Result<(), 
 pub(crate) struct CompiledJacobianRows {
     _pure_calls: Option<Rc<typed_program::CompiledPureCallTable>>,
     rows: Vec<CompiledJacobianRow>,
+    /// The rows' total output count, fixed when they are compiled.
+    output_count: usize,
+    /// Whether the rows may read external tables (see
+    /// `CraneliftEmitter::reads_external_tables`); rows that cannot are called
+    /// without installing the caller's tables.
+    reads_external_tables: bool,
     input_requirements: InputRequirements,
     regs_scratch: RefCell<Vec<f64>>,
     output_scratch: RefCell<Vec<f64>>,
+    transaction_scratch: RefCell<Vec<f64>>,
     jit_call_count: Cell<usize>,
     _module: OwnedJitModule,
 }
 
 impl CompiledJacobianRows {
+    /// Run `call` with `tables` installed when these rows can read them.
+    fn with_tables<R>(&self, tables: &[ExternalTableData], call: impl FnOnce() -> R) -> R {
+        if self.reads_external_tables {
+            with_active_external_tables(tables, call)
+        } else {
+            call()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn program_call_count(&self) -> usize {
         self.jit_call_count.get()
@@ -411,7 +500,7 @@ impl CompiledJacobianRows {
             )));
         }
         validate_input_requirements(self.input_requirements, y, p, Some(v))?;
-        with_active_external_tables(external_tables, || {
+        self.with_tables(external_tables, || {
             let mut output = self.output_scratch.borrow_mut();
             output.resize(count, 0.0);
             self.call_jacobian_row(
@@ -422,6 +511,7 @@ impl CompiledJacobianRows {
                     p,
                     t,
                     v,
+                    #[cfg(test)]
                     external_tables,
                 },
                 &mut output,
@@ -451,24 +541,28 @@ impl CompiledJacobianRows {
         external_tables: &[ExternalTableData],
         out: &mut [f64],
     ) -> Result<(), CompileError> {
-        let output_count: usize = self.rows.iter().map(|row| row.plan.output_count()).sum();
+        let output_count = self.output_count;
         validate_output_len(out, output_count)?;
         validate_input_requirements(self.input_requirements, y, p, Some(v))?;
-        with_active_external_tables(external_tables, || {
+        self.with_tables(external_tables, || {
             let mut regs_scratch = self.regs_scratch.borrow_mut();
             let ctx = JacobianCallContext {
                 y,
                 p,
                 t,
                 v,
+                #[cfg(test)]
                 external_tables,
             };
+            let mut staged = self.transaction_scratch.borrow_mut();
+            resize_native_outputs(&mut staged, output_count)?;
             let mut base = 0;
             for row in self.rows.iter() {
                 let k = row.plan.output_count();
-                self.call_jacobian_row(row, &mut regs_scratch, &ctx, &mut out[base..base + k])?;
+                self.call_jacobian_row(row, &mut regs_scratch, &ctx, &mut staged[base..base + k])?;
                 base += k;
             }
+            out[..output_count].copy_from_slice(&staged);
             Ok(())
         })
     }
@@ -476,11 +570,15 @@ impl CompiledJacobianRows {
     fn call_jacobian_row(
         &self,
         row: &CompiledJacobianRow,
-        regs_scratch: &mut Vec<f64>,
+        _regs_scratch: &mut Vec<f64>,
         ctx: &JacobianCallContext<'_>,
         out: &mut [f64],
     ) -> Result<(), CompileError> {
-        if row.interpreter_supported && should_validate_jit_row(row.validate_with_interpreter) {
+        let status = unsafe { call_jacobian_jit(row, ctx.y, ctx.p, ctx.t, ctx.v, out) };
+        self.record_jit_call();
+        status::check(status)?;
+        #[cfg(test)]
+        if row.interpreter_supported {
             let mut expected = vec![0.0; out.len()];
             let inputs = RowInputs {
                 y: ctx.y,
@@ -489,16 +587,11 @@ impl CompiledJacobianRows {
                 seed: Some(ctx.v),
                 external_tables: ctx.external_tables,
             };
-            execute_row(&row.plan, regs_scratch, inputs, &mut expected)?;
-            status::check(unsafe { call_jacobian_jit(row.jit, ctx.y, ctx.p, ctx.t, ctx.v, out) })?;
-            self.record_jit_call();
+            execute_row(&row.plan, _regs_scratch, inputs, &mut expected)?;
             for (actual, expected) in out.iter().zip(&expected) {
                 validate_jit_matches_interpreter("jacobian", *actual, *expected)?;
             }
-            return Ok(());
         }
-        status::check(unsafe { call_jacobian_jit(row.jit, ctx.y, ctx.p, ctx.t, ctx.v, out) })?;
-        self.record_jit_call();
         Ok(())
     }
 
@@ -563,6 +656,7 @@ fn fold_signature(
     }
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
     signature
 }
 
@@ -604,12 +698,18 @@ fn compile_residual_rows_attached(
     let jits = finalize_residual_jits(&emitter.module, pending)?;
     Ok(CompiledResidualRows {
         _pure_calls: pure_calls,
+        output_count: compiled_rows
+            .iter()
+            .map(|row| row.plan.output_count())
+            .sum(),
+        reads_external_tables: emitter.reads_external_tables(),
         rows: compiled_rows,
         jits,
         selectable,
         input_requirements,
         regs_scratch: RefCell::new(Vec::new()),
         output_scratch: RefCell::new(Vec::new()),
+        transaction_scratch: RefCell::new(Vec::new()),
         jit_call_count: Cell::new(0),
         _module: emitter.module,
     })
@@ -685,11 +785,11 @@ fn build_compiled_residual_rows(
     plans: Vec<RowPlan>,
 ) -> Result<Vec<CompiledResidualRow>, CompileError> {
     let mut compiled_rows = checked_vec_with_capacity(rows.len(), "compiled residual rows")?;
-    for (index, plan) in plans.into_iter().enumerate() {
+    for (plan, _source) in plans.into_iter().zip(rows) {
         compiled_rows.push(CompiledResidualRow {
             plan,
-            validate_with_interpreter: row_uses_table_ops(&rows[index]),
-            interpreter_supported: !row_uses_pure_calls(&rows[index]),
+            #[cfg(test)]
+            interpreter_supported: !row_uses_pure_calls(_source),
         });
     }
     Ok(compiled_rows)
@@ -715,6 +815,7 @@ fn finalize_residual_jits(
         };
         jits.push(CompiledResidualJit {
             jit,
+            scratch: Default::default(),
             register_count,
             output_start,
             output_count,
@@ -831,6 +932,7 @@ fn compile_assignment_schedule_slices(
     Ok(CompiledAssignmentSchedule {
         _pure_calls: pure_calls,
         jit,
+        scratch: Default::default(),
         input_requirements,
         required_y_len,
         rows: rows.len(),
@@ -871,21 +973,28 @@ fn compile_jacobian_rows_attached(
     finalize_jit_module(&mut emitter.module)?;
     let input_requirements = input_requirements_for_plans(&plans);
     let mut compiled_rows = checked_vec_with_capacity(rows.len(), "compiled Jacobian rows")?;
-    for (index, (plan, func_id)) in plans.into_iter().zip(func_ids).enumerate() {
+    for ((plan, func_id), _source) in plans.into_iter().zip(func_ids).zip(rows) {
         let jit = finalized_jacobian_fn(&emitter.module, func_id)?;
         compiled_rows.push(CompiledJacobianRow {
             plan,
             jit,
-            validate_with_interpreter: row_uses_table_ops(&rows[index]),
-            interpreter_supported: !row_uses_pure_calls(&rows[index]),
+            scratch: Default::default(),
+            #[cfg(test)]
+            interpreter_supported: !row_uses_pure_calls(_source),
         });
     }
     Ok(CompiledJacobianRows {
         _pure_calls: pure_calls,
+        output_count: compiled_rows
+            .iter()
+            .map(|row| row.plan.output_count())
+            .sum(),
+        reads_external_tables: emitter.reads_external_tables(),
         rows: compiled_rows,
         input_requirements,
         regs_scratch: RefCell::new(Vec::new()),
         output_scratch: RefCell::new(Vec::new()),
+        transaction_scratch: RefCell::new(Vec::new()),
         jit_call_count: Cell::new(0),
         _module: emitter.module,
     })
@@ -973,35 +1082,37 @@ fn finalized_assignment_schedule_fn(
 }
 
 unsafe fn call_residual_jit(
-    jit: &ResidualJit,
-    register_count: usize,
+    compiled: &CompiledResidualJit,
     regs: &mut Vec<f64>,
     y: &[f64],
     p: &[f64],
     t: f64,
     out: &mut [f64],
 ) -> u8 {
-    match jit {
+    match &compiled.jit {
         ResidualJit::Whole(jit) => {
             // SAFETY: prevalidation proves all input/output accesses.
-            unsafe { jit(y.as_ptr(), p.as_ptr(), t, out.as_mut_ptr()) }
+            compiled
+                .scratch
+                .invoke(|arena| unsafe { jit(y.as_ptr(), p.as_ptr(), t, out.as_mut_ptr(), arena) })
         }
         ResidualJit::Chunked(chunks) => {
             // Chunk functions exchange compiler registers through this tape.
             // Each register is written before its first read by validated SSA.
-            regs.resize(register_count, 0.0);
+            regs.resize(compiled.register_count, 0.0);
             for jit in chunks {
                 // SAFETY: compilation validates row register flow and embeds
                 // output offsets against the already validated output slice.
-                let status = unsafe {
+                let status = compiled.scratch.invoke(|arena| unsafe {
                     jit(
                         y.as_ptr(),
                         p.as_ptr(),
                         t,
                         out.as_mut_ptr(),
                         regs.as_mut_ptr(),
+                        arena,
                     )
-                };
+                });
                 if status != 0 {
                     return status;
                 }
@@ -1012,7 +1123,7 @@ unsafe fn call_residual_jit(
 }
 
 unsafe fn call_jacobian_jit(
-    jit: JacobianRowFn,
+    row: &CompiledJacobianRow,
     y: &[f64],
     p: &[f64],
     t: f64,
@@ -1022,9 +1133,19 @@ unsafe fn call_jacobian_jit(
     // SAFETY: the caller guarantees the function pointer came from
     // finalized_jacobian_fn, prevalidation ensures any loaded y/p/seed indices
     // are in bounds, and `out` has room for this program's outputs.
-    unsafe { jit(y.as_ptr(), p.as_ptr(), t, v.as_ptr(), out.as_mut_ptr()) }
+    row.scratch.invoke(|arena| unsafe {
+        (row.jit)(
+            y.as_ptr(),
+            p.as_ptr(),
+            t,
+            v.as_ptr(),
+            out.as_mut_ptr(),
+            arena,
+        )
+    })
 }
 
+#[cfg(test)]
 fn validate_jit_matches_interpreter(
     row_kind: &'static str,
     actual: f64,
@@ -1040,10 +1161,6 @@ fn validate_jit_matches_interpreter(
     Err(CompileError::Backend(format!(
         "Cranelift {row_kind} row result {actual} diverged from interpreter result {expected}"
     )))
-}
-
-fn should_validate_jit_row(row_requires_validation: bool) -> bool {
-    cfg!(test) || row_requires_validation
 }
 
 fn validate_row_supported_by_jit(row: &[LinearOp], kind: RowKind) -> Result<(), CompileError> {
@@ -1076,23 +1193,14 @@ fn validate_row_supported_by_jit(row: &[LinearOp], kind: RowKind) -> Result<(), 
     Ok(())
 }
 
-fn row_uses_table_ops(row: &[LinearOp]) -> bool {
-    row.iter().any(|op| {
-        matches!(
-            op,
-            LinearOp::TableBounds { .. }
-                | LinearOp::TableLookup { .. }
-                | LinearOp::TableLookupSlope { .. }
-                | LinearOp::TableNextEvent { .. }
-        )
-    })
-}
-
+#[cfg(test)]
 fn row_uses_pure_calls(row: &[LinearOp]) -> bool {
     row.iter().any(|operation| {
         matches!(
             operation,
-            LinearOp::PureCall { .. } | LinearOp::PureCallDirectional { .. }
+            LinearOp::PureCall { .. }
+                | LinearOp::PureCallDirectional { .. }
+                | LinearOp::PureCallObservation { .. }
         )
     })
 }
@@ -1112,6 +1220,13 @@ struct CraneliftEmitter {
 }
 
 impl CraneliftEmitter {
+    /// Whether a function of this module may read the caller's external
+    /// tables: it declared a table host import, or it calls a pure function,
+    /// whose separately compiled body may.
+    fn reads_external_tables(&self) -> bool {
+        !self.math.table.is_empty() || !self.pure_call_functions.is_empty()
+    }
+
     fn new(
         pure_calls: Option<&typed_program::CompiledPureCallTable>,
     ) -> Result<Self, CompileError> {
@@ -1234,6 +1349,7 @@ impl CraneliftEmitter {
         }
         signature.params.push(AbiParam::new(pointer_type)); // captures
         signature.params.push(AbiParam::new(pointer_type)); // results
+        signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
         let name = match self.conditional_scope {
             Some(scope) => format!("rumoca_scope_{scope}_conditional_owner_{}", owner.get()),
             None => format!("rumoca_conditional_owner_{}", owner.get()),
@@ -1263,6 +1379,7 @@ impl CraneliftEmitter {
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let params = fb.block_params(entry).to_vec();
+            scratch::enter(&mut fb);
             let y_ptr = params[0];
             let p_ptr = params[1];
             let t_value = params[2];
@@ -1295,6 +1412,7 @@ impl CraneliftEmitter {
                 fold_functions: &self.fold_functions,
                 conditional_functions: &self.conditional_functions,
                 pure_call_functions: &self.pure_call_functions,
+                source_operation: std::ptr::null(),
                 pure_call_results: HashMap::new(),
                 nested_fold_results: HashMap::new(),
                 conditional_results: HashMap::new(),
@@ -1307,8 +1425,7 @@ impl CraneliftEmitter {
             drop(lower);
             fb.finalize();
         }
-        self.module
-            .define_function(function, &mut context)
+        register_allocation::define_function(&mut *self.module, function, &mut context)
             .map_err(to_backend_err)?;
         self.module.clear_context(&mut context);
         Ok(function)
@@ -1352,6 +1469,7 @@ impl CraneliftEmitter {
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let params = fb.block_params(entry).to_vec();
+            scratch::enter(&mut fb);
             let y_ptr = params[0];
             let p_ptr = params[1];
             let t_value = params[2];
@@ -1370,11 +1488,7 @@ impl CraneliftEmitter {
                 .ok_or_else(|| {
                     CompileError::Backend("fold kernel carried size overflow".to_string())
                 })?;
-            let carried = fb.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                bytes,
-                3,
-            ));
+            let carried = scratch::create_slot(&mut fb, bytes)?;
             let backing_regs_ptr =
                 create_fold_register_tape(&mut fb, pointer_type, &program.update)?;
             let mut lower = RowLowerCtx {
@@ -1400,6 +1514,7 @@ impl CraneliftEmitter {
                 fold_functions: &self.fold_functions,
                 conditional_functions: &self.conditional_functions,
                 pure_call_functions: &self.pure_call_functions,
+                source_operation: std::ptr::null(),
                 pure_call_results: HashMap::new(),
                 nested_fold_results: HashMap::new(),
                 conditional_results: HashMap::new(),
@@ -1413,8 +1528,7 @@ impl CraneliftEmitter {
             drop(lower);
             fb.finalize();
         }
-        self.module
-            .define_function(function, &mut context)
+        register_allocation::define_function(&mut *self.module, function, &mut context)
             .map_err(to_backend_err)?;
         self.module.clear_context(&mut context);
         Ok(function)
@@ -1458,6 +1572,7 @@ impl CraneliftEmitter {
         }
         signature.params.push(AbiParam::new(pointer_type)); // out (written, not returned)
 
+        signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
         let func_id = self
             .module
             .declare_function(name, Linkage::Local, &signature)
@@ -1474,6 +1589,7 @@ impl CraneliftEmitter {
             fb.seal_block(entry);
 
             let params = fb.block_params(entry).to_vec();
+            scratch::enter(&mut fb);
             let y_ptr = params[0];
             let p_ptr = params[1];
             let t_value = params[2];
@@ -1511,6 +1627,7 @@ impl CraneliftEmitter {
                 fold_functions: &self.fold_functions,
                 conditional_functions: &self.conditional_functions,
                 pure_call_functions: &self.pure_call_functions,
+                source_operation: std::ptr::null(),
                 pure_call_results: HashMap::new(),
                 nested_fold_results: HashMap::new(),
                 conditional_results: HashMap::new(),
@@ -1523,8 +1640,7 @@ impl CraneliftEmitter {
             fb.finalize();
         }
 
-        self.module
-            .define_function(func_id, &mut context)
+        register_allocation::define_function(&mut *self.module, func_id, &mut context)
             .map_err(to_backend_err)?;
         self.module.clear_context(&mut context);
         Ok(func_id)
@@ -1581,6 +1697,7 @@ impl CraneliftEmitter {
         signature.params.push(AbiParam::new(types::F64));
         signature.params.push(AbiParam::new(pointer_type));
         let profile_id = NEXT_RESIDUAL_KERNEL_ID.fetch_add(1, Ordering::Relaxed);
+        signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
         let func_id = self
             .module
             .declare_function(
@@ -1599,6 +1716,7 @@ impl CraneliftEmitter {
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let params = fb.block_params(entry).to_vec();
+            scratch::enter(&mut fb);
             let (y_ptr, p_ptr, t_value, out_ptr) = (params[0], params[1], params[2], params[3]);
             let mut loaded_y = HashMap::new();
             let mut loaded_p = HashMap::new();
@@ -1630,6 +1748,7 @@ impl CraneliftEmitter {
                     fold_functions: &self.fold_functions,
                     conditional_functions: &self.conditional_functions,
                     pure_call_functions: &self.pure_call_functions,
+                    source_operation: std::ptr::null(),
                     pure_call_results: HashMap::new(),
                     nested_fold_results: HashMap::new(),
                     conditional_results: std::mem::take(&mut conditional_results),
@@ -1643,8 +1762,7 @@ impl CraneliftEmitter {
             status::succeed(&mut fb);
             fb.finalize();
         }
-        self.module
-            .define_function(func_id, &mut context)
+        register_allocation::define_function(&mut *self.module, func_id, &mut context)
             .map_err(to_backend_err)?;
         self.module.clear_context(&mut context);
         Ok(func_id)
@@ -1664,6 +1782,7 @@ impl CraneliftEmitter {
         signature.params.push(AbiParam::new(types::F64)); // t
         signature.params.push(AbiParam::new(pointer_type)); // out
         signature.params.push(AbiParam::new(pointer_type)); // register tape
+        signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
         let func_id = self
             .module
             .declare_function(name, Linkage::Local, &signature)
@@ -1678,6 +1797,7 @@ impl CraneliftEmitter {
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let params = fb.block_params(entry).to_vec();
+            scratch::enter(&mut fb);
             let mut regs = HashMap::new();
             let mut loaded_y = HashMap::new();
             let mut loaded_p = HashMap::new();
@@ -1704,6 +1824,7 @@ impl CraneliftEmitter {
                 fold_functions: &self.fold_functions,
                 conditional_functions: &self.conditional_functions,
                 pure_call_functions: &self.pure_call_functions,
+                source_operation: std::ptr::null(),
                 pure_call_results: HashMap::new(),
                 nested_fold_results: HashMap::new(),
                 conditional_results: HashMap::new(),
@@ -1714,8 +1835,7 @@ impl CraneliftEmitter {
             status::succeed(&mut fb);
             fb.finalize();
         }
-        self.module
-            .define_function(func_id, &mut context)
+        register_allocation::define_function(&mut *self.module, func_id, &mut context)
             .map_err(to_backend_err)?;
         self.module.clear_context(&mut context);
         Ok(func_id)
@@ -1736,6 +1856,7 @@ impl CraneliftEmitter {
         signature.params.push(AbiParam::new(pointer_type)); // mutable y
         signature.params.push(AbiParam::new(pointer_type)); // p
         signature.params.push(AbiParam::new(types::F64)); // t
+        signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
         let profile_id = NEXT_ASSIGNMENT_KERNEL_ID.fetch_add(1, Ordering::Relaxed);
         let func_id = self
             .module
@@ -1755,6 +1876,7 @@ impl CraneliftEmitter {
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let params = fb.block_params(entry).to_vec();
+            scratch::enter(&mut fb);
             let (y_ptr, p_ptr, t_value) = (params[0], params[1], params[2]);
             let flags = MemFlags::new();
             let mut target_offset = 0usize;
@@ -1794,6 +1916,7 @@ impl CraneliftEmitter {
                     fold_functions: &self.fold_functions,
                     conditional_functions: &self.conditional_functions,
                     pure_call_functions: &self.pure_call_functions,
+                    source_operation: std::ptr::null(),
                     pure_call_results: HashMap::new(),
                     nested_fold_results: HashMap::new(),
                     conditional_results: HashMap::new(),
@@ -1806,8 +1929,7 @@ impl CraneliftEmitter {
             status::succeed(&mut fb);
             fb.finalize();
         }
-        self.module
-            .define_function(func_id, &mut context)
+        register_allocation::define_function(&mut *self.module, func_id, &mut context)
             .map_err(to_backend_err)?;
         self.module.clear_context(&mut context);
         Ok(func_id)
@@ -1887,9 +2009,8 @@ fn create_register_tape(
         .checked_mul(std::mem::size_of::<f64>())
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or_else(|| CompileError::Backend("row register tape size overflow".into()))?;
-    let tape =
-        fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3));
-    Ok(Some(fb.ins().stack_addr(pointer_type, tape, 0)))
+    let tape = scratch::create_slot(fb, bytes)?;
+    Ok(Some(scratch::stack_addr(fb, pointer_type, tape, 0)))
 }
 
 fn create_typed_cell_slot(
@@ -1902,7 +2023,7 @@ fn create_typed_cell_slot(
         .checked_mul(std::mem::size_of::<u64>())
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or_else(|| CompileError::Backend(format!("{context} stack size overflows")))?;
-    Ok(fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3)))
+    scratch::create_slot(fb, bytes)
 }
 
 fn typed_cell_type(scalar: rumoca_ir_solve::SolveScalarType) -> cranelift_codegen::ir::Type {
@@ -1934,7 +2055,26 @@ fn encode_typed_cell(
             format: rumoca_ir_solve::SolveRealFormat::Binary64,
             ..
         } => value,
-        rumoca_ir_solve::SolveScalarType::Integer(_) => fb.ins().fcvt_to_sint(types::I64, value),
+        rumoca_ir_solve::SolveScalarType::Integer(domain) => {
+            let integer = fb.ins().fcvt_to_sint_sat(types::I64, value);
+            let round_trip = fb.ins().fcvt_from_sint(types::F64, integer);
+            let exact = fb.ins().fcmp(FloatCC::Equal, value, round_trip);
+            let upper = fb.ins().f64const(9_223_372_036_854_775_808.0);
+            let below_upper = fb.ins().fcmp(FloatCC::LessThan, value, upper);
+            let minimum = fb.ins().iconst(types::I64, domain.minimum());
+            let maximum = fb.ins().iconst(types::I64, domain.maximum());
+            let above_minimum = fb
+                .ins()
+                .icmp(IntCC::SignedGreaterThanOrEqual, integer, minimum);
+            let below_maximum = fb
+                .ins()
+                .icmp(IntCC::SignedLessThanOrEqual, integer, maximum);
+            let in_domain = fb.ins().band(above_minimum, below_maximum);
+            let exact = fb.ins().band(exact, below_upper);
+            let valid = fb.ins().band(exact, in_domain);
+            status::require_scalar_payload(fb, valid);
+            integer
+        }
         rumoca_ir_solve::SolveScalarType::Boolean => {
             let zero = fb.ins().f64const(0.0);
             let condition = fb.ins().fcmp(FloatCC::NotEqual, value, zero);
@@ -1957,7 +2097,16 @@ fn decode_typed_cell(
             format: rumoca_ir_solve::SolveRealFormat::Binary64,
             ..
         } => value,
-        rumoca_ir_solve::SolveScalarType::Integer(_) => fb.ins().fcvt_from_sint(types::F64, value),
+        rumoca_ir_solve::SolveScalarType::Integer(_) => {
+            let scalar = fb.ins().fcvt_from_sint(types::F64, value);
+            let round_trip = fb.ins().fcvt_to_sint_sat(types::I64, scalar);
+            let exact = fb.ins().icmp(IntCC::Equal, value, round_trip);
+            let upper = fb.ins().f64const(9_223_372_036_854_775_808.0);
+            let below_upper = fb.ins().fcmp(FloatCC::LessThan, scalar, upper);
+            let valid = fb.ins().band(exact, below_upper);
+            status::require_scalar_payload(fb, valid);
+            scalar
+        }
         rumoca_ir_solve::SolveScalarType::Boolean => fb.ins().fcvt_from_uint(types::F64, value),
     }
 }
@@ -1986,6 +2135,7 @@ struct RowLowerCtx<'a, 'b> {
     conditional_functions: &'a HashMap<rumoca_ir_solve::FunctionConditionalOwnerId, FuncId>,
     pure_call_functions:
         &'a HashMap<rumoca_ir_solve::SolvePureCallOwnerId, typed_program::PureCallImport>,
+    source_operation: *const LinearOp,
     pure_call_results: HashMap<PureCallResultKey, StackSlot>,
     nested_fold_results: HashMap<NestedFoldCallKey, StackSlot>,
     conditional_results: HashMap<rumoca_ir_solve::FunctionConditionalOwnerId, StackSlot>,
@@ -2018,6 +2168,9 @@ struct NestedFoldCallKey {
 struct PureCallResultKey {
     owner: rumoca_ir_solve::SolvePureCallOwnerId,
     directional: bool,
+    /// The observation form stops early and publishes only predicates, so its
+    /// result is never a stand-in for the value row.
+    observation: bool,
     inputs: Box<[u32]>,
 }
 
@@ -2034,6 +2187,16 @@ struct PureCallTarget<'a> {
     outputs: &'a [rumoca_ir_solve::SolvePureCallOutput],
     function: FuncId,
     directional: bool,
+    /// The outputs the site publishes to its registers.
+    published: PublishedOutputs<'a>,
+}
+
+/// Which outputs of a native owner call a site writes to its registers.
+#[derive(Clone, Copy)]
+enum PublishedOutputs<'a> {
+    All,
+    /// An assertion observation publishes only its ordered predicate outputs.
+    Predicates(&'a [usize]),
 }
 
 struct NestedFoldOutput<'a> {
@@ -2153,8 +2316,9 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         targets: &[usize],
     ) -> Result<(), CompileError> {
         let mut outputs = Vec::with_capacity(targets.len());
-        for op in row.iter().cloned() {
-            self.lower_assignment_output(op, &mut outputs)?;
+        for op in row {
+            self.source_operation = op as *const _;
+            self.lower_assignment_output(op.clone(), &mut outputs)?;
         }
         if outputs.len() != targets.len() {
             return Err(CompileError::Input(format!(
@@ -2217,8 +2381,19 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
     ) -> Result<(), CompileError> {
         let mut out_idx = i32::try_from(output_base)
             .map_err(|_| CompileError::Backend("residual output index exceeds i32".to_string()))?;
-        for op in row.iter().cloned() {
-            let values = match op {
+        for op in row {
+            self.source_operation = op as *const _;
+            if let LinearOp::StoreOutputRange {
+                start,
+                count,
+                stride: 1,
+            } = *op
+                && let Some(next) = self.copy_taped_output_range(start, count, out_ptr, out_idx)?
+            {
+                out_idx = next;
+                continue;
+            }
+            let values = match op.clone() {
                 LinearOp::StoreOutputRange {
                     start,
                     count,
@@ -2305,7 +2480,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 .map_err(|_| {
                     CompileError::Backend("function-fold carried offset exceeds i32".to_string())
                 })?;
-                let value = self.fb.ins().stack_load(types::F64, carried, offset);
+                let value = scratch::stack_load(self.fb, types::F64, carried, offset);
                 self.insert(dst, value)
             }
             LinearOp::LoadIndexedFoldCarried {
@@ -2596,6 +2771,11 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 capture_start,
                 program,
             } => self.lower_function_conditional(dst_start, capture_start, &program),
+            LinearOp::PureCallObservation {
+                dst_start,
+                input_starts,
+                site,
+            } => self.lower_pure_call_observation(dst_start, &input_starts, &site),
             LinearOp::PureCall {
                 dst_start,
                 input_starts,
@@ -2662,13 +2842,10 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 .ok_or_else(|| {
                     CompileError::Backend("function-fold carried storage size overflow".to_string())
                 })?;
-            let carried_slot = self.fb.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                carried_bytes,
-                3,
-            ));
+            let carried_slot = scratch::create_slot(self.fb, carried_bytes)?;
             for (offset, value) in carried.iter().copied().enumerate() {
-                self.fb.ins().stack_store(
+                scratch::stack_store(
+                    self.fb,
                     value,
                     carried_slot,
                     stack_element_byte_offset(offset, "function-fold initial")?,
@@ -2679,7 +2856,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             carried_slot
         };
         for offset in 0..program.carried_count {
-            let value = self.fb.ins().stack_load(
+            let value = scratch::stack_load(
+                self.fb,
                 types::F64,
                 carried_slot,
                 stack_element_byte_offset(offset, "function-fold result")?,
@@ -2697,6 +2875,35 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         dst_start: u32,
         input_starts: &[u32],
         site: &rumoca_ir_solve::SolvePureCallSite,
+    ) -> Result<Option<cranelift_codegen::ir::Value>, CompileError> {
+        self.lower_primal_call(dst_start, input_starts, site, PublishedOutputs::All)
+    }
+
+    /// An assertion observation runs the value owner's native helper, exactly
+    /// as an ordinary call of the same owner and inputs does, and publishes
+    /// only the ordered assertion predicates. The helper never stops on an
+    /// assertion, so a failing predicate reads as zero and the event-action
+    /// owner that scheduled the row keeps the authored failure and message.
+    fn lower_pure_call_observation(
+        &mut self,
+        dst_start: u32,
+        input_starts: &[u32],
+        site: &rumoca_ir_solve::SolveAssertionObservationSite,
+    ) -> Result<Option<cranelift_codegen::ir::Value>, CompileError> {
+        self.lower_primal_call(
+            dst_start,
+            input_starts,
+            site.value_site(),
+            PublishedOutputs::Predicates(site.predicate_outputs()),
+        )
+    }
+
+    fn lower_primal_call(
+        &mut self,
+        dst_start: u32,
+        input_starts: &[u32],
+        site: &rumoca_ir_solve::SolvePureCallSite,
+        published: PublishedOutputs<'_>,
     ) -> Result<Option<cranelift_codegen::ir::Value>, CompileError> {
         let import = self
             .pure_call_functions
@@ -2716,6 +2923,16 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 "typed pure-call native interface mismatch".to_string(),
             ));
         }
+        let function = match published {
+            PublishedOutputs::All => Some(import.function),
+            PublishedOutputs::Predicates(_) => import.observation,
+        }
+        .ok_or_else(|| {
+            CompileError::Backend(format!(
+                "typed pure-call owner {} has no native assertion observation",
+                site.owner().index()
+            ))
+        })?;
         self.lower_typed_pure_call(
             dst_start,
             input_starts,
@@ -2723,8 +2940,9 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 owner: site.owner(),
                 inputs: site.inputs(),
                 outputs: site.outputs(),
-                function: import.function,
+                function,
                 directional: false,
+                published,
             },
         )
     }
@@ -2768,6 +2986,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 outputs: site.outputs(),
                 function: directional.function,
                 directional: true,
+                published: PublishedOutputs::All,
             },
         )
     }
@@ -2784,14 +3003,19 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             outputs,
             function,
             directional,
+            published,
         } = target;
         let cache_key = PureCallResultKey {
             owner,
             directional,
+            observation: matches!(published, PublishedOutputs::Predicates(_)),
             inputs: input_starts.into(),
         };
-        if let Some(output_slot) = self.pure_call_results.get(&cache_key).copied() {
-            self.load_typed_call_results(dst_start, outputs, output_slot)?;
+        if let Some(output_slot) = (!matches!(published, PublishedOutputs::Predicates(_)))
+            .then(|| self.pure_call_results.get(&cache_key).copied())
+            .flatten()
+        {
+            self.publish_typed_call_results(dst_start, (outputs, published), output_slot)?;
             return Ok(None);
         }
         let input_cells = inputs.iter().try_fold(0usize, |count, value_type| {
@@ -2808,52 +3032,113 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         let input_slot = create_typed_cell_slot(self.fb, input_cells, "pure-call input")?;
         let output_slot = create_typed_cell_slot(self.fb, output_cells, "pure-call output")?;
         let pointer_type = self.module.target_config().pointer_type();
-        let input_ptr = self.fb.ins().stack_addr(pointer_type, input_slot, 0);
-        let output_ptr = self.fb.ins().stack_addr(pointer_type, output_slot, 0);
-        let mut input_cell = 0usize;
-        for (start, value_type) in input_starts.iter().zip(inputs) {
-            for offset in 0..value_type.scalar_count() as usize {
-                let register = checked_reg_offset(*start, offset, "typed pure-call input")?;
-                let value = self.lookup(register)?;
-                let value = encode_typed_cell(self.fb, value_type.element_type(), value);
-                self.fb.ins().stack_store(
-                    value,
-                    input_slot,
-                    stack_element_byte_offset(input_cell, "typed pure-call input")?,
-                );
-                input_cell += 1;
-            }
+        let input_ptr = scratch::stack_addr(self.fb, pointer_type, input_slot, 0);
+        let output_ptr = scratch::stack_addr(self.fb, pointer_type, output_slot, 0);
+        self.pack_typed_call_inputs(input_starts, inputs, input_slot)?;
+        if matches!(published, PublishedOutputs::Predicates(_)) {
+            let marker = self
+                .fb
+                .ins()
+                .iconst(types::I64, self.source_operation as usize as i64);
+            observation_carrier::emit(
+                self.module,
+                self.fb,
+                observation_carrier::ROOT_ENTER,
+                owner.index(),
+                None,
+                (input_ptr, input_cells),
+                Some(marker),
+            )?;
         }
         let function = declare_far_call_in_func(self.module, function, self.fb.func);
-        let call = self.fb.ins().call(function, &[input_ptr, output_ptr]);
+        let arena = scratch::parameter(self.fb);
+        let call = self
+            .fb
+            .ins()
+            .call(function, &[input_ptr, output_ptr, arena]);
         let status = self.fb.inst_results(call)[0];
+        if matches!(published, PublishedOutputs::Predicates(_)) {
+            observation_carrier::emit(
+                self.module,
+                self.fb,
+                observation_carrier::ROOT_EXIT,
+                owner.index(),
+                None,
+                (input_ptr, 0),
+                None,
+            )?;
+        }
+        // An observation form that stopped at a failed Error-level assertion
+        // has published its predicates; that is its result, not a failure.
+        let status = match published {
+            PublishedOutputs::All => status,
+            PublishedOutputs::Predicates(_) => status::separate_stop(self.fb, status).1,
+        };
         status::propagate(self.fb, status);
-        self.pure_call_results.insert(cache_key, output_slot);
-        self.load_typed_call_results(dst_start, outputs, output_slot)?;
+        if !matches!(published, PublishedOutputs::Predicates(_)) {
+            self.pure_call_results.insert(cache_key, output_slot);
+        }
+        self.publish_typed_call_results(dst_start, (outputs, published), output_slot)?;
         Ok(None)
     }
 
-    fn load_typed_call_results(
+    fn publish_typed_call_results(
         &mut self,
         dst_start: u32,
-        outputs: &[rumoca_ir_solve::SolvePureCallOutput],
+        (outputs, published): (
+            &[rumoca_ir_solve::SolvePureCallOutput],
+            PublishedOutputs<'_>,
+        ),
         output_slot: StackSlot,
     ) -> Result<(), CompileError> {
         let mut output_cell = 0usize;
-        for output in outputs {
-            for _ in 0..output.value_type().scalar_count() {
-                let value = self.fb.ins().stack_load(
-                    typed_cell_type(output.value_type().element_type()),
-                    output_slot,
-                    stack_element_byte_offset(output_cell, "typed pure-call output")?,
-                );
-                let value = decode_typed_cell(self.fb, output.value_type().element_type(), value);
-                self.insert(
-                    checked_reg_offset(dst_start, output_cell, "typed pure-call output")?,
-                    value,
+        let mut published_cell = 0usize;
+        for (index, output) in outputs.iter().enumerate() {
+            let width = output.value_type().scalar_count() as usize;
+            let publishes = match published {
+                PublishedOutputs::All => true,
+                PublishedOutputs::Predicates(predicates) => predicates.contains(&index),
+            };
+            if publishes {
+                self.load_typed_call_output(
+                    output,
+                    (output_slot, output_cell),
+                    checked_reg_offset(dst_start, published_cell, "typed pure-call output")?,
                 )?;
-                output_cell += 1;
+                published_cell += width;
             }
+            output_cell += width;
+        }
+        Ok(())
+    }
+
+    /// Load one output's cells, starting at `first_cell`, into registers from `dst`.
+    fn load_typed_call_output(
+        &mut self,
+        output: &rumoca_ir_solve::SolvePureCallOutput,
+        (output_slot, first_cell): (StackSlot, usize),
+        dst: u32,
+    ) -> Result<(), CompileError> {
+        if self.copy_taped_real_cells(
+            dst,
+            output.value_type(),
+            (output_slot, first_cell),
+            output_ranges::TypedRangeDirection::Output,
+        )? {
+            return Ok(());
+        }
+        for offset in 0..output.value_type().scalar_count() as usize {
+            let value = scratch::stack_load(
+                self.fb,
+                typed_cell_type(output.value_type().element_type()),
+                output_slot,
+                stack_element_byte_offset(first_cell + offset, "typed pure-call output")?,
+            );
+            let value = decode_typed_cell(self.fb, output.value_type().element_type(), value);
+            self.insert(
+                checked_reg_offset(dst, offset, "typed pure-call output")?,
+                value,
+            )?;
         }
         Ok(())
     }
@@ -2906,11 +3191,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                     "function-conditional result storage size overflow".to_string(),
                 )
             })?;
-        let result_slot = self.fb.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            result_bytes,
-            3,
-        ));
+        let result_slot = scratch::create_slot(self.fb, result_bytes)?;
         let continuation = self.fb.create_block();
         for arm in &program.arms {
             let condition = self.lower_function_conditional_condition(
@@ -2970,24 +3251,21 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                         "function-conditional capture storage size overflow".to_string(),
                     )
                 })?;
-            let captures = self.fb.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                capture_bytes,
-                3,
-            ));
+            let captures = scratch::create_slot(self.fb, capture_bytes)?;
             for offset in 0..program.capture_count {
                 let value = self.lookup(checked_reg_offset(
                     capture_start,
                     offset,
                     "function conditional capture",
                 )?)?;
-                self.fb.ins().stack_store(
+                scratch::stack_store(
+                    self.fb,
                     value,
                     captures,
                     stack_element_byte_offset(offset, "function-conditional capture")?,
                 );
             }
-            self.fb.ins().stack_addr(types::I64, captures, 0)
+            scratch::stack_addr(self.fb, types::I64, captures, 0)
         };
         let result_bytes = program
             .result_count
@@ -2998,18 +3276,15 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                     "function-conditional result storage size overflow".to_string(),
                 )
             })?;
-        let results = self.fb.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            result_bytes,
-            3,
-        ));
-        let results_ptr = self.fb.ins().stack_addr(types::I64, results, 0);
+        let results = scratch::create_slot(self.fb, result_bytes)?;
+        let results_ptr = scratch::stack_addr(self.fb, types::I64, results, 0);
         let function = declare_far_call_in_func(self.module, function, self.fb.func);
         let mut arguments = vec![self.y_ptr, self.p_ptr, self.t_value];
         if let Some(seed) = self.v_ptr {
             arguments.push(seed);
         }
         arguments.extend([captures_ptr, results_ptr]);
+        arguments.push(scratch::parameter(self.fb));
         let call = self.fb.ins().call(function, &arguments);
         let status = self.fb.inst_results(call)[0];
         status::propagate(self.fb, status);
@@ -3023,13 +3298,14 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         result_count: usize,
     ) -> Result<(), CompileError> {
         if let Some(registers) = self.backing_regs_ptr {
-            let source = self.fb.ins().stack_addr(types::I64, result_slot, 0);
+            let source = scratch::stack_addr(self.fb, types::I64, result_slot, 0);
             let destination_offset = i64::from(register_byte_offset(dst_start)?);
             let destination = self.fb.ins().iadd_imm(registers, destination_offset);
             return self.copy_pointer_range(source, destination, result_count);
         }
         for offset in 0..result_count {
-            let value = self.fb.ins().stack_load(
+            let value = scratch::stack_load(
+                self.fb,
                 types::F64,
                 result_slot,
                 stack_element_byte_offset(offset, "function-conditional result")?,
@@ -3085,6 +3361,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             pure_call_functions: self.pure_call_functions,
             // Conditional regions own isolated register namespaces, so their
             // register-number call keys cannot reuse parent-row results.
+            source_operation: std::ptr::null(),
             pure_call_results: HashMap::new(),
             nested_fold_results: HashMap::new(),
             conditional_results: self.conditional_results.clone(),
@@ -3151,8 +3428,9 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         region: &[LinearOp],
     ) -> Result<Vec<LoweredConditionalOutput>, CompileError> {
         let mut outputs = Vec::new();
-        for operation in region.iter().cloned() {
-            self.lower_conditional_region_output(operation, &mut outputs)?;
+        for operation in region {
+            self.source_operation = operation as *const _;
+            self.lower_conditional_region_output(operation.clone(), &mut outputs)?;
         }
         Ok(outputs)
     }
@@ -3254,7 +3532,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
     ) -> Result<usize, CompileError> {
         match *value {
             LoweredConditionalOutput::Value(value) => {
-                self.fb.ins().stack_store(
+                scratch::stack_store(
+                    self.fb,
                     value,
                     result_slot,
                     stack_element_byte_offset(output, "function-conditional result")?,
@@ -3269,7 +3548,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             } => {
                 let source_offset = i64::from(register_byte_offset(start)?);
                 let source = self.fb.ins().iadd_imm(pointer, source_offset);
-                let destination = self.fb.ins().stack_addr(
+                let destination = scratch::stack_addr(
+                    self.fb,
                     types::I64,
                     result_slot,
                     stack_element_byte_offset(output, "function-conditional result")?,
@@ -3296,7 +3576,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                         pointer,
                         register_byte_offset(source)?,
                     );
-                    self.fb.ins().stack_store(
+                    scratch::stack_store(
+                        self.fb,
                         value,
                         result_slot,
                         stack_element_byte_offset(output, "function-conditional result")?,
@@ -3338,13 +3619,10 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                     "guarded function-fold carried storage size overflow".to_string(),
                 )
             })?;
-        let carried_slot = self.fb.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            carried_bytes,
-            3,
-        ));
+        let carried_slot = scratch::create_slot(self.fb, carried_bytes)?;
         for (offset, value) in carried.iter().copied().enumerate() {
-            self.fb.ins().stack_store(
+            scratch::stack_store(
+                self.fb,
                 value,
                 carried_slot,
                 stack_element_byte_offset(offset, "guarded function-fold initial")?,
@@ -3369,7 +3647,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         self.fb.switch_to_block(continuation);
         self.fb.seal_block(continuation);
         for offset in 0..program.carried_count {
-            let value = self.fb.ins().stack_load(
+            let value = scratch::stack_load(
+                self.fb,
                 types::F64,
                 carried_slot,
                 stack_element_byte_offset(offset, "guarded function-fold result")?,
@@ -3527,6 +3806,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             fold_functions: self.fold_functions,
             conditional_functions: self.conditional_functions,
             pure_call_functions: self.pure_call_functions,
+            source_operation: std::ptr::null(),
             pure_call_results: HashMap::new(),
             nested_fold_results: HashMap::new(),
             conditional_results: HashMap::new(),
@@ -3574,6 +3854,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             fold_functions: self.fold_functions,
             conditional_functions: self.conditional_functions,
             pure_call_functions: self.pure_call_functions,
+            source_operation: std::ptr::null(),
             pure_call_results: HashMap::new(),
             nested_fold_results: HashMap::new(),
             conditional_results: HashMap::new(),
@@ -3603,11 +3884,12 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         operations: &[LinearOp],
     ) -> Result<Vec<LinearOp>, CompileError> {
         let mut outputs = Vec::new();
-        for operation in operations.iter().cloned() {
-            if is_fold_output(&operation) {
-                outputs.push(operation);
+        for operation in operations {
+            self.source_operation = operation as *const _;
+            if is_fold_output(operation) {
+                outputs.push(operation.clone());
             } else {
-                self.lower_op(operation)?;
+                self.lower_op(operation.clone())?;
             }
         }
         Ok(outputs)
@@ -3622,7 +3904,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         match operation {
             LinearOp::StoreOutput { src } => {
                 let value = self.lookup(src)?;
-                self.fb.ins().stack_store(
+                scratch::stack_store(
+                    self.fb,
                     value,
                     carried,
                     stack_element_byte_offset(cursor, "function-fold update")?,
@@ -3636,7 +3919,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             } => {
                 let values = self.lower_output_range(start, count, stride)?;
                 for (offset, value) in values.into_iter().enumerate() {
-                    self.fb.ins().stack_store(
+                    scratch::stack_store(
+                        self.fb,
                         value,
                         carried,
                         stack_element_byte_offset(cursor + offset, "function-fold update")?,
@@ -3714,26 +3998,24 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             .checked_mul(std::mem::size_of::<f64>())
             .and_then(|bytes| u32::try_from(bytes).ok())
             .ok_or_else(|| CompileError::Backend("fold capture size overflow".to_string()))?;
-        let capture_slot = self.fb.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            capture_bytes,
-            3,
-        ));
+        let capture_slot = scratch::create_slot(self.fb, capture_bytes)?;
         for (offset, value) in captures.iter().copied().enumerate() {
-            self.fb.ins().stack_store(
+            scratch::stack_store(
+                self.fb,
                 value,
                 capture_slot,
                 stack_element_byte_offset(offset, "fold capture")?,
             );
         }
-        let carried_ptr = self.fb.ins().stack_addr(types::I64, carried, 0);
-        let captures_ptr = self.fb.ins().stack_addr(types::I64, capture_slot, 0);
+        let carried_ptr = scratch::stack_addr(self.fb, types::I64, carried, 0);
+        let captures_ptr = scratch::stack_addr(self.fb, types::I64, capture_slot, 0);
         let function = declare_far_call_in_func(self.module, function, self.fb.func);
         let mut arguments = vec![self.y_ptr, self.p_ptr, self.t_value];
         if let Some(seed) = self.v_ptr {
             arguments.push(seed);
         }
         arguments.extend([carried_ptr, captures_ptr]);
+        arguments.push(scratch::parameter(self.fb));
         let call = self.fb.ins().call(function, &arguments);
         let status = self.fb.inst_results(call)[0];
         status::propagate(self.fb, status);
@@ -3860,7 +4142,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         let use_nested = if nested_when_true {
             condition
         } else {
-            self.fb.ins().bnot(condition)
+            self.fb.ins().icmp_imm(IntCC::Equal, condition, 0)
         };
         let nested = self.fb.create_block();
         let continuation = self.fb.create_block();
@@ -3886,11 +4168,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             program.carried_count,
             "nested function-fold storage size overflow",
         )?;
-        let nested_carried = self.fb.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            carried_bytes,
-            3,
-        ));
+        let nested_carried = scratch::create_slot(self.fb, carried_bytes)?;
         let count =
             self.initialize_nested_fold_carried(parent_carried, nested_carried, &call_key.initial)?;
         if count != program.carried_count {
@@ -3931,7 +4209,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         match source {
             NestedFoldInitialKey::Registers(values) => {
                 for (offset, value) in values.iter().copied().enumerate() {
-                    self.fb.ins().stack_store(
+                    scratch::stack_store(
+                        self.fb,
                         value,
                         nested,
                         stack_element_byte_offset(
@@ -3971,19 +4250,16 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         }
         let capture_bytes =
             checked_f64_stack_bytes(captures.len().max(1), "inline fold capture size overflow")?;
-        let capture_slot = self.fb.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            capture_bytes,
-            3,
-        ));
+        let capture_slot = scratch::create_slot(self.fb, capture_bytes)?;
         for (offset, value) in captures.iter().copied().enumerate() {
-            self.fb.ins().stack_store(
+            scratch::stack_store(
+                self.fb,
                 value,
                 capture_slot,
                 stack_element_byte_offset(offset, "inline fold capture")?,
             );
         }
-        let captures_ptr = self.fb.ins().stack_addr(types::I64, capture_slot, 0);
+        let captures_ptr = scratch::stack_addr(self.fb, types::I64, capture_slot, 0);
         self.lower_function_fold_on_stack(carried, captures, Some(captures_ptr), program)
     }
 
@@ -4024,16 +4300,14 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             .fb
             .ins()
             .imul_imm(ordinal, std::mem::size_of::<f64>() as i64);
-        let source_address = self.fb.ins().stack_addr(types::I64, source, source_base);
+        let source_address = scratch::stack_addr(self.fb, types::I64, source, source_base);
         let source_address = self.fb.ins().iadd(source_address, byte_offset);
         let value = self
             .fb
             .ins()
             .load(types::F64, self.flags, source_address, 0);
         let destination_address =
-            self.fb
-                .ins()
-                .stack_addr(types::I64, destination, destination_base);
+            scratch::stack_addr(self.fb, types::I64, destination, destination_base);
         let destination_address = self.fb.ins().iadd(destination_address, byte_offset);
         self.fb
             .ins()
@@ -4053,7 +4327,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         destination: StackSlot,
         count: usize,
     ) -> Result<(), CompileError> {
-        let destination = self.fb.ins().stack_addr(types::I64, destination, 0);
+        let destination = scratch::stack_addr(self.fb, types::I64, destination, 0);
         self.copy_pointer_range(source, destination, count)
     }
 
@@ -4063,7 +4337,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         destination: cranelift_codegen::ir::Value,
         count: usize,
     ) -> Result<(), CompileError> {
-        let source = self.fb.ins().stack_addr(types::I64, source, 0);
+        let source = scratch::stack_addr(self.fb, types::I64, source, 0);
         self.copy_pointer_range(source, destination, count)
     }
 
@@ -4257,11 +4531,21 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         self.fb.seal_block(outer_body);
         let row = self.fb.ins().udiv_imm(output, columns as i64);
         let column = self.fb.ins().urem_imm(output, columns as i64);
-        let zero_re = self.fb.ins().f64const(0.0);
-        let zero_du = self.fb.ins().f64const(0.0);
+        let term_shape = (inner, columns, lanes);
+        let operands = (regs_ptr, lhs_start, rhs_start);
+        // The first term is its own sum: k = 0 is formed here and the loop
+        // adds k = 1.. in order. An empty dot enters at k = 0 from +0.0.
+        let zero = self.fb.ins().f64const(0.0);
+        let (first_term, first_re, first_du) = if inner == 0 {
+            (zero_index, zero, zero)
+        } else {
+            let (re, du) = self.matrix_loop_term(operands, (row, column, zero_index), term_shape);
+            let one = self.fb.ins().iconst(types::I64, 1);
+            (one, re, du.unwrap_or(zero))
+        };
         self.fb.ins().jump(
             term_header,
-            &[zero_index.into(), zero_re.into(), zero_du.into()],
+            &[first_term.into(), first_re.into(), first_du.into()],
         );
 
         self.fb.switch_to_block(term_header);
@@ -4281,31 +4565,11 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
 
         self.fb.switch_to_block(term_body);
         self.fb.seal_block(term_body);
-        let lhs_element = self.fb.ins().imul_imm(row, inner as i64);
-        let lhs_element = self.fb.ins().iadd(lhs_element, term);
-        let lhs_element = self.fb.ins().imul_imm(lhs_element, lanes as i64);
-        let rhs_element = self.fb.ins().imul_imm(term, columns as i64);
-        let rhs_element = self.fb.ins().iadd(rhs_element, column);
-        let rhs_element = self.fb.ins().imul_imm(rhs_element, lanes as i64);
-        let lhs_register = self.fb.ins().iadd_imm(lhs_element, i64::from(lhs_start));
-        let rhs_register = self.fb.ins().iadd_imm(rhs_element, i64::from(rhs_start));
-        let lhs_offset = self.fb.ins().imul_imm(lhs_register, 8);
-        let rhs_offset = self.fb.ins().imul_imm(rhs_register, 8);
-        let lhs_address = self.fb.ins().iadd(regs_ptr, lhs_offset);
-        let rhs_address = self.fb.ins().iadd(regs_ptr, rhs_offset);
-        let lhs_re = self.fb.ins().load(types::F64, self.flags, lhs_address, 0);
-        let rhs_re = self.fb.ins().load(types::F64, self.flags, rhs_address, 0);
-        let product = self.fb.ins().fmul(lhs_re, rhs_re);
+        let (product, tangent) = self.matrix_loop_term(operands, (row, column, term), term_shape);
         let next_re = self.fb.ins().fadd(accumulated_re, product);
-        let next_du = if lanes == 2 {
-            let lhs_du = self.fb.ins().load(types::F64, self.flags, lhs_address, 8);
-            let rhs_du = self.fb.ins().load(types::F64, self.flags, rhs_address, 8);
-            let lhs_term = self.fb.ins().fmul(lhs_du, rhs_re);
-            let rhs_term = self.fb.ins().fmul(lhs_re, rhs_du);
-            let tangent = self.fb.ins().fadd(lhs_term, rhs_term);
-            self.fb.ins().fadd(accumulated_du, tangent)
-        } else {
-            accumulated_du
+        let next_du = match tangent {
+            Some(tangent) => self.fb.ins().fadd(accumulated_du, tangent),
+            None => accumulated_du,
         };
         let next_term = self.fb.ins().iadd_imm(term, 1);
         self.fb.ins().jump(
@@ -4335,6 +4599,46 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         self.fb.switch_to_block(outer_exit);
         self.fb.seal_block(outer_exit);
         Ok(None)
+    }
+
+    /// The `(row, column, term)` product of a looped matrix product read
+    /// through `regs_ptr`, and its tangent `du_l·r + l·du_r` for two lanes.
+    fn matrix_loop_term(
+        &mut self,
+        (regs_ptr, lhs_start, rhs_start): (cranelift_codegen::ir::Value, u32, u32),
+        (row, column, term): (
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+        ),
+        (inner, columns, lanes): (usize, usize, usize),
+    ) -> (
+        cranelift_codegen::ir::Value,
+        Option<cranelift_codegen::ir::Value>,
+    ) {
+        let lhs_element = self.fb.ins().imul_imm(row, inner as i64);
+        let lhs_element = self.fb.ins().iadd(lhs_element, term);
+        let lhs_element = self.fb.ins().imul_imm(lhs_element, lanes as i64);
+        let rhs_element = self.fb.ins().imul_imm(term, columns as i64);
+        let rhs_element = self.fb.ins().iadd(rhs_element, column);
+        let rhs_element = self.fb.ins().imul_imm(rhs_element, lanes as i64);
+        let lhs_register = self.fb.ins().iadd_imm(lhs_element, i64::from(lhs_start));
+        let rhs_register = self.fb.ins().iadd_imm(rhs_element, i64::from(rhs_start));
+        let lhs_offset = self.fb.ins().imul_imm(lhs_register, 8);
+        let rhs_offset = self.fb.ins().imul_imm(rhs_register, 8);
+        let lhs_address = self.fb.ins().iadd(regs_ptr, lhs_offset);
+        let rhs_address = self.fb.ins().iadd(regs_ptr, rhs_offset);
+        let lhs_re = self.fb.ins().load(types::F64, self.flags, lhs_address, 0);
+        let rhs_re = self.fb.ins().load(types::F64, self.flags, rhs_address, 0);
+        let product = self.fb.ins().fmul(lhs_re, rhs_re);
+        let tangent = (lanes == 2).then(|| {
+            let lhs_du = self.fb.ins().load(types::F64, self.flags, lhs_address, 8);
+            let rhs_du = self.fb.ins().load(types::F64, self.flags, rhs_address, 8);
+            let lhs_term = self.fb.ins().fmul(lhs_du, rhs_re);
+            let rhs_term = self.fb.ins().fmul(lhs_re, rhs_du);
+            self.fb.ins().fadd(lhs_term, rhs_term)
+        });
+        (product, tangent)
     }
 
     fn lower_static_matrix_multiply(
@@ -4373,15 +4677,19 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             lanes,
         } = request;
         let output = (row * columns + column) * lanes;
-        let mut re = self.fb.ins().f64const(0.0);
-        let mut du = self.fb.ins().f64const(0.0);
+        // The first term is its own sum; an empty dot is +0.0.
+        let mut re = None;
+        let mut du = None;
         for term in 0..inner {
             let lhs = (row * inner + term) * lanes;
             let rhs = (term * columns + column) * lanes;
             let lhs_re = self.lookup(checked_reg_offset(lhs_start, lhs, "matrix multiply lhs")?)?;
             let rhs_re = self.lookup(checked_reg_offset(rhs_start, rhs, "matrix multiply rhs")?)?;
             let product = self.fb.ins().fmul(lhs_re, rhs_re);
-            re = self.fb.ins().fadd(re, product);
+            re = Some(match re {
+                Some(sum) => self.fb.ins().fadd(sum, product),
+                None => product,
+            });
             if lanes == 2 {
                 let lhs_du = self.lookup(checked_reg_offset(
                     lhs_start,
@@ -4396,14 +4704,25 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 let lhs_term = self.fb.ins().fmul(lhs_du, rhs_re);
                 let rhs_term = self.fb.ins().fmul(lhs_re, rhs_du);
                 let tangent = self.fb.ins().fadd(lhs_term, rhs_term);
-                du = self.fb.ins().fadd(du, tangent);
+                du = Some(match du {
+                    Some(sum) => self.fb.ins().fadd(sum, tangent),
+                    None => tangent,
+                });
             }
         }
+        let re = match re {
+            Some(re) => re,
+            None => self.fb.ins().f64const(0.0),
+        };
         self.insert(
             checked_reg_offset(dst_start, output, "matrix multiply output")?,
             re,
         )?;
         if lanes == 2 {
+            let du = match du {
+                Some(du) => du,
+                None => self.fb.ins().f64const(0.0),
+            };
             self.insert(
                 checked_reg_offset(dst_start, output + 1, "matrix multiply output tangent")?,
                 du,
@@ -5515,7 +5834,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                     stride,
                     "constant tensor projection source",
                 )?)?,
-                None => self.fb.ins().f64const(f64::NAN),
+                None => self.invalid_tensor_projection(dimensions, indices)?,
             };
             return self.insert(dst, value);
         }
@@ -5531,11 +5850,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             .ok_or_else(|| {
                 CompileError::Backend("runtime tensor projection stack size overflow".to_string())
             })?;
-        let slot = self.fb.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            byte_count,
-            3,
-        ));
+        let slot = scratch::create_slot(self.fb, byte_count)?;
         for offset in 0..count {
             let register =
                 checked_strided_register(base, offset, stride, "runtime tensor projection source")?;
@@ -5545,19 +5860,17 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                     "runtime tensor projection stack offset exceeds i32".to_string(),
                 )
             })?;
-            self.fb.ins().stack_store(value, slot, byte_offset);
+            scratch::stack_store(self.fb, value, slot, byte_offset);
         }
 
-        let (flat, valid) = self.lower_tensor_offset(dimensions, indices)?;
+        let flat = self.checked_tensor_projection_offset(dimensions, indices)?;
         let byte_offset = self
             .fb
             .ins()
             .imul_imm(flat, std::mem::size_of::<f64>() as i64);
-        let stack = self.fb.ins().stack_addr(types::I64, slot, 0);
+        let stack = scratch::stack_addr(self.fb, types::I64, slot, 0);
         let address = self.fb.ins().iadd(stack, byte_offset);
-        let projected = self.fb.ins().load(types::F64, self.flags, address, 0);
-        let out_of_range = self.fb.ins().f64const(f64::NAN);
-        let value = self.fb.ins().select(valid, projected, out_of_range);
+        let value = self.fb.ins().load(types::F64, self.flags, address, 0);
         self.insert(dst, value)
     }
 
@@ -5578,10 +5891,13 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             ));
         }
         if let Some(offset) = self.constant_tensor_offset(dimensions, indices) {
-            let value = self.constant_fold_carried_value(carried, base, stride, offset)?;
+            let value = match offset {
+                Some(offset) => self.constant_fold_carried_value(carried, base, stride, offset)?,
+                None => self.invalid_tensor_projection(dimensions, indices)?,
+            };
             return self.insert(dst, value);
         }
-        let (flat, valid) = self.lower_tensor_offset(dimensions, indices)?;
+        let flat = self.checked_tensor_projection_offset(dimensions, indices)?;
         let stride = i64::try_from(stride).map_err(|_| {
             CompileError::Backend("function-fold tensor stride exceeds i64".to_string())
         })?;
@@ -5594,11 +5910,9 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             .fb
             .ins()
             .imul_imm(element_offset, std::mem::size_of::<f64>() as i64);
-        let stack = self.fb.ins().stack_addr(types::I64, carried, 0);
+        let stack = scratch::stack_addr(self.fb, types::I64, carried, 0);
         let address = self.fb.ins().iadd(stack, byte_offset);
-        let projected = self.fb.ins().load(types::F64, self.flags, address, 0);
-        let out_of_range = self.fb.ins().f64const(f64::NAN);
-        let value = self.fb.ins().select(valid, projected, out_of_range);
+        let value = self.fb.ins().load(types::F64, self.flags, address, 0);
         self.insert(dst, value)
     }
 
@@ -5607,18 +5921,16 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         carried: StackSlot,
         base: usize,
         stride: usize,
-        offset: Option<usize>,
+        offset: usize,
     ) -> Result<cranelift_codegen::ir::Value, CompileError> {
-        let Some(offset) = offset else {
-            return Ok(self.fb.ins().f64const(f64::NAN));
-        };
         let offset = offset
             .checked_mul(stride)
             .ok_or_else(|| CompileError::Backend("function-fold tensor offset overflow".into()))?;
         let element = base
             .checked_add(offset)
             .ok_or_else(|| CompileError::Backend("function-fold tensor offset overflow".into()))?;
-        Ok(self.fb.ins().stack_load(
+        Ok(scratch::stack_load(
+            self.fb,
             types::F64,
             carried,
             stack_element_byte_offset(element, "function-fold tensor")?,
@@ -5649,7 +5961,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                             "constant function-fold capture projection is out of range".to_string(),
                         )
                     })?,
-                None => self.fb.ins().f64const(f64::NAN),
+                None => self.invalid_tensor_projection(dimensions, indices)?,
             };
             return self.insert(dst, value);
         }
@@ -5658,7 +5970,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                 "indexed function-fold capture has no addressable capture tuple".to_string(),
             )
         })?;
-        let (flat, valid) = self.lower_tensor_offset(dimensions, indices)?;
+        let flat = self.checked_tensor_projection_offset(dimensions, indices)?;
         let element = self.fb.ins().imul_imm(
             flat,
             i64::try_from(stride).map_err(|_| {
@@ -5673,10 +5985,31 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         );
         let byte_offset = self.fb.ins().imul_imm(element, 8);
         let address = self.fb.ins().iadd(captures_ptr, byte_offset);
-        let projected = self.fb.ins().load(types::F64, self.flags, address, 0);
-        let out_of_range = self.fb.ins().f64const(f64::NAN);
-        let value = self.fb.ins().select(valid, projected, out_of_range);
+        let value = self.fb.ins().load(types::F64, self.flags, address, 0);
         self.insert(dst, value)
+    }
+
+    fn invalid_tensor_projection(
+        &mut self,
+        dimensions: &[u32],
+        indices: &[rumoca_ir_solve::TensorIndex],
+    ) -> Result<cranelift_codegen::ir::Value, CompileError> {
+        self.lower_tensor_offset(dimensions, indices, TensorOffsetPurpose::Access)?;
+        let invalid = self.fb.ins().iconst(types::I8, 0);
+        status::require_index(self.fb, invalid);
+        // The failure returns before this unreachable, builder-typed continuation.
+        Ok(self.fb.ins().f64const(0.0))
+    }
+
+    fn checked_tensor_projection_offset(
+        &mut self,
+        dimensions: &[u32],
+        indices: &[rumoca_ir_solve::TensorIndex],
+    ) -> Result<cranelift_codegen::ir::Value, CompileError> {
+        let (flat, valid) =
+            self.lower_tensor_offset(dimensions, indices, TensorOffsetPurpose::Access)?;
+        status::require_index(self.fb, valid);
+        Ok(flat)
     }
 
     /// Resolve binder-derived tensor projections while a tiny fixed fold is
@@ -5719,10 +6052,28 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
         }
     }
 
+    fn require_tensor_coordinate(
+        &mut self,
+        purpose: TensorOffsetPurpose,
+        coordinate: (
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+            u32,
+        ),
+    ) -> Result<(), CompileError> {
+        match purpose {
+            TensorOffsetPurpose::Access => {
+                native_fault::checked_index(self.module, self.fb, coordinate, std::ptr::null())
+            }
+            TensorOffsetPurpose::PatchMatch => Ok(()),
+        }
+    }
+
     fn lower_tensor_offset(
         &mut self,
         dimensions: &[u32],
         indices: &[rumoca_ir_solve::TensorIndex],
+        purpose: TensorOffsetPurpose,
     ) -> Result<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value), CompileError> {
         if dimensions.len() != indices.len() {
             return Err(CompileError::Backend(
@@ -5750,9 +6101,12 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                     let axis_valid = self.fb.ins().band(integral, above_lower);
                     let axis_valid = self.fb.ins().band(axis_valid, below_upper);
                     valid = self.fb.ins().band(valid, axis_valid);
+                    self.require_tensor_coordinate(purpose, (axis_valid, value, extent))?;
                     let clamped = self.fb.ins().fmax(rounded, one);
                     let clamped = self.fb.ins().fmin(clamped, upper);
-                    let one_based = self.fb.ins().fcvt_to_sint(types::I64, clamped);
+                    // Invalid coordinates must reach the caller's explicit status
+                    // check instead of trapping during address calculation.
+                    let one_based = self.fb.ins().fcvt_to_sint_sat(types::I64, clamped);
                     self.fb.ins().iadd_imm(one_based, -1)
                 }
             };
@@ -5818,11 +6172,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                         "function-fold tensor update value storage overflow".to_string(),
                     )
                 })?;
-            let values = self.fb.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                value_bytes,
-                3,
-            ));
+            let values = scratch::create_slot(self.fb, value_bytes)?;
             for element in 0..value_count {
                 for lane in 0..lanes {
                     let register = checked_strided_register(
@@ -5843,7 +6193,8 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                         )
                     })?;
                     let value = self.lookup(register)?;
-                    self.fb.ins().stack_store(
+                    scratch::stack_store(
+                        self.fb,
                         value,
                         values,
                         i32::try_from((element * lanes + lane) * std::mem::size_of::<f64>())
@@ -5961,7 +6312,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             }
             patches.push((valid, value_element, values));
         }
-        let carried_base = self.fb.ins().stack_addr(types::I64, carried, 0);
+        let carried_base = scratch::stack_addr(self.fb, types::I64, carried, 0);
         for lane in 0..lanes {
             let source_element = self.fb.ins().imul_imm(
                 element,
@@ -6016,7 +6367,7 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
                             .fb
                             .ins()
                             .imul_imm(selected_element, std::mem::size_of::<f64>() as i64);
-                        let values_base = self.fb.ins().stack_addr(types::I64, values, 0);
+                        let values_base = scratch::stack_addr(self.fb, types::I64, values, 0);
                         let selected_address = self.fb.ins().iadd(values_base, selected_bytes);
                         let selected =
                             self.fb
@@ -6124,8 +6475,11 @@ impl<'a, 'b> RowLowerCtx<'a, 'b> {
             return Ok(false);
         };
 
-        let (element, address_valid) = self.lower_tensor_offset(dimensions, &indices)?;
-        let carried_base = self.fb.ins().stack_addr(types::I64, carried, 0);
+        let (element, address_valid) =
+            self.lower_tensor_offset(dimensions, &indices, TensorOffsetPurpose::PatchMatch)?;
+        let zero = self.fb.ins().iconst(types::I64, 0);
+        let element = self.fb.ins().select(address_valid, element, zero);
+        let carried_base = scratch::stack_addr(self.fb, types::I64, carried, 0);
         let source_element = self.fb.ins().imul_imm(
             element,
             i64::try_from(source_stride).map_err(|_| {
@@ -6855,20 +7209,28 @@ fn call_table_host(
         for _ in 0..function.arity() {
             sig.params.push(AbiParam::new(types::F64));
         }
-        sig.returns.push(AbiParam::new(types::F64));
+        sig.params
+            .push(AbiParam::new(module.target_config().pointer_type()));
+        sig.returns.push(AbiParam::new(types::I8));
         let func_id = module
             .declare_function(function.symbol(), Linkage::Import, &sig)
             .map_err(to_backend_err)?;
         math.table.insert(function, func_id);
         func_id
     };
+    let slot = scratch::create_slot(fb, std::mem::size_of::<f64>() as u32)?;
+    let result = scratch::stack_addr(fb, module.target_config().pointer_type(), slot, 0);
+    let mut operands = args.to_vec();
+    operands.push(result);
     let callee = declare_far_call_in_func(module, func_id, fb.func);
-    let call = fb.ins().call(callee, args);
-    let values = fb.inst_results(call);
-    values
+    let call = fb.ins().call(callee, &operands);
+    let status = fb
+        .inst_results(call)
         .first()
         .copied()
-        .ok_or_else(|| CompileError::Backend(format!("no return value for {}", function.symbol())))
+        .ok_or_else(|| CompileError::Backend(format!("no status for {}", function.symbol())))?;
+    status::propagate(fb, status);
+    Ok(scratch::stack_load(fb, types::F64, slot, 0))
 }
 
 fn checked_reg_offset(base: u32, offset: usize, kind: &str) -> Result<u32, CompileError> {
@@ -6977,6 +7339,7 @@ fn plan_row(row: &[LinearOp]) -> Result<RowPlan, CompileError> {
                 LinearOp::PureCall { site, .. } => site.output_scalar_count().ok_or_else(|| {
                     CompileError::Backend("typed pure-call output width overflows".to_string())
                 })?,
+                LinearOp::PureCallObservation { site, .. } => site.output_scalar_count(),
                 LinearOp::PureCallDirectional { site, .. } => {
                     site.output_scalar_count().ok_or_else(|| {
                         CompileError::Backend(
@@ -7060,11 +7423,14 @@ fn plan_row(row: &[LinearOp]) -> Result<RowPlan, CompileError> {
     let output_srcs = output_srcs.into_boxed_slice();
 
     if body.iter().cloned().all(is_simple_linear_op) {
+        #[cfg(test)]
         let mut ops = checked_vec_with_capacity(body.len(), "simple runtime ops")?;
+        #[cfg(test)]
         for op in body.iter().cloned() {
             ops.push(lower_simple_op(op)?);
         }
         return Ok(RowPlan::Simple(SimpleRowPlan {
+            #[cfg(test)]
             ops: ops.into_boxed_slice(),
             reg_count,
             output_srcs,
@@ -7073,6 +7439,7 @@ fn plan_row(row: &[LinearOp]) -> Result<RowPlan, CompileError> {
     }
 
     Ok(RowPlan::General(GeneralRowPlan {
+        #[cfg(test)]
         ops: body.into_boxed_slice(),
         reg_count,
         output_srcs,
@@ -7115,6 +7482,7 @@ fn is_simple_linear_op(op: LinearOp) -> bool {
             | LinearOp::GuardedFunctionFold { .. }
             | LinearOp::FunctionConditional { .. }
             | LinearOp::PureCall { .. }
+            | LinearOp::PureCallObservation { .. }
             | LinearOp::PureCallDirectional { .. }
             | LinearOp::Move { .. }
             | LinearOp::LinearSolveComponent { .. }
@@ -7145,8 +7513,12 @@ fn is_simple_linear_op(op: LinearOp) -> bool {
     )
 }
 
+#[cfg(test)]
 fn lower_simple_op(op: LinearOp) -> Result<SimpleOp, CompileError> {
     match op {
+        LinearOp::PureCallObservation { .. } => Err(CompileError::Backend(
+            "assertion observation is outside the simple row contract".to_string(),
+        )),
         LinearOp::Const { dst, value } => Ok(SimpleOp::Const { dst, value }),
         LinearOp::LoadTime { dst } => Ok(SimpleOp::LoadTime { dst }),
         LinearOp::LoadY { dst, index } => Ok(SimpleOp::LoadY {
@@ -7218,6 +7590,7 @@ fn lower_simple_op(op: LinearOp) -> Result<SimpleOp, CompileError> {
     }
 }
 
+#[cfg(test)]
 fn lower_runtime_index(index: usize, kind: &str) -> Result<u32, CompileError> {
     u32::try_from(index)
         .map_err(|_| CompileError::Backend(format!("{kind} index exceeds u32 runtime plan")))
@@ -7783,6 +8156,25 @@ fn max_reg_index(op: LinearOp) -> Result<Option<usize>, CompileError> {
             }
             Ok(Some(last as usize))
         }
+        LinearOp::PureCallObservation {
+            dst_start,
+            input_starts,
+            site,
+        } => {
+            let mut last = checked_range_last_reg(
+                dst_start,
+                site.output_scalar_count(),
+                "assertion observation output",
+            )?;
+            for (start, value_type) in input_starts.iter().zip(site.value_site().inputs()) {
+                last = last.max(checked_range_last_reg(
+                    *start,
+                    value_type.scalar_count() as usize,
+                    "assertion observation input",
+                )?);
+            }
+            Ok(Some(last as usize))
+        }
         LinearOp::PureCallDirectional {
             dst_start,
             input_starts,
@@ -7858,6 +8250,7 @@ fn dst_reg(op: LinearOp) -> Option<usize> {
         | LinearOp::GuardedFunctionFold { dst_start, .. }
         | LinearOp::FunctionConditional { dst_start, .. }
         | LinearOp::PureCall { dst_start, .. }
+        | LinearOp::PureCallObservation { dst_start, .. }
         | LinearOp::PureCallDirectional { dst_start, .. }
         | LinearOp::MatrixMultiply { dst_start, .. }
         | LinearOp::TensorBinary { dst_start, .. }
@@ -7883,6 +8276,19 @@ fn dst_reg(op: LinearOp) -> Option<usize> {
 )]
 fn validate_row_sources(defined: &[bool], op: LinearOp) -> Result<(), CompileError> {
     match op {
+        LinearOp::PureCallObservation {
+            input_starts, site, ..
+        } => {
+            if input_starts.len() != site.value_site().inputs().len() {
+                return Err(CompileError::Backend(
+                    "assertion observation input ABI mismatch".to_string(),
+                ));
+            }
+            for (start, value_type) in input_starts.iter().zip(site.value_site().inputs()) {
+                validate_reg_range_defined(defined, *start, value_type.scalar_count() as usize)?;
+            }
+            Ok(())
+        }
         LinearOp::PureCall {
             input_starts, site, ..
         } => {

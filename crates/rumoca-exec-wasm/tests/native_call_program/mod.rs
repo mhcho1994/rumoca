@@ -1,9 +1,13 @@
 //! Whole-program tuple ordering, checked table linkage and atomic publication.
 mod affine;
+mod carried;
 mod conditionals;
+mod demand;
 mod maps;
 mod math;
 mod packed_tuples;
+mod reported_bug_sources;
+mod stage_glue;
 use super::*;
 use rumoca_exec_wasm::compile_native_assignment_schedule_with_calls_wasm;
 
@@ -140,6 +144,8 @@ struct ProgramRunner {
     scratch: usize,
     y_count: usize,
     total: usize,
+    lanes: usize,
+    lane_bytes: usize,
 }
 
 impl ProgramRunner {
@@ -147,12 +153,21 @@ impl ProgramRunner {
         compiled: &rumoca_exec_wasm::CompiledNativeCallProgramWasm,
         layout: &solve::VarLayout,
     ) -> Self {
+        Self::new_with_lanes(compiled, layout, 0)
+    }
+
+    fn new_with_lanes(
+        compiled: &rumoca_exec_wasm::CompiledNativeCallProgramWasm,
+        layout: &solve::VarLayout,
+        lane_bytes: usize,
+    ) -> Self {
         let engine = Engine::default();
         let module = Module::new(&engine, compiled.module_bytes()).unwrap();
         let mut store = Store::new(&engine, 0usize);
         let p = layout.y_scalars() * 8;
         let scratch = p + layout.p_scalars() * 8;
-        let total = scratch + compiled.scratch_bytes() as usize;
+        let lanes = scratch + compiled.scratch_bytes() as usize;
+        let total = lanes + lane_bytes;
         let memory = Memory::new(
             &mut store,
             MemoryType::new(total.div_ceil(65536) as u32, None),
@@ -185,10 +200,54 @@ impl ProgramRunner {
             scratch,
             y_count: layout.y_scalars(),
             total,
+            lanes,
+            lane_bytes,
         }
     }
 
+    /// One call of a program that publishes carried state: the status, the host Y
+    /// bytes (starting as 0xa5) and P after the call.
+    fn run_carried(&mut self, parameters: &[f64]) -> (i32, Vec<u8>, Vec<f64>) {
+        self.memory
+            .write(&mut self.store, 0, &vec![0xa5; self.p])
+            .unwrap();
+        let bytes = parameters
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>();
+        self.memory.write(&mut self.store, self.p, &bytes).unwrap();
+        self.memory
+            .write(
+                &mut self.store,
+                self.scratch,
+                &vec![0x7f; self.total - self.scratch],
+            )
+            .unwrap();
+        let status = self
+            .call
+            .call(
+                &mut self.store,
+                (0, self.p as i32, 0., self.scratch as i32, 0),
+            )
+            .unwrap();
+        let mut y = vec![0; self.y_count * 8];
+        self.memory.read(&self.store, 0, &mut y).unwrap();
+        let mut p = vec![0; bytes.len()];
+        self.memory.read(&self.store, self.p, &mut p).unwrap();
+        let p = p
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        (status, y, p)
+    }
+
     fn run(&mut self, parameters: &[f64]) -> (i32, Vec<f64>) {
+        let (status, output, _) = self.run_with_lanes(parameters, &[]);
+        (status, output)
+    }
+
+    fn run_with_lanes(&mut self, parameters: &[f64], inputs: &[u8]) -> (i32, Vec<f64>, Vec<u8>) {
+        assert!(inputs.len() <= self.lane_bytes);
         self.memory
             .write(&mut self.store, 0, &vec![0xa5; self.p])
             .unwrap();
@@ -205,11 +264,24 @@ impl ProgramRunner {
                 &vec![0x7f; self.total - self.scratch],
             )
             .unwrap();
+        self.memory
+            .write(&mut self.store, self.lanes, inputs)
+            .unwrap();
         let status = self
             .call
             .call(
                 &mut self.store,
-                (0, self.p as i32, 0., self.scratch as i32, 0),
+                (
+                    0,
+                    self.p as i32,
+                    0.,
+                    self.scratch as i32,
+                    if self.lane_bytes == 0 {
+                        0
+                    } else {
+                        self.lanes as i32
+                    },
+                ),
             )
             .unwrap();
         let mut output = vec![0; self.y_count * 8];
@@ -219,7 +291,17 @@ impl ProgramRunner {
             .read(&self.store, self.p, &mut unchanged)
             .unwrap();
         assert_eq!(unchanged, bytes);
+        let mut lanes = vec![0; self.lane_bytes];
+        self.memory
+            .read(&self.store, self.lanes, &mut lanes)
+            .unwrap();
+        assert_eq!(&lanes[..inputs.len()], inputs, "typed inputs are read-only");
         if status != 0 {
+            assert_eq!(
+                &lanes[inputs.len()..],
+                vec![0x7f; self.lane_bytes - inputs.len()],
+                "a failed typed program publishes no output lane"
+            );
             assert_eq!(
                 output,
                 vec![0xa5; self.p],
@@ -232,6 +314,7 @@ impl ProgramRunner {
                 .chunks_exact(8)
                 .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
                 .collect(),
+            lanes,
         )
     }
 }
@@ -331,7 +414,7 @@ fn complete_call_tuple_runs_once_per_immutable_coordinate_and_preserves_full_dom
                 .zip(inputs)
                 .map(|(ty, values)| TypedValue::construct(ty.clone(), values).unwrap())
                 .collect::<Vec<_>>();
-            let expected = eval_pure_call(&table, site.owner(), &typed).unwrap();
+            let expected = eval_pure_call_checked(&table, site.owner(), &typed).unwrap();
             let (status, actual) = runner.run(&parameters);
             assert_eq!(status, 0);
             assert_eq!(actual[0].to_bits(), value.to_bits());

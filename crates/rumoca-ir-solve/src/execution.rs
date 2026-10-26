@@ -5,7 +5,7 @@
 //! own spec gives "do not bake one solver's choices into the model" as the
 //! reason equation IR and execution IR are separate. v2 carries only what a
 //! pass wrote; the numerical program is derived at load by
-//! `rumoca_phase_solve::execution::export` from the equation IR and the
+//! `rumoca_eval_solve::execution::numerical::export` from the equation IR and the
 //! recorded profile, and never reaches the wire.
 //!
 //! This is not the private Solve wire. Certificates, caches, byte offsets and

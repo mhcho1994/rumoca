@@ -24,12 +24,14 @@ mod parameter_profile_tests;
 mod point_inspection;
 mod projection_report;
 pub(crate) mod sim_defaults;
+mod stdio;
 mod value;
 #[cfg(test)]
 use debug_tracing::expand_trace_filter;
 pub(crate) use debug_tracing::{init_debug_tracing, trace_requests_viewer};
 use point_inspection::{PointInspection, run_point_inspection, run_sim_inspection};
 use sim_defaults::{direct_sim_options, direct_sim_window, sim_window};
+use stdio::{parse_initial_input, serve_stdio_session};
 
 use compile_summary::print_summary;
 
@@ -55,12 +57,12 @@ use miette::{LabeledSpan, MietteDiagnostic, NamedSource, Report, Severity};
 pub use crate::fmt_cli::FmtArgs;
 pub use crate::sim_bench::SimBenchArgs;
 use crate::{CompilationResult, Compiler, CompilerError, DaeCompilationResult, TemplateIr};
+use rumoca_compile::parsing::StoredDefinition;
 use rumoca_compile::{
     codegen::{CodegenError, render_flat_template_with_name},
     compile::{Dae, FlatModel},
 };
 use rumoca_core::{Diagnostic as CommonDiagnostic, DiagnosticSeverity, SourceMap};
-use rumoca_phase_resolve::ResolvedTree;
 use rumoca_sim::{SimOptions, SimSolverMode};
 use rumoca_sim::{SimulationRequestSummary, SimulationRunMetrics};
 use rumoca_tool_lint::{LintLevel, LintMessage, LintOptions, PartialLintOptions};
@@ -355,6 +357,9 @@ pub struct CompileArgs {
 
     /// Dump an intermediate representation: `<stage>-mo` for Modelica or
     /// `<stage>-json` for JSON (stage = ast/flat/dae/solve). See possible values.
+    /// `ast-json` is the parser's tree of MODELICA_FILE alone and ignores
+    /// --model and --source-root; every later stage selects the model and
+    /// resolves its class closure.
     #[arg(long, value_enum, conflicts_with = "target")]
     pub emit: Option<EmitTarget>,
 
@@ -1235,12 +1240,12 @@ fn run_compile(args: CompileArgs) -> Result<()> {
     if let Some(emit) = args.emit
         && matches!(emit.phase(), CompilePhase::Ast | CompilePhase::Flat)
     {
-        let (artifact, model) = compile_early_ir_with_inferred_model(
+        let artifact = compile_early_ir_with_inferred_model(
             &args.input,
             emit.phase(),
             args.diagnostics.verbose,
         )?;
-        return run_early_ir_dump(&artifact, &model, emit.is_json(), args.output);
+        return run_early_ir_dump(&artifact, emit.is_json(), args.output);
     }
 
     let (result, model) = compile_with_inferred_model(&args.input, args.diagnostics.verbose)?;
@@ -1373,30 +1378,36 @@ fn selected_model_name(args: &ModelInputArgs) -> Result<String> {
     }
 }
 
+/// An IR dump that stops before the DAE.
 pub(crate) enum EarlyIrArtifact {
-    Ast(Box<ResolvedTree>),
-    Flat(Box<FlatModel>),
+    /// The parser's syntax tree of the input file: no model selection and no
+    /// name resolution, so it needs no source roots (SPEC_0007 Stage 1).
+    Ast(Box<StoredDefinition>),
+    /// The flattened model, with the selected model name its Modelica render
+    /// is written under.
+    Flat { flat: Box<FlatModel>, model: String },
 }
 
 fn run_early_ir_dump(
     artifact: &EarlyIrArtifact,
-    model: &str,
     json: bool,
     output: Option<PathBuf>,
 ) -> Result<()> {
     let rendered = match (artifact, json) {
-        (EarlyIrArtifact::Ast(resolved), true) => serde_json::to_string_pretty(resolved.inner())?,
+        (EarlyIrArtifact::Ast(parsed), true) => serde_json::to_string_pretty(parsed)?,
         (EarlyIrArtifact::Ast(_), false) => {
             bail!("the AST has no lossless Modelica export; use `--emit ast-json`")
         }
-        (EarlyIrArtifact::Flat(flat), true) => serde_json::to_string_pretty(flat)?,
-        (EarlyIrArtifact::Flat(flat), false) => render_early_ir_as_modelica_flat(flat, model)?,
+        (EarlyIrArtifact::Flat { flat, .. }, true) => serde_json::to_string_pretty(flat)?,
+        (EarlyIrArtifact::Flat { flat, model }, false) => {
+            render_early_ir_as_modelica_flat(flat, model)?
+        }
     };
     write_ir_dump(
         &rendered,
         match artifact {
             EarlyIrArtifact::Ast(_) => CompilePhase::Ast,
-            EarlyIrArtifact::Flat(_) => CompilePhase::Flat,
+            EarlyIrArtifact::Flat { .. } => CompilePhase::Flat,
         },
         json,
         output,
@@ -1572,7 +1583,7 @@ fn inspect_at_spec(at: Option<&str>) -> &str {
 /// explicit / artificial-compressibility schemes the implicit auto path cannot
 /// step, and silently ignoring a misspelling of that would run them on the
 /// solver they specifically asked not to use.
-fn simulate_solver_or_auto(
+pub(crate) fn simulate_solver_or_auto(
     solver: Option<SimulateSolverMode>,
     experiment_solver: Option<&str>,
 ) -> Result<SimulateSolverMode> {
@@ -1679,7 +1690,7 @@ fn run_lint(args: LintArgs) -> Result<()> {
 /// could not determine it, so a consumer comparing the two artifacts skips the
 /// check instead of comparing two equal placeholders and concluding they match.
 fn run_build_info() -> Result<()> {
-    let Some(identity) = rumoca_core::build_identity() else {
+    let Some(identity) = rumoca_tool_build_info::build_identity() else {
         anyhow::bail!(
             "build identity unavailable: this binary was built without commit \
              information, so it cannot be compared against another artifact"
@@ -1711,11 +1722,7 @@ fn compile_with_inferred_model(
     verbose: bool,
 ) -> Result<(CompilationResult, String)> {
     ensure_model_file_readable(&args.model_file)?;
-    let model = match &args.options.model {
-        Some(model) => model.clone(),
-        None => infer_model_name(&args.model_file)?,
-    };
-
+    let model = selected_model_name(args)?;
     let source_roots = merged_source_root_paths(&args.options.source_roots);
 
     let compiler = Compiler::new()
@@ -1729,38 +1736,42 @@ fn compile_with_inferred_model(
     Ok((result, model))
 }
 
+/// Build the AST or Flat dump for `--emit`. The AST stage is the parser's
+/// output for the named file alone, so it skips model inference and source
+/// roots; the Flat stage selects the model and resolves its closure.
 fn compile_early_ir_with_inferred_model(
     args: &ModelInputArgs,
     phase: CompilePhase,
     verbose: bool,
-) -> Result<(EarlyIrArtifact, String)> {
+) -> Result<EarlyIrArtifact> {
     ensure_model_file_readable(&args.model_file)?;
-    let model = match &args.options.model {
-        Some(model) => model.clone(),
-        None => infer_model_name(&args.model_file)?,
-    };
-
-    let source_roots = merged_source_root_paths(&args.options.source_roots);
-
-    let compiler = Compiler::new()
-        .model(&model)
-        .verbose(verbose)
-        .no_fold_parameter_bindings(args.options.no_fold_parameter_bindings)
-        .freeze_parameters(args.options.freeze_parameters)
-        .passes(&args.options.passes)
-        .source_roots(&source_roots);
-    let artifact = match phase {
+    match phase {
         CompilePhase::Ast => {
-            EarlyIrArtifact::Ast(Box::new(compiler.compile_file_ast(&args.model_file)?))
+            let parsed = Compiler::new()
+                .verbose(verbose)
+                .parse_file(&args.model_file)?;
+            Ok(EarlyIrArtifact::Ast(Box::new(parsed)))
         }
         CompilePhase::Flat => {
-            EarlyIrArtifact::Flat(Box::new(compiler.compile_file_flat(&args.model_file)?))
+            let model = selected_model_name(args)?;
+            let source_roots = merged_source_root_paths(&args.options.source_roots);
+            let compiler = Compiler::new()
+                .model(&model)
+                .verbose(verbose)
+                .no_fold_parameter_bindings(args.options.no_fold_parameter_bindings)
+                .freeze_parameters(args.options.freeze_parameters)
+                .passes(&args.options.passes)
+                .source_roots(&source_roots);
+            let flat = compiler.compile_file_flat(&args.model_file)?;
+            Ok(EarlyIrArtifact::Flat {
+                flat: Box::new(flat),
+                model,
+            })
         }
         CompilePhase::Dae | CompilePhase::Solve => {
             bail!("internal error: early IR compile requested for {phase:?}")
         }
-    };
-    Ok((artifact, model))
+    }
 }
 
 pub(crate) fn compile_dae_with_inferred_model(
@@ -1768,11 +1779,7 @@ pub(crate) fn compile_dae_with_inferred_model(
     verbose: bool,
 ) -> Result<(DaeCompilationResult, String)> {
     ensure_model_file_readable(&args.model_file)?;
-    let model = match &args.options.model {
-        Some(model) => model.clone(),
-        None => infer_model_name(&args.model_file)?,
-    };
-
+    let model = selected_model_name(args)?;
     let source_roots = merged_source_root_paths(&args.options.source_roots);
 
     let compiler = Compiler::new()
@@ -1807,20 +1814,26 @@ pub(crate) fn compile_str_early_ir_with_inferred_model(
     options: &ModelOptions,
     phase: CompilePhase,
     verbose: bool,
-) -> Result<(EarlyIrArtifact, String)> {
-    let (compiler, model) = compiler_for_source(source, file_name, options, verbose)?;
-    let artifact = match phase {
+) -> Result<EarlyIrArtifact> {
+    match phase {
         CompilePhase::Ast => {
-            EarlyIrArtifact::Ast(Box::new(compiler.compile_str_ast(source, file_name)?))
+            let parsed = Compiler::new()
+                .verbose(verbose)
+                .parse_str(source, file_name)?;
+            Ok(EarlyIrArtifact::Ast(Box::new(parsed)))
         }
         CompilePhase::Flat => {
-            EarlyIrArtifact::Flat(Box::new(compiler.compile_str_flat(source, file_name)?))
+            let (compiler, model) = compiler_for_source(source, file_name, options, verbose)?;
+            let flat = compiler.compile_str_flat(source, file_name)?;
+            Ok(EarlyIrArtifact::Flat {
+                flat: Box::new(flat),
+                model,
+            })
         }
         CompilePhase::Dae | CompilePhase::Solve => {
             bail!("internal error: early IR compile requested for {phase:?}")
         }
-    };
-    Ok((artifact, model))
+    }
 }
 
 /// In-memory counterpart to [`compile_dae_with_inferred_model`].
@@ -1848,39 +1861,6 @@ pub(crate) fn simulation_failure_error(
     error: &rumoca_sim::SimulationDiagnosticError,
 ) -> anyhow::Error {
     anyhow::anyhow!("[{}] {error}", error.diagnostic_code())
-}
-
-/// Parse one `--input NAME=VALUE` initial input.
-fn parse_initial_input(text: &str) -> std::result::Result<(String, f64), String> {
-    let (name, value) = text
-        .split_once('=')
-        .ok_or_else(|| format!("expected NAME=VALUE, got `{text}`"))?;
-    let value = value
-        .trim()
-        .parse::<f64>()
-        .map_err(|error| format!("input `{name}` value `{value}` is not a number: {error}"))?;
-    Ok((name.trim().to_owned(), value))
-}
-
-/// `sim --serve-stdio`: drive one session from JSON-lines commands on stdin.
-///
-/// Stdout carries only protocol events; the process exits with the status of
-/// how the controller ended the session (`0` after `close`).
-fn serve_stdio_session(dae: &Dae, opts: SimOptions) -> Result<()> {
-    let mut session = rumoca_sim::SimulationSession::new(dae, opts)
-        .map_err(|error| simulation_failure_error(&error))?;
-    let exit = rumoca_sim::serve_session(
-        &mut session,
-        std::io::stdin().lock(),
-        &mut std::io::stdout().lock(),
-    )?;
-    match exit {
-        rumoca_sim::SessionServeExit::Closed => Ok(()),
-        ended => {
-            eprintln!("rumoca sim --serve-stdio: session ended without close ({ended:?})");
-            std::process::exit(ended.exit_code())
-        }
-    }
 }
 
 struct SimulationRun<'a> {

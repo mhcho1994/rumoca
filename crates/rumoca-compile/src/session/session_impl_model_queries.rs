@@ -355,9 +355,11 @@ impl Session {
             } else {
                 None
             };
+            let closure = self.reachable_model_closure_query(tree, mode, model_name);
             let (flat, flattened_built) = flat_model_outcome_from_typed(
                 tree,
                 model_name,
+                &closure,
                 typed,
                 self.instantiation_options.freeze_parameters,
             );
@@ -383,9 +385,11 @@ impl Session {
         } else {
             None
         };
+        let closure = self.reachable_model_closure_query(tree, mode, model_name);
         let (flat, flattened_built) = flat_model_outcome_from_typed(
             tree,
             model_name,
+            &closure,
             typed,
             self.instantiation_options.freeze_parameters,
         );

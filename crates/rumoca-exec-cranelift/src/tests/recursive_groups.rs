@@ -125,6 +125,7 @@ fn halving_table() -> SolvePureCallTable {
                 let limit = builder.load(inputs[1], span)?;
                 let domain = rumoca_core::StructuredIndexDomain {
                     binders: vec![rumoca_core::StructuredIndexBinder {
+                        provenance: rumoca_core::IndexBinderProvenance::Generated,
                         id: 0,
                         display_name: "i".to_string(),
                         lower: 1,
@@ -137,7 +138,7 @@ fn halving_table() -> SolvePureCallTable {
                     &[x],
                     &[limit],
                     span,
-                    |predicate, carried, captures, outputs| {
+                    |predicate, carried, captures, _binders, outputs| {
                         let x = predicate.load(carried[0], span)?;
                         let limit = predicate.load(captures[0], span)?;
                         let above =

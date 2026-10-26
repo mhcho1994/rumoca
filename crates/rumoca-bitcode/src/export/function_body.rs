@@ -82,10 +82,7 @@ fn statements_of<'dae>(
                     provenance: ctx.provenance(provenance),
                 });
             }
-            dae::FunctionStatementView::AssignmentGroup {
-                definitions,
-                conditional,
-            } => {
+            dae::FunctionStatementView::AssignmentGroup { definitions } => {
                 let values = definitions
                     .iter()
                     .map(|definition| definition.target().ordinal())
@@ -98,28 +95,26 @@ fn statements_of<'dae>(
                 // so the first stands for all of them.
                 let first = definitions.iter().next()?;
                 let provenance = ctx.provenance(first.provenance());
-                let conditional = conditional.map(|correlation| RbcFunctionConditional {
-                    conditions: correlation
-                        .conditions()
-                        .map(|id| ExprId(id.index()))
-                        .collect(),
-                    branches: (0..correlation.branch_count())
-                        .filter_map(|ordinal| {
-                            correlation
-                                .branch(ordinal)
-                                .map(|values| values.map(|id| ExprId(id.index())).collect())
-                        })
-                        .collect(),
-                    fallback: correlation
-                        .fallback()
-                        .map(|id| ExprId(id.index()))
-                        .collect(),
-                });
                 statements.push(RbcFunctionStatement::AssignmentGroup {
                     values,
-                    conditional,
+                    conditional: None,
                     expressions,
                     provenance,
+                });
+            }
+            dae::FunctionStatementView::Conditional { conditional } => {
+                statements.push(conditional_of(conditional, ctx)?);
+            }
+            dae::FunctionStatementView::RequireAssigned {
+                value,
+                definition,
+                provenance,
+                ..
+            } => {
+                statements.push(RbcFunctionStatement::RequireAssigned {
+                    value: value.ordinal(),
+                    expression: ExprId(definition.rhs().index()),
+                    provenance: ctx.provenance(provenance),
                 });
             }
             dae::FunctionStatementView::For {
@@ -136,6 +131,38 @@ fn statements_of<'dae>(
         }
     }
     Some(statements)
+}
+
+fn conditional_of<'dae>(
+    conditional: dae::FunctionConditionalBodyView<'dae>,
+    ctx: &mut Ctx<'_>,
+) -> Option<RbcFunctionStatement> {
+    let branch = |branch: dae::FunctionBranchView<'dae>, ctx: &mut Ctx<'_>| {
+        Some(RbcFunctionBranch {
+            statements: statements_of(branch.statements(), ctx)?,
+            provenance: ctx.provenance(branch.declaration()),
+        })
+    };
+    Some(RbcFunctionStatement::Conditional {
+        ordinal: conditional.id().ordinal(),
+        conditions: conditional
+            .conditions()
+            .map(|id| ExprId(id.index()))
+            .collect(),
+        branches: conditional
+            .branches()
+            .map(|item| branch(item, ctx))
+            .collect::<Option<_>>()?,
+        fallback: branch(conditional.fallback(), ctx)?,
+        outputs: conditional
+            .outputs()
+            .map(|definition| RbcFunctionDefinition {
+                value: definition.target().ordinal(),
+                expression: ExprId(definition.rhs().index()),
+            })
+            .collect(),
+        provenance: ctx.provenance(conditional.declaration()),
+    })
 }
 
 /// A function's Modelica body and its folds, or `ElidedModelica` when any
@@ -196,6 +223,17 @@ pub(super) fn function_node(
             function: FunctionId(fold.function().index()),
             fold: fold.ordinal(),
             carried: *carried,
+            definition: definition.id().ordinal(),
+        },
+        dae::ExpressionOperation::FunctionConditionalOutput {
+            conditional,
+            value,
+            definition,
+            ..
+        } => RbcExprNode::FunctionConditionalOutput {
+            function: FunctionId(conditional.function().index()),
+            conditional: conditional.ordinal(),
+            value: value.ordinal(),
             definition: definition.id().ordinal(),
         },
         _ => {

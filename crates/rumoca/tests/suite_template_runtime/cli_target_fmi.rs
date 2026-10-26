@@ -9,13 +9,16 @@ mod affine_promotion;
 mod algebraic;
 mod array_bounds;
 mod assertions;
+mod batched_getters;
 mod c_profile_events;
 mod chart_switching;
 mod co_simulation_step;
 mod declared_causality;
 mod derivative_kinks;
 mod enumerations;
+mod input_defaults;
 mod integer_parameter;
+mod integer_publication;
 mod integer_quotients;
 mod lifecycle;
 mod mass_matrix;
@@ -24,11 +27,13 @@ mod real_extrema;
 mod reported_models;
 mod residual_split_harness;
 mod slice_updates;
+mod sliding_modes;
 mod state_events;
 mod tensor_algebra;
 mod torn_tangent_harness;
 mod typed_functions;
 mod variability;
+mod variable_names;
 
 use std::fs;
 use std::io::{Read, Write};
@@ -286,7 +291,7 @@ fn assert_validator_rejection_controls(fmu: &BuiltFmu, schema: &Path, checker: &
         .path()
         .join(format!("{}-duplicate-name.fmu", fmu.version));
     rewrite_description(&fmu.archive, &duplicate_name, |text| {
-        duplicate_variable_name(text, fmu.version)
+        variable_names::duplicate_variable_name(text, fmu.version)
     });
     assert_command_failed(
         Command::new("fmpy").arg("validate").arg(&duplicate_name),
@@ -366,32 +371,6 @@ fn rewrite_description(archive: &Path, output: &Path, rewrite: impl Fn(&str) -> 
         output.write_all(&bytes).expect("write FMU control bytes");
     }
     output.finish().expect("finish invalid FMU control");
-}
-
-fn duplicate_variable_name(xml: &str, version: &str) -> String {
-    let tag = match version {
-        "fmi2" => "<ScalarVariable name=\"",
-        "fmi3" => "<Float64 name=\"",
-        other => panic!("unexpected FMI version {other}"),
-    };
-    let ranges: Vec<_> = xml
-        .match_indices(tag)
-        .take(2)
-        .map(|(offset, _)| {
-            let start = offset + tag.len();
-            let end = start + xml[start..].find('"').expect("terminated variable name");
-            start..end
-        })
-        .collect();
-    assert_eq!(
-        ranges.len(),
-        2,
-        "duplicate-name control needs two variables"
-    );
-    let mut changed = xml.to_string();
-    changed.replace_range(ranges[1].clone(), &xml[ranges[0].clone()]);
-    assert_ne!(xml, changed, "duplicate-name control must alter metadata");
-    changed
 }
 
 fn assert_command_failed(command: &mut Command, label: &str) {

@@ -50,7 +50,7 @@ Checked typed programs, arithmetic profiles, exact values, wire replay,
 | Absent | `RootDigest`, `PreparedDigest`, and `ArtifactDigest` do not exist as distinct recomputable digests | `rumoca-ir-solve`, `rumoca-compile` | SEV-041, TRP-011 |
 | Absent | No volatile or atomic effect owner exists; `volatile` is an emitter spelling | backends, templates | SEV-016 |
 | Absent | No admitting path for an external function exists. The capability probe now derives externality from the checked function table (`FunctionView::is_external`) and the `external_functions == Some(false)` check at `codegen_target.rs` FIRES (witnesses: `rumoca-compile/src/codegen_target/tests.rs::dae_target_rejects_external_interface_without_external_function_support`, `::every_builtin_target_rejects_an_external_interface`; mutation guard `::external_function_free_dae_stays_admissible_without_external_function_support`); what remains absent is SEV-001's `InvokePure`/`InvokeImpure` factors, so no target can ADMIT one | `rumoca-ir-solve` | SEV-156 |
-| Absent | No WASM, MLIR, or C consumer of `SolveOperation` exists | backend crates | SEV-007 |
+| Partial | The typed-call WASM emitter consumes `SolveOperation`; this does not discharge exhaustive factored-grammar coverage or the target capability closure gates. MLIR and C consumer qualification remains outside this witness | `rumoca-exec-wasm/src/typed_call/emit.rs::Emitter::operation` | SEV-007 |
 | Absent | `ValueCapabilityProfile`, `OperationEffectCapabilityProfile`, and `ExecutionEnvironmentProfile` do not exist; a target's numeric declaration is the only admission check, so nonnumeric families, grammar operations, and effects are never closed over | `rumoca-compile` | TRP-039, TRP-042 |
 | Partial | `rust-fixed` is HOSTED and explicitly not `no_std` per its own README; it is allocator-free only inside the derivative call, and its template, runtime-math, panic, and library behavior is not transitively checked | rust-fixed target | TRP-039 |
 | Absent | Neither SPEC_0049 promotion gate exists: no key-set exhaustiveness test compares the catalog to `SolveOperation` and its embedded operator enums, and no constructor PARITY cases check each row's admitted and rejected element kinds, operand arity, and distinguishing operands. A name-set check alone would pass a wrong arity or a missing operand | `rumoca-ir-solve` tests | SPEC_0049 promotion gates |
@@ -549,3 +549,14 @@ earlier circular condition: both key off `RootKind`, never off each other.
 Receipt SELECTORS are manifest INPUTS naming what may be chosen; issued RECEIPTS
 are preparation OUTPUTS recording what was chosen and proven — the two are
 distinct fields and neither substitutes for the other.
+
+### 11. Reversal Gates (SPEC_0045 §9)
+
+Moved from SPEC_0045 section "9. Reversal Gates"; rows and rules below are normative by reference from that section.
+
+| ID | Reopening | Requires |
+|----|-----------|----------|
+| SEV-110 | A second canonical graph | ALL of: a genuinely different stage contract; an operation not representable in the grammar plus a checked target view; an INDEPENDENT semantic oracle for the second graph; a checked relation preserving type, profile, effect, and provenance identity across the boundary; and NAMED wire, AD, and capability proof-cost budgets it must stay within. Unrepresentability plus speed is not sufficient |
+| SEV-111 | A new core type family | A product inexpressible as a semantics-preserving ABI mapping, an independent oracle, AND two consumers or one safety-critical consumer with parity evidence |
+| SEV-113 | A profile-neutral construction recipe | Three-profile parity plus preregistered compile and RSS benefit; it stays non-executable |
+| SEV-114 | Abandoning the §2 factoring | Cross-factor escapes exceed 20%, or boilerplate exceeds 15% without reducing proof surface; keeping it needs ≥30% fewer unrelated touch sites with ≤3% evaluator and ≤5% wire regressions |

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExpressionArenaWire {
+    pub(super) model_contexts: Vec<Option<u32>>,
     pub(super) nodes: Vec<ExprNodeWire>,
     #[serde(deserialize_with = "deserialize_provenance_vec")]
     pub(super) provenance: Vec<DaeProvenance>,
@@ -50,6 +51,7 @@ pub(super) struct OwnerNodeProjection {
 pub(super) enum OwnerNodeKind {
     Model { activation: u32 },
     Function { function: u32 },
+    StructuredModel { domain: u32 },
 }
 
 /// Per-arena omission plan, computed once from the verified registry.
@@ -66,6 +68,7 @@ pub(super) struct OwnerProjection {
     pub(super) activation_markers: rustc_hash::FxHashMap<u32, u32>,
     /// Root ordinal → owner ordinal marker.
     pub(super) root_markers: rustc_hash::FxHashMap<u32, u32>,
+    pub(super) structured_root_markers: rustc_hash::FxHashMap<u32, u32>,
 }
 
 pub(super) struct ExpressionArenaOutput<'storage> {
@@ -78,7 +81,14 @@ impl Serialize for ExpressionArenaOutput<'_> {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("ExpressionArena", 4)?;
+        let mut state = serializer.serialize_struct("ExpressionArena", 5)?;
+        state.serialize_field(
+            "model_contexts",
+            &FilteredSeqOutput {
+                values: &self.arena.model_arm_scopes,
+                skip: &self.projection.skip_nodes,
+            },
+        )?;
         state.serialize_field(
             "nodes",
             &ExpressionNodesOutput {
@@ -219,6 +229,16 @@ impl Serialize for QuotientOwnerKindOutput<'_> {
                 state.serialize_field("activation", activation)?;
                 state.end()
             }
+            OwnerNodeKind::StructuredModel { domain } => {
+                let mut state = serializer.serialize_struct_variant(
+                    "QuotientOwnerKindWire",
+                    2,
+                    "structured_model",
+                    1,
+                )?;
+                state.serialize_field("domain", domain)?;
+                state.end()
+            }
             OwnerNodeKind::Function { function } => {
                 let mut state = serializer.serialize_struct_variant(
                     "QuotientOwnerKindWire",
@@ -246,6 +266,7 @@ const RECORD_VARIANT: u32 = 6;
 const CALL_VARIANT: u32 = 13;
 const FUNCTION_FOLD_PARAMETER_VARIANT: u32 = 16;
 const FUNCTION_FOLD_OUTPUT_VARIANT: u32 = 17;
+const FUNCTION_CONDITIONAL_OUTPUT_VARIANT: u32 = 20;
 const RUNTIME_QUOTIENT_OWNER_VARIANT: u32 = 19;
 
 /// One arena node projected onto the operation that built it.
@@ -318,6 +339,16 @@ impl Serialize for ExpressionNodeOutput<'_> {
                     "ExprNode",
                     FUNCTION_FOLD_OUTPUT_VARIANT,
                     "function_fold_output",
+                    1,
+                )?;
+                state.serialize_field("function", function)?;
+                state.end()
+            }
+            ExprNode::FunctionConditionalOutput { function, .. } => {
+                let mut state = serializer.serialize_struct_variant(
+                    "ExprNode",
+                    FUNCTION_CONDITIONAL_OUTPUT_VARIANT,
+                    "function_conditional_output",
                     1,
                 )?;
                 state.serialize_field("function", function)?;
@@ -432,6 +463,9 @@ pub(super) enum ExprNodeWire {
         lhs: u32,
         rhs: u32,
     },
+    FunctionConditionalOutput {
+        function: u32,
+    },
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -444,6 +478,9 @@ pub(super) enum QuotientOwnerKindWire {
     },
     Function {
         function: u32,
+    },
+    StructuredModel {
+        domain: u32,
     },
 }
 

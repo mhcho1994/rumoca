@@ -16,18 +16,43 @@ pub struct NativeGatherFault {
     pub provenance: rumoca_core::Span,
 }
 
+/// One failure of an original dense component, issued with its source program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeLinearSolveFault {
+    pub status: u32,
+    pub size: usize,
+    pub component: usize,
+    pub kernel: usize,
+    pub program: usize,
+    pub operation: usize,
+    pub region_path: Vec<(usize, usize)>,
+    pub provenance: rumoca_core::Span,
+}
+
 #[derive(Debug)]
 pub struct CompiledNativeCallProgramWasm {
     pub(crate) bytes: Vec<u8>,
+    pub(crate) capacity_policy: crate::CheckedNativeWasmCapacityPolicy,
     pub(crate) scratch_bytes: u32,
     pub(crate) scratch_report: crate::ScratchReport,
     pub(crate) faults: Vec<TypedCallFault>,
     pub(crate) gather_faults: Vec<NativeGatherFault>,
+    pub(crate) linear_solve_faults: Vec<NativeLinearSolveFault>,
     pub(crate) math_imports: Vec<&'static str>,
     pub(crate) pooled_arena_bytes: Option<u32>,
+    pub(crate) carried: rumoca_ir_solve::NativeCarriedState,
 }
 
 impl CompiledNativeCallProgramWasm {
+    pub fn capacity_policy(&self) -> crate::CheckedNativeWasmCapacityPolicy {
+        self.capacity_policy
+    }
+
+    /// The state this module publishes into P instead of the host Y (SOLVE-C101).
+    pub fn carried_state(&self) -> &rumoca_ir_solve::NativeCarriedState {
+        &self.carried
+    }
+
     pub fn module_bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -47,6 +72,27 @@ impl CompiledNativeCallProgramWasm {
     pub fn gather_faults(&self) -> &[NativeGatherFault] {
         &self.gather_faults
     }
+    pub(crate) fn status_error(&self, status: u32) -> WasmCompileError {
+        if let Some(fault) = self.faults().iter().find(|fault| fault.status == status) {
+            return WasmCompileError::TypedSource(fault.clone());
+        }
+        if let Some(fault) = self
+            .gather_faults()
+            .iter()
+            .find(|fault| fault.status == status)
+        {
+            return WasmCompileError::GatherSource(fault.clone());
+        }
+        if let Some(fault) = self
+            .linear_solve_faults
+            .iter()
+            .find(|fault| fault.status == status)
+        {
+            return WasmCompileError::LinearSolveSource(fault.clone());
+        }
+        WasmCompileError::Backend(format!("native entry failure status {status}"))
+    }
+
     pub fn math_imports(&self) -> &[&'static str] {
         &self.math_imports
     }
@@ -67,5 +113,16 @@ pub fn compile_native_assignment_schedule_with_calls_wasm(
     calls: &SolvePureCallTable,
 ) -> Result<CompiledNativeCallProgramWasm, WasmCompileError> {
     crate::emit::emit_native_call_assignment_module(schedule, layout, calls)
+        .map_err(WasmCompileError::Backend)
+}
+
+/// Compile the same checked schedule with explicit deployment bounds.
+pub fn compile_native_assignment_schedule_with_calls_wasm_and_policy(
+    schedule: &NativeRefreshAssignmentSchedule,
+    layout: &VarLayout,
+    calls: &SolvePureCallTable,
+    policy: crate::CheckedNativeWasmCapacityPolicy,
+) -> Result<CompiledNativeCallProgramWasm, WasmCompileError> {
+    crate::emit::emit_native_call_assignment_module_with_policy(schedule, layout, calls, policy)
         .map_err(WasmCompileError::Backend)
 }

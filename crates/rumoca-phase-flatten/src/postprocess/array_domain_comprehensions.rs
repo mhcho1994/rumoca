@@ -93,6 +93,7 @@ impl FallibleExpressionRewriter for ArrayDomainRewriter<'_> {
             filter = filter.map(|cond| Box::new(element.rewrite_expression(&cond)));
             let range_span = index.range.span().unwrap_or(span);
             rewritten.push(ComprehensionIndex {
+                binder: index.binder,
                 name: index.name,
                 range: Expression::Range {
                     start: Box::new(integer(1, range_span)),

@@ -1,6 +1,12 @@
 use super::*;
 
 pub(in crate::construction) enum ModelAlgorithmPlan {
+    /// One total tuple assignment to continuous coordinates, with no sequential
+    /// intermediate reads: the checked call owns all retained result ordinals.
+    DeclarativeFunctionCall {
+        receivers: Vec<Expression>,
+        plan: MultiOutputEquationPlan,
+    },
     /// Straight-line scalar assignments and conditionals. Each target's value
     /// when the section finishes is its declarative definition (MLS §11.1.2).
     Declarative {
@@ -677,6 +683,7 @@ fn event_tensor_domain(
     let mut binder_spans = Vec::with_capacity(indices.len());
     for (ordinal, (index, extent)) in indices.iter().zip(dimensions).enumerate() {
         binders.push(StructuredIndexBinder {
+            provenance: index.binder,
             id: ordinal,
             display_name: index.ident.clone(),
             lower: 1,
@@ -834,6 +841,7 @@ fn analyze_separated_array_sum(
         validate_total_axis(index, subscript, *extent, model_values)?;
         let range_span = expression_span(&index.range)?;
         binders.push(StructuredIndexBinder {
+            provenance: index.binder,
             id: ordinal,
             display_name: index.ident.clone(),
             lower: 1,
@@ -1017,6 +1025,7 @@ fn analyze_total_array_definition(
         validate_total_axis(index, subscript, *extent, model_values)?;
         let range_span = expression_span(&index.range)?;
         binders.push(StructuredIndexBinder {
+            provenance: index.binder,
             id: ordinal,
             display_name: index.ident.clone(),
             lower: 1,
@@ -1162,7 +1171,7 @@ fn validate_declarative_sequence(
     Ok(assigned)
 }
 
-fn reject_read_before_definition(
+pub(super) fn reject_read_before_definition(
     expression: &Expression,
     target: &VarName,
     assigned: bool,
@@ -1187,7 +1196,24 @@ fn reject_read_before_definition(
 pub(in crate::construction) fn event_targets(flat: &flat::Model) -> HashSet<VarName> {
     let mut written = when_chain_targets(flat);
     for algorithm in &flat.algorithms {
-        collect_event_control_targets(&algorithm.statements, &mut written);
+        collect_event_control_targets(
+            &algorithm.statements,
+            EventTargetScope::EventControl,
+            &mut written,
+        );
+    }
+    resolve_written_targets(flat, written)
+}
+
+/// Actual when ownership, excluding an ordinary if(sample(...)) event observer.
+pub(super) fn source_when_targets(flat: &flat::Model) -> HashSet<VarName> {
+    let mut written = when_chain_targets(flat);
+    for algorithm in &flat.algorithms {
+        collect_event_control_targets(
+            &algorithm.statements,
+            EventTargetScope::WhenOnly,
+            &mut written,
+        );
     }
     resolve_written_targets(flat, written)
 }
@@ -1301,8 +1327,15 @@ pub(in crate::construction) fn is_event_condition(expression: &Expression) -> bo
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EventTargetScope {
+    EventControl,
+    WhenOnly,
+}
+
 fn collect_event_control_targets(
     statements: &[rumoca_core::Statement],
+    scope: EventTargetScope,
     targets: &mut HashSet<VarName>,
 ) {
     for statement in statements {
@@ -1313,16 +1346,21 @@ fn collect_event_control_targets(
                 }
             }
             rumoca_core::Statement::For { equations, .. } => {
-                collect_event_control_targets(equations, targets);
+                collect_event_control_targets(equations, scope, targets);
             }
             rumoca_core::Statement::While { block, .. } => {
-                collect_event_control_targets(&block.stmts, targets);
+                collect_event_control_targets(&block.stmts, scope, targets);
             }
             rumoca_core::Statement::If {
                 cond_blocks,
                 else_block,
                 ..
-            } => collect_conditional_event_targets(cond_blocks, else_block.as_deref(), targets),
+            } => collect_conditional_event_targets(
+                cond_blocks,
+                else_block.as_deref(),
+                scope,
+                targets,
+            ),
             _ => {}
         }
     }
@@ -1331,9 +1369,11 @@ fn collect_event_control_targets(
 fn collect_conditional_event_targets(
     blocks: &[rumoca_core::StatementBlock],
     fallback: Option<&[rumoca_core::Statement]>,
+    scope: EventTargetScope,
     targets: &mut HashSet<VarName>,
 ) {
-    let event_control = blocks.iter().any(|block| is_event_condition(&block.cond));
+    let event_control = scope == EventTargetScope::EventControl
+        && blocks.iter().any(|block| is_event_condition(&block.cond));
     for statements in blocks
         .iter()
         .map(|block| block.stmts.as_slice())
@@ -1342,7 +1382,7 @@ fn collect_conditional_event_targets(
         if event_control {
             collect_statement_targets(statements, targets);
         } else {
-            collect_event_control_targets(statements, targets);
+            collect_event_control_targets(statements, scope, targets);
         }
     }
 }
@@ -1352,6 +1392,9 @@ fn collect_when_equation_targets(equations: &[flat::WhenEquation], targets: &mut
         match equation {
             flat::WhenEquation::Assign { target, .. } => {
                 targets.insert(target.clone());
+            }
+            flat::WhenEquation::AssignElement { target, .. } => {
+                targets.insert(target.var_name().clone());
             }
             flat::WhenEquation::Conditional {
                 branches,

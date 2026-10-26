@@ -93,7 +93,9 @@ Use `cargo run -p rumoca -- ...` while developing the compiler. Building the
 store-native package remains an explicit `nix build .#rumoca` operation.
 
 Package, playground, VS Code, and browser-asset workflows do require Node/npm.
-CI uses Node 20, so local package validation should use Node 20 as well:
+CI and the Nix web shells use Node 22, so local package validation should use
+Node 22 as well. Compiled WASM simulation requires WebAssembly multi-memory
+support, which Node 20 does not provide:
 
 ```bash
 node --version
@@ -110,7 +112,7 @@ cargo xtask vscode package --target linux-x64
 ```
 
 Cargo builds must remain Rust-only. If a selected package/web command reports a
-missing `node` or `npm`, install Node 20 using your platform package manager,
+missing `node` or `npm`, install Node 22 using your platform package manager,
 Volta, nvm, or the official Node installer, then retry that command.
 
 ### Kani bounded verification
@@ -144,6 +146,20 @@ Ordinary `cargo test -p rumoca-solver` still runs the `proptest` fallbacks. A
 green fallback is validation evidence, never proof evidence; only a successful
 `cargo xtask verify kani` run under the pinned verifier is Kani proof evidence.
 
+### Native FMI qualification tests
+
+The fixed-guest and publication qualification tests in `rumoca` and
+`rumoca-bind-wasm` need fixture configs under `target/verification/` and an
+owned output namespace, so they run only on the qualification machine. They are
+gated by `cfg(rumoca_qualification)`, not by a cargo feature, so that
+`cargo test --all-features` in CI never selects them. Build the guest with the
+`native-fmi-ls-build` feature and enable the cfg through the compiler flags:
+
+```bash
+RUSTFLAGS="--cfg rumoca_qualification" \
+  cargo test -p rumoca-bind-wasm --features native-fmi-ls-build native_fmi_ls
+```
+
 ## Common Commands
 
 Typical local verification:
@@ -160,7 +176,7 @@ cargo xtask verify template-runtimes
 corpus, architecture gates, and workspace tests. `cargo xtask verify full`
 also runs examples, binary builds, template runtimes, coverage, documentation,
 VS Code, and browser/WASM gates. The full suite expects the same local
-prerequisites that CI installs: `cargo-llvm-cov`, Node 20/npm for package/web
+prerequisites that CI installs: `cargo-llvm-cov`, Node 22/npm for package/web
 tasks, and the wasm Rust target/tooling. Both suites require the external
 model libraries used by their corpus gates.
 `cargo xtask verify template-runtimes` wraps
@@ -301,9 +317,21 @@ git diff -- crates/rumoca-phase-parse/src/generated
 git diff -- crates/rumoca-phase-parse-galec/src/parse/generated
 ```
 
+Each generated directory records a `grammar.stamp`: a content hash of the
+grammar, the build script (generator settings) and the pinned `parol` release.
+The build scripts regenerate only when that stamp no longer matches, never from
+file modification times, so a machine whose `rustfmt` differs from the
+maintainer's leaves the checked-in parsers untouched. After a grammar or
+generator-setting change the build rewrites the parsers and the stamp; commit
+both.
+
 The workspace pins `parol` and `parol_runtime` to exact patch versions in
 `Cargo.toml`. Do not loosen those pins with a grammar change; update the pin
 intentionally and review the generated diff in the same change.
+
+### Build output and cleanup
+
+Build output may be deleted by the shared-machine prune when a checkout has been idle for a few days. The directories it may remove are listed in `.prune-paths` at the repository root. That includes `target/`, so results that commands write there (for example `--results-dir target/msl/sweep` or `target/verification/kani-summary.json`) are not kept. Copy any result you need into durable storage, or commit it. Add each new build-output directory to `.prune-paths` in the same change that creates it.
 
 ## Process
 

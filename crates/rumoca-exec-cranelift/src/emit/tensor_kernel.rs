@@ -70,6 +70,7 @@ impl CraneliftEmitter {
             signature.params.push(AbiParam::new(pointer_type)); // v
         }
         signature.params.push(AbiParam::new(pointer_type)); // out
+        signature.params.push(AbiParam::new(pointer_type)); // caller-owned scratch
         let func_id = self
             .module
             .declare_function(name, Linkage::Local, &signature)
@@ -90,6 +91,7 @@ impl CraneliftEmitter {
             fb.append_block_params_for_function_params(entry);
             fb.switch_to_block(entry);
             let params = fb.block_params(entry).to_vec();
+            scratch::enter(&mut fb);
             let inputs = KernelInputs {
                 y_ptr: params[0],
                 p_ptr: params[1],
@@ -113,8 +115,7 @@ impl CraneliftEmitter {
             fb.seal_all_blocks();
             fb.finalize();
         }
-        self.module
-            .define_function(func_id, &mut context)
+        crate::emit::register_allocation::define_function(&mut *self.module, func_id, &mut context)
             .map_err(to_backend_err)?;
         self.module.clear_context(&mut context);
         Ok(func_id)
@@ -151,6 +152,7 @@ impl CraneliftEmitter {
             fold_functions: &self.fold_functions,
             conditional_functions: &self.conditional_functions,
             pure_call_functions: &self.pure_call_functions,
+            source_operation: std::ptr::null(),
             pure_call_results: HashMap::new(),
             nested_fold_results: HashMap::new(),
             conditional_results: HashMap::new(),
@@ -382,6 +384,7 @@ pub(crate) trait KernelKind {
     /// length of the kernel set `kernel` belongs to.
     unsafe fn invoke(
         kernel: Self::Fn,
+        scratch: &scratch::ScratchOwner,
         y: &[f64],
         p: &[f64],
         t: f64,
@@ -411,6 +414,7 @@ impl KernelKind for ResidualKernels {
 
     unsafe fn invoke(
         kernel: Self::Fn,
+        scratch: &scratch::ScratchOwner,
         y: &[f64],
         p: &[f64],
         t: f64,
@@ -419,7 +423,8 @@ impl KernelKind for ResidualKernels {
     ) -> u8 {
         // SAFETY: the kernel was declared with the residual row ABI; the
         // caller guarantees the buffers cover every index its plan proved.
-        unsafe { kernel(y.as_ptr(), p.as_ptr(), t, out.as_mut_ptr()) }
+        scratch
+            .invoke(|arena| unsafe { kernel(y.as_ptr(), p.as_ptr(), t, out.as_mut_ptr(), arena) })
     }
 }
 
@@ -438,6 +443,7 @@ impl KernelKind for DirectionalKernels {
 
     unsafe fn invoke(
         kernel: Self::Fn,
+        scratch: &scratch::ScratchOwner,
         y: &[f64],
         p: &[f64],
         t: f64,
@@ -446,7 +452,16 @@ impl KernelKind for DirectionalKernels {
     ) -> u8 {
         // SAFETY: the kernel was declared with the directional row ABI; the
         // caller guarantees the buffers cover every index its plan proved.
-        unsafe { kernel(y.as_ptr(), p.as_ptr(), t, seed.as_ptr(), out.as_mut_ptr()) }
+        scratch.invoke(|arena| unsafe {
+            kernel(
+                y.as_ptr(),
+                p.as_ptr(),
+                t,
+                seed.as_ptr(),
+                out.as_mut_ptr(),
+                arena,
+            )
+        })
     }
 }
 
@@ -475,6 +490,7 @@ pub(crate) struct KernelId(usize);
 /// Native loop kernels of the affine tensor nodes of one block, sharing one
 /// executable-memory arena.
 pub(crate) struct CompiledTensorKernels<K: KernelKind> {
+    scratch: scratch::ScratchOwner,
     kernels: Vec<K::Fn>,
     input_requirements: InputRequirements,
     output_len: usize,
@@ -521,6 +537,7 @@ impl<K: KernelKind> CompiledTensorKernels<K> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok((
             Self {
+                scratch: Default::default(),
                 kernels,
                 input_requirements,
                 output_len,
@@ -570,7 +587,17 @@ impl<K: KernelKind> KernelFrame<'_, K> {
         // SAFETY: the frame checked its buffers against the set's input
         // requirements and output length, which the kernel's plan proved
         // cover every index it reads and writes.
-        let status = unsafe { K::invoke(function, self.y, self.p, self.t, self.seed, self.out) };
+        let status = unsafe {
+            K::invoke(
+                function,
+                &self.kernels.scratch,
+                self.y,
+                self.p,
+                self.t,
+                self.seed,
+                self.out,
+            )
+        };
         status::check(status)
     }
 }

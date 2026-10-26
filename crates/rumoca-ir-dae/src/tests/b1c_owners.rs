@@ -264,7 +264,7 @@ fn b1c_atomic_owner_accepts_current_dependency_on_issued_target_prefix() {
             owner
                 .targets()
                 .iter()
-                .map(DiscreteValueId::index)
+                .map(DiscreteValueTarget::index)
                 .collect::<Vec<_>>(),
             [0, 1]
         );
@@ -526,6 +526,7 @@ fn construct_structured_b1c_dae() -> (Dae, DaeProvenance) {
             domains.structured(
                 StructuredIndexDomain {
                     binders: vec![StructuredIndexBinder {
+                        provenance: rumoca_core::IndexBinderProvenance::Generated,
                         id: 0,
                         display_name: "i".to_string(),
                         lower: 1,

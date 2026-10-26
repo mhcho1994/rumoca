@@ -939,3 +939,72 @@ fn malformed_stream_set_reports_missing_flat_variable_without_panicking() {
         "unexpected stream diagnostic: {error:?}"
     );
 }
+
+#[test]
+fn symbolic_stream_index_inside_scalarized_parent_preserves_both_indices() {
+    let mut model = flat::Model::new();
+    for port in [
+        "cells[1].a[1]",
+        "cells[1].a[2]",
+        "cells[1].b[1]",
+        "cells[1].b[2]",
+    ] {
+        add_port(&mut model, port, 1.0);
+    }
+    let mut overlay = elementwise_array_stream_overlay();
+    for class in overlay.classes.values_mut() {
+        for connection in &mut class.connections {
+            connection.a = ast::QualifiedName::from_dotted(&format!("cells[1].{}", connection.a));
+            connection.b = ast::QualifiedName::from_dotted(&format!("cells[1].{}", connection.b));
+        }
+    }
+    add_observation_equation(
+        &mut model,
+        symbolic_indexed_connector_field_stream_call("inStream", "cells[1].a", "h_outflow", "i"),
+    );
+    process(&mut model, &overlay).expect("the fixed parent index precedes the connector index");
+    let rumoca_core::Expression::If {
+        branches,
+        else_branch,
+        ..
+    } = observed_expression(&model)
+    else {
+        panic!("the symbolic connector index retains element selection");
+    };
+    assert!(
+        matches!(&branches[0].1, rumoca_core::Expression::VarRef { name, .. }
+        if name.as_str() == "cells[1].b[1].h_outflow")
+    );
+    assert!(
+        matches!(else_branch.as_ref(), rumoca_core::Expression::VarRef { name, .. }
+        if name.as_str() == "cells[1].b[2].h_outflow")
+    );
+}
+
+#[test]
+fn concrete_indexed_stream_reference_selects_its_own_connection_set() {
+    for operator in ["inStream", "actualStream"] {
+        let mut model = flat::Model::new();
+        for port in ["a[1]", "a[2]", "b[1]", "b[2]"] {
+            add_port(&mut model, port, 1.0);
+        }
+        add_observation_equation(&mut model, stream_call(operator, "a[1].h_outflow"));
+        process(&mut model, &elementwise_array_stream_overlay())
+            .expect("an already selected element must use its exact connection set");
+        let observed = observed_expression(&model);
+        assert!(observed.contains_subexpression(|expression| matches!(
+            expression, rumoca_core::Expression::VarRef { name, .. }
+                if name.as_str() == "b[1].h_outflow"
+        )));
+        assert!(!observed.contains_subexpression(|expression| matches!(
+            expression, rumoca_core::Expression::VarRef { name, .. }
+                if name.as_str().contains("[2]")
+        )));
+        if operator == "actualStream" {
+            assert!(observed.contains_subexpression(|expression| matches!(
+                expression, rumoca_core::Expression::VarRef { name, .. }
+                    if name.as_str() == "a[1].m_flow"
+            )));
+        }
+    }
+}

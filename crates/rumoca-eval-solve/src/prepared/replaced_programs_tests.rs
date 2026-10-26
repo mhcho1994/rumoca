@@ -85,6 +85,10 @@ fn only_replaced_programs_are_prepared_and_the_result_matches_a_fresh_preparatio
         fresh.row_reverse_y_gradient_supported
     );
     assert_eq!(replaced.row_is_causal, fresh.row_is_causal);
+    assert_eq!(
+        replaced.row_requires_checked_observation,
+        fresh.row_requires_checked_observation
+    );
     assert_eq!(replaced.row_parameter_indices, fresh.row_parameter_indices);
     assert_eq!(
         replaced.row_parameter_static_y_gradient_params,
@@ -108,4 +112,47 @@ fn a_replacement_must_name_exactly_the_differing_programs_of_one_layout() {
     assert_eq!(replaced_programs(base.block(), &longer), None);
     let same = block(vec![difference(0, 0), difference(1, 1)]);
     assert_eq!(replaced_programs(base.block(), &same), Some(Vec::new()));
+}
+#[test]
+fn nested_conditional_signed_zero_is_a_replacement_in_a_compute_block() {
+    let row = |value| {
+        let value_ops = |value| {
+            vec![
+                LinearOp::Const { dst: 0, value },
+                LinearOp::StoreOutput { src: 0 },
+            ]
+        };
+        let conditional = rumoca_ir_solve::FunctionConditionalProgram::checked(
+            0,
+            vec![1],
+            [(value_ops(1.0), value_ops(value))],
+            value_ops(0.0),
+        )
+        .unwrap();
+        vec![
+            LinearOp::FunctionConditional {
+                dst_start: 0,
+                capture_start: 0,
+                program: std::sync::Arc::new(conditional),
+            },
+            LinearOp::StoreOutput { src: 0 },
+        ]
+    };
+    let base = block(vec![row(0.0)]);
+    let target = block(vec![row(-0.0)]);
+    assert_eq!(replaced_programs(&base, &target), Some(vec![0]));
+    let base = rumoca_ir_solve::ComputeBlock::from_scalar_program_block(base);
+    let target = rumoca_ir_solve::ComputeBlock::from_scalar_program_block(target);
+    let prepared = PreparedComputeBlock::new_with_label(&base, "signed-zero base").unwrap();
+    let shared =
+        PreparedComputeBlock::with_shared_programs(&prepared, &target, "signed-zero alternate")
+            .unwrap();
+    let fresh = PreparedComputeBlock::new_with_label(&target, "signed-zero fresh").unwrap();
+    for program in [&shared, &fresh] {
+        let mut out = [1.0];
+        program
+            .eval_with_context(&[], &[], 0.0, RowEvalContext::default(), &mut out)
+            .unwrap();
+        assert_eq!(out[0].to_bits(), (-0.0f64).to_bits());
+    }
 }

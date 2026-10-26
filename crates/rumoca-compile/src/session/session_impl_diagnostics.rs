@@ -37,6 +37,20 @@ impl Session {
         Some(result)
     }
 
+    /// Retain a strict compilation's target resolution as the model's save
+    /// resolution proof, so the target-scoped diagnostics of that compilation
+    /// read the resolution it compiled instead of resolving the source set
+    /// again. A target taken from the Standard resolution is not a strict proof.
+    pub(in crate::session) fn retain_strict_target_proof(
+        &mut self,
+        model_name: &str,
+        target: &StrictTargetResolution,
+    ) {
+        if target.query_mode == ResolveBuildMode::StrictCompileRecovery {
+            self.insert_save_resolution_proof(model_name, target.clone());
+        }
+    }
+
     fn insert_save_resolution_proof(&mut self, model_name: &str, proof: StrictTargetResolution) {
         let key = SemanticDiagnosticsCacheKey::new(model_name, SemanticDiagnosticsMode::Save);
         self.query_state
@@ -237,26 +251,6 @@ impl Session {
         mode: SemanticDiagnosticsMode,
         model_name: &str,
     ) -> Result<(Arc<ResolvedTree>, CommonDiagnostics), CommonDiagnostics> {
-        if mode == SemanticDiagnosticsMode::Standard
-            && let Some(resolved) = self
-                .query_state
-                .flat
-                .semantic_diagnostics
-                .resolved_by_mode
-                .get(&mode)
-        {
-            let diagnostics = diagnostics_from_vec(
-                self.query_state
-                    .flat
-                    .semantic_diagnostics
-                    .resolved_diagnostics_by_mode
-                    .get(&mode)
-                    .cloned()
-                    .unwrap_or_default(),
-            );
-            return Ok((resolved.clone(), diagnostics));
-        }
-
         if mode == SemanticDiagnosticsMode::Save {
             if let Some(target) = self.cached_save_resolution_proof(model_name) {
                 return Ok((target.resolved, diagnostics_from_vec(target.diagnostics)));
@@ -270,24 +264,7 @@ impl Session {
             return Ok((resolved, diagnostics));
         }
 
-        let build_started = maybe_start_timer();
-        let resolved_result = self.resolve_documents_for_mode(mode.resolve_build_mode());
-        let _ = maybe_elapsed_duration(build_started);
-        let (plan, diagnostics, _) = resolved_result?;
-        let ResolutionPlanningTree::Complete(resolved) = plan else {
-            return Err(diagnostics);
-        };
-        self.query_state
-            .flat
-            .semantic_diagnostics
-            .resolved_by_mode
-            .insert(mode, resolved.clone());
-        self.query_state
-            .flat
-            .semantic_diagnostics
-            .resolved_diagnostics_by_mode
-            .insert(mode, diagnostics.iter().cloned().collect());
-        Ok((resolved, diagnostics))
+        self.build_resolved_with_diagnostics()
     }
 
     /// Warning-severity resolve diagnostics scoped to the model's source
@@ -636,6 +613,14 @@ fn structural_selection_warnings(
                          {parameters} cannot be set (MLS 3.7 §8.3.3)"
                     ),
                     "range fixed at translation",
+                ),
+                rumoca_ir_flat::StructuralParameterUse::WhenTargetSubscript => (
+                    format!("this when-equation target is fixed at translation, so parameter{plural} {parameters} cannot be set (MLS 3.7 §8.3.5.3)"),
+                    "when coordinate fixed at translation",
+                ),
+                rumoca_ir_flat::StructuralParameterUse::DiscreteDependencySubscript => (
+                    format!("this discrete-value dependency is selected at translation, so parameter{plural} {parameters} cannot be set (MLS 3.7 §8.3.5, §10.5)"),
+                    "discrete dependency fixed at translation",
                 ),
                 rumoca_ir_flat::StructuralParameterUse::SpecializationArgument => (
                     format!(

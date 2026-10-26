@@ -29,6 +29,32 @@ fn dae_template_context_is_a_semantic_projection_not_wire_storage() {
 }
 
 #[test]
+fn dae_template_retains_loaded_external_table_descriptors() {
+    let table = rumoca_core::ExternalTableData {
+        id: 9_007_199_254_740_993,
+        data: vec![vec![0.0, 10.0, 20.0], vec![1.0, 12.0, 24.0]],
+        columns: vec![3, 2],
+        smoothness: 1,
+        extrapolation: 2,
+    };
+    let model = empty_checked_dae().with_external_tables(vec![table]);
+    let projected = dae_template_json(&model).expect("table descriptors project");
+    assert_eq!(
+        projected["external_tables"],
+        serde_json::json!(model.external_tables())
+    );
+    let rendered = render_template(
+        &model,
+        "{% for table in dae.external_tables %}{{ table.id }}:{{ table.columns|tojson }}{% endfor %}",
+    ).expect("table descriptors render without Solve lowering");
+    assert_eq!(rendered, "9007199254740993:[3,2]");
+    assert_eq!(
+        dae_template_json(&empty_checked_dae()).unwrap()["external_tables"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
 fn dae_render_context_accepts_only_a_finalized_checked_root() {
     let dae = empty_checked_dae();
     let rendered = render_template(&dae, "{{ ir_kind }}:{{ dae.schema.version }}")
@@ -37,6 +63,48 @@ fn dae_render_context_accepts_only_a_finalized_checked_root() {
     assert_eq!(
         rendered,
         format!("dae:{}", dae_backend::TEMPLATE_SCHEMA_VERSION)
+    );
+}
+
+#[test]
+fn dae_template_targets_retain_aggregate_identity_and_selected_offsets() {
+    let text = "Boolean m[2]; m[1] = true; m[2] = false;";
+    let mut sources = SourceMap::new();
+    let source = sources.add("SelectedTargets.mo", text);
+    let at = dae::DaeProvenance::source(Span::from_offsets(source, 0, text.len())).unwrap();
+    let model = dae::Dae::construct(sources, |model| {
+        let ty = model.types(|types| {
+            types.derived(dae::ValueType::array(dae::ScalarType::Boolean, [2]), at)
+        })?;
+        let variable = model.variables(|variables| {
+            variables.discrete_value(
+                VarName::new("m"),
+                ty,
+                at,
+                dae::VariableAttributes::default(),
+            )
+        })?;
+        let targets = [
+            model.discrete_value_element(variable, &[1], at)?,
+            model.discrete_value_element(variable, &[2], at)?,
+        ];
+        let value = model.expressions(|expressions| {
+            expressions.at(at).literal(dae::DaeLiteral::Boolean(true))
+        })?;
+        model.b1c_selected(targets, |topology| {
+            topology.selected_owner(at, targets, |owner| owner.always(at, [(value, at); 2]))?;
+            Ok(())
+        })
+    })
+    .unwrap();
+    let json = dae_template_json(&model).unwrap();
+    assert_eq!(json["variables"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json.pointer("/systems/discrete_values/owners/0/targets")
+            .unwrap(),
+        &serde_json::json!([
+            {"variable": 0, "scalar_selection": 0}, {"variable": 0, "scalar_selection": 1},
+        ])
     );
 }
 
@@ -909,6 +977,7 @@ fn checked_fold_fixture() -> (dae::Dae, FoldSource) {
                 domains.structured(
                     rumoca_core::StructuredIndexDomain {
                         binders: vec![rumoca_core::StructuredIndexBinder {
+                            provenance: rumoca_core::IndexBinderProvenance::Generated,
                             id: 0,
                             display_name: "k".to_owned(),
                             lower: 1,
@@ -989,6 +1058,10 @@ fn assert_fold_definition_links(function: &serde_json::Value, source: FoldSource
             serde_json::to_value(provenance).unwrap()
         );
     }
+    assert!(definitions[0]["previous_target_definition"].is_null());
+    assert_eq!(definitions[1]["previous_target_definition"], 0);
+    assert_eq!(definitions[2]["previous_target_definition"], 1);
+    assert_eq!(definitions[3]["previous_target_definition"], 0);
     assert_eq!(
         function["folds"][0]["provenance"],
         serde_json::to_value(at("for k in 1:2 loop", 0)).unwrap()
@@ -1060,4 +1133,96 @@ fn symbolic_ode_targets_use_checked_declarations_and_solve_programs() {
         assert!(rendered.contains("PARAM_NAMES = []"));
         assert!(!template.contains("dae.p"));
     }
+}
+
+#[test]
+fn dae_template_projects_clock_transfer_by_exact_conversion_and_clock_identity() {
+    let source = "discrete Real u; discrete Real y; y = shiftSample(u, 2);";
+    let mut source_map = SourceMap::new();
+    let source_id = source_map.add("clock_transfer.mo", source);
+    let at = |snippet: &str| {
+        let start = source.find(snippet).expect("fixture snippet exists");
+        dae::DaeProvenance::source(Span::from_offsets(source_id, start, start + snippet.len()))
+            .expect("fixture provenance is exact")
+    };
+    let transfer_at = at("shiftSample(u, 2)");
+    let dae = dae::Dae::construct(source_map, |dae| {
+        let real = dae.types(|types| {
+            types.intern(
+                TypeId::new(0),
+                dae::ValueType::scalar(dae::ScalarType::Real),
+                at("discrete Real u"),
+            )
+        })?;
+        let (u, y) = dae.variables(|variables| {
+            Ok((
+                variables.discrete_real(
+                    VarName::new("u"),
+                    real,
+                    at("discrete Real u"),
+                    dae::VariableAttributes::default(),
+                )?,
+                variables.discrete_real(
+                    VarName::new("y"),
+                    real,
+                    at("discrete Real y"),
+                    dae::VariableAttributes::default(),
+                )?,
+            ))
+        })?;
+        let condition = dae.conditions(|conditions| conditions.reserve(transfer_at))?;
+        let tick = dae.expressions(|expressions| {
+            expressions
+                .at(transfer_at)
+                .literal(dae::DaeLiteral::Boolean(true))
+        })?;
+        dae.conditions(|conditions| {
+            conditions.define(condition, dae::ConditionInput::Discrete(tick), transfer_at)
+        })?;
+        let (base, shifted) = dae.clocks(|clocks| {
+            let base = clocks.triggered(condition, transfer_at)?;
+            let shifted = clocks.shifted(base, 2, condition, transfer_at)?;
+            clocks.own_discrete_real(base, u, at("discrete Real u"))?;
+            clocks.own_discrete_real(shifted, y, at("discrete Real y"))?;
+            Ok((base, shifted))
+        })?;
+        dae.expressions(|expressions| {
+            let value = expressions
+                .at(transfer_at)
+                .coordinate(dae::CoordinateInput::DiscreteReal(u))?;
+            expressions.at(transfer_at).clock_transfer(
+                dae::ClockTransferKind::ShiftSample {
+                    counter: 2,
+                    resolution: 1,
+                },
+                value,
+                base,
+                shifted,
+            )
+        })?;
+        Ok(())
+    })
+    .expect("a whole-tick shift of an event clock constructs");
+
+    let projected = dae_template_json(&dae).expect("checked DAE projects");
+    let expressions = projected["expressions"]
+        .as_array()
+        .expect("expressions are dense");
+    let transfer = expressions
+        .iter()
+        .find(|expression| expression["operation"]["kind"] == "clock_transfer")
+        .expect("the clock transfer is projected");
+    let operation = &transfer["operation"];
+    assert_eq!(
+        operation["conversion"],
+        serde_json::json!({ "shift_sample": { "counter": 2, "resolution": 1 } })
+    );
+    assert_eq!(operation["source_clock"], 0);
+    assert_eq!(operation["target_clock"], 1);
+    let source = operation["source"].as_u64().expect("source is an index") as usize;
+    assert_eq!(expressions[source]["operation"]["kind"], "coordinate");
+    assert_eq!(
+        transfer["provenance"],
+        serde_json::to_value(transfer_at).expect("provenance serializes")
+    );
 }

@@ -1,3 +1,6 @@
+mod range_assignment;
+mod streamed_materialization;
+
 use super::*;
 
 mod staged_execution;
@@ -73,6 +76,7 @@ fn exact_zero_materialization_preserves_the_complete_tensor_register_range() {
 fn guarded_fold_dependency_includes_its_activation() {
     let domain = rumoca_core::StructuredIndexDomain {
         binders: vec![rumoca_core::StructuredIndexBinder {
+            provenance: rumoca_core::IndexBinderProvenance::Generated,
             id: 0,
             display_name: "i".to_string(),
             lower: 1,
@@ -144,7 +148,7 @@ fn matrix_multiply_dependency_tracks_the_selected_output_element() {
     }
 }
 
-fn row(target: usize) -> AlgebraicRefreshRow {
+pub(super) fn row(target: usize) -> AlgebraicRefreshRow {
     AlgebraicRefreshRow {
         owner_id: RefreshRowOwnerId::checked(target).unwrap(),
         source: RefreshScalarProgramSource::checked(0, target).unwrap(),
@@ -252,7 +256,7 @@ fn mixed_projection_exact_plan(projection_first: bool) -> RefreshPlan {
         seed_sequence: Default::default(),
         block_index: 0,
         plan: AlgebraicProjectionPlan {
-            blocks: vec![projection_block.clone()],
+            blocks: (vec![projection_block.clone()]).into(),
         },
         seed_rows: selection(rows.len(), [0]),
     };
@@ -269,7 +273,7 @@ fn mixed_projection_exact_plan(projection_first: bool) -> RefreshPlan {
     };
     RefreshPlan {
         simultaneous_plan: AlgebraicProjectionPlan {
-            blocks: vec![
+            blocks: (vec![
                 projection_block,
                 crate::AlgebraicProjectionBlock {
                     rows: vec![1],
@@ -277,7 +281,8 @@ fn mixed_projection_exact_plan(projection_first: bool) -> RefreshPlan {
                     tearing: None,
                     alternate_charts: Vec::new(),
                 },
-            ],
+            ])
+            .into(),
         },
         simultaneous_block_indices: vec![0, 1],
         rows,
@@ -310,6 +315,7 @@ fn affine_projection_seeds_are_omitted_from_all_owners_and_remainders() {
             owners.event(),
             &owners.clock_events()[0],
             owners.root_after_derivative().unwrap().remainder(),
+            owners.root_after_algebraic().unwrap().remainder(),
             owners.algebraic_after_derivative().unwrap().remainder(),
             owners.clock_events_after_event()[0].remainder(),
         ] {
@@ -407,12 +413,13 @@ fn exact_assignment_completeness_requires_full_blt_coverage() {
 
     let complete = RefreshPlan {
         simultaneous_plan: AlgebraicProjectionPlan {
-            blocks: vec![crate::AlgebraicProjectionBlock {
+            blocks: (vec![crate::AlgebraicProjectionBlock {
                 rows: vec![0],
                 y_indices: vec![0],
                 tearing: None,
                 alternate_charts: Vec::new(),
-            }],
+            }])
+            .into(),
         },
         simultaneous_block_indices: vec![0],
         rows: vec![row(0)],
@@ -504,9 +511,13 @@ fn every_refresh_purpose_requires_settled_assignment_dependencies() {
 fn refresh_proofs_require_the_same_canonical_rows_and_unknowns_for_every_purpose() {
     let canonical = mixed_projection_exact_plan(true).simultaneous_plan;
     let mut changed_rows = canonical.clone();
-    changed_rows.blocks[0].rows[0] = 1;
+    let mut blocks = changed_rows.blocks.scalar_blocks().to_vec();
+    blocks[0].rows[0] = 1;
+    changed_rows.blocks = blocks.into();
     let mut changed_unknowns = canonical.clone();
-    changed_unknowns.blocks[0].y_indices[0] = 1;
+    let mut blocks = changed_unknowns.blocks.scalar_blocks().to_vec();
+    blocks[0].y_indices[0] = 1;
+    changed_unknowns.blocks = blocks.into();
     for purpose in 0..5 {
         let mut plans = std::array::from_fn::<_, 4, _>(|_| RefreshPlan::default());
         let plan = mixed_projection_exact_plan(true);
@@ -539,7 +550,9 @@ fn ordered_remainder_consumes_dependencies_settled_by_its_predecessor() {
     let algebraic = mixed_projection_exact_plan(true);
     let mut derivative = algebraic.clone();
     derivative.rows.truncate(1);
-    derivative.simultaneous_plan.blocks.truncate(1);
+    derivative.simultaneous_plan.blocks = derivative.simultaneous_plan.blocks.scalar_blocks()[..1]
+        .to_vec()
+        .into();
     derivative.simultaneous_block_indices.truncate(1);
     derivative
         .value_stages
@@ -662,6 +675,7 @@ fn refresh_owner_rejects_a_source_output_for_another_equation() {
 
 #[test]
 fn exact_assignment_program_is_constructed_once_and_not_serialized() {
+    let source = source_block();
     let refresh_row = row(0);
     let plan = RefreshPlan {
         rows: vec![refresh_row],
@@ -669,7 +683,7 @@ fn exact_assignment_program_is_constructed_once_and_not_serialized() {
         ..RefreshPlan::default()
     };
     let owners = ContinuousRefreshOwners::checked_for_source(
-        &source_block(),
+        &source,
         plan,
         RefreshPlan::default(),
         RefreshPlan::default(),
@@ -693,7 +707,9 @@ fn exact_assignment_program_is_constructed_once_and_not_serialized() {
         &[RefreshRowOwnerId::checked(0).unwrap()]
     );
     assert_eq!(program.assignment_shapes().len(), 1);
-    let final_program = program.final_scalar_program(&source_block()).unwrap();
+    let final_program = program.final_scalar_program(&source).unwrap();
+    assert!(program.final_scalar_program(&source.clone()).is_ok());
+    assert!(program.final_scalar_program(&source_block()).is_err());
     assert_eq!(final_program.programs().len(), 1);
     assert_eq!(final_program.output_count(), 1);
 
@@ -713,8 +729,9 @@ fn exact_assignment_program_is_constructed_once_and_not_serialized() {
 
 #[test]
 fn independent_outputs_from_one_source_keep_one_checked_program_owner() {
+    let source = two_output_source(false);
     let owners = ContinuousRefreshOwners::checked_for_source(
-        &two_output_source(false),
+        &source,
         two_row_dynamic_plan(),
         RefreshPlan::default(),
         RefreshPlan::default(),
@@ -732,7 +749,7 @@ fn independent_outputs_from_one_source_keep_one_checked_program_owner() {
     assert_eq!(program.assignment_shapes().len(), 2);
     assert_eq!(
         program
-            .final_scalar_program(&two_output_source(false))
+            .final_scalar_program(&source)
             .unwrap()
             .output_count(),
         2
@@ -778,9 +795,11 @@ fn wire_reconstructs_the_root_remainder_relation() {
     .unwrap();
     let wire = serde_json::to_value(&owners).unwrap();
     assert!(wire.get("root_after_derivative").is_none());
+    assert!(wire.get("root_after_algebraic").is_none());
     let replayed: ContinuousRefreshOwners = serde_json::from_value(wire).unwrap();
     assert!(replayed.is_issued());
     assert!(replayed.root_after_derivative().is_some());
+    assert!(replayed.root_after_algebraic().is_some());
 }
 
 #[test]
@@ -881,12 +900,13 @@ fn derivative_settle_relation_keeps_only_uncovered_root_stages() {
         seed_sequence: Default::default(),
         block_index: 11,
         plan: AlgebraicProjectionPlan {
-            blocks: vec![crate::AlgebraicProjectionBlock {
+            blocks: (vec![crate::AlgebraicProjectionBlock {
                 rows: vec![1, 2],
                 y_indices: vec![1, 2],
                 tearing: None,
                 alternate_charts: Vec::new(),
-            }],
+            }])
+            .into(),
         },
         seed_rows: RefreshRowSelection::default(),
     };
@@ -1005,4 +1025,101 @@ fn builder_push_reserves_the_registers_of_appended_operations() {
         })
         .unwrap();
     assert_eq!(result, 6);
+}
+
+#[test]
+fn full_algebraic_root_remainder_reissues_exact_uncovered_order_on_wire() {
+    let full = RefreshPlan {
+        rows: vec![row(0)],
+        causal_seed_rows: selection(1, [0]),
+        dynamic_causal_seed_rows: selection(1, [0]),
+        causal_solution_certified: true,
+        ..Default::default()
+    };
+    let root = RefreshPlan {
+        rows: vec![row(0), row(1)],
+        causal_seed_rows: selection(2, [0, 1]),
+        dynamic_causal_seed_rows: selection(2, [0, 1]),
+        causal_solution_certified: true,
+        ..Default::default()
+    };
+    let owners = ContinuousRefreshOwners::checked(
+        full,
+        RefreshPlan::default(),
+        root,
+        RefreshPlan::default(),
+        Vec::new(),
+    )
+    .unwrap();
+    for owners in [
+        owners.clone(),
+        serde_json::from_value(serde_json::to_value(&owners).unwrap()).unwrap(),
+    ] {
+        let relation = owners.root_after_algebraic().unwrap();
+        assert_eq!(
+            relation
+                .remainder()
+                .dynamic_causal_rows()
+                .iter()
+                .map(AlgebraicRefreshRow::target_index)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(
+            owners
+                .root_after_derivative()
+                .unwrap()
+                .remainder()
+                .dynamic_causal_rows()
+                .iter()
+                .map(AlgebraicRefreshRow::target_index)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_ne!(
+            relation.remainder().dynamic_causal_sequence,
+            owners.root().dynamic_causal_sequence
+        );
+    }
+}
+
+#[test]
+fn full_algebraic_root_remainder_covers_only_the_exact_predecessor_inventory() {
+    let complete = mixed_projection_exact_plan(true);
+    let owners = ContinuousRefreshOwners::checked_for_source(
+        &two_output_source(true),
+        complete.clone(),
+        RefreshPlan::default(),
+        complete,
+        RefreshPlan::default(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(
+        owners
+            .root_after_algebraic()
+            .unwrap()
+            .remainder()
+            .value_stages
+            .is_empty()
+    );
+    assert!(
+        !owners
+            .root_after_derivative()
+            .unwrap()
+            .remainder()
+            .value_stages
+            .is_empty()
+    );
+    let mut wire = serde_json::to_value(&owners).unwrap();
+    wire["algebraic"] = serde_json::to_value(RefreshPlan::default()).unwrap();
+    let altered: ContinuousRefreshOwners = serde_json::from_value(wire).unwrap();
+    assert!(
+        !altered
+            .root_after_algebraic()
+            .unwrap()
+            .remainder()
+            .value_stages
+            .is_empty()
+    );
 }

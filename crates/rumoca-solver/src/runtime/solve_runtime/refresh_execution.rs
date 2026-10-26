@@ -1,7 +1,10 @@
+#[cfg(test)]
+mod dispatch_tests;
+
 use super::*;
 
 pub(super) fn static_refresh_parameter_indices<'a>(
-    implicit: &PreparedScalarProgramBlock,
+    implicit: ProgramAnalysis<'_>,
     plans: impl IntoIterator<Item = &'a solve::RefreshPlan>,
     program_rows: &FxHashMap<solve::RefreshScalarProgramSource, usize>,
 ) -> Box<[usize]> {
@@ -38,12 +41,13 @@ pub(super) fn static_refresh_parameter_indices<'a>(
         .into_boxed_slice()
 }
 
-impl SolveRuntime {
+impl ScalarExecutionView<'_> {
     pub(super) fn refresh_program_row(
         &self,
         row: &solve::AlgebraicRefreshRow,
     ) -> Result<usize, RuntimeSolveError> {
-        self.refresh_program_rows
+        self.scalar
+            .refresh_program_rows
             .get(&row.source())
             .copied()
             .ok_or_else(|| {
@@ -61,7 +65,7 @@ impl SolveRuntime {
         max_iters: usize,
     ) -> Result<(), RuntimeSolveError> {
         self.refresh_slots_with_plan(
-            &self.derivative_refresh,
+            &self.scalar.derivative_refresh,
             RefreshSlotArgs {
                 t,
                 solver_y,
@@ -82,7 +86,35 @@ impl SolveRuntime {
         max_iters: usize,
     ) -> Result<(), RuntimeSolveError> {
         self.refresh_slots_with_plan(
-            &self.algebraic_refresh,
+            &self.scalar.algebraic_refresh,
+            RefreshSlotArgs {
+                t,
+                solver_y,
+                params,
+                tol,
+                max_iters,
+                certify_coordinates: true,
+            },
+        )
+    }
+
+    pub(crate) fn complete_algebraic_after_derivative(
+        &self,
+        t: f64,
+        solver_y: &mut [f64],
+        params: &[f64],
+        tol: f64,
+        max_iters: usize,
+    ) -> Result<(), RuntimeSolveError> {
+        let plan = self
+            .scalar
+            .algebraic_refresh_after_derivative
+            .as_ref()
+            .map_or(&self.scalar.algebraic_refresh, |relation| {
+                relation.remainder()
+            });
+        self.refresh_slots_with_plan(
+            plan,
             RefreshSlotArgs {
                 t,
                 solver_y,
@@ -111,7 +143,7 @@ impl SolveRuntime {
         // their independent checked closures; later coverage certificates can
         // remove shared stages without runtime schedule discovery.
         self.refresh_slots_with_plan(
-            &self.event_refresh,
+            &self.scalar.event_refresh,
             RefreshSlotArgs {
                 t,
                 solver_y: &mut *solver_y,
@@ -121,7 +153,12 @@ impl SolveRuntime {
                 certify_coordinates: true,
             },
         )?;
-        for (clock_index, relation) in self.clock_event_refresh_after_event.iter().enumerate() {
+        for (clock_index, relation) in self
+            .scalar
+            .clock_event_refresh_after_event
+            .iter()
+            .enumerate()
+        {
             let owner = self
                 .model
                 .problem
@@ -154,7 +191,7 @@ impl SolveRuntime {
         max_iters: usize,
     ) -> Result<(), RuntimeSolveError> {
         self.refresh_slots_with_plan(
-            &self.algebraic_refresh,
+            &self.scalar.algebraic_refresh,
             RefreshSlotArgs {
                 t,
                 solver_y,
@@ -175,7 +212,7 @@ impl SolveRuntime {
             return Ok(());
         }
         self.validate_refresh_inputs(args.solver_y, args.params)?;
-        let mut incoming = self.refresh_snapshot_scratch.borrow_mut();
+        let mut incoming = self.scalar.refresh_snapshot_scratch.borrow_mut();
         copy_runtime_values_into(
             &mut incoming,
             args.solver_y,
@@ -254,13 +291,13 @@ impl SolveRuntime {
     }
 
     pub(super) fn prepare_static_refresh_cache(&self, params: &[f64], solver_len: usize) {
-        let mut cache = self.static_refresh_cache.borrow_mut();
+        let mut cache = self.scalar.static_refresh_cache.borrow_mut();
         let params_match = cache.valid
-            && cache.params.len() == self.static_refresh_parameter_indices.len()
+            && cache.params.len() == self.scalar.static_refresh_parameter_indices.len()
             && cache
                 .params
                 .iter()
-                .zip(self.static_refresh_parameter_indices.iter().copied())
+                .zip(self.scalar.static_refresh_parameter_indices.iter().copied())
                 .all(|(lhs, index)| {
                     params
                         .get(index)
@@ -270,7 +307,8 @@ impl SolveRuntime {
             cache.valid = true;
             cache.params.clear();
             cache.params.extend(
-                self.static_refresh_parameter_indices
+                self.scalar
+                    .static_refresh_parameter_indices
                     .iter()
                     .filter_map(|&index| params.get(index).copied()),
             );
@@ -288,7 +326,7 @@ impl SolveRuntime {
         params: &[f64],
     ) -> Result<(), RuntimeSolveError> {
         let fully_cached = {
-            let cache = self.static_refresh_cache.borrow();
+            let cache = self.scalar.static_refresh_cache.borrow();
             rows.iter().all(|row| {
                 cache
                     .values
@@ -297,7 +335,7 @@ impl SolveRuntime {
             })
         };
         if fully_cached {
-            let cache = self.static_refresh_cache.borrow();
+            let cache = self.scalar.static_refresh_cache.borrow();
             for row in rows.iter() {
                 solver_y[row.target_index()] =
                     cached_static_refresh_value(&cache, row.target_index())?;
@@ -306,7 +344,7 @@ impl SolveRuntime {
         }
 
         self.refresh_slots_once(rows, sequence, t, solver_y, params)?;
-        let mut cache = self.static_refresh_cache.borrow_mut();
+        let mut cache = self.scalar.static_refresh_cache.borrow_mut();
         for row in rows.iter() {
             cache.values[row.target_index()] = Some(solver_y[row.target_index()]);
         }
@@ -325,16 +363,15 @@ impl SolveRuntime {
             &plan.value_projection_plan
         };
         let projection_model = RefreshProjectionModel {
-            runtime: self,
+            runtime: *self,
             seed_linearizations: None,
             #[cfg(test)]
             plan: projection_plan,
             block_indices: &plan.simultaneous_block_indices,
             plan_validated: false,
-            jacobian_v: ProjectionJacobian::SolverY {
-                block: &self.implicit_projection_jacobian_v,
-                scalar: &self.implicit_projection_scalar_jacobian_v,
-            },
+            jacobian_v: ProjectionJacobian::SolverY(
+                &self.scalar.implicit_projection_scalar_jacobian_v,
+            ),
         };
         let projection_args = crate::runtime::projection::AlgebraicProjectionArgs {
             parameters: args.params,
@@ -370,7 +407,7 @@ impl SolveRuntime {
         t: f64,
         tol: f64,
     ) -> Result<bool, RuntimeSolveError> {
-        let projection_model = RuntimeManifoldProjection { runtime: self };
+        let projection_model = RuntimeManifoldProjection { runtime: *self };
         crate::runtime::projection::project_state_manifold(
             &projection_model,
             solver_y,
@@ -390,27 +427,12 @@ impl SolveRuntime {
         tol: f64,
     ) -> Result<(), RuntimeSolveError> {
         crate::runtime::projection::certify_state_manifold(
-            &RuntimeManifoldProjection { runtime: self },
+            &RuntimeManifoldProjection { runtime: *self },
             y,
             p,
             t,
             tol,
         )
-    }
-
-    /// Whether checked Solve IR retained any lower-order state constraints.
-    ///
-    /// An empty projection artifact is a construction-time certificate that
-    /// projecting continuous states cannot change them. FMI hosts use this to
-    /// avoid reconstructing observation algebraics merely to discover that
-    /// there is no manifold system to evaluate.
-    pub fn requires_state_manifold_projection(&self) -> bool {
-        !self
-            .model
-            .problem
-            .continuous
-            .manifold_projection_plan
-            .is_empty()
     }
 
     pub(super) fn validate_refresh_inputs(
@@ -422,7 +444,7 @@ impl SolveRuntime {
         // every algebraic coordinate. Explicit states are owned by derivative
         // rows and therefore need no placeholder implicit rows.
         solve_eval::validate_input_requirements(
-            self.implicit_scalar_rhs.requirements(),
+            self.scalar.implicit_scalar_rhs.source().requirements(),
             solver_y,
             params,
             None,
@@ -450,14 +472,11 @@ impl SolveRuntime {
     }
 
     /// Solver slot name for diagnostics.
-    pub(super) fn solver_name(&self, index: usize) -> &str {
+    pub(super) fn solver_name(&self, index: usize) -> String {
         self.model
             .problem
-            .solve_layout
-            .solver_maps
-            .names
-            .get(index)
-            .map_or("<unnamed>", String::as_str)
+            .solver_name(index)
+            .unwrap_or_else(|| "<unnamed>".to_owned())
     }
 
     /// Build a spanned non-finite-value error, resolving the solver slot's name
@@ -466,11 +485,7 @@ impl SolveRuntime {
         let name = self
             .model
             .problem
-            .solve_layout
-            .solver_maps
-            .names
-            .get(index)
-            .cloned()
+            .solver_name(index)
             .unwrap_or_else(|| format!("y[{index}]"));
         let span = self.solver_source_span(index);
         let kind = if value.is_nan() { "NaN" } else { "inf" };
@@ -478,17 +493,11 @@ impl SolveRuntime {
     }
 
     pub(super) fn solver_source_span(&self, index: usize) -> Option<rumoca_core::Span> {
-        let name = self
-            .model
-            .problem
-            .solve_layout
-            .solver_maps
-            .names
-            .get(index)?;
+        let name = self.model.problem.solver_name(index)?;
+        let point = self.model.visible_projection().index(&name)?;
         self.model
-            .variable_meta
-            .iter()
-            .find(|meta| &meta.name == name)
+            .visible_projection()
+            .metadata(point)
             .map(|meta| meta.source_span)
     }
 
@@ -505,20 +514,29 @@ impl SolveRuntime {
         // the row's own implicit target; for a cross-paired row (a coupled
         // block solved a residual row for one of its other unknowns) the
         // assignment value belongs to a different variable.
-        if row.assignment_target() == Some(index)
-            && let Some(value) = self
-                .implicit_scalar_rhs
-                .eval_target_assignment_output_unchecked_with_context(
-                    rumoca_eval_solve::TargetAssignmentOutputRequest {
-                        row_idx: program_row,
-                        output_offset: row.output_offset(),
-                        target_y_index: index,
-                        y: solver_y,
-                        p: params,
-                        t,
-                        context: self.row_eval_context(),
-                    },
+        if let Some(queries) = self.scalar.compiled_targets(false) {
+            if row.assignment_target() == Some(index)
+                && let Some(value) = queries.call(
+                    (program_row, row.output_offset(), index),
+                    (solver_y, params, t),
+                    self.row_eval_context(),
                 )?
+            {
+                return Ok(value);
+            }
+        } else if row.assignment_target() == Some(index)
+            && let Some(reference) = self.scalar.implicit_scalar_rhs.reference()
+            && let Some(value) = reference.eval_target_assignment_output_unchecked_with_context(
+                rumoca_eval_solve::TargetAssignmentOutputRequest {
+                    row_idx: program_row,
+                    output_offset: row.output_offset(),
+                    target_y_index: index,
+                    y: solver_y,
+                    p: params,
+                    t,
+                    context: self.row_eval_context(),
+                },
+            )?
         {
             return Ok(value);
         }
@@ -535,16 +553,15 @@ impl SolveRuntime {
         params: &[f64],
     ) -> Result<f64, RuntimeSolveError> {
         let program_row = self.refresh_program_row(row)?;
-        self.implicit_scalar_rhs
-            .eval_row_output_unchecked_with_context(
-                program_row,
-                row.output_offset(),
-                solver_y,
-                params,
+        self.scalar.implicit_scalar_rhs.eval_output(
+            (program_row, row.output_offset()),
+            RowEvalPoint {
+                y: solver_y,
+                p: params,
                 t,
-                self.row_eval_context(),
-            )
-            .map_err(Into::into)
+            },
+            self.row_eval_context(),
+        )
     }
 
     fn solve_refresh_residual_row(
@@ -557,7 +574,7 @@ impl SolveRuntime {
     ) -> Result<f64, RuntimeSolveError> {
         let index = row.target_index();
         let current = solver_y[index];
-        let mut probe_y = self.refresh_probe_scratch.borrow_mut();
+        let mut probe_y = self.scalar.refresh_probe_scratch.borrow_mut();
         probe_y.clear();
         reserve_runtime_vec_capacity(&mut probe_y, solver_y.len(), "refresh residual probe")?;
         probe_y.extend_from_slice(solver_y);
@@ -592,17 +609,17 @@ impl SolveRuntime {
             self.validate_refresh_values(plan, solver_y, params)?;
             return Ok(());
         }
-        if self.can_batch_assignment_refresh(plan) {
-            self.implicit_scalar_rhs
-                .apply_target_assignment_rows_unchecked_with_context(
-                    plan.iter(),
-                    |row| self.refresh_program_rows.get(&row.source()).copied(),
-                    solver_y,
-                    params,
-                    t,
-                    self.row_eval_context(),
-                )
-                .map_err(RuntimeSolveError::from)?;
+        if let Some(reference) = self.scalar.implicit_scalar_rhs.reference()
+            && self.can_batch_assignment_refresh(plan)
+        {
+            reference.apply_target_assignment_rows_unchecked_with_context(
+                plan.iter(),
+                |row| self.scalar.refresh_program_rows.get(&row.source()).copied(),
+                solver_y,
+                params,
+                t,
+                self.row_eval_context(),
+            )?;
             self.validate_refresh_values(plan, solver_y, params)?;
             return Ok(());
         }
@@ -642,63 +659,21 @@ impl SolveRuntime {
         solver_y: &mut [f64],
         params: &[f64],
     ) -> Result<bool, RuntimeSolveError> {
-        let Some(backend) = self.execution_backend.as_ref() else {
+        let Some(compiled) = self.compiled_assignment_schedule(sequence) else {
             return Ok(false);
         };
-        let Some(compiled) = self.compiled_assignment_schedule(backend.as_ref(), sequence) else {
-            return Ok(false);
-        };
-        compiled
-            .call(solver_y, params, t, self.model.external_tables.as_slice())
-            .map_err(RuntimeSolveError::solve_ir)?;
+        compiled.call(solver_y, params, t, self.model.external_tables.as_slice())?;
         Ok(true)
     }
 
     fn compiled_assignment_schedule(
         &self,
-        backend: &dyn SolveExecutionBackend,
         sequence: solve::RefreshSequenceId,
     ) -> Option<Rc<dyn CompiledSolveAssignmentSchedule>> {
-        if let Some(cached) = self
+        self.scalar
             .compiled_assignment_schedules
-            .borrow()
             .get(&sequence)
             .cloned()
-        {
-            return cached;
-        }
-        let owners = &self.model.problem.continuous.refresh_owners;
-        let Some(schedule) = owners.exact_assignment_schedule(sequence) else {
-            self.compiled_assignment_schedules
-                .borrow_mut()
-                .insert(sequence, None);
-            return None;
-        };
-        let compiled = backend
-            .compile_assignment_schedule(
-                &self.model.problem.continuous.implicit_rhs,
-                owners,
-                schedule,
-            )
-            .map_err(|error| {
-                tracing::debug!(
-                    target: "rumoca_solver::native_execution",
-                    programs = schedule.program_ids().len(),
-                    targets = schedule
-                        .program_ids()
-                        .iter()
-                        .filter_map(|id| owners.exact_assignment_program(*id))
-                        .map(|program| program.target_indices().len())
-                        .sum::<usize>(),
-                    %error,
-                    "failed to compile assignment schedule"
-                );
-            })
-            .ok();
-        self.compiled_assignment_schedules
-            .borrow_mut()
-            .insert(sequence, compiled.clone());
-        compiled
     }
 
     fn validate_refresh_values(
@@ -755,5 +730,126 @@ impl SolveRuntime {
             value,
             "refresh assignment value"
         );
+    }
+}
+
+impl ScalarExecutionView<'_> {
+    pub fn eval_root_search_conditions_after_derivative_settle_into(
+        &self,
+        t: f64,
+        params: &[f64],
+        solver_y: &mut [f64],
+        tol: f64,
+        max_iters: usize,
+        out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        if !self.derivative_settled_coordinate_can_refresh_roots() {
+            return Err(RuntimeSolveError::solve_ir(
+                "root refresh has no certified derivative-settled remainder".to_string(),
+            ));
+        }
+        let relation = self
+            .scalar
+            .root_refresh_after_derivative
+            .as_ref()
+            .ok_or_else(|| {
+                RuntimeSolveError::solve_ir("root refresh derivative-settled remainder disappeared")
+            })?;
+        self.eval_root_search_conditions_after_settle(
+            t, params, solver_y, tol, max_iters, out, relation,
+        )
+    }
+
+    pub(crate) fn algebraic_settled_coordinate_can_refresh_roots(&self) -> bool {
+        self.scalar.root_refresh_after_algebraic.is_some()
+    }
+
+    pub(crate) fn eval_root_search_conditions_after_algebraic_settle_into(
+        &self,
+        t: f64,
+        params: &[f64],
+        solver_y: &mut [f64],
+        tol: f64,
+        max_iters: usize,
+        out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        let relation = self
+            .scalar
+            .root_refresh_after_algebraic
+            .as_ref()
+            .ok_or_else(|| {
+                RuntimeSolveError::solve_ir(
+                    "root refresh has no certified algebraic-settled remainder",
+                )
+            })?;
+        self.eval_root_search_conditions_after_settle(
+            t, params, solver_y, tol, max_iters, out, relation,
+        )
+    }
+
+    // SPEC_0021: Exception - the selected constructor-issued remainder is part of the checked coordinate.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_root_search_conditions_after_settle(
+        &self,
+        t: f64,
+        params: &[f64],
+        solver_y: &mut [f64],
+        tol: f64,
+        max_iters: usize,
+        out: &mut [f64],
+        relation: &solve::RefreshRemainderRelation,
+    ) -> Result<(), RuntimeSolveError> {
+        if solver_y.len() != self.solver_count {
+            return Err(RuntimeSolveError::solve_ir(format!(
+                "settled solver-y length mismatch: expected {}, got {}",
+                self.solver_count,
+                solver_y.len()
+            )));
+        }
+        let remainder = relation.remainder();
+        if remainder.causal_solution_certified || !remainder.value_stages.is_empty() {
+            self.refresh_slots_with_plan(
+                remainder,
+                RefreshSlotArgs {
+                    t,
+                    solver_y,
+                    params,
+                    tol,
+                    max_iters,
+                    certify_coordinates: true,
+                },
+            )?;
+        }
+        let root_count = self.root_condition_count();
+        if root_count == 0 {
+            return fill_inactive_root_output(out);
+        }
+        validate_runtime_output_len("root search output", root_count, out.len())?;
+        let model_root_count = self.model.problem.events.root_conditions.len();
+        if model_root_count > 0 {
+            let model_out = &mut out[..model_root_count];
+            match &self.scalar.root_condition_plan {
+                Some(plan) if plan.search_rows.is_empty() => {
+                    self.validate_root_plan_output_len(plan, model_out)?;
+                    self.write_planned_root_search_defaults(plan, params, t, model_out)?;
+                }
+                Some(plan) => {
+                    self.validate_root_plan_output_len(plan, model_out)?;
+                    self.write_planned_root_search_conditions(
+                        plan, solver_y, params, t, model_out,
+                    )?;
+                }
+                None => self
+                    .eval_root_conditions_from_refreshed_solver_y(t, solver_y, params, model_out)?,
+            }
+        }
+        self.delay_runtime.evaluate_event_roots(
+            t,
+            solver_y,
+            params,
+            self.row_eval_context(),
+            &mut out[model_root_count..],
+        )?;
+        validate_finite_runtime_output("root search output", out)
     }
 }

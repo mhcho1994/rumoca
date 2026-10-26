@@ -116,7 +116,7 @@ impl SolveRuntime {
         params: &[f64],
         settle: AlgebraicSettle,
     ) -> JacobianReport {
-        let n = self.state_count;
+        let n = self.state_count();
         let state_labels = (0..n).map(|index| self.state_label(index)).collect();
 
         let (mut matrix, mut seed, mut column) = match jacobian_work_buffers(n) {
@@ -163,9 +163,8 @@ impl SolveRuntime {
     /// names. The fully-qualified name uniquely identifies the state; raw source
     /// byte spans are omitted as they aren't human-actionable in this dump.
     fn state_label(&self, index: usize) -> String {
-        let names = &self.model.problem.solve_layout.solver_maps.names;
-        match names.get(index) {
-            Some(name) => name.clone(),
+        match self.model().problem.solver_name(index) {
+            Some(name) => name,
             None => format!("y[{index}]"),
         }
     }
@@ -184,8 +183,8 @@ impl SolveRuntime {
         params: &[f64],
         settle: AlgebraicSettle,
     ) -> ParameterJacobianReport {
-        let layout = &self.model.problem.layout;
-        let n_state = self.state_count;
+        let layout = &self.model().problem.layout;
+        let n_state = self.state_count();
         let y_scalars = layout.y_scalars();
         let row_labels = (0..n_state).map(|index| self.state_label(index)).collect();
         // One column per model parameter (rumoca-internal `__`-prefixed slots are
@@ -246,15 +245,15 @@ impl SolveRuntime {
     /// rumoca-internal `__`-prefixed slots (event/pre memory etc.). The first
     /// name bound to a slot wins.
     fn model_parameter_slots(&self) -> Vec<(usize, String)> {
-        let n = self.model.problem.layout.p_scalars();
+        let n = self.model().problem.layout.p_scalars();
         let mut by_slot: Vec<Option<String>> = vec![None; n];
-        for (name, slot) in self.model.problem.layout.bindings() {
+        for (name, slot) in self.model().problem.layout.scalar_bindings() {
             if let ScalarSlot::P { index, .. } = slot
-                && *index < n
+                && index < n
                 && !name.as_str().starts_with("__")
-                && by_slot[*index].is_none()
+                && by_slot[index].is_none()
             {
-                by_slot[*index] = Some(name.to_string());
+                by_slot[index] = Some(name);
             }
         }
         by_slot
@@ -362,7 +361,7 @@ impl SolveRuntime {
 
         let n_state = steady.state_labels.len();
         let mut gradient = vec![0.0; param_slots.len()];
-        let mut solver_column = vec![0.0; self.solver_count];
+        let mut solver_column = vec![0.0; self.solver_count()];
         let mut state_column = vec![0.0; n_state];
         for (col, &slot) in param_slots.iter().enumerate() {
             for (row, value) in state_column.iter_mut().enumerate() {
@@ -377,7 +376,7 @@ impl SolveRuntime {
             ) {
                 return make_error(error.to_string());
             }
-            // `objective_index` is a position in `solver_maps.names` (length
+            // `objective_index` is a position in the checked solver Y extent (length
             // `solver_count`), and `solver_column` is sized `solver_count`, so the
             // index is in bounds by construction.
             gradient[col] = solver_column[objective_index];
@@ -449,7 +448,7 @@ impl SolveRuntime {
             ));
         };
 
-        let p_scalars = self.model.problem.layout.p_scalars();
+        let p_scalars = self.model().problem.layout.p_scalars();
         // Settle the full solver-y point (states + algebraics consistent, g = 0):
         // the adjoint operator and right-hand side linearize there.
         let solver_y = match self.full_solver_y(t, state, params, settle.tol, settle.max_iters) {
@@ -458,16 +457,16 @@ impl SolveRuntime {
         };
 
         // Adjoint right-hand side ∂J/∂solver_y = e_objective (solver-y objective).
-        let mut rhs = vec![0.0; self.solver_count];
+        let mut rhs = vec![0.0; self.solver_count()];
         rhs[objective_index] = 1.0;
 
         // Solve (∂R/∂solver_y)ᵀ λ = rhs matrix-free: `apply_steady_residual_transpose`
         // supplies `v ↦ (∂R/∂solver_y)ᵀ v` (full DAE residual, der + algebraic
         // constraints) from the two reverse VJPs, so no Jacobian is formed.
-        let mut transpose = vec![0.0; self.solver_count + p_scalars];
+        let mut transpose = vec![0.0; self.solver_count() + p_scalars];
         let apply = |v: &[f64], out: &mut [f64]| -> Result<(), crate::RuntimeSolveError> {
             self.apply_steady_residual_transpose(t, &solver_y, params, v, &mut transpose)?;
-            out.copy_from_slice(&transpose[..self.solver_count]);
+            out.copy_from_slice(&transpose[..self.solver_count()]);
             Ok(())
         };
         // GMRES wraps an operator failure as `GmresError::Operator`, so its
@@ -485,7 +484,7 @@ impl SolveRuntime {
         }
         let gradient: Vec<f64> = param_slots
             .iter()
-            .map(|&slot| -transpose[self.solver_count + slot])
+            .map(|&slot| -transpose[self.solver_count() + slot])
             .collect();
 
         ObjectiveGradientReport {

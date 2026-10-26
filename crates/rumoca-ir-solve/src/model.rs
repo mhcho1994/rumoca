@@ -1,16 +1,23 @@
 use super::*;
 
 mod affine_elimination;
+mod assignment_decomposition;
 mod clock_partition;
 mod event_schedule;
 mod event_transaction;
 mod guarded_assignment;
 mod jacobian_outputs;
+mod model_views;
+mod variable_storage;
 
 #[cfg(test)]
 mod jacobian_column_cache_tests;
 
+#[cfg(test)]
+mod storage_tests;
+
 pub use affine_elimination::AffineEliminationLayout;
+pub use assignment_decomposition::{CheckedAssignmentDecomposition, ScalarArtifactRefusal};
 pub use event_schedule::{
     CoupledNewtonPolicy, EventIterationSchedule, EventPassStep, EventScheduleError,
     RelationPassStep, SettleStep,
@@ -18,11 +25,15 @@ pub use event_schedule::{
 pub use event_transaction::*;
 pub use guarded_assignment::{GuardedAssignmentProgram, GuardedAssignmentTargetRange};
 pub use jacobian_outputs::*;
+pub use variable_storage::{
+    SolveLayout, SolveVariableDeclaration, SolveVariableDeclarationError, SolveVariableStorageRole,
+    SolveVariableStorageRun, SolveVariableTimeDomain, SolveVariableValueKind,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct ContinuousSolveSystem {
     pub implicit_rhs: ComputeBlock,
-    pub implicit_row_targets: Vec<Option<ScalarSlot>>,
+    pub implicit_row_targets: ImplicitRowTargets,
     pub algebraic_projection_plan: AlgebraicProjectionPlan,
     pub residual: ComputeBlock,
     /// Lower-order holonomic and velocity residuals retained when structural
@@ -255,9 +266,10 @@ impl Serialize for ReducedChart {
 /// model stays byte-identical across formats and every alternate basis is
 /// re-materialized as an executable image before a runtime observes it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(from = "ReducedChartPlanWire")]
 pub struct ReducedChartPlan {
     pub implicit_rhs: ComputeBlock,
-    pub implicit_row_targets: Vec<Option<ScalarSlot>>,
+    pub implicit_row_targets: ImplicitRowTargets,
     pub algebraic_projection_plan: AlgebraicProjectionPlan,
     pub residual: ComputeBlock,
     pub derivative_rhs: ComputeBlock,
@@ -276,9 +288,37 @@ pub struct ReducedChartPlan {
     pub delta: Option<crate::ChartPlanDelta>,
 }
 
+#[derive(Deserialize)]
+struct ReducedChartPlanWire {
+    implicit_rhs: ComputeBlock,
+    implicit_row_targets: crate::projection_stages::ImplicitRowTargetsWire,
+    algebraic_projection_plan: AlgebraicProjectionPlan,
+    residual: ComputeBlock,
+    derivative_rhs: ComputeBlock,
+    refresh_owners: ContinuousRefreshOwners,
+}
+
+impl From<ReducedChartPlanWire> for ReducedChartPlan {
+    fn from(wire: ReducedChartPlanWire) -> Self {
+        Self {
+            implicit_rhs: wire.implicit_rhs,
+            implicit_row_targets: ImplicitRowTargets::from_wire(
+                wire.implicit_row_targets,
+                &wire.algebraic_projection_plan.blocks,
+            ),
+            algebraic_projection_plan: wire.algebraic_projection_plan,
+            residual: wire.residual,
+            derivative_rhs: wire.derivative_rhs,
+            refresh_owners: wire.refresh_owners,
+            artifacts: ContinuousSolveArtifacts::default(),
+            delta: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AlgebraicProjectionPlan {
-    pub blocks: Vec<AlgebraicProjectionBlock>,
+    pub blocks: ProjectionBlocks,
 }
 
 impl AlgebraicProjectionPlan {
@@ -464,14 +504,21 @@ pub struct DiscreteSolveArtifacts {
     pub structured_jacobian_v: Option<ScalarProgramBlock>,
 }
 
+/// A structural-only artifact; colored execution requires a distinct issued type.
+///
+/// ```compile_fail
+/// use rumoca_ir_solve::JacobianStructure;
+/// fn coloring_is_not_a_structural_reader(structure: &JacobianStructure) {
+///     let _ = structure.coloring();
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct JacobianStructure {
     pattern: StructuralPattern,
-    coloring: ColumnColoring,
     output_evaluations: Box<[ProjectionJacobianOutputs]>,
     residual_output_evaluation: Option<ProjectionOutputSelection>,
-    jacobian_application: Option<ProjectionJacobianApplication>,
-    affine_elimination: Option<AffineEliminationLayout>,
+    jacobian_application: Option<Box<ProjectionJacobianApplication>>,
+    affine_elimination: Option<Box<AffineEliminationLayout>>,
     linearization_repeatable: bool,
     /// The immutable pattern's rows per column, derived only when a consumer
     /// needs the coordinate view. Clone keeps the established owned-cache
@@ -483,10 +530,8 @@ pub struct JacobianStructure {
 
 impl JacobianStructure {
     pub fn derived(pattern: StructuralPattern) -> Self {
-        let coloring = pattern.column_coloring();
         Self {
             pattern,
-            coloring,
             column_rows: std::sync::OnceLock::new(),
             compact: std::sync::OnceLock::new(),
             output_evaluations: Box::default(),
@@ -499,10 +544,6 @@ impl JacobianStructure {
 
     pub const fn pattern(&self) -> &StructuralPattern {
         &self.pattern
-    }
-
-    pub const fn coloring(&self) -> &ColumnColoring {
-        &self.coloring
     }
 
     /// [`StructuralPattern::column_rows`] of this structure's pattern.
@@ -521,7 +562,10 @@ impl JacobianStructure {
     }
 
     pub const fn affine_elimination(&self) -> Option<&AffineEliminationLayout> {
-        self.affine_elimination.as_ref()
+        match &self.affine_elimination {
+            Some(layout) => Some(layout),
+            None => None,
+        }
     }
 
     pub const fn linearization_is_repeatable(&self) -> bool {
@@ -529,7 +573,10 @@ impl JacobianStructure {
     }
 
     pub const fn jacobian_application(&self) -> Option<&ProjectionJacobianApplication> {
-        self.jacobian_application.as_ref()
+        match &self.jacobian_application {
+            Some(application) => Some(application),
+            None => None,
+        }
     }
 
     /// The compact storage order of this structure's pattern.
@@ -539,14 +586,75 @@ impl JacobianStructure {
     }
 }
 
+/// A projection structure with its coloring obligation completed at construction.
+///
+/// ```
+/// use rumoca_ir_solve::{ColoredJacobianStructure, ColumnColoring};
+/// fn borrow_issued_coloring(structure: &ColoredJacobianStructure) -> &ColumnColoring {
+///     structure.coloring()
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct ColoredJacobianStructure {
+    structure: JacobianStructure,
+    colored_pattern: ColoredStructuralPattern,
+}
+
+impl ColoredJacobianStructure {
+    pub fn derived(pattern: StructuralPattern) -> Self {
+        let colored_pattern = pattern.with_column_coloring();
+        Self {
+            structure: JacobianStructure::derived(colored_pattern.pattern().clone()),
+            colored_pattern,
+        }
+    }
+
+    pub const fn pattern(&self) -> &StructuralPattern {
+        self.colored_pattern.pattern()
+    }
+
+    pub fn coloring(&self) -> &ColumnColoring {
+        self.colored_pattern.coloring()
+    }
+
+    pub fn column_rows(&self) -> &[Vec<usize>] {
+        self.structure.column_rows()
+    }
+
+    pub fn compact_layout(&self) -> &std::sync::Arc<CompactPatternLayout> {
+        self.structure.compact_layout()
+    }
+
+    pub fn output_evaluation(&self, color: usize) -> Option<&ProjectionJacobianOutputs> {
+        self.structure.output_evaluation(color)
+    }
+
+    pub const fn residual_output_evaluation(&self) -> Option<&ProjectionOutputSelection> {
+        self.structure.residual_output_evaluation()
+    }
+
+    pub const fn affine_elimination(&self) -> Option<&AffineEliminationLayout> {
+        self.structure.affine_elimination()
+    }
+
+    pub const fn linearization_is_repeatable(&self) -> bool {
+        self.structure.linearization_is_repeatable()
+    }
+
+    pub const fn jacobian_application(&self) -> Option<&ProjectionJacobianApplication> {
+        self.structure.jacobian_application()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ContinuousStructuralArtifacts {
+    checked_assignment: Option<CheckedAssignmentDecomposition>,
     algebraic_jacobian_source: Option<ScalarProgramBlock>,
     implicit: Option<JacobianStructure>,
-    algebraic_projection: Box<[JacobianStructure]>,
+    algebraic_projection: Box<[ColoredJacobianStructure]>,
     algebraic_invalidates_earlier: Box<[bool]>,
     manifold: Option<JacobianStructure>,
-    manifold_projection: Box<[JacobianStructure]>,
+    manifold_projection: Box<[ColoredJacobianStructure]>,
     derivative: Option<JacobianStructure>,
     /// The state Jacobian `d(der)/d(states)`, derived from `derivative`
     /// through the algebraic projection ([`StructuralPattern::derive_state_jacobian`]).
@@ -563,17 +671,18 @@ impl ContinuousStructuralArtifacts {
         derivative: Option<StructuralPattern>,
     ) -> Self {
         Self {
+            checked_assignment: None,
             algebraic_jacobian_source: None,
             implicit: implicit.map(JacobianStructure::derived),
             algebraic_projection: algebraic_projection
                 .into_iter()
-                .map(JacobianStructure::derived)
+                .map(ColoredJacobianStructure::derived)
                 .collect(),
             algebraic_invalidates_earlier: algebraic_invalidates_earlier.into_boxed_slice(),
             manifold: manifold.map(JacobianStructure::derived),
             manifold_projection: manifold_projection
                 .into_iter()
-                .map(JacobianStructure::derived)
+                .map(ColoredJacobianStructure::derived)
                 .collect(),
             derivative: derivative.map(JacobianStructure::derived),
             state_jacobian: None,
@@ -616,7 +725,7 @@ impl ContinuousStructuralArtifacts {
         self.algebraic_jacobian_source.as_ref()
     }
 
-    pub fn algebraic_projection(&self) -> &[JacobianStructure] {
+    pub fn algebraic_projection(&self) -> &[ColoredJacobianStructure] {
         &self.algebraic_projection
     }
 
@@ -628,7 +737,7 @@ impl ContinuousStructuralArtifacts {
         self.manifold.as_ref()
     }
 
-    pub fn manifold_projection(&self) -> &[JacobianStructure] {
+    pub fn manifold_projection(&self) -> &[ColoredJacobianStructure] {
         &self.manifold_projection
     }
 
@@ -640,7 +749,7 @@ impl ContinuousStructuralArtifacts {
 #[derive(Clone, Debug, Default)]
 pub struct InitializationStructuralArtifacts {
     residual: Option<JacobianStructure>,
-    projection: Box<[JacobianStructure]>,
+    projection: Box<[ColoredJacobianStructure]>,
 }
 
 impl InitializationStructuralArtifacts {
@@ -652,7 +761,7 @@ impl InitializationStructuralArtifacts {
             residual: residual.map(JacobianStructure::derived),
             projection: projection
                 .into_iter()
-                .map(JacobianStructure::derived)
+                .map(ColoredJacobianStructure::derived)
                 .collect(),
         }
     }
@@ -661,7 +770,7 @@ impl InitializationStructuralArtifacts {
         self.residual.as_ref()
     }
 
-    pub fn projection(&self) -> &[JacobianStructure] {
+    pub fn projection(&self) -> &[ColoredJacobianStructure] {
         &self.projection
     }
 }
@@ -797,6 +906,17 @@ pub enum EventIterationOwner {
         program_index: usize,
         target_index: usize,
     },
+    Partitioned {
+        first_partition: usize,
+        partition_count: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct EventIterationPartition {
+    pub scalar_start: usize,
+    pub scalar_count: usize,
+    pub owner: EventIterationOwner,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -810,6 +930,7 @@ pub struct EventIterationRun {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct EventIterationPlan {
     pub runs: Vec<EventIterationRun>,
+    pub partitions: Vec<EventIterationPartition>,
     /// How every executor walks the iteration (SPEC_0044 ME-EVENT-006).
     #[serde(default)]
     pub schedule: EventIterationSchedule,
@@ -820,6 +941,18 @@ impl EventIterationPlan {
     pub fn new(runs: Vec<EventIterationRun>) -> Self {
         Self {
             runs,
+            partitions: Vec::new(),
+            schedule: EventIterationSchedule::standard(),
+        }
+    }
+
+    pub fn new_partitioned(
+        runs: Vec<EventIterationRun>,
+        partitions: Vec<EventIterationPartition>,
+    ) -> Self {
+        Self {
+            runs,
+            partitions,
             schedule: EventIterationSchedule::standard(),
         }
     }
@@ -975,6 +1108,44 @@ impl DiscreteSolveSystem {
         run: &EventIterationRun,
     ) -> Result<Option<PeriodicClockId>, &'static str> {
         match run.owner {
+            EventIterationOwner::Partitioned {
+                first_partition,
+                partition_count,
+            } => self.partitioned_event_iteration_clock(first_partition, partition_count),
+            owner => self.event_iteration_leaf_clock(owner),
+        }
+    }
+
+    fn partitioned_event_iteration_clock(
+        &self,
+        first_partition: usize,
+        partition_count: usize,
+    ) -> Result<Option<PeriodicClockId>, &'static str> {
+        if partition_count == 0 {
+            return Err("event-iteration partition owner is empty");
+        }
+        let end = first_partition
+            .checked_add(partition_count)
+            .ok_or("event-iteration partition range overflowed")?;
+        let partitions = self
+            .event_iteration_plan
+            .partitions
+            .get(first_partition..end)
+            .ok_or("event-iteration partition range is out of bounds")?;
+        let clock = self.event_iteration_leaf_clock(partitions[0].owner)?;
+        for partition in &partitions[1..] {
+            if self.event_iteration_leaf_clock(partition.owner)? != clock {
+                return Err("event-iteration partition owners disagree on their typed clock");
+            }
+        }
+        Ok(clock)
+    }
+
+    fn event_iteration_leaf_clock(
+        &self,
+        owner: EventIterationOwner,
+    ) -> Result<Option<PeriodicClockId>, &'static str> {
+        match owner {
             EventIterationOwner::Hold => Ok(None),
             EventIterationOwner::ScalarRows { start_row } => self
                 .clock_owners
@@ -1000,6 +1171,9 @@ impl DiscreteSolveSystem {
                 .and_then(|transaction| transaction.targets().get(target_index))
                 .map(EventTransactionTarget::clock_owner)
                 .ok_or("event-iteration transaction owner clock is out of bounds"),
+            EventIterationOwner::Partitioned { .. } => {
+                Err("event-iteration partitions cannot contain partitioned owners")
+            }
         }
     }
 
@@ -1164,6 +1338,37 @@ pub struct SolveEventAction {
     /// its activation lane as a local semantic guard.
     #[serde(default)]
     pub clock_owner: Option<PeriodicClockId>,
+    /// Wire recipe for the checked projection of one source invocation.
+    /// A detached recipe grants no authority; the observer borrows its exact
+    /// model table, source program and ordered action inventory together.
+    #[serde(default)]
+    pub assertion_projection: Option<SolveAssertionActionProjection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct SolveAssertionActionProjection {
+    site: crate::SolvePureCallSite,
+    predicate_output: usize,
+}
+
+impl SolveAssertionActionProjection {
+    pub fn new(site: crate::SolvePureCallSite, predicate_output: usize) -> Option<Self> {
+        site.outputs().get(predicate_output)?.assertion_level()?;
+        Some(Self {
+            site,
+            predicate_output,
+        })
+    }
+
+    #[must_use]
+    pub const fn site(&self) -> &crate::SolvePureCallSite {
+        &self.site
+    }
+
+    #[must_use]
+    pub const fn predicate_output(&self) -> usize {
+        self.predicate_output
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -1280,6 +1485,13 @@ pub enum DiscreteRowRole {
     EventAction,
     /// Runtime memory for detecting a condition edge.
     ConditionMemory,
+    /// The numeric step of a model-level quotient, held between events.
+    /// The checked root index binds its live ratio to the producer; the same
+    /// producer initializes its exclusive private parameter slot. On a checked
+    /// structured update, it owns the Map's whole private P span and this index
+    /// names the first root in the domain-ordered root view. The same prepared
+    /// Map, not a duplicated initialization program, initializes that span.
+    QuotientMemory { step: UnaryOp, root_index: usize },
     /// Condition memory whose condition reads a periodic clock activation
     /// lane (`clocks.activation_parameter_indices`).
     ///
@@ -1422,13 +1634,6 @@ impl<'de> Deserialize<'de> for PeriodicEventSchedule {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct SolverNameIndexMaps {
-    pub names: Vec<String>,
-    pub name_to_idx: IndexMap<String, usize>,
-    pub base_to_indices: IndexMap<String, Vec<usize>>,
-}
-
 /// Source slot for a `__pre__.*` parameter binding.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum PreParamSource {
@@ -1451,293 +1656,6 @@ pub struct PreParamBinding {
     /// every event. A scheduled binding is committed only when this clock
     /// ticks, so unrelated roots and other clocks cannot advance its history.
     pub clock_schedule: Option<PeriodicEventSchedule>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum SolveVariableStorageRole {
-    Parameter,
-    Constant,
-    ExternalInput,
-    State,
-    Algebraic,
-    Output,
-    DiscreteReal,
-    DiscreteValue,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum SolveVariableValueKind {
-    Real,
-    Integer,
-    Boolean,
-    Enumeration,
-    String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SolveVariableTimeDomain {
-    Static,
-    EventDiscrete,
-    EventDiscontinuous,
-    ContinuousTime,
-}
-
-impl SolveVariableTimeDomain {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Static => "static",
-            Self::EventDiscrete => "event-discrete",
-            Self::EventDiscontinuous => "event-discontinuous",
-            Self::ContinuousTime => "continuous-time",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
-pub struct SolveVariableStorageRun {
-    pub base: ScalarSlot,
-    pub scalar_count: usize,
-    pub role: SolveVariableStorageRole,
-    pub value_kind: SolveVariableValueKind,
-}
-
-/// Immutable typed declaration replayed independently of storage projection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SolveVariableDeclaration {
-    role: SolveVariableStorageRole,
-    value_kind: SolveVariableValueKind,
-    time_domain: SolveVariableTimeDomain,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SolveVariableDeclarationWire {
-    role: SolveVariableStorageRole,
-    value_kind: SolveVariableValueKind,
-    time_domain: SolveVariableTimeDomain,
-}
-
-impl<'de> Deserialize<'de> for SolveVariableDeclaration {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = SolveVariableDeclarationWire::deserialize(deserializer)?;
-        let declaration = if wire.time_domain == SolveVariableTimeDomain::EventDiscontinuous {
-            Self::event_discontinuous(wire.role, wire.value_kind)
-                .map_err(serde::de::Error::custom)?
-        } else {
-            Self::new(wire.role, wire.value_kind)
-        };
-        if declaration.time_domain() != wire.time_domain {
-            return Err(serde::de::Error::custom(format!(
-                "{:?} {:?} storage requires time domain `{}`, not `{}`",
-                wire.role,
-                wire.value_kind,
-                declaration.time_domain().as_str(),
-                wire.time_domain.as_str()
-            )));
-        }
-        Ok(declaration)
-    }
-}
-
-impl SolveVariableDeclaration {
-    pub const fn new(role: SolveVariableStorageRole, value_kind: SolveVariableValueKind) -> Self {
-        Self {
-            role,
-            value_kind,
-            time_domain: default_time_domain(role),
-        }
-    }
-
-    pub fn event_discontinuous(
-        role: SolveVariableStorageRole,
-        value_kind: SolveVariableValueKind,
-    ) -> Result<Self, SolveVariableDeclarationError> {
-        if !matches!(
-            role,
-            SolveVariableStorageRole::Algebraic | SolveVariableStorageRole::Output
-        ) || value_kind != SolveVariableValueKind::Real
-        {
-            return Err(SolveVariableDeclarationError { role, value_kind });
-        }
-        Ok(Self {
-            role,
-            value_kind,
-            time_domain: SolveVariableTimeDomain::EventDiscontinuous,
-        })
-    }
-
-    pub const fn role(self) -> SolveVariableStorageRole {
-        self.role
-    }
-
-    pub const fn value_kind(self) -> SolveVariableValueKind {
-        self.value_kind
-    }
-
-    pub const fn time_domain(self) -> SolveVariableTimeDomain {
-        self.time_domain
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SolveVariableDeclarationError {
-    role: SolveVariableStorageRole,
-    value_kind: SolveVariableValueKind,
-}
-
-impl std::fmt::Display for SolveVariableDeclarationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{:?} {:?} storage cannot be event-discontinuous",
-            self.role, self.value_kind
-        )
-    }
-}
-
-impl std::error::Error for SolveVariableDeclarationError {}
-
-const fn default_time_domain(role: SolveVariableStorageRole) -> SolveVariableTimeDomain {
-    match role {
-        SolveVariableStorageRole::Parameter | SolveVariableStorageRole::Constant => {
-            SolveVariableTimeDomain::Static
-        }
-        SolveVariableStorageRole::DiscreteReal | SolveVariableStorageRole::DiscreteValue => {
-            SolveVariableTimeDomain::EventDiscrete
-        }
-        SolveVariableStorageRole::ExternalInput
-        | SolveVariableStorageRole::State
-        | SolveVariableStorageRole::Algebraic
-        | SolveVariableStorageRole::Output => SolveVariableTimeDomain::ContinuousTime,
-    }
-}
-
-impl SolveVariableStorageRun {
-    pub fn event_iteration_kind(self) -> Option<EventIterationValueKind> {
-        match (self.role, self.value_kind) {
-            (SolveVariableStorageRole::DiscreteReal, SolveVariableValueKind::Real) => {
-                Some(EventIterationValueKind::Real)
-            }
-            (SolveVariableStorageRole::DiscreteValue, SolveVariableValueKind::Integer) => {
-                Some(EventIterationValueKind::Integer)
-            }
-            (SolveVariableStorageRole::DiscreteValue, SolveVariableValueKind::Boolean) => {
-                Some(EventIterationValueKind::Boolean)
-            }
-            (SolveVariableStorageRole::DiscreteValue, SolveVariableValueKind::Enumeration) => {
-                Some(EventIterationValueKind::Enumeration)
-            }
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct SolveLayout {
-    pub solver_maps: SolverNameIndexMaps,
-    /// Dense DAE variable ordinal to its first Solve storage slot.
-    ///
-    /// Scalar `k` of a variable is stored at `base + k` in the same column.
-    /// This is the canonical cross-phase coordinate map; display names are not
-    /// used to recover compiler identity.
-    pub variable_storage_runs: Vec<SolveVariableStorageRun>,
-    /// Canonical typed DAE declarations in the same dense identity order.
-    pub variable_declarations: Vec<SolveVariableDeclaration>,
-    pub state_scalar_count: usize,
-    pub algebraic_scalar_count: usize,
-    pub output_scalar_count: usize,
-    pub parameter_count: usize,
-    pub compiled_parameter_len: usize,
-    pub input_scalar_names: Vec<String>,
-    pub discrete_real_scalar_names: Vec<String>,
-    pub discrete_valued_scalar_names: Vec<String>,
-    pub relation_memory_parameter_indices: Vec<usize>,
-    pub initial_event_parameter_index: Option<usize>,
-    /// P-slot that is true only while applying the final simulation event.
-    pub terminal_event_parameter_index: Option<usize>,
-    /// Hidden P-slot used by initialization residuals that contain
-    /// `homotopy(actual, simplified)`.
-    ///
-    /// The initialization driver advances this value from zero to one. Models
-    /// without homotopy expressions omit the slot entirely.
-    pub initial_homotopy_parameter_index: Option<usize>,
-    /// Snapshot bindings for `__pre__.*` parameters created by DAE-IR
-    /// pre_lowering. At event entry the runtime copies each source slot into
-    /// the corresponding dest P-slot before the event equations evaluate.
-    pub pre_param_bindings: Vec<PreParamBinding>,
-}
-
-impl SolveLayout {
-    pub fn solver_maps(&self) -> &SolverNameIndexMaps {
-        &self.solver_maps
-    }
-
-    pub fn variable_scalar_slot(&self, variable: usize, scalar: usize) -> Option<ScalarSlot> {
-        let run = self.variable_storage_runs.get(variable)?;
-        if scalar >= run.scalar_count {
-            return None;
-        }
-        match run.base {
-            ScalarSlot::Y { index, .. } => index.checked_add(scalar).map(scalar_slot_y),
-            ScalarSlot::P { index, .. } => index.checked_add(scalar).map(scalar_slot_p),
-            ScalarSlot::Time | ScalarSlot::Constant(_) => None,
-        }
-    }
-
-    pub fn state_scalar_count(&self) -> usize {
-        self.state_scalar_count
-    }
-
-    pub fn algebraic_scalar_count(&self) -> usize {
-        self.algebraic_scalar_count
-    }
-
-    pub fn output_scalar_count(&self) -> usize {
-        self.output_scalar_count
-    }
-
-    pub fn solver_scalar_count(&self) -> usize {
-        self.solver_maps.names.len()
-    }
-
-    pub fn input_scalar_names(&self) -> &[String] {
-        &self.input_scalar_names
-    }
-
-    pub fn input_parameter_index(&self, name: &str) -> Option<usize> {
-        self.input_scalar_names
-            .iter()
-            .position(|candidate| candidate == name)
-            .map(|offset| self.parameter_count + offset)
-    }
-
-    pub fn discrete_real_parameter_index(&self, name: &str) -> Option<usize> {
-        self.discrete_real_scalar_names
-            .iter()
-            .position(|candidate| candidate == name)
-            .map(|offset| self.parameter_count + self.input_scalar_names.len() + offset)
-    }
-
-    pub fn discrete_valued_parameter_index(&self, name: &str) -> Option<usize> {
-        self.discrete_valued_scalar_names
-            .iter()
-            .position(|candidate| candidate == name)
-            .map(|offset| {
-                self.parameter_count
-                    + self.input_scalar_names.len()
-                    + self.discrete_real_scalar_names.len()
-                    + offset
-            })
-    }
-
-    pub fn solver_idx_for_target(&self, target: &str) -> Option<usize> {
-        solver_idx_for_target(target, &self.solver_maps.name_to_idx)
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1824,84 +1742,10 @@ pub struct SolveModel {
     /// arithmetic profile; lowering never reconstructs this table from rows.
     pub pure_calls: SolvePureCallTable,
     pub artifacts: SolveArtifacts,
-    pub initial_y: Vec<f64>,
+    pub initial_y: crate::SolveInitialValues,
     /// Positive nominal values aligned with solver `y` slots.
     pub solver_nominals: Vec<f64>,
-    pub parameters: Vec<f64>,
+    pub parameters: crate::SolveInitialValues,
     pub external_tables: ExternalTables,
-    pub visible_names: Vec<String>,
-    pub visible_value_rows: ScalarProgramBlock,
-    pub variable_meta: Vec<SolveVariableMeta>,
-}
-
-impl SolveModel {
-    /// This compile-time model with every periodic schedule resolved at the
-    /// FMI instance's simulation start instant. A model with no periodic
-    /// schedule has nothing to resolve and is borrowed, not copied.
-    pub fn resolved_periodic_schedules_at(
-        &self,
-        start_time: f64,
-    ) -> Result<std::borrow::Cow<'_, Self>, rumoca_core::ClockLatticeErrorKind> {
-        if self.problem.clocks.periodic_event_schedules.is_empty()
-            && self
-                .problem
-                .solve_layout
-                .pre_param_bindings
-                .iter()
-                .all(|binding| binding.clock_schedule.is_none())
-        {
-            return Ok(std::borrow::Cow::Borrowed(self));
-        }
-        let mut resolved = self.clone();
-        for schedule in &mut resolved.problem.clocks.periodic_event_schedules {
-            *schedule = schedule.resolved_at(start_time)?;
-        }
-        for binding in &mut resolved.problem.solve_layout.pre_param_bindings {
-            if let Some(schedule) = &mut binding.clock_schedule {
-                *schedule = schedule.resolved_at(start_time)?;
-            }
-        }
-        Ok(std::borrow::Cow::Owned(resolved))
-    }
-
-    pub fn state_scalar_count(&self) -> usize {
-        self.problem.solve_layout.state_scalar_count()
-    }
-
-    pub fn solver_scalar_count(&self) -> usize {
-        self.problem.solve_layout.solver_scalar_count()
-    }
-
-    /// Return a finite positive scale for one solver variable.
-    ///
-    /// The declared nominal is the baseline. A larger start magnitude expands
-    /// the scale so solver tolerances remain meaningful for large initial
-    /// values and runtime start overrides.
-    pub fn solver_variable_scale(&self, index: usize) -> f64 {
-        let nominal = self
-            .solver_nominals
-            .get(index)
-            .copied()
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or(1.0);
-        let start_magnitude = self
-            .initial_y
-            .get(index)
-            .copied()
-            .filter(|value| value.is_finite())
-            .map_or(0.0, f64::abs);
-        nominal.max(start_magnitude)
-    }
-}
-
-pub fn solver_idx_for_target(target: &str, name_to_idx: &IndexMap<String, usize>) -> Option<usize> {
-    if let Some(&idx) = name_to_idx.get(target) {
-        return Some(idx);
-    }
-    if let Some(scalar) = rumoca_core::parse_scalar_name(target)
-        && scalar.indices.iter().all(|index| *index == 1)
-    {
-        return name_to_idx.get(scalar.base).copied();
-    }
-    None
+    pub visible_projection: crate::VisibleProjection,
 }

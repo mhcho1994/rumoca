@@ -1,3 +1,4 @@
+use super::ScalarExecutionView;
 use crate::{
     EventActionOutcome, EventPreMode, RuntimeEventStop, RuntimeSolveError,
     commit_pre_params_after_event, initial_runtime_event_stop,
@@ -5,7 +6,7 @@ use crate::{
 };
 
 use super::{
-    EventUpdateRowFilter, ProjectedEventUpdateInput, SeededConditionMemory, SolveRuntime,
+    EventUpdateRowFilter, ProjectedEventUpdateInput, SeededConditionMemory,
     support::copy_runtime_values,
 };
 
@@ -109,11 +110,7 @@ fn trace_value_matches(left: f64, right: f64, tol: f64) -> bool {
     (left - right).abs() <= tol.max(1.0e-12) * scale
 }
 
-impl SolveRuntime {
-    pub fn set_initial_event_flag(&self, p: &mut [f64], value: bool) {
-        super::set_initial_event_flag(&self.model, p, value);
-    }
-
+impl ScalarExecutionView<'_> {
     /// Whether `p` holds `initial()` true.
     pub(super) fn initial_event_flag(&self, p: &[f64]) -> bool {
         self.model
@@ -242,12 +239,17 @@ impl SolveRuntime {
         }
         self.set_initial_event_flag(p, false);
         let Some(event) = initial_event else {
-            commit_pre_params_after_event(&self.model, y, p, tol);
-            return Ok(ProjectedInitialEventOutcome {
-                final_t: t_start,
-                observations,
-                action,
-            });
+            return self.finish_unscheduled_initial_phase(
+                ProjectedPostInitialEventInput {
+                    y,
+                    p,
+                    t: t_start,
+                    tol,
+                    max_iters,
+                    row_filter: EventUpdateRowFilter::All,
+                },
+                |y, p| project_algebraics(y, p, t_start),
+            );
         };
         let right_t = initial_event_right_limit(event, t_start, t_end);
         // `pre(v)` remains frozen at its initialization value throughout the
@@ -301,6 +303,31 @@ impl SolveRuntime {
             final_t: post_t,
             observations,
             action: post_action,
+        })
+    }
+
+    fn finish_unscheduled_initial_phase<P>(
+        &self,
+        input: ProjectedPostInitialEventInput<'_>,
+        project_algebraics: P,
+    ) -> Result<ProjectedInitialEventOutcome, RuntimeSolveError>
+    where
+        P: FnMut(&mut [f64], &mut [f64]) -> Result<bool, RuntimeSolveError>,
+    {
+        commit_pre_params_after_event(&self.model, input.y, input.p, input.tol);
+        let action = self.apply_projected_post_initial_event_update(
+            ProjectedPostInitialEventInput {
+                y: &mut *input.y,
+                p: &mut *input.p,
+                ..input
+            },
+            project_algebraics,
+        )?;
+        commit_pre_params_after_event(&self.model, input.y, input.p, input.tol);
+        Ok(ProjectedInitialEventOutcome {
+            final_t: input.t,
+            observations: Vec::new(),
+            action,
         })
     }
 

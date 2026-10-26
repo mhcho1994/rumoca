@@ -1,6 +1,6 @@
 //! EXPR (Expression/Operator) contract tests - MLS §3
 //!
-//! Tests for the 41 expression contracts defined in SPEC_0022.
+//! Tests for the 42 expression contracts defined in SPEC_0022.
 
 use rumoca_compile::compile::FailedPhase;
 use rumoca_contracts::test_support::{
@@ -1104,7 +1104,7 @@ fn der_of_parameter_is_zero() {
 }
 
 /// `der(u)` of a top-level input needs the input's derivative, which the DAE
-/// does not carry: a source diagnostic (ED024), not a panic.
+/// does not carry: a source diagnostic (ED026), not a panic.
 #[test]
 fn der_of_top_level_input_is_diagnosed() {
     expect_failure_in_phase_with_code(
@@ -1119,7 +1119,7 @@ fn der_of_top_level_input_is_diagnosed() {
     "#,
         "M",
         FailedPhase::ToDae,
-        "ED024",
+        "ED026",
     );
 }
 

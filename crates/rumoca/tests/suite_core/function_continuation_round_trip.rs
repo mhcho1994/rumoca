@@ -6,7 +6,9 @@
 //! lowering instead of folding at translation.
 
 use rumoca::Compiler;
-use rumoca_ir_solve::{LinearOp, LinearOpSliceKind, SolveVisitor};
+use rumoca_ir_solve::{
+    LinearOp, LinearOpSliceKind, SolveModel, SolveOperation, SolveVisitor, TypedProgram,
+};
 use rumoca_sim::{SimOptions, simulate_dae};
 
 const MODELS: &str = r#"
@@ -236,9 +238,9 @@ fn a_fold_continuation_replays_from_the_wire_and_lowers_to_solve_rows() {
     }
 }
 
-/// The callee takes an array-maximum reduction, which has no directional
-/// body, so scalar differentiation expands the call in place and its
-/// flag-continued fold lowers through scalar inline lowering.
+/// The callee holds source-ordered conditionals, which the scalar row
+/// programs cannot represent, so its call keeps the typed owner and the
+/// owner body carries the flag-continued fold.
 const UNDIRECTED_GATES: &str = r#"
 function firstOverPeak
   input Real u;
@@ -275,13 +277,11 @@ equation
 end UndirectedGates;
 "#;
 
-/// Counts the typed calls, conditional regions, and continued fold programs
-/// of a Solve model.
+/// Counts the retained typed calls of a Solve model; the structured regions
+/// they execute are inspected in the owner bodies (`assert_typed_region`).
 #[derive(Default)]
 struct FoldCensus {
     typed_calls: usize,
-    continued_folds: usize,
-    conditional_regions: usize,
 }
 
 impl SolveVisitor for FoldCensus {
@@ -293,24 +293,55 @@ impl SolveVisitor for FoldCensus {
         _op_index: usize,
         op: &LinearOp,
     ) -> Result<(), Self::Error> {
-        match op {
-            LinearOp::PureCall { .. } => self.typed_calls += 1,
-            LinearOp::FunctionConditional { .. } => self.conditional_regions += 1,
-            LinearOp::FunctionFold { program, .. }
-            | LinearOp::GuardedFunctionFold { program, .. }
-            | LinearOp::StoreOutputFunctionFold { program, .. }
-                if program.continuation.is_some() =>
-            {
-                self.continued_folds += 1;
-            }
-            _ => {}
+        if matches!(op, LinearOp::PureCall { .. }) {
+            self.typed_calls += 1;
         }
         Ok(())
     }
 }
 
+fn assert_typed_region(
+    model: &SolveModel,
+    census: &FoldCensus,
+    predicate: fn(&SolveOperation) -> bool,
+) {
+    assert!(census.typed_calls > 0, "the call uses its checked owner");
+    assert!(
+        model
+            .pure_calls
+            .owners()
+            .iter()
+            .any(|owner| { contains_typed_region(owner.body(), predicate) }),
+        "the checked owner preserves its structured region"
+    );
+}
+
+fn contains_typed_region(body: &TypedProgram, predicate: fn(&SolveOperation) -> bool) -> bool {
+    body.operations().iter().any(|operation| {
+        let operation = operation.operation();
+        predicate(operation)
+            || match operation {
+                SolveOperation::Fold { transition, .. } => {
+                    contains_typed_region(transition.body(), predicate)
+                }
+                SolveOperation::Conditional {
+                    if_true, if_false, ..
+                } => {
+                    contains_typed_region(if_true.body(), predicate)
+                        || contains_typed_region(if_false.body(), predicate)
+                }
+                SolveOperation::AssignedConditional { program } => {
+                    contains_typed_region(program.if_true().body(), predicate)
+                        || contains_typed_region(program.if_false().body(), predicate)
+                }
+                SolveOperation::Map { body, .. } => contains_typed_region(body.body(), predicate),
+                _ => false,
+            }
+    })
+}
+
 #[test]
-fn a_continued_fold_in_a_callee_without_a_directional_body_lowers_inline() {
+fn a_continued_fold_in_a_callee_keeps_its_typed_owner() {
     let compiled = Compiler::new()
         .model("UndirectedGates")
         .compile_str(UNDIRECTED_GATES, "undirected_gates.mo")
@@ -326,11 +357,15 @@ fn a_continued_fold_in_a_callee_without_a_directional_body_lowers_inline() {
     census
         .visit_solve_model(&model)
         .expect("the census walk is infallible");
-    assert_eq!(census.typed_calls, 0, "the call is expanded in place");
-    assert!(
-        census.continued_folds > 0,
-        "the inline path carries the fold continuation"
-    );
+    assert_typed_region(&model, &census, |operation| {
+        matches!(
+            operation,
+            SolveOperation::Fold {
+                continuation: Some(_),
+                ..
+            }
+        )
+    });
     let simulation =
         simulate_dae(&compiled.dae, &options).expect("the continuation lowers to Solve rows");
     for (name, expected) in [("k", 3.0), ("peak", 4.0)] {
@@ -414,7 +449,15 @@ fn a_continued_fold_under_outer_loops_reads_the_outer_binders() {
     census
         .visit_solve_model(&model)
         .expect("the census walk is infallible");
-    assert_eq!(census.typed_calls, 0, "the call is expanded in place");
+    assert_typed_region(&model, &census, |operation| {
+        matches!(
+            operation,
+            SolveOperation::Fold {
+                continuation: Some(_),
+                ..
+            }
+        )
+    });
     let simulation =
         simulate_dae(&compiled.dae, &options).expect("the nested continuation simulates");
     let value = |name: &str| {
@@ -487,7 +530,7 @@ end Sweep;
 "#;
 
 #[test]
-fn a_guarded_fold_in_a_callee_under_an_outer_loop_lowers_inline() {
+fn a_guarded_fold_in_a_callee_under_an_outer_loop_keeps_its_typed_owner() {
     let compiled = Compiler::new()
         .model("Sweep")
         .compile_str(GUARDED_FOLDS_UNDER_LOOP, "sweep.mo")
@@ -503,11 +546,12 @@ fn a_guarded_fold_in_a_callee_under_an_outer_loop_lowers_inline() {
     census
         .visit_solve_model(&model)
         .expect("the census walk is infallible");
-    assert_eq!(census.typed_calls, 0, "the call is expanded in place");
-    assert!(
-        census.conditional_regions > 0,
-        "the guarded folds lower as conditional regions"
-    );
+    assert_typed_region(&model, &census, |operation| {
+        matches!(
+            operation,
+            SolveOperation::Conditional { .. } | SolveOperation::AssignedConditional { .. }
+        )
+    });
     let simulation = simulate_dae(&compiled.dae, &options).expect("the sweep simulates");
     let first = |name: &str| {
         let variable = simulation

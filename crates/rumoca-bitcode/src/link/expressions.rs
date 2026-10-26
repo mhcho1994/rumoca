@@ -38,6 +38,7 @@ impl Shift for RbcExprNode {
             // relocates the whole reference.
             Self::FunctionValue { function, .. }
             | Self::FunctionFoldParameter { function, .. }
+            | Self::FunctionConditionalOutput { function, .. }
             | Self::FunctionFoldOutput { function, .. } => function.shift(m)?,
             Self::Unsupported { detail } => {
                 return Err(super::LinkError(format!(

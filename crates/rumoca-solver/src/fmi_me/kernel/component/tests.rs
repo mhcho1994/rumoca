@@ -90,57 +90,64 @@ fn steep_algebraic_time_event_model() -> solve::SolveModel {
         vec![vec![Const { dst: 0, value: 0.0 }, StoreOutput { src: 0 }]],
         "fmi_me_event_entry_derivative_jvp.mo",
     );
-    solve::SolveModel {
-        problem: solve::SolveProblem {
-            continuous: solve::ContinuousSolveSystem {
-                implicit_rhs: solve::ComputeBlock::from_scalar_program_block(implicit),
-                implicit_row_targets: vec![
-                    Some(solve::scalar_slot_y(0)),
-                    Some(solve::scalar_slot_y(1)),
-                ],
-                derivative_rhs: solve::ComputeBlock::from_scalar_program_block(derivative),
-                algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                    blocks: vec![solve::AlgebraicProjectionBlock {
-                        rows: vec![1],
-                        y_indices: vec![1],
-                        tearing: None,
-                        alternate_charts: Vec::new(),
-                    }],
-                },
-                ..Default::default()
-            },
-            events: solve::SolveEventPartition {
-                scheduled_time_events: vec![1.0],
-                ..Default::default()
-            },
-            solve_layout: solve::SolveLayout {
-                solver_maps: solve::SolverNameIndexMaps {
-                    names: vec!["x".to_string(), "a".to_string()],
+    crate::fixture_layout::with_visible_expressions(
+        solve::SolveModel {
+            problem: solve::SolveProblem {
+                layout: crate::fixture_layout::named_y_layout(
+                    rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 0),
+                    vec!["x".to_string(), "a".to_string()],
+                ),
+                continuous: solve::ContinuousSolveSystem {
+                    implicit_rhs: solve::ComputeBlock::from_scalar_program_block(implicit),
+                    implicit_row_targets: (vec![
+                        Some(solve::scalar_slot_y(0)),
+                        Some(solve::scalar_slot_y(1)),
+                    ])
+                    .into(),
+                    derivative_rhs: solve::ComputeBlock::from_scalar_program_block(derivative),
+                    algebraic_projection_plan: solve::AlgebraicProjectionPlan {
+                        blocks: (vec![solve::AlgebraicProjectionBlock {
+                            rows: vec![1],
+                            y_indices: vec![1],
+                            tearing: None,
+                            alternate_charts: Vec::new(),
+                        }])
+                        .into(),
+                    },
                     ..Default::default()
                 },
-                state_scalar_count: 1,
-                algebraic_scalar_count: 1,
+                events: solve::SolveEventPartition {
+                    scheduled_time_events: vec![1.0],
+                    ..Default::default()
+                },
+                solve_layout: solve::SolveLayout {
+                    state_scalar_count: 1,
+                    algebraic_scalar_count: 1,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
-            ..Default::default()
-        },
-        artifacts: solve::SolveArtifacts {
-            discrete: Default::default(),
-            continuous: solve::ContinuousSolveArtifacts {
-                implicit_jacobian_v: solve::ComputeBlock::from_scalar_program_block(
-                    implicit_jvp.clone(),
-                ),
-                implicit_jacobian_v_scalar: implicit_jvp,
-                full_jacobian_v: derivative_jvp,
+            artifacts: solve::SolveArtifacts {
+                discrete: Default::default(),
+                continuous: solve::ContinuousSolveArtifacts {
+                    implicit_jacobian_v: solve::ComputeBlock::from_scalar_program_block(
+                        implicit_jvp.clone(),
+                    ),
+                    implicit_jacobian_v_scalar: implicit_jvp,
+                    full_jacobian_v: derivative_jvp,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
+            initial_y: vec![0.0, 0.0].into(),
+            solver_nominals: vec![1.0, 1.0],
+
             ..Default::default()
         },
-        initial_y: vec![0.0, 0.0],
-        solver_nominals: vec![1.0, 1.0],
-        visible_names: vec!["x".to_string(), "a".to_string()],
-        ..Default::default()
-    }
+        vec!["x".to_string(), "a".to_string()],
+        Default::default(),
+        Vec::new(),
+    )
 }
 
 fn instantiate(model: &solve::SolveModel) -> SolveMeKernel {
@@ -358,7 +365,7 @@ fn observation_clock_alias_model() -> solve::SolveModel {
             },
             ..Default::default()
         },
-        parameters: vec![1.0, 1.0],
+        parameters: vec![1.0, 1.0].into(),
         ..Default::default()
     }
 }
@@ -388,9 +395,8 @@ fn public_observation_refreshes_clock_alias_without_mutating_event_state() {
     }
 }
 
-/// Instantiating a model with no periodic schedule borrows it for anchoring
-/// and the runtime then copies it once (ME-LIFE-006): the anchored model is
-/// the source itself, and the runtime owns one separate copy of its storage.
+/// Standalone test construction copies its bare model once without granting
+/// correlated assertion authority (ME-LIFE-006).
 #[test]
 fn instantiation_copies_a_scheduleless_model_exactly_once() {
     let mut model = steep_algebraic_time_event_model();
@@ -411,12 +417,312 @@ fn instantiation_copies_a_scheduleless_model_exactly_once() {
             .expect("instance configuration constructs"),
     )
     .expect("fixture instantiates");
-    let owned = &kernel.runtime.model;
+    let owned = kernel.runtime.model();
     assert_eq!(owned.initial_y, model.initial_y);
-    assert_eq!(owned.visible_names, model.visible_names);
+    assert_eq!(owned.visible_names(), model.visible_names());
     assert!(
         !std::ptr::eq(owned.initial_y.as_ptr(), model.initial_y.as_ptr())
-            && !std::ptr::eq(owned.visible_names.as_ptr(), model.visible_names.as_ptr()),
+            && !std::ptr::eq(
+                owned.visible_projection.inputs().as_ptr(),
+                model.visible_projection.inputs().as_ptr()
+            ),
         "the runtime owns its own copy of the model"
     );
+}
+
+#[test]
+fn correlated_instantiation_retains_the_exact_scheduleless_root() {
+    let mut model = solve::SolveModel::default();
+    model.problem.continuous.refresh_owners =
+        rumoca_eval_solve::refresh_plan::build_continuous_refresh_owners(&mut model.problem)
+            .expect("empty model refresh owners construct");
+    let component = solve::fmi::FmiComponent::construct(model, vec![]).unwrap();
+    let original = component.runtime_view().retain_assertion_root();
+    let kernel = SolveMeKernel::instantiate(
+        MeModelSource::new(&component),
+        &MeInstanceConfig::new("retained-source", 1.0e-8, 2.0, 3.0).unwrap(),
+    )
+    .unwrap();
+    let root = kernel.runtime.model().retained_assertion_root().unwrap();
+    assert!(root.shares_root_owner(&original));
+    assert!(std::ptr::eq(root.model(), &**kernel.runtime.model()));
+    assert_eq!(
+        root.resolved_periodic_schedules_at(5.0).unwrap_err(),
+        solve::RetainedAssertionResolutionError::AlreadyResolved
+    );
+    let standalone = crate::SolveRuntime::new(original.model()).unwrap();
+    assert!(standalone.model().retained_assertion_root().is_none());
+    let alternate = kernel.runtime.new_alternate(root.model()).unwrap();
+    assert!(alternate.model().retained_assertion_root().is_none());
+    drop(component);
+    assert!(root.shares_root_owner(&original));
+}
+
+#[test]
+fn correlated_clocked_instances_resolve_from_the_original_component() {
+    let mut model = solve::SolveModel::default();
+    let lattice = rumoca_core::ClockLattice::from_seconds(0.25, 0.25).unwrap();
+    let schedule = rumoca_core::PeriodicClockSchedule::simulation_start_relative(lattice).unwrap();
+    model.problem.clocks.periodic_event_schedules =
+        vec![solve::PeriodicEventSchedule::from_schedule(schedule).unwrap()];
+    model.problem.clocks.activation_parameter_indices = vec![0];
+    model.problem.layout = solve::VarLayout::from_parts(Default::default(), 0, 1);
+    model.parameters = solve::SolveInitialValues::repeat(0.0, 1).unwrap();
+    model.problem.continuous.refresh_owners =
+        rumoca_eval_solve::refresh_plan::build_continuous_refresh_owners(&mut model.problem)
+            .expect("clocked model refresh owners construct");
+    let component = solve::fmi::FmiComponent::construct(model, vec![]).unwrap();
+    let original = component.runtime_view().retain_assertion_root();
+    let instantiate = |start| {
+        SolveMeKernel::instantiate(
+            MeModelSource::new(&component),
+            &MeInstanceConfig::new("clocked-source", 1.0e-8, start, start + 1.0).unwrap(),
+        )
+        .unwrap()
+    };
+    let first = instantiate(2.0);
+    let second = instantiate(5.0);
+    let first_root = first.runtime.model().retained_assertion_root().unwrap();
+    let second_root = second.runtime.model().retained_assertion_root().unwrap();
+    assert!(!first_root.shares_root_owner(&original));
+    assert!(!second_root.shares_root_owner(&original));
+    assert!(!first_root.shares_root_owner(second_root));
+    for (kernel, root, phase) in [(&first, first_root, 2.25), (&second, second_root, 5.25)] {
+        assert!(std::ptr::eq(root.model(), &**kernel.runtime.model()));
+        assert_eq!(
+            root.model().problem.clocks.periodic_event_schedules[0].phase_seconds(),
+            phase
+        );
+    }
+    assert_eq!(
+        original.model().problem.clocks.periodic_event_schedules[0].anchor(),
+        rumoca_core::ClockPhaseAnchor::SimulationStart
+    );
+}
+
+#[test]
+fn frozen_relation_memory_orients_only_original_exact_zero_indicators() {
+    let mut model = steep_algebraic_time_event_model();
+    model.problem.events.root_conditions = block(
+        vec![vec![
+            solve::LinearOp::LoadY { dst: 0, index: 0 },
+            solve::LinearOp::StoreOutput { src: 0 },
+        ]],
+        "fmi_me_exact_zero_root.mo",
+    );
+    model.problem.events.root_relation_memory_targets = vec![Some(solve::scalar_slot_p(0))];
+    model.problem.events.root_zero_domains = vec![solve::RootZeroDomain::Previous];
+    model.problem.events.root_relation_refresh_roles = vec![solve::RootRelationRefreshRole::Frozen];
+    model.problem.solve_layout.parameter_count = 1;
+    model.problem.solve_layout.compiled_parameter_len = 1;
+    model.problem.solve_layout.relation_memory_parameter_indices = vec![0];
+    model.parameters = vec![0.0].into();
+    let mut kernel = instantiate(&model);
+    kernel.enter_initialization_mode().unwrap();
+    kernel.exit_initialization_mode().unwrap();
+    kernel.update_discrete_states().unwrap();
+    kernel.enter_continuous_time_mode().unwrap();
+    for (state, memory, expected) in [
+        (1.0e-12_f64, 1.0, 1.0e-12_f64),
+        (-1.0e-12_f64, 0.0, -1.0e-12_f64),
+        (0.0, 0.0, f64::EPSILON),
+        (0.0, 1.0, -f64::EPSILON),
+    ] {
+        kernel.states[0] = state;
+        kernel.params[0] = memory;
+        kernel.clear_runtime_caches();
+        let mut values = vec![0.0; kernel.indicator_plan.len()];
+        kernel.event_indicators_into(&mut values).unwrap();
+        assert_eq!(values[0].to_bits(), expected.to_bits());
+        kernel.seed_settled_indicator_domains().unwrap();
+        assert_eq!(kernel.frozen_indicator_positive[0], expected > 0.0);
+    }
+}
+
+#[test]
+fn settled_views_and_root_values_require_identical_time_states_and_parameters() {
+    let mut model = steep_algebraic_time_event_model();
+    model.problem.solve_layout.parameter_count = 1;
+    model.problem.solve_layout.compiled_parameter_len = 1;
+    model.parameters = vec![0.0].into();
+    let kernel = instantiate(&model);
+    let time = 0.25_f64;
+    let states = kernel.states.clone();
+    let parameters = [0.0_f64];
+    let adjacent_parameters = [f64::from_bits(1)];
+    let mut adjacent_states = states.clone();
+    adjacent_states[0] = f64::from_bits(states[0].to_bits() + 1);
+    let complete = kernel.solver_y_at_parameters(time, &parameters).unwrap();
+    assert!((complete[1] - ALGEBRAIC_SLOPE * time).abs() < 1e-6);
+    kernel.cache_algebraic_coordinate(time, &states, &parameters, &complete);
+    kernel.solver_y_guess.borrow_mut()[1] = -123.0;
+    let view = kernel
+        .cached_continuous_solver_y(time, &states, &parameters)
+        .unwrap();
+    assert_eq!(view.kind, SettledCoordinateKind::Algebraic);
+    assert_eq!(view.values, complete);
+    kernel.cache_root_conditions_at_parameters(time, &states, &parameters, &[3.0]);
+    for (at, state, params) in [
+        (time.next_up(), states.as_slice(), parameters.as_slice()),
+        (time, adjacent_states.as_slice(), parameters.as_slice()),
+        (time, states.as_slice(), adjacent_parameters.as_slice()),
+    ] {
+        assert!(
+            kernel
+                .cached_continuous_solver_y(at, state, params)
+                .is_none()
+        );
+        assert!(!kernel.copy_cached_root_conditions_into(at, state, params, &mut [0.0]));
+    }
+    assert!(kernel.copy_cached_root_conditions_into(time, &states, &parameters, &mut [0.0]));
+}
+
+#[test]
+fn a_deadline_read_completes_the_checked_remainder_of_a_partial_derivative_view() {
+    let mut model = steep_algebraic_time_event_model();
+    model.problem.events.dynamic_time_event_names = vec!["algebraicDeadline".to_owned()];
+    model.problem.events.dynamic_time_event_rhs = block(
+        vec![vec![
+            solve::LinearOp::LoadY { dst: 0, index: 1 },
+            solve::LinearOp::StoreOutput { src: 0 },
+        ]],
+        "fmi_me_partial_derivative_deadline.mo",
+    );
+    let mut kernel = instantiate(&model);
+    let time = 0.25;
+    kernel.set_time(MeTime::at(time)).unwrap();
+    kernel
+        .continuous_state_derivatives_into(&mut [0.0])
+        .unwrap();
+    let view = kernel
+        .cached_continuous_solver_y(time, &kernel.states, &kernel.params)
+        .unwrap();
+    assert_eq!(view.kind, SettledCoordinateKind::Derivative);
+    assert_eq!(
+        view.values[1], 0.0,
+        "the derivative does not own the deadline's algebraic lane"
+    );
+    let mut indicators = vec![0.0; kernel.indicator_plan.len()];
+    kernel.event_indicators_into(&mut indicators).unwrap();
+    assert_eq!(indicators.len(), 1);
+    assert!((indicators[0] - (ALGEBRAIC_SLOPE * time - time)).abs() < 1e-6);
+}
+
+#[test]
+fn certified_algebraic_delay_history_uses_the_owned_values_after_a_warm_guess_changes() {
+    let mut model = steep_algebraic_time_event_model();
+    let duration = block(
+        vec![vec![
+            solve::LinearOp::Const { dst: 0, value: 0.5 },
+            solve::LinearOp::StoreOutput { src: 0 },
+        ]],
+        "fmi_me_owned_delay_duration.mo",
+    );
+    model.problem.events.delays = solve::SolveDelayPartition {
+        source_rhs: block(
+            vec![vec![
+                solve::LinearOp::LoadY { dst: 0, index: 1 },
+                solve::LinearOp::StoreOutput { src: 0 },
+            ]],
+            "fmi_me_owned_delay_source.mo",
+        ),
+        delay_time_rhs: duration.clone(),
+        delay_max_rhs: duration,
+        value_parameter_indices: vec![0],
+        source_is_discrete: vec![false],
+    };
+    model.problem.solve_layout.parameter_count = 1;
+    model.problem.solve_layout.compiled_parameter_len = 1;
+    model.parameters = vec![0.0].into();
+    let mut kernel = instantiate(&model);
+    kernel
+        .runtime
+        .initialize_delay_history(0.0, &model.initial_y, &mut kernel.params)
+        .unwrap();
+    kernel
+        .runtime
+        .commit_delay_history(0.0, &model.initial_y, &kernel.params)
+        .unwrap();
+    kernel.time = 0.25;
+    let complete = kernel
+        .solver_y_at_parameters(kernel.time, &kernel.params)
+        .unwrap();
+    kernel.cache_algebraic_coordinate(kernel.time, &kernel.states, &kernel.params, &complete);
+    kernel.solver_y_guess.borrow_mut()[1] = -123.0;
+    kernel.commit_delay_point().unwrap();
+    let mut queried = kernel.params.clone();
+    kernel
+        .runtime
+        .refresh_delay_values(0.75, &complete, &mut queried)
+        .unwrap();
+    assert_eq!(
+        queried[0], complete[1],
+        "accepted delay history must use the certified coordinate"
+    );
+}
+
+#[test]
+fn certified_algebraic_delay_inputs_use_owned_values_before_duration_evaluation() {
+    let mut model = steep_algebraic_time_event_model();
+    model.problem.events.delays = solve::SolveDelayPartition {
+        source_rhs: block(
+            vec![vec![
+                solve::LinearOp::LoadY { dst: 0, index: 1 },
+                solve::LinearOp::StoreOutput { src: 0 },
+            ]],
+            "fmi_me_owned_dynamic_delay_source.mo",
+        ),
+        delay_time_rhs: block(
+            vec![vec![
+                solve::LinearOp::LoadY { dst: 0, index: 1 },
+                solve::LinearOp::Const {
+                    dst: 1,
+                    value: 2.0e-6,
+                },
+                solve::LinearOp::Binary {
+                    dst: 2,
+                    op: solve::BinaryOp::Mul,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                solve::LinearOp::StoreOutput { src: 2 },
+            ]],
+            "fmi_me_owned_dynamic_delay_duration.mo",
+        ),
+        delay_max_rhs: block(
+            vec![vec![
+                solve::LinearOp::Const { dst: 0, value: 0.5 },
+                solve::LinearOp::StoreOutput { src: 0 },
+            ]],
+            "fmi_me_owned_dynamic_delay_max.mo",
+        ),
+        value_parameter_indices: vec![0],
+        source_is_discrete: vec![false],
+    };
+    model.problem.solve_layout.parameter_count = 1;
+    model.problem.solve_layout.compiled_parameter_len = 1;
+    model.parameters = vec![0.0].into();
+    let mut kernel = instantiate(&model);
+    kernel
+        .runtime
+        .initialize_delay_history(0.0, &model.initial_y, &mut kernel.params)
+        .unwrap();
+    kernel
+        .runtime
+        .commit_delay_history(0.0, &model.initial_y, &kernel.params)
+        .unwrap();
+    kernel.time = 0.25;
+    let complete = kernel
+        .solver_y_at_parameters(kernel.time, &kernel.params)
+        .unwrap();
+    kernel.cache_algebraic_coordinate(kernel.time, &kernel.states, &kernel.params, &complete);
+    kernel.solver_y_guess.borrow_mut()[1] = -123.0;
+    assert_eq!(
+        kernel
+            .with_delay_params_unseeded(kernel.time, &kernel.states, |p| p[0])
+            .unwrap(),
+        0.0
+    );
+    kernel.commit_delay_point().unwrap();
+    assert_eq!(kernel.max_step_duration, Some(0.5));
 }

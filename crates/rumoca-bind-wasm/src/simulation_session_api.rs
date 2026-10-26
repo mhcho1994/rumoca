@@ -55,8 +55,8 @@ impl WasmSimulationSession {
     }
 
     /// Construct an interactive session with checked options including the
-    /// existing `auto` or `interpreter` execution policy. Empty options retain
-    /// the model's experiment metadata and existing automatic execution default.
+    /// `native_required`, `auto`, or `interpreter` execution policy. Empty
+    /// options retain the model's experiment metadata and require compilation.
     #[wasm_bindgen(js_name = withInteractiveConfiguration)]
     pub fn with_interactive_configuration(
         source: &str,
@@ -209,6 +209,7 @@ fn create_interactive_session(
     }
     opts.initial_inputs = initial_inputs()?;
     opts.execution_policy = options.execution_policy;
+    opts.param_overrides = options.param_overrides.clone();
     let session = rumoca_sim::SimulationSession::new(&dae, opts)
         .map_err(|e| WasmError::new(format!("Session creation error: {e}")))?;
     Ok(WasmSimulationSession { session })

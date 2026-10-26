@@ -10,7 +10,7 @@ pub fn lower(
     model: &rumoca_ir_solve::SolveModel,
     observed: &[(u32, u32, String)],
 ) -> Result<ir::NumericalProgram, String> {
-    rumoca_phase_solve::execution::export(model, observed)
+    rumoca_eval_solve::execution::numerical::export(model, observed)
 }
 
 /// Check an artifact against the program derived for it.
@@ -22,7 +22,7 @@ pub fn check(
     numerical: &ir::NumericalProgram,
 ) -> Result<(), String> {
     ir::validate(artifact)?;
-    rumoca_phase_solve::execution::reconstruct(numerical)?;
+    rumoca_eval_solve::execution::numerical::reconstruct(numerical)?;
     Ok(())
 }
 
@@ -35,7 +35,7 @@ pub fn run(
     root: &Path,
 ) -> Result<crate::SimResult, String> {
     check(artifact, numerical)?;
-    let component = rumoca_phase_solve::execution::reconstruct(numerical)?;
+    let component = rumoca_eval_solve::execution::numerical::reconstruct(numerical)?;
     let observer = NativePublication(rumoca_eval_solve::execution::CsvExecution::start(
         artifact.clone(),
         numerical.clone(),

@@ -15,6 +15,8 @@ pub mod runtime;
 mod runtime;
 #[cfg(not(kani))]
 pub mod solver;
+#[cfg(all(test, not(kani)))]
+mod test_fixtures;
 #[cfg(not(kani))]
 pub mod timeline;
 mod verification;
@@ -78,12 +80,14 @@ pub use runtime::solve_ops::{
 #[cfg(not(kani))]
 pub use runtime::solve_runtime::{
     AlgebraicLinearization, AlgebraicSettle, BlockResidualSplitCounts,
-    CompiledSolveAssignmentSchedule, CompiledSolveEventTransaction, CompiledSolveExpression,
-    CompiledSolveJacobianExpression, CompiledSolveProjectionJacobian, CompiledSolveTargetValues,
-    EventTransactionExecution, EventUpdateRowFilter, InitialEventObservation,
+    CompiledSolveAssignmentSchedule, CompiledSolveEventObservation, CompiledSolveEventTransaction,
+    CompiledSolveExpression, CompiledSolveJacobianExpression, CompiledSolveProjectionJacobian,
+    CompiledSolveTargetValues, EventTransactionExecution, EventUpdateRowFilter,
+    InitialEventObservation, PrecompiledSolveBackend, PrecompiledSolveBackendBuilder,
     ProjectedEventUpdateInput, ProjectedInitialEventInput, ProjectedInitialEventOutcome,
-    ProjectedPostInitialEventInput, SolveExecutionBackend, SolveRuntime,
-    block_residual_split_counts, reset_block_residual_split_counts,
+    ProjectedPostInitialEventInput, ReferenceReverseExecution, ScalarExecutionView,
+    SolveExecutionBackend, SolveRuntime, SolveRuntimeModel, block_residual_split_counts,
+    reset_block_residual_split_counts,
 };
 #[cfg(not(kani))]
 pub use runtime::time::{
@@ -112,3 +116,6 @@ pub use solver::{
     SimNativeRefusal, SimOptions, SimPacingMode, SimResult, SimSolverMode, SimTermination,
     SimVariableMeta, WARNING_ASSERTION_CODE,
 };
+
+#[cfg(test)]
+mod fixture_layout;

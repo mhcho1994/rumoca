@@ -1,5 +1,5 @@
 {
-  "schema_version": 74,
+  "schema_version": 89,
   "layout": {
     "bindings": {
       "x": {
@@ -78,48 +78,25 @@
       }
     },
     "y_scalars": 3,
-    "p_scalars": 2
+    "p_scalars": 5
   },
   "solve_layout": {
-    "solver_maps": {
-      "names": [
-        "x",
-        "y",
-        "hold.y"
-      ],
-      "name_to_idx": {
-        "x": 0,
-        "y": 1,
-        "hold.y": 2
-      },
-      "base_to_indices": {
-        "x": [
-          0
-        ],
-        "y": [
-          1
-        ],
-        "hold.y": [
-          2
-        ]
-      }
-    },
     "variable_storage_runs": [],
     "variable_declarations": [],
     "state_scalar_count": 1,
     "algebraic_scalar_count": 1,
     "output_scalar_count": 1,
     "parameter_count": 1,
-    "compiled_parameter_len": 2,
+    "compiled_parameter_len": 5,
     "input_scalar_names": [],
     "discrete_real_scalar_names": [
       "hold.y"
     ],
     "discrete_valued_scalar_names": [],
     "relation_memory_parameter_indices": [
-      1
+      2
     ],
-    "initial_event_parameter_index": 1,
+    "initial_event_parameter_index": 3,
     "terminal_event_parameter_index": null,
     "initial_homotopy_parameter_index": null,
     "pre_param_bindings": [
@@ -175,31 +152,37 @@
                 "end": 1
               }
             ],
-            "output_indices": [
-              0
-            ]
+            "output_placements": {
+              "Dense": {
+                "count": 1
+              }
+            }
           }
         }
       ]
     },
-    "implicit_row_targets": [
-      {
-        "Y": {
-          "index": 1,
-          "byte_offset": 8
+    "implicit_row_targets": {
+      "Explicit": [
+        {
+          "Y": {
+            "index": 1,
+            "byte_offset": 8
+          }
         }
-      }
-    ],
+      ]
+    },
     "algebraic_projection_plan": {
       "blocks": [
         {
-          "rows": [
-            0
-          ],
-          "y_indices": [
-            1
-          ],
-          "tearing": null
+          "Explicit": {
+            "rows": [
+              0
+            ],
+            "y_indices": [
+              1
+            ],
+            "tearing": null
+          }
         }
       ]
     },
@@ -229,9 +212,11 @@
                 "end": 1
               }
             ],
-            "output_indices": [
-              0
-            ]
+            "output_placements": {
+              "Dense": {
+                "count": 1
+              }
+            }
           }
         }
       ]
@@ -308,10 +293,15 @@
       ]
     },
     "refresh_owners": {
+      "compact_projection": null,
       "algebraic": {
-        "simultaneous_plan": { "blocks": [] },
+        "simultaneous_plan": {
+          "blocks": []
+        },
         "simultaneous_block_indices": [],
-        "value_projection_plan": { "blocks": [] },
+        "value_projection_plan": {
+          "blocks": []
+        },
         "rows": [],
         "causal_seed_rows": [],
         "static_causal_seed_rows": [],
@@ -320,9 +310,13 @@
         "causal_solution_certified": false
       },
       "derivative": {
-        "simultaneous_plan": { "blocks": [] },
+        "simultaneous_plan": {
+          "blocks": []
+        },
         "simultaneous_block_indices": [],
-        "value_projection_plan": { "blocks": [] },
+        "value_projection_plan": {
+          "blocks": []
+        },
         "rows": [],
         "causal_seed_rows": [],
         "static_causal_seed_rows": [],
@@ -331,9 +325,13 @@
         "causal_solution_certified": false
       },
       "root": {
-        "simultaneous_plan": { "blocks": [] },
+        "simultaneous_plan": {
+          "blocks": []
+        },
         "simultaneous_block_indices": [],
-        "value_projection_plan": { "blocks": [] },
+        "value_projection_plan": {
+          "blocks": []
+        },
         "rows": [],
         "causal_seed_rows": [],
         "static_causal_seed_rows": [],
@@ -342,9 +340,13 @@
         "causal_solution_certified": false
       },
       "event": {
-        "simultaneous_plan": { "blocks": [] },
+        "simultaneous_plan": {
+          "blocks": []
+        },
         "simultaneous_block_indices": [],
-        "value_projection_plan": { "blocks": [] },
+        "value_projection_plan": {
+          "blocks": []
+        },
         "rows": [],
         "causal_seed_rows": [],
         "static_causal_seed_rows": [],
@@ -382,9 +384,11 @@
                 "end": 1
               }
             ],
-            "output_indices": [
-              0
-            ]
+            "output_placements": {
+              "Dense": {
+                "count": 1
+              }
+            }
           }
         }
       ]
@@ -399,7 +403,11 @@
     "update_rhs": {
       "programs": [],
       "program_spans": [],
-      "output_indices": []
+      "output_placements": {
+        "Dense": {
+          "count": 0
+        }
+      }
     },
     "update_targets": [],
     "manifold_row_count": 0,
@@ -408,6 +416,7 @@
   "discrete": {
     "event_iteration_plan": {
       "runs": [],
+      "partitions": [],
       "schedule": {
         "event_pass": [
           "RelationOverrides",
@@ -445,7 +454,7 @@
           {
             "LoadP": {
               "dst": 0,
-              "index": 1
+              "index": 2
             }
           },
           {
@@ -462,15 +471,17 @@
           "end": 1
         }
       ],
-      "output_indices": [
-        0
-      ]
+      "output_placements": {
+        "Dense": {
+          "count": 1
+        }
+      }
     },
     "runtime_assignment_targets": [
       {
         "P": {
-          "index": 1,
-          "byte_offset": 8
+          "index": 2,
+          "byte_offset": 16
         }
       }
     ],
@@ -480,7 +491,11 @@
     "post_commit_assignment_rhs": {
       "programs": [],
       "program_spans": [],
-      "output_indices": []
+      "output_placements": {
+        "Dense": {
+          "count": 0
+        }
+      }
     },
     "post_commit_assignment_targets": [],
     "post_commit_assignment_runtime_rows": [],
@@ -521,9 +536,11 @@
           "end": 1
         }
       ],
-      "output_indices": [
-        0
-      ]
+      "output_placements": {
+        "Dense": {
+          "count": 1
+        }
+      }
     },
     "update_targets": [
       {
@@ -559,7 +576,11 @@
     "clock_partition_intermediates": {
       "programs": [],
       "program_spans": [],
-      "output_indices": []
+      "output_placements": {
+        "Dense": {
+          "count": 0
+        }
+      }
     },
     "clock_partition_intermediate_targets": [],
     "clock_partition_intermediate_clocks": []
@@ -601,15 +622,17 @@
           "end": 1
         }
       ],
-      "output_indices": [
-        0
-      ]
+      "output_placements": {
+        "Dense": {
+          "count": 1
+        }
+      }
     },
     "root_relation_memory_targets": [
       {
         "P": {
-          "index": 1,
-          "byte_offset": 8
+          "index": 2,
+          "byte_offset": 16
         }
       }
     ],
@@ -628,12 +651,20 @@
     "dynamic_time_event_rhs": {
       "programs": [],
       "program_spans": [],
-      "output_indices": []
+      "output_placements": {
+        "Dense": {
+          "count": 0
+        }
+      }
     },
     "action_conditions": {
       "programs": [],
       "program_spans": [],
-      "output_indices": []
+      "output_placements": {
+        "Dense": {
+          "count": 0
+        }
+      }
     },
     "actions": [],
     "has_terminal_event": false,
@@ -641,17 +672,29 @@
       "source_rhs": {
         "programs": [],
         "program_spans": [],
-        "output_indices": []
+        "output_placements": {
+          "Dense": {
+            "count": 0
+          }
+        }
       },
       "delay_time_rhs": {
         "programs": [],
         "program_spans": [],
-        "output_indices": []
+        "output_placements": {
+          "Dense": {
+            "count": 0
+          }
+        }
       },
       "delay_max_rhs": {
         "programs": [],
         "program_spans": [],
-        "output_indices": []
+        "output_placements": {
+          "Dense": {
+            "count": 0
+          }
+        }
       },
       "value_parameter_indices": [],
       "source_is_discrete": []
@@ -674,7 +717,7 @@
       }
     ],
     "activation_parameter_indices": [
-      0
+      4
     ]
   }
 }

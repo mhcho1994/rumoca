@@ -121,7 +121,11 @@ pub struct PreparedScalarProgramBlock {
     row_requirements: Vec<RowInputRequirements>,
     row_reverse_y_gradient_supported: Vec<bool>,
     row_is_causal: Vec<bool>,
+    /// Programs holding an assertion observation, which only the checked
+    /// event-action adapter evaluates, so no execution backend compiles them.
+    row_requires_checked_observation: Vec<bool>,
     row_assignment_shapes: Vec<Box<[(usize, TargetAssignmentShape)]>>,
+    target_value_families: RefCell<target_value_plan::TargetValueFamilies>,
     row_tensor_affine_assignments: Vec<tensor_affine_assignment::PreparedTensorAffineAssignments>,
     row_parameter_indices: Vec<Box<[usize]>>,
     row_parameter_static_y_gradient_params: Vec<Option<Box<[usize]>>>,
@@ -575,6 +579,17 @@ impl PreparedScalarProgramBlock {
             && self
                 .assignment_shape_for_output(row_idx, output_offset, target_y_index)
                 .is_some()
+    }
+
+    /// Whether program `row_idx` holds an assertion observation, a fact fixed
+    /// when the block is prepared: its execution needs an issued source/action
+    /// observation adapter that retains exact invocation captures.
+    #[must_use]
+    pub fn program_requires_checked_observation(&self, row_idx: usize) -> bool {
+        self.row_requires_checked_observation
+            .get(row_idx)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn is_causal_row(&self, row_idx: usize) -> bool {
@@ -2046,4 +2061,15 @@ impl PreparedComputeNode {
             }
         }
     }
+}
+
+/// The parameter slots keying `program`'s certified parameter-static solver-Y
+/// gradient (SPEC_0043), as [`PreparedScalarProgramBlock::parameter_static_y_gradient_params`]
+/// records it per row; `None` when the gradient is not certified invariant
+/// under solver Y and time.
+#[must_use]
+pub fn parameter_static_y_gradient_params(
+    program: &[rumoca_ir_solve::LinearOp],
+) -> Option<Vec<usize>> {
+    parameter_static_y_gradient(program).then(|| row_parameter_indices(program))
 }

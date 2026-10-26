@@ -165,13 +165,13 @@ end Projection;
                     .iter()
                     .position(|candidate| candidate == &name)
                     .unwrap();
-                for (value, time) in result.data[column].iter().zip(&result.times) {
-                    let expected = (10 * rotor) as f64 + axis as f64 * time;
-                    assert!(
-                        (value - expected).abs() < 1e-9,
-                        "{name}: {value} != {expected}"
-                    );
-                }
+                assert_linear_trace(
+                    &name,
+                    &result.data[column],
+                    &result.times,
+                    (10 * rotor) as f64,
+                    axis as f64,
+                );
             }
         }
     }
@@ -223,13 +223,24 @@ end Projection;
                     .iter()
                     .position(|candidate| candidate == &name)
                     .unwrap();
-                for value in &result.data[column] {
-                    assert!(
-                        (value - ((row - 1) * 3 + col) as f64).abs() < 1e-9,
-                        "{name} = {value}"
-                    );
-                }
+                assert_linear_trace(
+                    &name,
+                    &result.data[column],
+                    &result.times,
+                    ((row - 1) * 3 + col) as f64,
+                    0.0,
+                );
             }
         }
+    }
+}
+
+fn assert_linear_trace(name: &str, values: &[f64], times: &[f64], offset: f64, slope: f64) {
+    for (value, time) in values.iter().zip(times) {
+        let expected = offset + slope * time;
+        assert!(
+            (value - expected).abs() < 1e-9,
+            "{name}: {value} != {expected}"
+        );
     }
 }

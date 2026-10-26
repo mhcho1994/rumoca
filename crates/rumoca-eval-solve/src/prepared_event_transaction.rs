@@ -2,7 +2,7 @@
 
 use rumoca_ir_solve as solve;
 
-use crate::{EvalSolveError, TypedValue, typed_kind_from_scalar, typed_kind_to_scalar};
+use crate::{EvalSolveError, TypedValue, checked_scalar_payload_value, typed_kind_from_scalar};
 
 /// Prepared evaluator boundary for one [`solve::EventTransactionProgram`].
 ///
@@ -15,6 +15,7 @@ pub struct PreparedEventTransactionProgram {
     output_scalar_count: usize,
     target_scalar_count: usize,
     scalar_targets: Box<[solve::ScalarSlot]>,
+    assertion_scalar_offsets: Box<[usize]>,
 }
 
 impl PreparedEventTransactionProgram {
@@ -45,12 +46,25 @@ impl PreparedEventTransactionProgram {
                 scalar_targets.push(offset_slot(target.base(), offset, program)?);
             }
         }
+        let mut assertion_scalar_offsets = Vec::with_capacity(program.assertion_count());
+        let mut offset = 0usize;
+        for output in program.site().outputs() {
+            if output.kind() == solve::SolvePureCallOutputKind::AssertionPredicate {
+                assertion_scalar_offsets.push(offset);
+            }
+            offset = offset
+                .checked_add(output.value_type().scalar_count() as usize)
+                .ok_or_else(|| {
+                    shape_error(program, "event transaction assertion offset overflows")
+                })?;
+        }
         Ok(Self {
             program: program.clone(),
             input_scalar_count,
             output_scalar_count,
             target_scalar_count,
             scalar_targets: scalar_targets.into_boxed_slice(),
+            assertion_scalar_offsets: assertion_scalar_offsets.into_boxed_slice(),
         })
     }
 
@@ -78,6 +92,13 @@ impl PreparedEventTransactionProgram {
     #[must_use]
     pub const fn scalar_targets(&self) -> &[solve::ScalarSlot] {
         &self.scalar_targets
+    }
+
+    /// Predicate positions in the complete typed assertion tuple. Message
+    /// captures remain observations and are never interpreted as predicates.
+    #[must_use]
+    pub const fn assertion_scalar_offsets(&self) -> &[usize] {
+        &self.assertion_scalar_offsets
     }
 
     /// Evaluate the complete target/predicate tuple in one invocation scope.
@@ -149,14 +170,16 @@ impl PreparedEventTransactionProgram {
             );
         }
         let values = crate::eval_pure_call(table, self.program.site().owner(), &arguments)
-            .map_err(|error| EvalSolveError::ShapeContract {
-                message: error.to_string(),
-                span: error.source_span().or(Some(self.program.span())),
-            })?;
+            .map_err(EvalSolveError::from)?;
         output.clear();
         output.reserve(self.output_scalar_count);
         for value in values {
-            output.extend(value.elements().iter().copied().map(typed_kind_to_scalar));
+            for &element in value.elements() {
+                output.push(
+                    checked_scalar_payload_value(element)
+                        .map_err(|error| error.with_source_span(Some(self.program.span())))?,
+                );
+            }
         }
         if output.len() != self.output_scalar_count {
             return Err(shape_error(

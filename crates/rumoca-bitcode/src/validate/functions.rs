@@ -265,7 +265,10 @@ impl Checker<'_> {
     fn statements(&self, errors: &mut Vec<ValidationError>, statements: &[RbcFunctionStatement]) {
         for statement in statements {
             match statement {
-                RbcFunctionStatement::Assignment {
+                RbcFunctionStatement::RequireAssigned {
+                    value, expression, ..
+                }
+                | RbcFunctionStatement::Assignment {
                     value, expression, ..
                 } => {
                     self.value(errors, *value);
@@ -283,10 +286,45 @@ impl Checker<'_> {
                     expressions,
                     ..
                 } => self.group(errors, values, expressions, conditional.as_ref()),
+                RbcFunctionStatement::Conditional {
+                    conditions,
+                    branches,
+                    fallback,
+                    outputs,
+                    ..
+                } => {
+                    self.conditional(errors, conditions, branches, fallback, outputs);
+                }
                 RbcFunctionStatement::For {
                     fold, statements, ..
                 } => self.loop_body(errors, *fold, statements),
             }
+        }
+    }
+
+    fn conditional(
+        &self,
+        errors: &mut Vec<ValidationError>,
+        conditions: &[ExprId],
+        branches: &[RbcFunctionBranch],
+        fallback: &RbcFunctionBranch,
+        outputs: &[RbcFunctionDefinition],
+    ) {
+        if conditions.len() != branches.len() || conditions.is_empty() {
+            self.fail(
+                errors,
+                format_args!("conditional requires one condition per branch"),
+            );
+        }
+        for condition in conditions {
+            self.expression(errors, *condition);
+        }
+        for branch in branches.iter().chain(std::iter::once(fallback)) {
+            self.statements(errors, &branch.statements);
+        }
+        for output in outputs {
+            self.value(errors, output.value);
+            self.expression(errors, output.expression);
         }
     }
 
@@ -398,10 +436,23 @@ pub(crate) fn function_spans(model: &RbcModel) -> Vec<RbcSpan> {
 fn statement_spans(statements: &[RbcFunctionStatement], found: &mut Vec<RbcSpan>) {
     for statement in statements {
         match statement {
-            RbcFunctionStatement::Assignment { provenance, .. }
+            RbcFunctionStatement::RequireAssigned { provenance, .. }
+            | RbcFunctionStatement::Assignment { provenance, .. }
             | RbcFunctionStatement::Assertion { provenance, .. }
             | RbcFunctionStatement::AssignmentGroup { provenance, .. } => {
                 found.push(provenance.span);
+            }
+            RbcFunctionStatement::Conditional {
+                branches,
+                fallback,
+                provenance,
+                ..
+            } => {
+                found.push(provenance.span);
+                for branch in branches.iter().chain(std::iter::once(fallback)) {
+                    found.push(branch.provenance.span);
+                    statement_spans(&branch.statements, found);
+                }
             }
             RbcFunctionStatement::For {
                 statements,

@@ -1,4 +1,7 @@
 mod demanded_gathers;
+mod ordered_tensor_forwarding;
+mod prepared_tensor_snapshots;
+mod scalar_integer_payload;
 
 use super::*;
 use crate::prepared::assignment_shape_reads_y_index;
@@ -64,6 +67,80 @@ fn parameter_static_gradient_certificate_rejects_y_and_time_varying_coefficients
     assert!(parameter_affine.certifies_parameter_static_y_gradient(0));
     assert!(!time_coefficient.certifies_parameter_static_y_gradient(0));
     assert!(!nonlinear.certifies_parameter_static_y_gradient(0));
+}
+
+#[test]
+fn parameter_static_gradient_certificate_admits_time_selected_gradient_free_branches() {
+    // `y - (offset + (if time < start then 0 else height))`: the time
+    // condition selects between branches without a solver-Y gradient, so the
+    // row's gradient is the constant of `y` whichever branch is taken.
+    let step_source = |height: LinearOp| {
+        vec![
+            LinearOp::LoadY { dst: 0, index: 0 },
+            LinearOp::LoadP { dst: 1, index: 0 },
+            LinearOp::LoadTime { dst: 2 },
+            LinearOp::Const { dst: 3, value: 1.0 },
+            LinearOp::Compare {
+                dst: 4,
+                op: CompareOp::Lt,
+                lhs: 2,
+                rhs: 3,
+            },
+            height,
+            LinearOp::Const { dst: 6, value: 0.0 },
+            LinearOp::Select {
+                dst: 7,
+                cond: 4,
+                if_true: 6,
+                if_false: 5,
+            },
+            LinearOp::Binary {
+                dst: 8,
+                op: BinaryOp::Add,
+                lhs: 1,
+                rhs: 7,
+            },
+            LinearOp::Binary {
+                dst: 9,
+                op: BinaryOp::Sub,
+                lhs: 0,
+                rhs: 8,
+            },
+            LinearOp::StoreOutput { src: 9 },
+        ]
+    };
+    let parameter_height = step_source(LinearOp::LoadP { dst: 5, index: 1 });
+    // A branch reading solver Y keeps its gradient behind the time
+    // condition, which then switches the gradient itself.
+    let coordinate_height = step_source(LinearOp::LoadY { dst: 5, index: 1 });
+
+    assert_eq!(
+        crate::parameter_static_y_gradient_params(&parameter_height),
+        Some(vec![0, 1])
+    );
+    assert_eq!(
+        crate::parameter_static_y_gradient_params(&coordinate_height),
+        None
+    );
+    // `1 / y` reads solver Y through its divisor alone; that branch has a
+    // gradient, so the time-switched selection is not certified either.
+    let mut reciprocal_height = step_source(LinearOp::Const { dst: 5, value: 1.0 });
+    reciprocal_height.splice(
+        6..6,
+        [
+            LinearOp::LoadY { dst: 10, index: 1 },
+            LinearOp::Binary {
+                dst: 5,
+                op: BinaryOp::Div,
+                lhs: 5,
+                rhs: 10,
+            },
+        ],
+    );
+    assert_eq!(
+        crate::parameter_static_y_gradient_params(&reciprocal_height),
+        None
+    );
 }
 
 #[test]
@@ -268,6 +345,7 @@ fn eval_event_action_message_concatenates_text_and_numeric_parts() {
             span: fixture_span(),
             origin: "assert".to_string(),
             clock_owner: None,
+            assertion_projection: None,
         }],
         ..Default::default()
     };
@@ -359,6 +437,7 @@ fn event_message_fixture(
             span: fixture_span(),
             origin: "assert".to_string(),
             clock_owner: None,
+            assertion_projection: None,
         }],
         ..Default::default()
     }
@@ -452,7 +531,7 @@ fn eval_row_supports_solve_ir_table_bounds_and_next_event_ops() {
 fn eval_row_hydrates_serialized_external_table_data() {
     let table_id = 424_242.0;
     let model = rumoca_ir_solve::SolveModel {
-        parameters: vec![table_id],
+        parameters: vec![table_id].into(),
         external_tables: rumoca_ir_solve::ExternalTables::new(vec![
             rumoca_core::ExternalTableData {
                 id: table_id as u64,
@@ -751,6 +830,9 @@ fn eval_row_table_lookup_failure_is_error_not_silent_zero() {
     )
     .expect_err("missing table should report an evaluation error");
 
+    let diagnostic = err.to_string();
+    assert!(diagnostic.contains("external table lookup failed for table id 42 column 1:"));
+    assert!(diagnostic.contains("was not provided"));
     let EvalSolveError::ExternalTable {
         operation,
         table_id,
@@ -763,6 +845,43 @@ fn eval_row_table_lookup_failure_is_error_not_silent_zero() {
     assert_eq!(operation, "lookup");
     assert_eq!(table_id, 42.0);
     assert_eq!(column, Some(1.0));
+    assert!(reason.contains("was not provided"));
+}
+
+#[test]
+fn eval_row_missing_table_next_event_preserves_diagnostic_without_a_column() {
+    let row = vec![
+        LinearOp::Const {
+            dst: 0,
+            value: 42.0,
+        },
+        LinearOp::Const { dst: 1, value: 0.0 },
+        LinearOp::TableNextEvent {
+            dst: 2,
+            table_id: 0,
+            time: 1,
+        },
+        LinearOp::StoreOutput { src: 2 },
+    ];
+    let error = eval_row_with_context(&row, &[], &[], 0.0, RowEvalContext::default())
+        .expect_err("missing next-event table must fail");
+    let diagnostic = error.to_string();
+    let EvalSolveError::ExternalTable {
+        operation,
+        table_id,
+        column,
+        reason,
+    } = error
+    else {
+        panic!("missing table must retain the external-table diagnostic");
+    };
+    assert_eq!(operation, "next event");
+    assert_eq!(table_id, 42.0);
+    assert_eq!(column, None);
+    assert_eq!(
+        diagnostic,
+        format!("external table next event failed for table id 42: {reason}")
+    );
     assert!(reason.contains("was not provided"));
 }
 
@@ -1084,6 +1203,129 @@ fn function_conditional_evaluates_only_the_selected_correlated_region() {
     eval_scalar_program_block(&active, &[], &[11.0], 0.0, None, &mut output)
         .expect("active region reads its parameter");
     assert_eq!(output, [11.0]);
+}
+
+/// A row that runs one outer conditional twice, selecting its nested inner
+/// conditional on the first run and its fallback on the second.
+fn nested_conditional_row() -> ScalarProgramBlock {
+    let inner = std::sync::Arc::new(
+        rumoca_ir_solve::FunctionConditionalProgram::checked(
+            1,
+            [1],
+            [(
+                vec![
+                    LinearOp::LoadFunctionConditionalCapture { dst: 0, index: 0 },
+                    LinearOp::StoreOutput { src: 0 },
+                ],
+                vec![
+                    LinearOp::LoadP { dst: 0, index: 0 },
+                    LinearOp::StoreOutput { src: 0 },
+                ],
+            )],
+            vec![
+                LinearOp::Const { dst: 0, value: 5.0 },
+                LinearOp::StoreOutput { src: 0 },
+            ],
+        )
+        .expect("checked inner conditional"),
+    );
+    let outer = std::sync::Arc::new(
+        rumoca_ir_solve::FunctionConditionalProgram::checked(
+            1,
+            [1],
+            [(
+                vec![
+                    LinearOp::LoadFunctionConditionalCapture { dst: 0, index: 0 },
+                    LinearOp::StoreOutput { src: 0 },
+                ],
+                vec![
+                    LinearOp::LoadP { dst: 0, index: 1 },
+                    LinearOp::FunctionConditional {
+                        dst_start: 1,
+                        capture_start: 0,
+                        program: inner,
+                    },
+                    LinearOp::Const {
+                        dst: 2,
+                        value: 100.0,
+                    },
+                    LinearOp::Binary {
+                        dst: 3,
+                        op: BinaryOp::Add,
+                        lhs: 1,
+                        rhs: 2,
+                    },
+                    LinearOp::StoreOutput { src: 3 },
+                ],
+            )],
+            vec![
+                LinearOp::Const { dst: 0, value: 9.0 },
+                LinearOp::StoreOutput { src: 0 },
+            ],
+        )
+        .expect("checked outer conditional"),
+    );
+    ScalarProgramBlock::with_program_spans(
+        vec![vec![
+            LinearOp::Const { dst: 0, value: 1.0 },
+            LinearOp::FunctionConditional {
+                dst_start: 1,
+                capture_start: 0,
+                program: outer.clone(),
+            },
+            LinearOp::Const { dst: 2, value: 0.0 },
+            LinearOp::FunctionConditional {
+                dst_start: 3,
+                capture_start: 2,
+                program: outer,
+            },
+            LinearOp::Binary {
+                dst: 5,
+                op: BinaryOp::Add,
+                lhs: 1,
+                rhs: 3,
+            },
+            LinearOp::StoreOutput { src: 5 },
+        ]],
+        vec![fixture_span()],
+    )
+    .expect("nested conditional row")
+}
+
+#[test]
+fn nested_function_conditionals_evaluate_independently_across_repeated_runs() {
+    let block = nested_conditional_row();
+    let mut output = [0.0];
+    // The inner selector p[1] is 0, so the inner fallback 5 is chosen; the
+    // second outer run takes its own fallback 9.
+    eval_scalar_program_block(&block, &[], &[11.0, 0.0], 0.0, None, &mut output)
+        .expect("inner fallback row evaluates");
+    assert_eq!(output, [5.0 + 100.0 + 9.0]);
+    // The inner selector p[1] is nonzero, so the inner result reads p[0].
+    eval_scalar_program_block(&block, &[], &[11.0, 2.0], 0.0, None, &mut output)
+        .expect("inner result row evaluates");
+    assert_eq!(output, [11.0 + 100.0 + 9.0]);
+
+    // The register-safe path reuses one frame pool across both outer runs and
+    // across rows, and selects the same values.
+    let row = &block.programs()[0];
+    let mut scratch = RowEvalScratch::default();
+    for (p, expected) in [
+        ([11.0, 0.0], 114.0),
+        ([11.0, 2.0], 120.0),
+        ([11.0, 0.0], 114.0),
+    ] {
+        let input = PreparedRowEval::new(
+            row,
+            required_registers(row).expect("row registers"),
+            &[],
+            &p,
+            0.0,
+            RowEvalContext::default(),
+        );
+        let value = eval_program_single(input, true, &mut scratch).expect("fast row evaluates");
+        assert_eq!(value, expected);
+    }
 }
 
 #[test]
@@ -1689,9 +1931,9 @@ fn prepared_scalar_block_rejects_ambiguous_single_output_owners() {
 }
 
 #[test]
-fn prepared_scalar_block_rejects_logical_output_count_overflow() {
+fn scalar_block_logical_output_count_overflow_is_refused_at_construction() {
     let span = fixture_span();
-    let block = ScalarProgramBlock::with_output_indices(
+    let error = ScalarProgramBlock::with_output_indices(
         vec![vec![
             LinearOp::Const { dst: 0, value: 1.0 },
             LinearOp::StoreOutput { src: 0 },
@@ -1699,13 +1941,11 @@ fn prepared_scalar_block_rejects_logical_output_count_overflow() {
         vec![span],
         vec![usize::MAX],
     )
-    .expect("sparse output fixture satisfies scalar-program contracts");
-
-    let error = match PreparedScalarProgramBlock::new(block) {
-        Ok(_) => panic!("logical output count overflow should fail preparation"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("logical output count"));
+    .expect_err("an output index with no representable logical count has no block");
+    assert!(matches!(
+        error,
+        rumoca_ir_solve::SolveProblemShapeContractError::OutputIndexOverflow { .. }
+    ));
     assert_eq!(error.source_span(), Some(span));
 }
 
@@ -2079,3 +2319,11 @@ fn random_opcode_helper_rejects_non_random_op() {
 
 // SPEC_0021 file-size exception: this file is 2059 lines, over the 2000-line
 // action threshold; split plan: group the eval-solve tests by subsystem (projection, dense-basis, refresh) into sibling test modules.
+
+#[test]
+fn event_real_messages_preserve_integer_trailing_zeros() {
+    assert_eq!(format_significant_digits(120.0, 3), "120");
+    assert_eq!(format_significant_digits(1000.0, 4), "1000");
+    assert_eq!(format_significant_digits(12.0, 4), "12");
+    assert_eq!(format_significant_digits(12000.0, 3), "1.2e4");
+}

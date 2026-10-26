@@ -6,6 +6,7 @@
 //! fixed point, and bounds the stack one chain of active member invocations
 //! may occupy by the execution profile's declared depth limit.
 
+use super::assertion_flow::CheckedAssertionFlow;
 use super::dependency::{self, SolveCallDependency};
 use super::{
     SolvePureCallIdentity, SolvePureCallInterface, SolvePureCallOutput, SolvePureCallOutputKind,
@@ -124,6 +125,7 @@ pub(in crate::typed_program) struct PendingOwner {
     inputs: Arc<[SolveValueType]>,
     outputs: Arc<[SolvePureCallOutput]>,
     dependencies: Box<[Box<[SolveCallDependency]>]>,
+    assertion_flow: CheckedAssertionFlow,
 }
 
 impl PendingOwner {
@@ -139,6 +141,7 @@ impl PendingOwner {
             dependencies: &self.dependencies,
             projections: None,
             affinity: None,
+            assertion_flow: Some(&self.assertion_flow),
         }
     }
 }
@@ -193,6 +196,7 @@ pub(super) fn construct_group(
             inputs: member.inputs.clone().into(),
             outputs: member.outputs.clone().into(),
             dependencies: vec![Box::default(); member.outputs.len()].into(),
+            assertion_flow: CheckedAssertionFlow::empty(),
         });
     }
     let ids = pending.iter().map(PendingOwner::id).collect::<Vec<_>>();
@@ -206,6 +210,7 @@ pub(super) fn construct_group(
         })
         .collect::<Result<Vec<_>, _>>()?;
     require_one_recursive_component(&bodies, &ids, provenance)?;
+    require_unobserved_callees(owners, &pending, &bodies, provenance)?;
     let coordinates = bodies
         .iter()
         .zip(&members)
@@ -228,6 +233,7 @@ pub(super) fn construct_group(
     {
         owners.push(SolvePureCallOwner {
             input_coordinate,
+            assertion_flow: Some(pending.assertion_flow),
             dependencies: Arc::from(pending.dependencies),
             projections: None,
             affinity: None,
@@ -248,6 +254,32 @@ pub(super) fn construct_group(
     };
     groups.push(group);
     Ok(group)
+}
+
+fn require_unobserved_callees(
+    owners: &[SolvePureCallOwner],
+    pending: &[PendingOwner],
+    bodies: &[TypedProgram],
+    provenance: Span,
+) -> Result<(), SolveProgramConstructionError> {
+    let view = SolvePureCallTableView::with_pending(owners, pending);
+    let mut unobserved = true;
+    for body in bodies {
+        visit_calls(body, &mut |owner| {
+            unobserved &= view.get(owner.index() as usize).is_some_and(|callee| {
+                callee
+                    .outputs
+                    .iter()
+                    .all(|output| output.kind() == SolvePureCallOutputKind::Result)
+                    && callee
+                        .assertion_flow
+                        .is_some_and(|flow| flow.sources().is_empty())
+            });
+        });
+    }
+    unobserved
+        .then_some(())
+        .ok_or(SolveProgramConstructionError::RecursiveAssertion { provenance })
 }
 
 /// The member call graph must be exactly one SCC containing a cycle; a set
@@ -314,7 +346,15 @@ fn least_dependencies(
 pub(super) fn visit_calls(program: &TypedProgram, visit: &mut impl FnMut(SolvePureCallOwnerId)) {
     for operation in program.operations() {
         match operation.operation() {
+            SolveOperation::CheckAssertion {
+                message: crate::SolveAssertionMessage::Captures { program },
+                ..
+            } => visit_calls(program.body(), visit),
             SolveOperation::Call { owner, .. } => visit(*owner),
+            SolveOperation::AssignedConditional { program } => {
+                visit_calls(program.if_true().body(), visit);
+                visit_calls(program.if_false().body(), visit);
+            }
             SolveOperation::Conditional {
                 if_true, if_false, ..
             } => {
@@ -350,11 +390,24 @@ fn program_cells(program: &TypedProgram) -> u64 {
                 .iter()
                 .map(|value_type| u64::from(value_type.scalar_count())),
         )
+        .chain(
+            program
+                .assigned_state_types()
+                .iter()
+                .map(|value_type| 1 + u64::from(value_type.scalar_count())),
+        )
         .sum::<u64>();
     let nested = program
         .operations()
         .iter()
         .map(|operation| match operation.operation() {
+            SolveOperation::CheckAssertion {
+                message: crate::SolveAssertionMessage::Captures { program },
+                ..
+            } => program_cells(program.body()),
+            SolveOperation::AssignedConditional { program } => {
+                program_cells(program.if_true().body()) + program_cells(program.if_false().body())
+            }
             SolveOperation::Conditional {
                 if_true, if_false, ..
             } => program_cells(if_true.body()) + program_cells(if_false.body()),

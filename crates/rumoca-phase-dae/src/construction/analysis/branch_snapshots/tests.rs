@@ -50,6 +50,7 @@ fn boolean(value: bool, at: Span) -> Expression {
 fn for_loop(binder: &str, body: Vec<Statement>, at: Span) -> Statement {
     Statement::For {
         indices: vec![ForIndex {
+            binder: rumoca_core::IndexBinderProvenance::Generated,
             ident: binder.into(),
             range: Expression::Range {
                 start: Box::new(Expression::Literal {
@@ -128,6 +129,7 @@ fn a_conditional_inside_a_loop_body_is_captured_in_that_body() {
 #[test]
 fn an_immutable_selection_issues_no_capture() {
     let mut guards = vec![GeneratedBooleanDefinition {
+        mutable: false,
         target: VarName::new("returned"),
         value: boolean(true, span(5)),
         span: span(5),
@@ -157,6 +159,7 @@ fn an_immutable_selection_issues_no_capture() {
 
 fn capture(name: &str, at: Span) -> GeneratedBooleanDefinition {
     GeneratedBooleanDefinition {
+        mutable: false,
         target: VarName::new(name),
         value: boolean(true, at),
         span: at,
@@ -205,4 +208,38 @@ fn a_repeated_capture_in_one_scope_is_refused() {
         Statement::Empty { span: span(50) },
     ];
     assert!(certify_generated_scopes(&body, &guards).is_err());
+}
+
+#[test]
+fn lexical_loop_entries_bind_only_the_actual_normalized_source() {
+    let mut guards = Vec::new();
+    let (normalized, entries) =
+        snapshot_loop_conditionals_with_entries(&nested_mutable_gate(), &mut guards).unwrap();
+    let bound = bind_loop_selections(&normalized, &entries);
+    assert_eq!(bound.len(), 2);
+    let [Statement::For { equations, .. }] = normalized.as_slice() else {
+        panic!("outer loop")
+    };
+    let Statement::For {
+        equations: inner, ..
+    } = &equations[2]
+    else {
+        panic!("selected child")
+    };
+    let selection = bound[1]
+        .condition_for(inner)
+        .expect("normalizer owns the child selection");
+    assert_eq!(selection, &read(guards[0].target.as_str(), guards[0].span));
+    assert!(bound[0].condition_for(equations).is_none());
+    let foreign = inner.clone();
+    assert!(bound[1].condition_for(&foreign).is_none());
+}
+
+#[test]
+#[should_panic(expected = "the same normalized loop has an issued decision")]
+fn lexical_loop_binding_refuses_missing_normalizer_decisions() {
+    let mut guards = Vec::new();
+    let (normalized, _) =
+        snapshot_loop_conditionals_with_entries(&nested_mutable_gate(), &mut guards).unwrap();
+    bind_loop_selections(&normalized, &[]);
 }

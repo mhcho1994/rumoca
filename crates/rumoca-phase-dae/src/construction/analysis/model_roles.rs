@@ -86,7 +86,9 @@ fn collect_when_previous_operands(
 ) {
     for equation in equations {
         match equation {
-            flat::WhenEquation::Assign { value, .. } | flat::WhenEquation::Reinit { value, .. } => {
+            flat::WhenEquation::Assign { value, .. }
+            | flat::WhenEquation::AssignElement { value, .. }
+            | flat::WhenEquation::Reinit { value, .. } => {
                 collect_previous_operand_names(value, discrete);
             }
             flat::WhenEquation::Assert {
@@ -391,7 +393,20 @@ pub(in crate::construction) fn is_external_input(
                 variable.source_span,
             )
         })?;
-    Ok(flat.top_level_input_components.contains(root) || flat.top_level_connectors.contains(root))
+    Ok(is_public_causality_root(flat, root, &variable.causality))
+}
+
+pub(in crate::construction) fn is_public_causality_root(
+    flat: &flat::Model,
+    root: &str,
+    causality: &Causality,
+) -> bool {
+    flat.top_level_connectors.contains(root)
+        || match causality {
+            Causality::Input(_) => flat.top_level_input_components.contains(root),
+            Causality::Output(_) => flat.top_level_output_components.contains(root),
+            Causality::Empty => false,
+        }
 }
 
 /// Root component of an expandable-connector member that augmentation added.

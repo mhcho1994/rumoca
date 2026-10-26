@@ -1,5 +1,11 @@
 //! Runtime orchestration for projection, events, and visible outputs.
 
+mod execution_backend;
+
+pub use execution_backend::{
+    CompiledSolveAssignmentSchedule, CompiledSolveEventObservation, CompiledSolveEventTransaction,
+    CompiledSolveProjectionJacobian, CompiledSolveTargetValues, SolveExecutionBackend,
+};
 use indexmap::IndexMap;
 use rumoca_eval_solve as solve_eval;
 use rumoca_ir_solve as solve;
@@ -12,16 +18,13 @@ use std::{
 
 use crate::runtime::delay::{DelayRuntime, DelayRuntimeSnapshot};
 use crate::runtime::pre_params::{
-    advance_event_iteration_pre_params, event_iteration_plan_settled, seed_event_entry_pre_params,
+    PreBindingPlan, advance_event_iteration_pre_params, event_iteration_plan_settled,
 };
 use crate::runtime::projection::{
     ImplicitProjectionModel, ManifoldProjectionModel, project_algebraic_seed_with_plan,
     project_algebraics_with_plan, project_algebraics_with_plan_certified,
 };
-use crate::runtime::solve_events::{
-    current_dynamic_time_event_stop, event_action_params, next_runtime_event_stop,
-    visible_values_with_context,
-};
+use crate::runtime::solve_events::{event_action_params, visible_values_with_context};
 use crate::runtime::solve_ops::write_clock_activation_params;
 use crate::{
     EventActionOutcome, RuntimeEventStop, RuntimeSolveError, SolveStopSchedule,
@@ -39,34 +42,61 @@ use rumoca_eval_solve::{
 pub(super) type ProjectAlgebraics<'a> =
     dyn FnMut(&mut [f64], &mut [f64]) -> Result<bool, RuntimeSolveError> + 'a;
 
+mod block_kernels;
 mod block_residual_split;
+mod state_jacobian_memo;
 pub use block_residual_split::{
     BlockResidualSplitCounts, block_residual_split_counts, reset_block_residual_split_counts,
 };
 mod chart_sharing;
 mod compiled_expressions;
+mod compiled_inventory;
+mod compiled_lifecycle;
+mod compiled_messages;
+mod compiled_targets;
+mod construction;
+mod execution_owners;
+mod selected_programs;
+use execution_owners::{
+    DirectionalProgram, EvaluationDirectional, EvaluationPrimal, PrimalProgram, ProgramAnalysis,
+};
+#[cfg(test)]
+pub(crate) mod test_kernels;
 use chart_sharing::BlockReuse;
 pub use compiled_expressions::{CompiledSolveExpression, CompiledSolveJacobianExpression};
+use compiled_inventory::{CompiledExpressions, PreparedExpressions, require_prepared};
+use compiled_lifecycle::CompiledLifecycle;
 mod coupled_event;
 mod discrete_rows;
 mod event_transactions;
 pub use event_transactions::EventTransactionExecution;
 use event_transactions::PreparedEventTransactionCoverage;
 mod event_update;
+mod execution_inventory;
+use execution_inventory::RuntimeExecutionInventory;
+pub use execution_inventory::ScalarExecutionView;
 mod guarded_assignments;
 mod initial_continuation;
 mod initial_event;
 mod initial_projection;
+mod initial_relation_memory;
 mod interpreted_schedules;
 mod manifold_execution;
+mod model_owner;
+mod scalar_dispatch;
+pub use model_owner::SolveRuntimeModel;
 mod native_projection_assignments;
 mod native_specialization;
 use native_specialization::{RowEvalPoint, SpecializedRows};
 mod plans;
+mod precompiled;
+pub use precompiled::{PrecompiledSolveBackend, PrecompiledSolveBackendBuilder};
+mod reference_reverse;
 mod refresh_batch;
 mod refresh_execution;
 mod refresh_projection;
 mod relation_memory;
+pub use reference_reverse::ReferenceReverseExecution;
 mod seed_linearization;
 mod sensitivity;
 mod singular_mode;
@@ -94,138 +124,20 @@ use plans::{
 use refresh_execution::static_refresh_parameter_indices;
 use refresh_projection::*;
 use seed_linearization::SeedProjectionCache;
+#[cfg(test)]
+use support::compiled_expression;
 use support::{
-    build_visible_name_index, compiled_compute_expression, compiled_compute_jacobian,
-    compiled_expression, compiled_jacobian, copy_runtime_values, copy_runtime_values_into,
-    fill_inactive_root_output, optional_compiled, reserve_runtime_index_map_capacity,
-    reserve_runtime_vec_capacity, resize_runtime_values, validate_finite_runtime_output,
-    validate_runtime_output_len, visible_value_index_error, zero_runtime_values,
+    admitted_compiled_error, admitted_output_call, build_visible_name_index, compiled_jacobian,
+    copy_runtime_values, copy_runtime_values_into, fill_inactive_root_output, optional_compiled,
+    required_compiled, reserve_runtime_index_map_capacity, reserve_runtime_vec_capacity,
+    resize_runtime_values, validate_finite_runtime_output, validate_runtime_output_len,
+    visible_value_index_error, zero_runtime_values,
 };
 use tangent_evaluators::{colored_tangent_evaluators, torn_tangent_evaluators};
 
-/// Complete application of an issued colored Jacobian at fresh coordinates.
-pub trait CompiledSolveProjectionJacobian {
-    fn call(
-        &self,
-        y: &[f64],
-        p: &[f64],
-        t: f64,
-        external_tables: &[rumoca_core::ExternalTableData],
-        out: &mut [f64],
-    ) -> Result<(), String>;
-}
-
-/// Backend-neutral callable for a causally ordered set of exact assignments.
-/// Program outputs write directly to the flattened solver-Y target list, so
-/// subsequent programs observe earlier assignments while multiple outputs of
-/// one source program commit together.
-pub trait CompiledSolveAssignmentSchedule {
-    fn call(
-        &self,
-        y: &mut [f64],
-        p: &[f64],
-        t: f64,
-        external_tables: &[rumoca_core::ExternalTableData],
-    ) -> Result<(), String>;
-}
-
-/// Backend-neutral callable for one checked aggregate event transaction.
-pub trait CompiledSolveEventTransaction {
-    fn call(&self, input: &[f64], output: &mut [f64]) -> Result<(), String>;
-}
-
-/// Optional execution adapter injected by a concrete simulation backend.
-/// Private checked target tuple execution. No solver-Y publication occurs.
-pub trait CompiledSolveTargetValues {
-    fn call(
-        &self,
-        selected: usize,
-        y: &[f64],
-        p: &[f64],
-        time: f64,
-        context: RowEvalContext<'_>,
-    ) -> Result<f64, String>;
-}
-
-pub trait SolveExecutionBackend {
-    fn compile_target_values(
-        &self,
-        _plan: &solve_eval::PreparedTargetValuePlan,
-        _context: RowEvalContext<'_>,
-    ) -> Result<Rc<dyn CompiledSolveTargetValues>, String> {
-        Err("prepared target values are not compiled by this backend".into())
-    }
-
-    fn pure_call_execution(&self) -> Option<&dyn solve_eval::PureCallExecution> {
-        None
-    }
-
-    fn compile_expression(
-        &self,
-        block: &solve::ScalarProgramBlock,
-    ) -> Result<Rc<dyn CompiledSolveExpression>, String>;
-
-    /// Prepare an expression used through both whole-block and selected-program
-    /// calls. Backends may retain batching when separate entry points would
-    /// split a shared owner; the selected call then explicitly declines.
-    fn compile_selectable_expression(
-        &self,
-        block: &solve::ScalarProgramBlock,
-    ) -> Result<Rc<dyn CompiledSolveExpression>, String> {
-        self.compile_expression(block)
-    }
-
-    fn compile_jacobian_expression(
-        &self,
-        block: &solve::ScalarProgramBlock,
-    ) -> Result<Rc<dyn CompiledSolveJacobianExpression>, String>;
-
-    /// [`Self::compile_compute_expression`] for a directional (JVP) block.
-    fn compile_compute_jacobian_expression(
-        &self,
-        _block: &solve::ComputeBlock,
-    ) -> Result<Option<Rc<dyn CompiledSolveJacobianExpression>>, String> {
-        Ok(None)
-    }
-
-    /// Prepare a whole compute block for whole-block calls with its affine
-    /// tensor nodes executed natively over their compact domains (SPEC_0032
-    /// §4). `Ok(None)` means the backend has no compact form for this block,
-    /// and the caller compiles the block's scalar view instead.
-    fn compile_compute_expression(
-        &self,
-        _block: &solve::ComputeBlock,
-    ) -> Result<Option<Rc<dyn CompiledSolveExpression>>, String> {
-        Ok(None)
-    }
-
-    fn compile_assignment_schedule(
-        &self,
-        source: &solve::ComputeBlock,
-        owners: &solve::ContinuousRefreshOwners,
-        schedule: &solve::ExactRefreshAssignmentSchedule,
-    ) -> Result<Rc<dyn CompiledSolveAssignmentSchedule>, String>;
-
-    /// Compile a causally ordered list of single-output isolator rows whose
-    /// outputs write to the paired solver-Y targets, so later rows observe
-    /// earlier writes. Torn back-substitution batches through this; the
-    /// default declines so existing backends stay untouched.
-    fn compile_torn_assignment_rows(
-        &self,
-        _rows: &[Vec<solve::LinearOp>],
-        _target_y_indices: &[usize],
-    ) -> Result<Rc<dyn CompiledSolveAssignmentSchedule>, String> {
-        Err("torn assignment rows are not compiled by this backend".to_string())
-    }
-
-    fn compile_event_transaction(
-        &self,
-        program: &solve::EventTransactionProgram,
-    ) -> Result<Rc<dyn CompiledSolveEventTransaction>, String>;
-}
-
 #[derive(Clone)]
 struct CompiledDiscreteSpecialization {
+    source_span: rumoca_core::Span,
     expression: Rc<dyn CompiledSolveExpression>,
     output_count: usize,
     guard_expectations: Box<[bool]>,
@@ -240,6 +152,11 @@ struct ClockActivationCache {
 impl From<solve_eval::EvalSolveError> for RuntimeSolveError {
     fn from(value: solve_eval::EvalSolveError) -> Self {
         match value {
+            EvalSolveError::CompiledExecution { message, span } => Self::CompiledExecution {
+                context: "evaluator pure call",
+                message,
+                source_spans: span.into_iter().collect(),
+            },
             EvalSolveError::SingularTargetAssignment {
                 row,
                 target_y_index,
@@ -252,7 +169,9 @@ impl From<solve_eval::EvalSolveError> for RuntimeSolveError {
                 span,
             },
             fault @ (EvalSolveError::InvalidTensorIndex { .. }
-            | EvalSolveError::TensorIndexOutOfBounds { .. }) => Self::SourceFault {
+            | EvalSolveError::TensorIndexOutOfBounds { .. }
+            | EvalSolveError::NativeSourceIndexFault { .. }
+            | EvalSolveError::SourceOperationFault { .. }) => Self::SourceFault {
                 message: fault.to_string(),
                 span: fault.source_span(),
             },
@@ -301,15 +220,59 @@ fn validate_discrete_event_rows(model: &solve::SolveModel) -> Result<(), Runtime
     )))
 }
 
+/// Execution prepared for one immutable model and its derived layout counts.
+/// Callers cannot substitute another source after preparation.
+///
+/// ```
+/// use rumoca_solver::{SolveRuntime, SolveRuntimeModel};
+/// fn inspect(runtime: &SolveRuntime) {
+///     let _: &SolveRuntimeModel = runtime.model();
+///     let _: usize = runtime.state_count();
+///     let _: usize = runtime.solver_count();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use rumoca_solver::SolveRuntime;
+/// fn replace_source(runtime: &mut SolveRuntime, other: &SolveRuntime) {
+///     runtime.model = other.model.clone();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use rumoca_solver::SolveRuntime;
+/// fn corrupt_state_count(runtime: &mut SolveRuntime) {
+///     runtime.state_count = usize::MAX;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use rumoca_solver::SolveRuntime;
+/// fn corrupt_solver_count(runtime: &mut SolveRuntime) {
+///     runtime.solver_count = 0;
+/// }
+/// ```
 #[derive(Clone)]
 pub struct SolveRuntime {
-    pub model: solve::SolveModel,
-    pub state_count: usize,
-    pub solver_count: usize,
-    implicit_rhs: PreparedComputeBlock,
-    implicit_projection_jacobian_v: PreparedComputeBlock,
-    implicit_projection_scalar_jacobian_v: PreparedScalarProgramBlock,
-    implicit_scalar_rhs: PreparedScalarProgramBlock,
+    model: SolveRuntimeModel,
+    state_count: usize,
+    solver_count: usize,
+    runtime_state: solve_eval::SimulationRuntimeState,
+    delay_runtime: DelayRuntime,
+    root_condition_count: usize,
+    /// Warning-level assertion sites reported so far (MLS §8.3.7).
+    warning_log: RefCell<warnings::WarningLog>,
+    clock_activation_cache: RefCell<ClockActivationCache>,
+    /// The model's `pre()` bindings as copy runs, built once at construction.
+    pre_bindings: PreBindingPlan,
+    execution: RuntimeExecutionInventory,
+}
+
+#[derive(Clone)]
+struct ScalarExecutionInventory {
+    coupled_event_jvps: coupled_event::CoupledEventJvps,
+    implicit_projection_scalar_jacobian_v: DirectionalProgram,
+    implicit_scalar_rhs: PrimalProgram,
     /// Tangent plan of each algebraic projection block's tearing, aligned
     /// with the block list; `None` for an untorn block or one without a plan.
     torn_tangents: Rc<[Option<rumoca_eval_solve::TornTangentEvaluator>]>,
@@ -318,6 +281,8 @@ pub struct SolveRuntime {
     colored_tangents: Rc<[Option<rumoca_eval_solve::ColoredTangentEvaluator>]>,
     /// Block residual splits aligned with the projection plan's blocks.
     block_splits: Rc<[Option<Rc<block_residual_split::BlockSplits>>]>,
+    /// Fused kernels of each affine block, aligned with the plan's blocks.
+    block_kernels: Rc<[Option<Rc<block_kernels::BlockKernels>>]>,
     /// Invariant values of the block projection call in progress.
     active_split: block_residual_split::ActiveSplitSlot,
     /// Output buffer of a single-row split evaluation.
@@ -326,51 +291,52 @@ pub struct SolveRuntime {
     residual_row_batch: std::cell::RefCell<block_residual_split::ResidualRowBatch>,
     refresh_program_rows: FxHashMap<solve::RefreshScalarProgramSource, usize>,
     manifold: manifold_execution::PreparedManifoldProjection,
-    initial_residual: PreparedComputeBlock,
-    initial_residual_jacobian_v: PreparedComputeBlock,
-    initial_scalar_residual: PreparedScalarProgramBlock,
-    compiled_implicit_rhs: Option<Rc<dyn CompiledSolveExpression>>,
-    compiled_implicit_projection_jacobian_v: Option<Rc<dyn CompiledSolveJacobianExpression>>,
+    initial_residual_jacobian_v: EvaluationDirectional,
+    initial_scalar_residual: PrimalProgram,
+    expressions: PreparedExpressions,
     compiled_algebraic_jacobians: Vec<Option<Rc<dyn CompiledSolveProjectionJacobian>>>,
-    compiled_implicit_full_jacobian_v: Option<Rc<dyn CompiledSolveJacobianExpression>>,
-    compiled_initial_residual: Option<Rc<dyn CompiledSolveExpression>>,
-    compiled_initial_residual_jacobian_v: Option<Rc<dyn CompiledSolveJacobianExpression>>,
-    derivative_rhs: PreparedComputeBlock,
-    compiled_derivative_rhs: Option<Rc<dyn CompiledSolveExpression>>,
     /// Forward-mode AD Jacobian-vector product of `derivative_rhs`
     /// (`d(der)/d(y)·v`), lowered to `LinearOp`s with `LoadSeed`. Applied — with a
     /// seed completed by `seed_refresh_derivative_dependencies` — to form
     /// the exact state Jacobian for the state-only BDF path.
-    derivative_jacobian_v: PreparedEvaluationBlock,
+    derivative_jacobian_v: EvaluationDirectional,
     /// Primal state-derivative scalar program `der = f(solver_y, p, t)`. Reversed
     /// by [`Self::reverse_state_derivative_vjp`] to form the reverse-mode VJP
     /// `(∂der/∂[solver_y|p])ᵀ·λ` (Track A scalar reverse core).
-    derivative_scalar: PreparedEvaluationBlock,
+    derivative_scalar: EvaluationPrimal,
     /// Per-row forward-mode AD Jacobian-vector product of `implicit_rhs`
     /// (`d(residual_row)/d[y|p]·v`). Used to propagate state and parameter seeds
     /// through the algebraic projection row by row.
-    implicit_jacobian_v: PreparedScalarProgramBlock,
+    implicit_jacobian_v: DirectionalProgram,
     continuous_structural: solve::ContinuousStructuralArtifacts,
     initialization_structural: solve::InitializationStructuralArtifacts,
     algebraic_newton_caches: Vec<RefCell<crate::runtime::projection::SparseNewtonCache>>,
+    /// `SolveModel::solver_variable_scales` of the runtime model, formed once.
+    solver_variable_scales: Rc<[f64]>,
+    /// The parameter-static state Jacobian products, when certified.
+    state_jacobian_memo: Option<Rc<state_jacobian_memo::StateJacobianMemo>>,
     seed_projection_cache: RefCell<SeedProjectionCache>,
     algebraic_refresh: solve::RefreshPlan,
     /// Per initialization residual row, the positions of the algebraic
     /// refresh blocks it reads directly or through other blocks; `None` when
     /// a block Jacobian must carry its direction through every block
     /// ([`initial_projection::settled_read_cones`]).
-    settled_read_cones: Option<Box<[Box<[usize]>]>>,
+    settled_read_cones: Option<initial_projection::InitialReadCones>,
     derivative_refresh: solve::RefreshPlan,
     root_refresh: solve::RefreshPlan,
     event_refresh: solve::RefreshPlan,
     root_refresh_after_derivative: Option<solve::RefreshRemainderRelation>,
+    root_refresh_after_algebraic: Option<solve::RefreshRemainderRelation>,
+    algebraic_refresh_after_derivative: Option<solve::RefreshRemainderRelation>,
     clock_event_refresh_after_event: Vec<solve::RefreshRemainderRelation>,
     /// Certified coverage for the initialization homotopy continuation; the
     /// single source of truth shared by the sweep driver and the acceptance
     /// check in [`InitialContinuationCoverage::certify`].
     initial_continuation: Option<InitialContinuationCoverage>,
+    /// The observation programs of the root-condition and event-action blocks,
+    /// checked once when the runtime is built.
+    observation_authority: solve_eval::EventObservationAuthority,
     root_condition_rows: PreparedScalarProgramBlock,
-    compiled_root_conditions: Option<Rc<dyn CompiledSolveExpression>>,
     event_action_conditions: PreparedScalarProgramBlock,
     event_action_active_row_indices: RefCell<Vec<usize>>,
     root_condition_plan: Option<RootConditionPlan>,
@@ -392,6 +358,8 @@ pub struct SolveRuntime {
     guarded_assignment_programs: Vec<PreparedGuardedAssignmentProgram>,
     event_transaction_programs: Vec<PreparedEventTransactionProgram>,
     event_transaction_coverage: PreparedEventTransactionCoverage,
+    initialization_update_rhs: PreparedScalarProgramBlock,
+    dynamic_time_event_rhs: PreparedScalarProgramBlock,
     runtime_assignment_rhs: PreparedScalarProgramBlock,
     post_commit_assignment_rhs: PreparedScalarProgramBlock,
     update_values_scratch: RefCell<Vec<f64>>,
@@ -407,9 +375,6 @@ pub struct SolveRuntime {
     static_refresh_parameter_indices: Box<[usize]>,
     parameter_static_gradient_cache: RefCell<ParameterStaticGradientCache>,
     torn_sweep_cache: TornSweepCache,
-    runtime_state: solve_eval::SimulationRuntimeState,
-    delay_runtime: DelayRuntime,
-    root_condition_count: usize,
     derivative_scratch: RefCell<StateDerivativeScratch>,
     root_scratch: RefCell<Vec<f64>>,
     /// Reusable register tape / adjoint buffers for the reverse-mode VJP sweep,
@@ -427,7 +392,6 @@ pub struct SolveRuntime {
     clock_partition_intermediate_scratch: RefCell<Vec<f64>>,
     compiled_guarded_assignments: RefCell<FxHashMap<usize, Rc<dyn CompiledSolveExpression>>>,
     failed_guarded_assignments: RefCell<BTreeSet<usize>>,
-    compiled_event_transactions: Vec<Option<Rc<dyn CompiledSolveEventTransaction>>>,
     event_transaction_input_scratch: RefCell<Vec<f64>>,
     event_transaction_output_scratch: RefCell<Vec<Vec<f64>>>,
     compiled_root_rows: RefCell<FxHashMap<usize, Vec<CompiledDiscreteSpecialization>>>,
@@ -436,15 +400,10 @@ pub struct SolveRuntime {
     failed_visible_rows: RefCell<BTreeSet<usize>>,
     compiled_event_action_rows: RefCell<FxHashMap<usize, Vec<CompiledDiscreteSpecialization>>>,
     failed_event_action_rows: RefCell<BTreeSet<usize>>,
-    /// Warning-level assertion sites reported so far (MLS §8.3.7).
-    warning_log: RefCell<warnings::WarningLog>,
-    compiled_assignment_schedules: RefCell<
-        FxHashMap<solve::RefreshSequenceId, Option<Rc<dyn CompiledSolveAssignmentSchedule>>>,
-    >,
+    compiled_assignment_schedules: interpreted_schedules::CompiledSchedules,
     interpreted_assignment_schedules: interpreted_schedules::InterpretedSchedules,
     native_projection_assignments: native_projection_assignments::NativeProjectionAssignments,
     compiled_output_scratch: RefCell<Vec<f64>>,
-    clock_activation_cache: RefCell<ClockActivationCache>,
 }
 
 /// Opaque mutable state shared by the evaluators behind one ME component.
@@ -455,6 +414,46 @@ pub(crate) struct SolveRuntimeSnapshot {
 }
 
 impl SolveRuntime {
+    /// The immutable source owner whose execution was prepared by construction.
+    pub fn model(&self) -> &SolveRuntimeModel {
+        &self.model
+    }
+
+    /// `pre_params::commit_pre_params_after_event_at` over
+    /// the binding runs prepared at construction.
+    pub fn commit_pre_params_after_event_at(
+        &self,
+        y: &[f64],
+        params: &mut [f64],
+        event_time: Option<f64>,
+        tol: f64,
+    ) -> bool {
+        self.pre_bindings
+            .commit_after_event_at(&self.model, y, params, event_time, tol)
+    }
+
+    /// `pre_params::seed_event_entry_pre_params` over the
+    /// binding runs prepared at construction.
+    pub(crate) fn seed_event_entry_pre_params(
+        &self,
+        event_pre_y: &[f64],
+        event_pre_p: &[f64],
+        params: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        self.pre_bindings
+            .seed_event_entry(event_pre_y, event_pre_p, params)
+    }
+
+    /// Number of continuous states in the prepared source layout.
+    pub fn state_count(&self) -> usize {
+        self.state_count
+    }
+
+    /// Number of solver values in the prepared source layout.
+    pub fn solver_count(&self) -> usize {
+        self.solver_count
+    }
+
     pub fn new(model: &solve::SolveModel) -> Result<Self, EvalSolveError> {
         Self::new_with_execution_backend(model, None)
     }
@@ -467,8 +466,26 @@ impl SolveRuntime {
         Self::new(&model)
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_fixture_with_backend(
+        model: &solve::SolveModel,
+        backend: Rc<dyn SolveExecutionBackend>,
+    ) -> Result<Self, EvalSolveError> {
+        let mut model = model.clone();
+        model.problem.continuous.refresh_owners =
+            solve_eval::refresh_plan::build_continuous_refresh_owners(&mut model.problem)?;
+        Self::new_with_execution_backend(&model, Some(backend))
+    }
+
     pub fn new_with_execution_backend(
         model: &solve::SolveModel,
+        execution_backend: Option<Rc<dyn SolveExecutionBackend>>,
+    ) -> Result<Self, EvalSolveError> {
+        Self::construct(SolveRuntimeModel::copied(model), execution_backend, None)
+    }
+
+    pub(crate) fn new_with_model_owner(
+        model: SolveRuntimeModel,
         execution_backend: Option<Rc<dyn SolveExecutionBackend>>,
     ) -> Result<Self, EvalSolveError> {
         Self::construct(model, execution_backend, None)
@@ -478,531 +495,11 @@ impl SolveRuntime {
     /// primary runtime's prepared and compiled programs wherever `model`
     /// carries the same ones (see [`chart_sharing`]).
     pub(crate) fn new_alternate(&self, model: &solve::SolveModel) -> Result<Self, EvalSolveError> {
-        Self::construct(model, self.execution_backend.clone(), Some(self))
-    }
-
-    // SPEC_0021: Exception - construction-issued owner binding stays contiguous for auditability.
-    #[allow(clippy::too_many_lines)]
-    fn construct(
-        model: &solve::SolveModel,
-        execution_backend: Option<Rc<dyn SolveExecutionBackend>>,
-        primary: Option<&SolveRuntime>,
-    ) -> Result<Self, EvalSolveError> {
-        let prepare = |pick: fn(&SolveRuntime) -> &PreparedScalarProgramBlock,
-                       block: solve::ScalarProgramBlock| {
-            let base = primary.map(pick);
-            BlockReuse::of(base, &block).prepared(base, block)
-        };
-        // The state-derivative programs are evaluated, differentiated, and
-        // reversed, never solved for a target, so they derive no assignment
-        // certificates (one materialized program per output of a tensor row).
-        let prepare_evaluation =
-            |pick: fn(&SolveRuntime) -> &PreparedEvaluationBlock,
-             block: solve::ScalarProgramBlock| {
-                let base = primary.map(pick);
-                BlockReuse::of_programs(base.map(PreparedEvaluationBlock::block), &block)
-                    .prepared_evaluation(base, block)
-            };
-        let prepare_compute =
-            |pick: fn(&SolveRuntime) -> &PreparedComputeBlock,
-             block: &solve::ComputeBlock,
-             label: &'static str| match primary.map(pick) {
-                Some(base) => PreparedComputeBlock::with_shared_programs(base, block, label),
-                None => PreparedComputeBlock::new_with_label(block, label),
-            };
-        if !model.problem.continuous.refresh_owners.is_issued() {
-            return Err(EvalSolveError::InvalidRow {
-                message: "Solve model has no construction-issued continuous refresh owners"
-                    .to_string(),
-                span: None,
-            });
-        }
-        let continuous_structural = model.artifacts.continuous.structural.clone();
-        let initialization_structural = model.artifacts.initialization.structural.clone();
-        let algebraic_newton_caches = (0..continuous_structural.algebraic_projection().len())
-            .map(|_| RefCell::new(crate::runtime::projection::SparseNewtonCache::default()))
-            .collect();
-        let implicit_scalar_projection =
-            solve_eval::to_scalar_program_projection(&model.problem.continuous.implicit_rhs)?;
-        let mut refresh_program_rows = FxHashMap::default();
-        for (row, source) in implicit_scalar_projection
-            .sources()
-            .iter()
-            .copied()
-            .enumerate()
-        {
-            let Some(source) = source else {
-                continue;
-            };
-            if refresh_program_rows.insert(source, row).is_some() {
-                return Err(EvalSolveError::InvalidRow {
-                    message: "canonical refresh scalar-program identity is duplicated".to_string(),
-                    span: implicit_scalar_projection.block().program_span(row),
-                });
-            }
-        }
-        let implicit_scalar_programs = implicit_scalar_projection.into_block();
-        refresh_projection::validate_projection_primal_source(
-            &implicit_scalar_programs,
-            &continuous_structural,
-        )?;
-        let implicit_reuse = BlockReuse::of(
-            primary.map(|primary| &primary.implicit_scalar_rhs),
-            &implicit_scalar_programs,
-        );
-        let compiled_implicit_rhs = implicit_reuse.expression(
-            primary.and_then(|primary| primary.compiled_implicit_rhs.as_ref()),
-            &implicit_scalar_programs,
-            &mut |block| {
-                execution_backend.as_ref().and_then(|backend| {
-                    optional_compiled("implicit_rhs", backend.compile_selectable_expression(block))
-                })
-            },
-        );
-        let implicit_projection_scalar_jacobian = refresh_projection::projection_jacobian_source(
-            &model.artifacts.continuous.implicit_jacobian_v,
-            &continuous_structural,
-        )?;
-        let projection_reuse = BlockReuse::of(
-            primary.map(|primary| &primary.implicit_projection_scalar_jacobian_v),
-            &implicit_projection_scalar_jacobian,
-        );
-        let compiled_implicit_projection_jacobian_v = projection_reuse.jacobian(
-            primary.and_then(|primary| primary.compiled_implicit_projection_jacobian_v.as_ref()),
-            &implicit_projection_scalar_jacobian,
-            &mut |block| {
-                compiled_jacobian(
-                    execution_backend.as_ref(),
-                    "implicit_projection_jacobian_v",
-                    block,
-                )
-            },
-        );
-        let implicit_full_jacobian_v = model
-            .artifacts
-            .continuous
-            .implicit_jacobian_v_scalar
-            .clone();
-        let full_reuse = BlockReuse::of(
-            primary.map(|primary| &primary.implicit_jacobian_v),
-            &implicit_full_jacobian_v,
-        );
-        let compiled_implicit_full_jacobian_v = full_reuse.jacobian(
-            primary.and_then(|primary| primary.compiled_implicit_full_jacobian_v.as_ref()),
-            &implicit_full_jacobian_v,
-            &mut |block| {
-                compiled_jacobian(
-                    execution_backend.as_ref(),
-                    "implicit_full_jacobian_v",
-                    block,
-                )
-            },
-        );
-        let replaced_rows = implicit_reuse
-            .replaced_outputs(&implicit_scalar_programs)
-            .into_iter()
-            .chain(projection_reuse.replaced_outputs(&implicit_projection_scalar_jacobian))
-            .collect::<BTreeSet<_>>();
-        let implicit_scalar_rhs = implicit_reuse.prepared(
-            primary.map(|primary| &primary.implicit_scalar_rhs),
-            implicit_scalar_programs,
-        )?;
-        let compiled_algebraic_jacobians = match primary {
-            Some(primary) => chart_sharing::shared_projection_jacobians(
-                primary,
-                &continuous_structural,
-                &replaced_rows,
-            ),
-            None => refresh_projection::prepare_projection_jacobians(
-                &continuous_structural,
-                &implicit_scalar_rhs,
-                &implicit_projection_scalar_jacobian,
-                compiled_implicit_projection_jacobian_v.as_deref(),
-            )?,
-        };
-        let manifold = manifold_execution::PreparedManifoldProjection::new(
-            model,
-            execution_backend.as_deref(),
-        )?;
-        let derivative_scalar_rhs =
-            to_scalar_program_block(&model.problem.continuous.derivative_rhs)?;
-        // Scalarization is an evaluator-boundary view of the compact
-        // structured map.  Build it once and share it between dependency
-        // planning and the prepared runtime adapter.
-        let structured_discrete_scalar_rhs =
-            to_scalar_program_block(&model.problem.discrete.structured_rhs)?;
-        let guarded_assignment_programs = model
-            .problem
-            .discrete
-            .guarded_assignments
-            .iter()
-            .map(PreparedGuardedAssignmentProgram::new)
-            .collect::<Result<Vec<_>, _>>()?;
-        let event_transaction_programs = model
-            .problem
-            .discrete
-            .event_transactions
-            .iter()
-            .map(|program| PreparedEventTransactionProgram::new(program, &model.pure_calls))
-            .collect::<Result<Vec<_>, _>>()?;
-        let event_transaction_output_scratch = event_transaction_programs
-            .iter()
-            .map(|program| vec![0.0; program.output_scalar_count()])
-            .collect();
-        let event_transaction_coverage = PreparedEventTransactionCoverage::new(model);
-        let observation_refresh_scalar_rows = model
-            .problem
-            .discrete
-            .observation_refresh
-            .iter()
-            .enumerate()
-            .filter_map(|(row, selected)| selected.then_some(row))
-            .collect::<Box<[_]>>();
-        let compiled_event_transactions = event_transaction_programs
-            .iter()
-            .map(|prepared| {
-                execution_backend.as_ref().and_then(|backend| {
-                    optional_compiled(
-                        "event_transaction",
-                        backend.compile_event_transaction(prepared.program()),
-                    )
-                })
-            })
-            .collect();
-        let compiled_derivative_rhs = BlockReuse::of_programs(
-            primary.map(|primary| primary.derivative_scalar.block()),
-            &derivative_scalar_rhs,
+        Self::construct(
+            SolveRuntimeModel::copied(model),
+            self.scalar_evaluation()?.scalar.execution_backend.clone(),
+            Some(self),
         )
-        .expression_with_fresh(
-            primary.and_then(|primary| primary.compiled_derivative_rhs.as_ref()),
-            &derivative_scalar_rhs,
-            &mut || {
-                compiled_compute_expression(
-                    execution_backend.as_ref(),
-                    "derivative_rhs",
-                    &model.problem.continuous.derivative_rhs,
-                    &derivative_scalar_rhs,
-                )
-            },
-            &mut |block| compiled_expression(execution_backend.as_ref(), "derivative_rhs", block),
-        );
-        let refresh_owners = &model.problem.continuous.refresh_owners;
-        let algebraic_refresh = refresh_owners.algebraic().clone();
-        let derivative_refresh = refresh_owners.derivative().clone();
-        let root_refresh = refresh_owners.root().clone();
-        let event_refresh = refresh_owners.event().clone();
-        let clock_event_refresh = refresh_owners.clock_events().to_vec();
-        for row in [
-            &algebraic_refresh,
-            &derivative_refresh,
-            &root_refresh,
-            &event_refresh,
-        ]
-        .into_iter()
-        .flat_map(|plan| &plan.rows)
-        .chain(clock_event_refresh.iter().flat_map(|plan| &plan.rows))
-        {
-            if !refresh_program_rows.contains_key(&row.source()) {
-                return Err(EvalSolveError::InvalidRow {
-                    message: "refresh row source does not replay its final scalar projection"
-                        .to_string(),
-                    span: None,
-                });
-            }
-        }
-        let settled_read_cones = initial_projection::settled_read_cones(
-            model,
-            &continuous_structural,
-            &algebraic_refresh.simultaneous_plan,
-        );
-        trace_refresh_plan(model, "algebraic", &algebraic_refresh);
-        trace_refresh_plan(model, "derivative", &derivative_refresh);
-        trace_refresh_plan(model, "root", &root_refresh);
-        trace_refresh_plan(model, "event", &event_refresh);
-        for (clock, plan) in clock_event_refresh.iter().enumerate() {
-            trace_refresh_plan(model, &format!("clock-event-{clock}"), plan);
-        }
-        let mut refresh_plans = vec![
-            &algebraic_refresh,
-            &derivative_refresh,
-            &root_refresh,
-            &event_refresh,
-        ];
-        refresh_plans.extend(clock_event_refresh.iter());
-        let static_refresh_parameter_indices = static_refresh_parameter_indices(
-            &implicit_scalar_rhs,
-            refresh_plans,
-            &refresh_program_rows,
-        );
-        let root_refresh_after_derivative = refresh_owners.root_after_derivative().cloned();
-        let clock_event_refresh_after_event = refresh_owners.clock_events_after_event().to_vec();
-        if clock_event_refresh_after_event.len() != clock_event_refresh.len() {
-            return Err(EvalSolveError::InvalidRow {
-                message: "clock refresh remainder inventory does not match clock owners"
-                    .to_string(),
-                span: None,
-            });
-        }
-        trace_reverse_projection_coverage(model, &implicit_scalar_rhs);
-        let visible_value_plan = visible_value_plan(model);
-        let root_condition_plan = root_condition_plan(model);
-        let compiled_root_conditions = BlockReuse::of(
-            primary.map(|primary| &primary.root_condition_rows),
-            &model.problem.events.root_conditions,
-        )
-        .expression(
-            primary.and_then(|primary| primary.compiled_root_conditions.as_ref()),
-            &model.problem.events.root_conditions,
-            &mut |block| compiled_expression(execution_backend.as_ref(), "root_conditions", block),
-        );
-        let (initial_scalar_residual, initial_continuation) =
-            InitialContinuationCoverage::certify_runtime_blocks(
-                model,
-                &implicit_scalar_rhs,
-                &algebraic_refresh,
-            )?;
-        let compiled_initial_residual = BlockReuse::of(
-            primary.map(|primary| &primary.initial_scalar_residual),
-            &initial_scalar_residual,
-        )
-        .expression_with_fresh(
-            primary.and_then(|primary| primary.compiled_initial_residual.as_ref()),
-            &initial_scalar_residual,
-            &mut || {
-                compiled_compute_expression(
-                    execution_backend.as_ref(),
-                    "initial_residual",
-                    model.problem.initialization.residual(),
-                    &initial_scalar_residual,
-                )
-            },
-            &mut |block| compiled_expression(execution_backend.as_ref(), "initial_residual", block),
-        );
-        let initial_scalar_jacobian =
-            to_scalar_program_block(&model.artifacts.initialization.residual_jacobian_v)?;
-        let primary_initial_jacobian = primary
-            .map(|primary| {
-                to_scalar_program_block(&primary.model.artifacts.initialization.residual_jacobian_v)
-            })
-            .transpose()?;
-        let compiled_initial_residual_jacobian_v =
-            BlockReuse::of_programs(primary_initial_jacobian.as_ref(), &initial_scalar_jacobian)
-                .jacobian_with_fresh(
-                    primary
-                        .and_then(|primary| primary.compiled_initial_residual_jacobian_v.as_ref()),
-                    &initial_scalar_jacobian,
-                    &mut || {
-                        compiled_compute_jacobian(
-                            execution_backend.as_ref(),
-                            "initial_residual_jacobian_v",
-                            &model.artifacts.initialization.residual_jacobian_v,
-                            &initial_scalar_jacobian,
-                        )
-                    },
-                    &mut |block| {
-                        compiled_jacobian(
-                            execution_backend.as_ref(),
-                            "initial_residual_jacobian_v",
-                            block,
-                        )
-                    },
-                );
-        let delay_runtime = DelayRuntime::new(&model.problem.events.delays)?;
-        let root_condition_count =
-            total_root_condition_count(model, delay_runtime.event_root_count())?;
-        let structured_discrete_rows =
-            PreparedStructuredDiscreteRows::new(model, structured_discrete_scalar_rhs)?;
-        let clock_partition_structured_rows = discrete_rows::clock_partition_structured_rows(
-            model.problem.discrete.structured_updates.len(),
-            structured_discrete_rows.rows(),
-        );
-        let clock_partition_clocks = discrete_rows::clock_partition_clocks(&model.problem.discrete);
-        let block_splits = block_residual_split::block_residual_splits(
-            &model.problem.continuous.refresh_owners,
-            &model.problem.continuous.algebraic_projection_plan,
-            &continuous_structural,
-            &implicit_scalar_rhs,
-            execution_backend.as_deref(),
-            primary.map(|primary| {
-                block_residual_split::SharedSplits::new(
-                    &primary.model.problem.continuous.algebraic_projection_plan,
-                    &primary.block_splits,
-                    &replaced_rows,
-                )
-            }),
-        )
-        .into();
-        Ok(Self {
-            model: model.clone(),
-            state_count: model.state_scalar_count(),
-            solver_count: model.solver_scalar_count(),
-            implicit_rhs: prepare_compute(
-                |primary| &primary.implicit_rhs,
-                &model.problem.continuous.implicit_rhs,
-                "runtime_implicit_rhs",
-            )?,
-            implicit_projection_jacobian_v: prepare_compute(
-                |primary| &primary.implicit_projection_jacobian_v,
-                &model.artifacts.continuous.implicit_jacobian_v,
-                "runtime_implicit_projection_jacobian_v",
-            )?,
-            torn_tangents: torn_tangent_evaluators(
-                &model.problem.continuous.algebraic_projection_plan,
-                &implicit_projection_scalar_jacobian,
-                compiled_implicit_projection_jacobian_v.is_some(),
-            ),
-            // A backend-compiled JVP evaluates the colors natively, so the
-            // colored lanes are built only for the interpreted runtime.
-            colored_tangents: if compiled_implicit_projection_jacobian_v.is_some() {
-                Rc::from(Vec::new())
-            } else {
-                colored_tangent_evaluators(
-                    &model.problem.continuous.algebraic_projection_plan,
-                    &continuous_structural,
-                )
-            },
-            block_splits,
-            active_split: std::cell::Cell::new(None),
-            split_row_scratch: std::cell::RefCell::new(Vec::new()),
-            residual_row_batch: std::cell::RefCell::default(),
-            implicit_projection_scalar_jacobian_v: projection_reuse.prepared(
-                primary.map(|primary| &primary.implicit_projection_scalar_jacobian_v),
-                implicit_projection_scalar_jacobian,
-            )?,
-            implicit_scalar_rhs,
-            refresh_program_rows,
-            manifold,
-            initial_residual: PreparedComputeBlock::new_with_label(
-                model.problem.initialization.residual(),
-                "runtime_initial_residual",
-            )?,
-            initial_residual_jacobian_v: PreparedComputeBlock::new_with_label(
-                &model.artifacts.initialization.residual_jacobian_v,
-                "runtime_initial_residual_jacobian_v",
-            )?,
-            initial_scalar_residual: prepare(
-                |primary| &primary.initial_scalar_residual,
-                initial_scalar_residual,
-            )?,
-            compiled_implicit_rhs,
-            compiled_implicit_projection_jacobian_v,
-            compiled_algebraic_jacobians,
-            compiled_implicit_full_jacobian_v,
-            compiled_initial_residual,
-            compiled_initial_residual_jacobian_v,
-            derivative_rhs: PreparedComputeBlock::new_with_label(
-                &model.problem.continuous.derivative_rhs,
-                "runtime_derivative_rhs",
-            )?,
-            compiled_derivative_rhs,
-            derivative_jacobian_v: prepare_evaluation(
-                |primary| &primary.derivative_jacobian_v,
-                model.artifacts.continuous.full_jacobian_v.clone(),
-            )?,
-            derivative_scalar: prepare_evaluation(
-                |primary| &primary.derivative_scalar,
-                derivative_scalar_rhs,
-            )?,
-            implicit_jacobian_v: full_reuse.prepared(
-                primary.map(|primary| &primary.implicit_jacobian_v),
-                implicit_full_jacobian_v,
-            )?,
-            continuous_structural,
-            initialization_structural,
-            algebraic_newton_caches,
-            seed_projection_cache: RefCell::new(SeedProjectionCache::default()),
-            algebraic_refresh,
-            settled_read_cones,
-            derivative_refresh,
-            root_refresh,
-            event_refresh,
-            root_refresh_after_derivative,
-            clock_event_refresh_after_event,
-            initial_continuation,
-            root_condition_rows: prepare(
-                |primary| &primary.root_condition_rows,
-                model.problem.events.root_conditions.clone(),
-            )?,
-            compiled_root_conditions,
-            event_action_conditions: prepare(
-                |primary| &primary.event_action_conditions,
-                model.problem.events.action_conditions.clone(),
-            )?,
-            event_action_active_row_indices: RefCell::new(Vec::new()),
-            root_condition_plan,
-            discrete_rhs: prepare(
-                |primary| &primary.discrete_rhs,
-                model.problem.discrete.rhs.clone(),
-            )?,
-            observation_refresh_scalar_rows,
-            observation_refresh_p_scratch: RefCell::new(Vec::new()),
-            observation_refresh_values_scratch: RefCell::new(Vec::new()),
-            clock_partition_intermediates: prepare(
-                |primary| &primary.clock_partition_intermediates,
-                model.problem.discrete.clock_partition_intermediates.clone(),
-            )?,
-            clock_partition_clocks,
-            clock_partition_structured_rows,
-            clock_partition_work_y: RefCell::new(Vec::new()),
-            clock_partition_work_p: RefCell::new(Vec::new()),
-            guarded_assignment_programs,
-            event_transaction_programs,
-            event_transaction_coverage,
-            runtime_assignment_rhs: prepare(
-                |primary| &primary.runtime_assignment_rhs,
-                model.problem.discrete.runtime_assignment_rhs.clone(),
-            )?,
-            post_commit_assignment_rhs: prepare(
-                |primary| &primary.post_commit_assignment_rhs,
-                model.problem.discrete.post_commit_assignment_rhs.clone(),
-            )?,
-            update_values_scratch: RefCell::new(Vec::new()),
-            structured_discrete_rows,
-            visible_name_index: build_visible_name_index(model),
-            visible_value_rows: prepare(
-                |primary| &primary.visible_value_rows,
-                model.visible_value_rows.clone(),
-            )?,
-            visible_value_plan,
-            visible_scratch: RefCell::new(Vec::new()),
-            refresh_snapshot_scratch: RefCell::new(Vec::new()),
-            refresh_probe_scratch: RefCell::new(Vec::new()),
-            refresh_tensor_scratch: RefCell::new(Vec::new()),
-            static_refresh_cache: RefCell::new(StaticRefreshCache::default()),
-            static_refresh_parameter_indices,
-            parameter_static_gradient_cache: RefCell::new(ParameterStaticGradientCache::default()),
-            torn_sweep_cache: TornSweepCache::default(),
-            runtime_state: solve_eval::SimulationRuntimeState::new(),
-            delay_runtime,
-            root_condition_count,
-            derivative_scratch: RefCell::new(StateDerivativeScratch::default()),
-            root_scratch: RefCell::new(Vec::new()),
-            reverse_scratch: RefCell::new(solve_eval::reverse::ReverseScratch::default()),
-            execution_backend,
-            compiled_discrete_rows: RefCell::new(FxHashMap::default()),
-            failed_discrete_rows: RefCell::new(BTreeSet::new()),
-            compiled_clock_partition_intermediates: RefCell::new(FxHashMap::default()),
-            failed_clock_partition_intermediates: RefCell::new(BTreeSet::new()),
-            clock_partition_intermediate_scratch: RefCell::new(Vec::new()),
-            compiled_guarded_assignments: RefCell::new(FxHashMap::default()),
-            failed_guarded_assignments: RefCell::new(BTreeSet::new()),
-            compiled_event_transactions,
-            event_transaction_input_scratch: RefCell::new(Vec::new()),
-            event_transaction_output_scratch: RefCell::new(event_transaction_output_scratch),
-            compiled_root_rows: RefCell::new(FxHashMap::default()),
-            failed_root_rows: RefCell::new(BTreeSet::new()),
-            compiled_visible_rows: RefCell::new(FxHashMap::default()),
-            failed_visible_rows: RefCell::new(BTreeSet::new()),
-            compiled_event_action_rows: RefCell::new(FxHashMap::default()),
-            failed_event_action_rows: RefCell::new(BTreeSet::new()),
-            warning_log: RefCell::new(warnings::WarningLog::default()),
-            compiled_assignment_schedules: RefCell::new(FxHashMap::default()),
-            interpreted_assignment_schedules:
-                interpreted_schedules::InterpretedSchedules::construct(model)?,
-            native_projection_assignments: Default::default(),
-            compiled_output_scratch: RefCell::new(Vec::new()),
-            clock_activation_cache: RefCell::new(ClockActivationCache::default()),
-        })
     }
 
     /// Classify each periodic clock once per exact event instant.
@@ -1060,6 +557,58 @@ impl SolveRuntime {
         Ok(cache.active[owner.index()])
     }
 
+    pub fn has_delay_channels(&self) -> bool {
+        !self.delay_runtime.is_empty()
+    }
+
+    pub fn reset_delay_history(&self) {
+        self.delay_runtime.reset();
+    }
+
+    /// Record the accepted delay sources as the left limit of an event at
+    /// `time`, the accepted coordinate Event Mode is entered at.
+    pub fn hold_delay_history_at_event_entry(&self, time: f64) {
+        self.delay_runtime.hold_accepted_history_to(time);
+    }
+
+    pub(crate) fn snapshot(&self) -> SolveRuntimeSnapshot {
+        SolveRuntimeSnapshot {
+            evaluator: self.runtime_state.snapshot(),
+            delay: self.delay_runtime.snapshot(),
+        }
+    }
+
+    pub(crate) fn restore(&self, snapshot: &SolveRuntimeSnapshot) {
+        // Parameter-static refresh values are exact-keyed derived data, not
+        // component continuation state. Keeping them across an FMU-state
+        // restore is safe because every read validates the complete parameter
+        // key, and avoids copying the model-width cache for every host probe.
+        self.runtime_state.restore(&snapshot.evaluator);
+        self.delay_runtime.restore(&snapshot.delay);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matches_snapshot(&self, snapshot: &SolveRuntimeSnapshot) -> bool {
+        self.runtime_state.matches_snapshot(&snapshot.evaluator)
+            && self.delay_runtime.matches_snapshot(&snapshot.delay)
+    }
+
+    pub fn root_condition_count(&self) -> usize {
+        self.root_condition_count
+    }
+}
+
+impl ScalarExecutionView<'_> {
+    /// The checked observation context of the root-condition and event-action
+    /// blocks, over the authority derived at construction.
+    pub(super) fn event_observations(&self) -> solve_eval::CheckedEventObservationContext<'_> {
+        solve_eval::CheckedEventObservationContext::new(
+            &self.scalar.observation_authority,
+            &self.model.pure_calls,
+            &self.model.problem.events.actions,
+        )
+    }
+
     fn eval_discrete_program_outputs(
         &self,
         program: usize,
@@ -1068,7 +617,16 @@ impl SolveRuntime {
         t: f64,
         out: &mut Vec<f64>,
     ) -> Result<(), RuntimeSolveError> {
-        let mut compiled_rows = self.compiled_discrete_rows.borrow_mut();
+        if self.eval_lifecycle_program_outputs(
+            &self.scalar.discrete_rhs,
+            program,
+            RowEvalPoint { y, p, t },
+            out,
+        )? {
+            self.report_nonfinite_discrete_program_outputs(program, t, out);
+            return Ok(());
+        }
+        let mut compiled_rows = self.scalar.compiled_discrete_rows.borrow_mut();
         let had_compiled = compiled_rows.contains_key(&program);
         let used_compiled = match compiled_rows.get_mut(&program) {
             Some(compiled_variants) => {
@@ -1089,22 +647,32 @@ impl SolveRuntime {
         }
         drop(compiled_rows);
 
-        if !had_compiled && !self.discrete_rhs.has_lazy_row_plan(program) {
-            self.failed_discrete_rows.borrow_mut().remove(&program);
+        if !had_compiled && !self.scalar.discrete_rhs.has_lazy_row_plan(program) {
+            self.scalar
+                .failed_discrete_rows
+                .borrow_mut()
+                .remove(&program);
             self.compile_discrete_specialization(program);
-            if self.compiled_discrete_rows.borrow().contains_key(&program) {
+            if self
+                .scalar
+                .compiled_discrete_rows
+                .borrow()
+                .contains_key(&program)
+            {
                 return self.eval_discrete_program_outputs(program, y, p, t, out);
             }
         }
 
-        self.discrete_rhs.eval_row_outputs_unchecked_with_context(
-            program,
-            y,
-            p,
-            t,
-            self.row_eval_context(),
-            out,
-        )?;
+        self.scalar
+            .discrete_rhs
+            .eval_row_outputs_unchecked_with_context(
+                program,
+                y,
+                p,
+                t,
+                self.row_eval_context(),
+                out,
+            )?;
         self.report_nonfinite_discrete_program_outputs(program, t, out);
         self.compile_discrete_specialization(program);
         Ok(())
@@ -1144,17 +712,19 @@ impl SolveRuntime {
             .output_count
             .checked_add(compiled.guard_expectations.len())
             .ok_or_else(|| RuntimeSolveError::solve_ir("compiled output count overflow"))?;
-        let mut scratch = self.compiled_output_scratch.borrow_mut();
+        let mut scratch = self.scalar.compiled_output_scratch.borrow_mut();
         scratch.resize(total_outputs, 0.0);
-        let called =
-            compiled
-                .expression
-                .call(y, p, t, self.model.external_tables.as_slice(), &mut scratch);
+        compiled
+            .expression
+            .call(y, p, t, self.model.external_tables.as_slice(), &mut scratch)
+            .map_err(|error| {
+                admitted_compiled_error("discrete specialization", &[compiled.source_span], error)
+            })?;
         let guards_match = scratch[compiled.output_count..]
             .iter()
             .zip(&compiled.guard_expectations)
             .all(|(actual, expected)| (*actual != 0.0) == *expected);
-        if called.is_err() || !guards_match {
+        if !guards_match {
             return Ok(false);
         }
         out.clear();
@@ -1170,19 +740,13 @@ impl SolveRuntime {
             if value.is_finite() {
                 continue;
             }
-            let row = (0..self.model.problem.discrete.update_targets.len())
-                .find(|&row| self.discrete_rhs.row_output_position(row) == Some((program, offset)));
+            let row = (0..self.model.problem.discrete.update_targets.len()).find(|&row| {
+                self.scalar.discrete_rhs.row_output_position(row) == Some((program, offset))
+            });
             let target =
                 row.and_then(|row| self.model.problem.discrete.update_targets.get(row).copied());
-            let name = target.and_then(|target| {
-                self.model
-                    .problem
-                    .layout
-                    .bindings()
-                    .iter()
-                    .rev()
-                    .find_map(|(name, slot)| (*slot == target).then(|| name.to_string()))
-            });
+            let name =
+                target.and_then(|target| self.model.problem.layout.scalar_name_for_slot(target));
             eprintln!(
                 "[nan-trace] discrete program {program} output {offset} (row {}, target {}, slot {target:?}) @ t={t} = {}",
                 row.map_or_else(|| "?".to_string(), |row| row.to_string()),
@@ -1211,32 +775,26 @@ impl SolveRuntime {
         if value.is_finite() || !solve_eval::nan_trace::nan_trace_enabled() {
             return;
         }
-        let Some((program, _)) = self.implicit_scalar_rhs.row_output_position(row) else {
+        let Some((program, _)) = self
+            .scalar
+            .implicit_scalar_rhs
+            .source()
+            .row_output_position(row)
+        else {
             return;
         };
-        let Some(ops) = self.implicit_scalar_rhs.block().programs().get(program) else {
+        let Some(reads) = self
+            .scalar
+            .implicit_scalar_rhs
+            .source()
+            .nonfinite_y_reads(program)
+        else {
             return;
         };
-        let mut inputs = BTreeSet::new();
-        for op in ops {
-            match op {
-                solve::LinearOp::LoadY { index, .. } => {
-                    inputs.insert(*index);
-                }
-                solve::LinearOp::TensorLoad {
-                    input: solve::TensorInputKind::Y,
-                    input_start,
-                    count,
-                    ..
-                } => {
-                    inputs.extend(*input_start..input_start.saturating_add(*count));
-                }
-                _ => {}
-            }
-        }
+        let inputs = reads.collect::<BTreeSet<_>>();
         eprintln!(
             "[nan-trace] implicit residual row {row} ({}) @ t={t} = {}",
-            self.solver_name(row),
+            self.row_target_name(row),
             if value.is_nan() { "NaN" } else { "inf" },
         );
         for index in inputs {
@@ -1269,28 +827,33 @@ impl SolveRuntime {
                 .continuous
                 .algebraic_projection_plan
                 .blocks
+                .scalar_blocks()
                 .get(index)
                 .is_some_and(|block| block.tearing.as_ref() == Some(tearing)),
             "a torn block index names the plan block that owns its tearing"
         );
-        let evaluator = self.torn_tangents.get(index).and_then(Option::as_ref);
+        let evaluator = self
+            .scalar
+            .torn_tangents
+            .get(index)
+            .and_then(Option::as_ref);
         let Some(evaluator) = evaluator else {
             return Ok(None);
         };
-        let tables = self.model.external_tables.as_slice();
-        let compiled = self.compiled_implicit_projection_jacobian_v.as_deref();
-        let mut call = |program: usize, seed: &[f64], out: &mut Vec<f64>| {
-            compiled.is_some_and(|compiled| {
-                compiled
-                    .call_program_outputs(
-                        program,
-                        solve_eval::JacobianEvalInputs { y, p, t, seed },
-                        tables,
-                        out,
-                    )
-                    .unwrap_or(false)
-            })
-        };
+        let owner = &self.scalar.implicit_projection_scalar_jacobian_v;
+        let mut call =
+            |program: usize, seed: &[f64], out: &mut Vec<f64>| -> Result<bool, RuntimeSolveError> {
+                if !owner.is_compiled() {
+                    return Ok(false);
+                }
+                owner.eval_program_outputs(
+                    program,
+                    solve_eval::JacobianEvalInputs { y, p, t, seed },
+                    self.row_eval_context(),
+                    out,
+                )?;
+                Ok(true)
+            };
         evaluator
             .eval_through(
                 rumoca_eval_solve::TangentPoint {
@@ -1302,78 +865,6 @@ impl SolveRuntime {
                 &mut call,
             )
             .map(Some)
-            .map_err(Into::into)
-    }
-
-    pub fn row_eval_context(&self) -> RowEvalContext<'_> {
-        RowEvalContext {
-            external_tables: Some(self.model.external_tables.as_slice()),
-            pure_calls: Some(&self.model.pure_calls),
-            pure_call_execution: self
-                .execution_backend
-                .as_deref()
-                .and_then(|backend| backend.pure_call_execution()),
-            runtime_state: Some(&self.runtime_state),
-            ..Default::default()
-        }
-    }
-
-    pub fn has_delay_channels(&self) -> bool {
-        !self.delay_runtime.is_empty()
-    }
-
-    pub fn reset_delay_history(&self) {
-        self.delay_runtime.reset();
-    }
-
-    /// Record the accepted delay sources as the left limit of an event at
-    /// `time`, the accepted coordinate Event Mode is entered at.
-    pub fn hold_delay_history_at_event_entry(&self, time: f64) {
-        self.delay_runtime.hold_accepted_history_to(time);
-    }
-
-    pub(crate) fn snapshot(&self) -> SolveRuntimeSnapshot {
-        SolveRuntimeSnapshot {
-            evaluator: self.runtime_state.snapshot(),
-            delay: self.delay_runtime.snapshot(),
-        }
-    }
-
-    pub(crate) fn restore(&self, snapshot: &SolveRuntimeSnapshot) {
-        // Parameter-static refresh values are exact-keyed derived data, not
-        // component continuation state. Keeping them across an FMU-state
-        // restore is safe because every read validates the complete parameter
-        // key, and avoids copying the model-width cache for every host probe.
-        self.runtime_state.restore(&snapshot.evaluator);
-        self.delay_runtime.restore(&snapshot.delay);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn matches_snapshot(&self, snapshot: &SolveRuntimeSnapshot) -> bool {
-        self.runtime_state.matches_snapshot(&snapshot.evaluator)
-            && self.delay_runtime.matches_snapshot(&snapshot.delay)
-    }
-
-    pub fn initialize_delay_history(
-        &self,
-        time: f64,
-        solver_y: &[f64],
-        params: &mut [f64],
-    ) -> Result<(), RuntimeSolveError> {
-        self.delay_runtime
-            .initialize(time, solver_y, params, self.row_eval_context())
-            .map_err(Into::into)
-    }
-
-    pub fn refresh_delay_values(
-        &self,
-        time: f64,
-        solver_y: &[f64],
-        params: &mut [f64],
-    ) -> Result<Option<f64>, RuntimeSolveError> {
-        self.delay_runtime
-            .refresh(time, solver_y, params, self.row_eval_context())
-            .map_err(Into::into)
     }
 
     /// Refresh every delayed value: from its source while the initialization
@@ -1394,23 +885,8 @@ impl SolveRuntime {
         Ok(crate::runtime_values_changed(&before, params, tol))
     }
 
-    pub fn commit_delay_history(
-        &self,
-        time: f64,
-        solver_y: &[f64],
-        params: &[f64],
-    ) -> Result<(), RuntimeSolveError> {
-        self.delay_runtime
-            .commit(time, solver_y, params, self.row_eval_context())
-            .map_err(Into::into)
-    }
-
-    pub fn root_condition_count(&self) -> usize {
-        self.root_condition_count
-    }
-
     pub fn derivative_settled_coordinate_can_refresh_roots(&self) -> bool {
-        self.root_refresh_after_derivative.is_some()
+        self.scalar.root_refresh_after_derivative.is_some()
     }
 
     pub fn full_solver_y(
@@ -1453,6 +929,19 @@ impl SolveRuntime {
         self.refresh_algebraic_and_output_slots(t, guess, params, tol, max_iters)
     }
 
+    pub(crate) fn full_solver_y_with_guess_certified(
+        &self,
+        t: f64,
+        state: &[f64],
+        params: &[f64],
+        guess: &mut [f64],
+        tol: f64,
+        max_iters: usize,
+    ) -> Result<(), RuntimeSolveError> {
+        self.update_solver_y_guess_from_state(guess, state)?;
+        self.refresh_algebraic_and_output_slots_certified(t, guess, params, tol, max_iters)
+    }
+
     pub fn eval_state_derivatives(
         &self,
         t: f64,
@@ -1475,7 +964,7 @@ impl SolveRuntime {
         max_iters: usize,
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
-        let mut scratch = self.derivative_scratch.borrow_mut();
+        let mut scratch = self.scalar.derivative_scratch.borrow_mut();
         let solver_y = &mut scratch.solver_y;
         self.populate_solver_y_from_state(solver_y, state)?;
         self.eval_state_derivatives_at_solver_y(t, params, tol, max_iters, solver_y, out)
@@ -1554,10 +1043,10 @@ impl SolveRuntime {
         }
         validate_runtime_output_len("root condition output", root_count, out.len())?;
         let model_root_count = self.model.problem.events.root_conditions.len();
-        let mut solver_y = self.root_scratch.borrow_mut();
+        let mut solver_y = self.scalar.root_scratch.borrow_mut();
         self.populate_solver_y_from_state(&mut solver_y, state)?;
         self.refresh_slots_with_plan(
-            &self.root_refresh,
+            &self.scalar.root_refresh,
             RefreshSlotArgs {
                 t,
                 solver_y: &mut solver_y,
@@ -1573,15 +1062,13 @@ impl SolveRuntime {
             params,
             &mut out[..model_root_count],
         )?;
-        self.delay_runtime
-            .evaluate_event_roots(
-                t,
-                &solver_y,
-                params,
-                self.row_eval_context(),
-                &mut out[model_root_count..],
-            )
-            .map_err(RuntimeSolveError::from)?;
+        self.delay_runtime.evaluate_event_roots(
+            t,
+            &solver_y,
+            params,
+            self.row_eval_context(),
+            &mut out[model_root_count..],
+        )?;
         validate_finite_runtime_output("root condition output", out)
     }
 
@@ -1594,7 +1081,7 @@ impl SolveRuntime {
         max_iters: usize,
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
-        let mut solver_y = self.root_scratch.borrow_mut();
+        let mut solver_y = self.scalar.root_scratch.borrow_mut();
         self.populate_solver_y_from_state(&mut solver_y, state)?;
         self.eval_root_search_conditions_at_solver_y(t, params, tol, max_iters, out, &mut solver_y)
     }
@@ -1634,12 +1121,13 @@ impl SolveRuntime {
         let model_root_count = self.model.problem.events.root_conditions.len();
         let model_roots_need_refresh = model_root_count > 0
             && self
+                .scalar
                 .root_condition_plan
                 .as_ref()
                 .is_none_or(|plan| !plan.search_rows.is_empty());
         if model_roots_need_refresh || self.delay_runtime.event_root_count() > 0 {
             self.refresh_slots_with_plan(
-                &self.root_refresh,
+                &self.scalar.root_refresh,
                 RefreshSlotArgs {
                     t,
                     solver_y,
@@ -1652,17 +1140,15 @@ impl SolveRuntime {
         }
         if model_root_count > 0 {
             let model_out = &mut out[..model_root_count];
-            let Some(plan) = &self.root_condition_plan else {
+            let Some(plan) = &self.scalar.root_condition_plan else {
                 self.eval_root_conditions_from_refreshed_solver_y(t, solver_y, params, model_out)?;
-                self.delay_runtime
-                    .evaluate_event_roots(
-                        t,
-                        solver_y,
-                        params,
-                        self.row_eval_context(),
-                        &mut out[model_root_count..],
-                    )
-                    .map_err(RuntimeSolveError::from)?;
+                self.delay_runtime.evaluate_event_roots(
+                    t,
+                    solver_y,
+                    params,
+                    self.row_eval_context(),
+                    &mut out[model_root_count..],
+                )?;
                 return validate_finite_runtime_output("root search output", out);
             };
             self.validate_root_plan_output_len(plan, model_out)?;
@@ -1672,90 +1158,13 @@ impl SolveRuntime {
                 self.write_planned_root_search_conditions(plan, solver_y, params, t, model_out)?;
             }
         }
-        self.delay_runtime
-            .evaluate_event_roots(
-                t,
-                solver_y,
-                params,
-                self.row_eval_context(),
-                &mut out[model_root_count..],
-            )
-            .map_err(RuntimeSolveError::from)?;
-        validate_finite_runtime_output("root search output", out)
-    }
-
-    pub fn eval_root_search_conditions_after_derivative_settle_into(
-        &self,
-        t: f64,
-        params: &[f64],
-        solver_y: &mut [f64],
-        tol: f64,
-        max_iters: usize,
-        out: &mut [f64],
-    ) -> Result<(), RuntimeSolveError> {
-        if !self.derivative_settled_coordinate_can_refresh_roots() {
-            return Err(RuntimeSolveError::solve_ir(
-                "root refresh has no certified derivative-settled remainder".to_string(),
-            ));
-        }
-        if solver_y.len() != self.solver_count {
-            return Err(RuntimeSolveError::solve_ir(format!(
-                "derivative-settled solver-y length mismatch: expected {}, got {}",
-                self.solver_count,
-                solver_y.len()
-            )));
-        }
-        let relation = self.root_refresh_after_derivative.as_ref().ok_or_else(|| {
-            RuntimeSolveError::solve_ir(
-                "root refresh derivative-settled remainder disappeared".to_string(),
-            )
-        })?;
-        let remainder = relation.remainder();
-        if !remainder.value_stages.is_empty() {
-            self.refresh_slots_with_plan(
-                remainder,
-                RefreshSlotArgs {
-                    t,
-                    solver_y,
-                    params,
-                    tol,
-                    max_iters,
-                    certify_coordinates: true,
-                },
-            )?;
-        }
-        let root_count = self.root_condition_count();
-        if root_count == 0 {
-            return fill_inactive_root_output(out);
-        }
-        validate_runtime_output_len("root search output", root_count, out.len())?;
-        let model_root_count = self.model.problem.events.root_conditions.len();
-        if model_root_count > 0 {
-            let model_out = &mut out[..model_root_count];
-            match &self.root_condition_plan {
-                Some(plan) if plan.search_rows.is_empty() => {
-                    self.validate_root_plan_output_len(plan, model_out)?;
-                    self.write_planned_root_search_defaults(plan, params, t, model_out)?;
-                }
-                Some(plan) => {
-                    self.validate_root_plan_output_len(plan, model_out)?;
-                    self.write_planned_root_search_conditions(
-                        plan, solver_y, params, t, model_out,
-                    )?;
-                }
-                None => self
-                    .eval_root_conditions_from_refreshed_solver_y(t, solver_y, params, model_out)?,
-            }
-        }
-        self.delay_runtime
-            .evaluate_event_roots(
-                t,
-                solver_y,
-                params,
-                self.row_eval_context(),
-                &mut out[model_root_count..],
-            )
-            .map_err(RuntimeSolveError::from)?;
+        self.delay_runtime.evaluate_event_roots(
+            t,
+            solver_y,
+            params,
+            self.row_eval_context(),
+            &mut out[model_root_count..],
+        )?;
         validate_finite_runtime_output("root search output", out)
     }
 
@@ -1766,17 +1175,21 @@ impl SolveRuntime {
         p: &[f64],
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
-        if let Some(plan) = &self.root_condition_plan {
+        if let Some(plan) = &self.scalar.root_condition_plan {
             return self.write_planned_root_conditions(plan, y, p, t, out);
         }
-        if let Some(compiled) = &self.compiled_root_conditions {
-            compiled
-                .call(y, p, t, self.model.external_tables.as_slice(), out)
-                .map_err(RuntimeSolveError::solve_ir)?;
+        if let Some(compiled) = self.scalar.compiled_root_conditions() {
+            compiled.call(y, p, t, self.model.external_tables.as_slice(), out)?;
             return validate_finite_runtime_output("root condition output", out);
         }
-        self.root_condition_rows
-            .eval_with_context(y, p, t, self.row_eval_context(), out)
+        let observations = self.event_observations();
+        let context = RowEvalContext {
+            event_observations: Some(&observations),
+            ..self.row_eval_context()
+        };
+        self.scalar
+            .root_condition_rows
+            .eval_with_context(y, p, t, context, out)
             .map_err(Into::into)
     }
 
@@ -1798,7 +1211,7 @@ impl SolveRuntime {
                 RootConditionPlanEntry::Dynamic => 0.0,
             };
         }
-        self.eval_planned_root_rows(&plan.evaluated_rows, y, params, t, out)
+        self.eval_planned_root_rows(&plan.evaluated, y, params, t, out)
     }
 
     fn write_planned_root_search_conditions(
@@ -1810,7 +1223,7 @@ impl SolveRuntime {
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
         self.write_planned_root_search_defaults(plan, params, t, out)?;
-        self.eval_planned_root_rows(&plan.search_rows, y, params, t, out)
+        self.eval_planned_root_rows(&plan.search, y, params, t, out)
     }
 
     fn write_planned_root_search_defaults(
@@ -1834,22 +1247,19 @@ impl SolveRuntime {
 
     fn eval_planned_root_rows(
         &self,
-        output_indices: &[usize],
+        selection: &native_specialization::ProgramSelection,
         y: &[f64],
         params: &[f64],
         t: f64,
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
-        if output_indices.is_empty() {
-            return Ok(());
-        }
-        self.eval_selected_outputs_with_native(
+        self.eval_program_selection_with_native(
             SpecializedRows {
-                block: &self.root_condition_rows,
-                cache: &self.compiled_root_rows,
-                failed: &self.failed_root_rows,
+                block: &self.scalar.root_condition_rows,
+                cache: &self.scalar.compiled_root_rows,
+                failed: &self.scalar.failed_root_rows,
             },
-            output_indices,
+            selection,
             RowEvalPoint { y, p: params, t },
             out,
         )
@@ -1963,3 +1373,45 @@ fn validate_derivative_output_len(
 
 #[cfg(test)]
 mod tests;
+
+impl SolveRuntime {
+    pub fn row_eval_context(&self) -> RowEvalContext<'_> {
+        RowEvalContext {
+            external_tables: Some(self.model.external_tables.as_slice()),
+            pure_calls: Some(&self.model.pure_calls),
+            pure_call_execution: self
+                .scalar_backend()
+                .and_then(|backend| backend.pure_call_execution()),
+            runtime_state: Some(&self.runtime_state),
+            message_program_execution: self.message_program_execution(),
+            ..Default::default()
+        }
+    }
+    pub fn initialize_delay_history(
+        &self,
+        time: f64,
+        solver_y: &[f64],
+        params: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        self.delay_runtime
+            .initialize(time, solver_y, params, self.row_eval_context())
+    }
+    pub fn refresh_delay_values(
+        &self,
+        time: f64,
+        solver_y: &[f64],
+        params: &mut [f64],
+    ) -> Result<Option<f64>, RuntimeSolveError> {
+        self.delay_runtime
+            .refresh(time, solver_y, params, self.row_eval_context())
+    }
+    pub fn commit_delay_history(
+        &self,
+        time: f64,
+        solver_y: &[f64],
+        params: &[f64],
+    ) -> Result<(), RuntimeSolveError> {
+        self.delay_runtime
+            .commit(time, solver_y, params, self.row_eval_context())
+    }
+}

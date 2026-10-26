@@ -1,16 +1,23 @@
+#[cfg(test)]
+mod admitted_tests;
+
 use crate::RuntimeSolveError;
 use crate::runtime::projection::{
     AlgebraicProjectionModel, ImplicitProjectionModel, InitialHomotopySystem, ScaledNewtonSystem,
     project_initial_variables_with_homotopy,
 };
 use nalgebra::DVector;
+use rumoca_core::Span;
+use rumoca_eval_solve::JacobianEvalInputs;
 
 use super::initial_continuation::InitialContinuationCoverage;
 
 use super::*;
 
+pub(super) type InitialReadCones = Box<[Box<[usize]>]>;
+
 struct InitialProjectionModel<'a> {
-    runtime: &'a SolveRuntime,
+    runtime: ScalarExecutionView<'a>,
     tol: f64,
     max_iters: usize,
     refreshes_algebraic_reads: bool,
@@ -24,19 +31,17 @@ impl ImplicitProjectionModel for InitialProjectionModel<'_> {
         t: f64,
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
-        if let Some(compiled) = self.runtime.compiled_implicit_rhs.as_ref()
-            && compiled
-                .call(y, p, t, self.runtime.model.external_tables.as_slice(), out)
-                .is_ok()
-        {
-            self.runtime
-                .report_nonfinite_implicit_residual_inputs(t, y, out);
-            return Ok(());
-        }
-        self.runtime
-            .implicit_rhs
-            .eval_with_context(y, p, t, self.runtime.row_eval_context(), out)
-            .map_err(RuntimeSolveError::from)?;
+        admitted_output_call(
+            &self.runtime.scalar.compiled_output_scratch,
+            out,
+            |output| {
+                self.runtime.scalar.implicit_scalar_rhs.eval(
+                    RowEvalPoint { y, p, t },
+                    self.runtime.row_eval_context(),
+                    output,
+                )
+            },
+        )?;
         self.runtime
             .report_nonfinite_implicit_residual_inputs(t, y, out);
         Ok(())
@@ -50,36 +55,20 @@ impl ImplicitProjectionModel for InitialProjectionModel<'_> {
         v: &[f64],
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
-        if let Some(compiled) = self
-            .runtime
-            .compiled_implicit_projection_jacobian_v
-            .as_ref()
-            && compiled
-                .call(
-                    y,
-                    p,
-                    t,
-                    v,
-                    self.runtime.model.external_tables.as_slice(),
-                    out,
-                )
-                .is_ok()
-        {
-            return Ok(());
-        }
-        self.runtime
-            .implicit_projection_jacobian_v
-            .eval_with_context(
-                y,
-                p,
-                t,
-                RowEvalContext {
-                    seed: Some(v),
-                    ..self.runtime.row_eval_context()
-                },
-                out,
-            )
-            .map_err(Into::into)
+        admitted_output_call(
+            &self.runtime.scalar.compiled_output_scratch,
+            out,
+            |output| {
+                self.runtime
+                    .scalar
+                    .implicit_projection_scalar_jacobian_v
+                    .eval(
+                        solve_eval::JacobianEvalInputs { y, p, t, seed: v },
+                        self.runtime.row_eval_context(),
+                        output,
+                    )
+            },
+        )
     }
 
     fn implicit_target(&self, row_idx: usize) -> Option<solve::ScalarSlot> {
@@ -88,9 +77,7 @@ impl ImplicitProjectionModel for InitialProjectionModel<'_> {
             .problem
             .continuous
             .implicit_row_targets
-            .get(row_idx)
-            .copied()
-            .flatten()
+            .target_at(row_idx)
     }
 
     #[cfg(test)]
@@ -110,8 +97,9 @@ impl ImplicitProjectionModel for InitialProjectionModel<'_> {
     fn algebraic_projection_block_structure(
         &self,
         block_index: usize,
-    ) -> Option<&solve::JacobianStructure> {
+    ) -> Option<&solve::ColoredJacobianStructure> {
         self.runtime
+            .scalar
             .continuous_structural
             .algebraic_projection()
             .get(block_index)
@@ -119,6 +107,7 @@ impl ImplicitProjectionModel for InitialProjectionModel<'_> {
 
     fn algebraic_projection_block_invalidates_earlier(&self, block_index: usize) -> bool {
         self.runtime
+            .scalar
             .continuous_structural
             .algebraic_invalidates_earlier(block_index)
             .unwrap_or(true)
@@ -130,6 +119,7 @@ impl ImplicitProjectionModel for InitialProjectionModel<'_> {
         system: ScaledNewtonSystem<'_>,
     ) -> Option<DVector<f64>> {
         self.runtime
+            .scalar
             .algebraic_newton_caches
             .get(block_index)
             .map_or_else(
@@ -143,38 +133,17 @@ impl ImplicitProjectionModel for InitialProjectionModel<'_> {
             )
     }
 
-    fn target_name_for_row(&self, row_idx: usize) -> Option<&str> {
-        self.runtime
-            .model
-            .problem
-            .continuous
-            .implicit_row_targets
-            .get(row_idx)
-            .copied()
-            .flatten()
-            .and_then(|slot| match slot {
-                solve::ScalarSlot::Y { index, .. } => Some(index),
-                _ => None,
-            })
-            .and_then(|index| {
-                self.runtime
-                    .model
-                    .problem
-                    .solve_layout
-                    .solver_maps
-                    .names
-                    .get(index)
-            })
-            .map(String::as_str)
-    }
-
     fn implicit_target_assignment_is_exact(&self, row_idx: usize, target_y_index: usize) -> bool {
         self.runtime
+            .scalar
             .implicit_scalar_rhs
+            .source()
             .row_output_position(row_idx)
             .is_some_and(|(program_idx, output_offset)| {
                 self.runtime
+                    .scalar
                     .implicit_scalar_rhs
+                    .source()
                     .certifies_exact_target_assignment_output(
                         program_idx,
                         output_offset,
@@ -183,19 +152,12 @@ impl ImplicitProjectionModel for InitialProjectionModel<'_> {
             })
     }
 
-    fn variable_name_for_y_index(&self, y_index: usize) -> Option<&str> {
-        self.runtime
-            .model
-            .problem
-            .solve_layout
-            .solver_maps
-            .names
-            .get(y_index)
-            .map(String::as_str)
+    fn variable_name_for_y_index(&self, y_index: usize) -> Option<String> {
+        self.runtime.model.problem.solver_name(y_index)
     }
 
     fn variable_scale_for_y_index(&self, y_index: usize) -> f64 {
-        self.runtime.model.solver_variable_scale(y_index)
+        self.runtime.solver_variable_scale(y_index)
     }
 }
 
@@ -225,33 +187,25 @@ impl AlgebraicProjectionModel for InitialProjectionModel<'_> {
             Some((settled_y, settled_p)) => (settled_y.as_slice(), settled_p.as_slice()),
             None => (y, p),
         };
-        if let Some(compiled) = self.runtime.compiled_initial_residual.as_ref()
-            && compiled
-                .call(
-                    residual_y,
-                    residual_p,
-                    t,
-                    self.runtime.model.external_tables.as_slice(),
-                    out,
+        admitted_output_call(
+            &self.runtime.scalar.compiled_output_scratch,
+            out,
+            |output| {
+                self.runtime.scalar.initial_scalar_residual.eval_compact(
+                    RowEvalPoint {
+                        y: residual_y,
+                        p: residual_p,
+                        t,
+                    },
+                    self.runtime.row_eval_context(),
+                    output,
                 )
-                .is_ok()
-        {
-            return Ok(());
-        }
-        self.runtime
-            .initial_residual
-            .eval_with_context(
-                residual_y,
-                residual_p,
-                t,
-                self.runtime.row_eval_context(),
-                out,
-            )
-            .map_err(Into::into)
+            },
+        )
     }
 
     fn initial_residual_len(&self) -> usize {
-        self.runtime.initial_residual.len()
+        self.runtime.scalar.initial_scalar_residual.source().len()
     }
 
     fn initial_target(&self, row_idx: usize) -> Option<solve::ScalarSlot> {
@@ -268,8 +222,9 @@ impl AlgebraicProjectionModel for InitialProjectionModel<'_> {
     fn initial_projection_block_structure(
         &self,
         block_index: usize,
-    ) -> Option<&solve::JacobianStructure> {
+    ) -> Option<&solve::ColoredJacobianStructure> {
         self.runtime
+            .scalar
             .initialization_structural
             .projection()
             .get(block_index)
@@ -313,22 +268,29 @@ impl AlgebraicProjectionModel for InitialProjectionModel<'_> {
         }
         let Some(row_idx) = self
             .runtime
+            .scalar
             .initial_scalar_residual
+            .source()
             .single_output_row_for_output_index(output_index)
         else {
             return Ok(None);
         };
-        self.runtime
-            .initial_scalar_residual
-            .eval_target_assignment_row_unchecked_with_context(
-                row_idx,
-                target_y_index,
-                y,
-                p,
-                t,
+        if let Some(queries) = self.runtime.scalar.compiled_targets(true) {
+            return queries.call(
+                (row_idx, 0, target_y_index),
+                (y, p, t),
                 self.runtime.row_eval_context(),
-            )
-            .map_err(Into::into)
+            );
+        }
+        let Some(reference) = self.runtime.scalar.initial_scalar_residual.reference() else {
+            return Ok(None);
+        };
+        reference.eval_target_assignment_row_unchecked_with_context(
+            row_idx,
+            target_y_index,
+            RowEvalPoint { y, p, t },
+            self.runtime.row_eval_context(),
+        )
     }
 
     fn eval_initial_residual_row(
@@ -343,23 +305,22 @@ impl AlgebraicProjectionModel for InitialProjectionModel<'_> {
         }
         let Some(row_idx) = self
             .runtime
+            .scalar
             .initial_scalar_residual
+            .source()
             .single_output_row_for_output_index(output_index)
         else {
             return Ok(None);
         };
         self.runtime
+            .scalar
             .initial_scalar_residual
-            .eval_row_output_unchecked_with_context(
-                row_idx,
-                0,
-                y,
-                p,
-                t,
+            .eval_output(
+                (row_idx, 0),
+                RowEvalPoint { y, p, t },
                 self.runtime.row_eval_context(),
             )
             .map(Some)
-            .map_err(Into::into)
     }
 }
 
@@ -375,7 +336,7 @@ impl InitialProjectionModel<'_> {
     ///
     /// With `blocks` (positions in the algebraic refresh's simultaneous plan,
     /// the construction-issued read cone of the rows being evaluated, see
-    /// [`SolveRuntime::settled_blocks_read_by`]), only those blocks are
+    /// [`ScalarExecutionView::settled_blocks_read_by`]), only those blocks are
     /// reconstructed. The cone is closed over the blocks it reads, so the rows
     /// see exactly the values the complete view gives them, while a block
     /// outside it that is undefined at the point (an enthalpy `h` of
@@ -445,12 +406,12 @@ impl InitialProjectionModel<'_> {
     ///
     /// The compiled residual JVP differentiates stored coordinates and so
     /// cannot see `d settled(y, p) / d(y, p)`. The direction is carried through
-    /// the fixed point that settles the view ([`SolveRuntime::settled_initial_tangent`])
+    /// the fixed point that settles the view ([`ScalarExecutionView::settled_initial_tangent`])
     /// and the residual JVP then reads that tangent at the settled point.
     ///
     /// With `rows`, only those rows' entries are needed, so the tangent carries
     /// the direction through only the algebraic blocks they read
-    /// ([`SolveRuntime::settled_blocks_read_by`]). A block outside that set
+    /// ([`ScalarExecutionView::settled_blocks_read_by`]). A block outside that set
     /// cannot move them, and linearizing it anyway would refuse the whole
     /// derivative wherever that block alone is singular.
     fn eval_settled_initial_jacobian_v(
@@ -496,37 +457,21 @@ impl InitialProjectionModel<'_> {
         v: &[f64],
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
-        if let Some(compiled) = self.runtime.compiled_initial_residual_jacobian_v.as_ref()
-            && compiled
-                .call(
-                    y,
-                    p,
-                    t,
-                    v,
-                    self.runtime.model.external_tables.as_slice(),
-                    out,
+        admitted_output_call(
+            &self.runtime.scalar.compiled_output_scratch,
+            out,
+            |output| {
+                self.runtime.scalar.initial_residual_jacobian_v.eval(
+                    solve_eval::JacobianEvalInputs { y, p, t, seed: v },
+                    self.runtime.row_eval_context(),
+                    output,
                 )
-                .is_ok()
-        {
-            return Ok(());
-        }
-        self.runtime
-            .initial_residual_jacobian_v
-            .eval_with_context(
-                y,
-                p,
-                t,
-                RowEvalContext {
-                    seed: Some(v),
-                    ..self.runtime.row_eval_context()
-                },
-                out,
-            )
-            .map_err(Into::into)
+            },
+        )
     }
 }
 
-impl SolveRuntime {
+impl ScalarExecutionView<'_> {
     /// The initialization residual's directional derivative along `v` (over
     /// `[solver-y | parameter]`) at `(y, p, t)`, as the initialization
     /// projection forms it: through the settled view when a row reads a
@@ -539,7 +484,7 @@ impl SolveRuntime {
         out: &mut [f64],
     ) -> Result<(), RuntimeSolveError> {
         InitialProjectionModel {
-            runtime: self,
+            runtime: *self,
             tol: settle.tol,
             max_iters: settle.max_iters,
             refreshes_algebraic_reads: self.initial_rows_read_settled_view(),
@@ -561,17 +506,59 @@ impl SolveRuntime {
                 reason: "an initialization update row has no directional derivative".to_string(),
             });
         };
-        let seed_len = (y.len() + p.len()).max(self.implicit_jacobian_v.requirements().seed_len);
+        let seed_len = (y.len() + p.len()).max(
+            self.scalar
+                .implicit_jacobian_v
+                .source()
+                .requirements()
+                .seed_len,
+        );
         let mut seed = vec![0.0; seed_len];
         let copied = v.len().min(seed_len);
         seed[..copied].copy_from_slice(&v[..copied]);
-        solve_eval::eval_scalar_program_block_with_context(
+        self.eval_initial_update_jacobian(
             block,
-            y,
-            p,
-            t,
+            JacobianEvalInputs {
+                y,
+                p,
+                t,
+                seed: &seed,
+            },
+            out,
+        )
+    }
+
+    fn eval_initial_update_jacobian(
+        &self,
+        source: &solve::ScalarProgramBlock,
+        inputs: JacobianEvalInputs<'_>,
+        out: &mut [f64],
+    ) -> Result<(), RuntimeSolveError> {
+        if let Some(code) = self.scalar.compiled_initial_update_jacobian() {
+            return code
+                .call(
+                    inputs.y,
+                    inputs.p,
+                    inputs.t,
+                    inputs.seed,
+                    self.model.external_tables.as_slice(),
+                    out,
+                )
+                .map_err(|error| {
+                    admitted_compiled_error(
+                        "initial update Jacobian",
+                        source.program_spans(),
+                        error,
+                    )
+                });
+        }
+        solve_eval::eval_scalar_program_block_with_context(
+            source,
+            inputs.y,
+            inputs.p,
+            inputs.t,
             RowEvalContext {
-                seed: Some(&seed),
+                seed: Some(inputs.seed),
                 ..self.row_eval_context()
             },
             out,
@@ -602,7 +589,7 @@ impl SolveRuntime {
     /// the initialization rows `rows` read: the union of their construction-
     /// issued cones. `None` when every block is needed.
     pub(super) fn settled_blocks_read_by(&self, rows: &[usize]) -> Option<Vec<usize>> {
-        let cones = self.settled_read_cones.as_deref()?;
+        let cones = self.scalar.settled_read_cones.as_deref()?;
         let mut blocks = Vec::new();
         for &row in rows {
             blocks.extend_from_slice(cones.get(row)?);
@@ -619,12 +606,13 @@ impl SolveRuntime {
         &self,
         blocks: &[usize],
     ) -> (solve::AlgebraicProjectionPlan, Vec<usize>) {
-        let refresh = &self.algebraic_refresh;
+        let refresh = &self.scalar.algebraic_refresh;
         let plan = solve::AlgebraicProjectionPlan {
-            blocks: blocks
+            blocks: (blocks
                 .iter()
-                .map(|&block| refresh.simultaneous_plan.blocks[block].clone())
-                .collect(),
+                .map(|&block| refresh.simultaneous_plan.blocks.scalar_blocks()[block].clone())
+                .collect::<Vec<_>>())
+            .into(),
         };
         let indices = blocks
             .iter()
@@ -645,16 +633,15 @@ impl SolveRuntime {
         (tol, max_iters): (f64, usize),
     ) -> Result<(), RuntimeSolveError> {
         let projection_model = RefreshProjectionModel {
-            runtime: self,
+            runtime: *self,
             seed_linearizations: None,
             #[cfg(test)]
             plan,
             block_indices,
             plan_validated: false,
-            jacobian_v: ProjectionJacobian::SolverY {
-                block: &self.implicit_projection_jacobian_v,
-                scalar: &self.implicit_projection_scalar_jacobian_v,
-            },
+            jacobian_v: ProjectionJacobian::SolverY(
+                &self.scalar.implicit_projection_scalar_jacobian_v,
+            ),
         };
         crate::runtime::projection::project_algebraics_with_plan(
             &projection_model,
@@ -702,7 +689,13 @@ impl SolveRuntime {
                 });
             }
         };
-        let seed_len = (y.len() + p.len()).max(self.implicit_jacobian_v.requirements().seed_len);
+        let seed_len = (y.len() + p.len()).max(
+            self.scalar
+                .implicit_jacobian_v
+                .source()
+                .requirements()
+                .seed_len,
+        );
         let mut seed = vec![0.0; seed_len];
         seed[..v.len()].copy_from_slice(v);
         let lin = AlgebraicLinearization {
@@ -710,7 +703,7 @@ impl SolveRuntime {
             params: p,
             settle,
         };
-        let refresh = &self.algebraic_refresh;
+        let refresh = &self.scalar.algebraic_refresh;
         let subset = blocks.map(|blocks| self.refresh_block_subset(blocks));
         let plan = match &subset {
             Some((plan, indices)) => (plan, indices.as_slice()),
@@ -723,14 +716,13 @@ impl SolveRuntime {
         for pass in 0..settle.max_iters {
             let mut changed = false;
             if let Some(block) = updates {
-                solve_eval::eval_scalar_program_block_with_context(
+                self.eval_initial_update_jacobian(
                     block,
-                    y,
-                    p,
-                    t,
-                    RowEvalContext {
-                        seed: Some(&seed),
-                        ..self.row_eval_context()
+                    JacobianEvalInputs {
+                        y,
+                        p,
+                        t,
+                        seed: &seed,
                     },
                     &mut values,
                 )?;
@@ -749,49 +741,95 @@ impl SolveRuntime {
 
 /// Per initialization residual row, the positions in `plan` of the algebraic
 /// refresh blocks the row reads directly or through other blocks, closed over
-/// the construction's structural patterns, issued once when the runtime is
+/// the canonical primal value dependencies, issued once when the runtime is
 /// built. `None` when a block Jacobian must carry its direction through every
-/// block: a pattern is unrecorded, or an update row reads an algebraic slot,
+/// block: an update row reads an algebraic slot,
 /// so the updates' tangents may carry any block's.
 pub(super) fn settled_read_cones(
     model: &solve::SolveModel,
-    continuous: &solve::ContinuousStructuralArtifacts,
+    residual: &solve::ScalarProgramBlock,
+    implicit: &solve::ScalarProgramBlock,
     plan: &solve::AlgebraicProjectionPlan,
-) -> Option<Box<[Box<[usize]>]>> {
-    let residual = model
-        .artifacts
-        .initialization
-        .structural
-        .residual()?
-        .pattern();
-    let implicit = continuous.implicit()?.pattern();
+) -> Result<Option<InitialReadCones>, EvalSolveError> {
     if updates_read_algebraic_slots(model) {
-        return None;
+        return Ok(None);
     }
-    Some(read_cones(residual, implicit, &plan.blocks))
+    let residual_reads =
+        primal_row_reads(residual, model.problem.initialization.residual().len()?)?;
+    let implicit_reads = primal_row_reads(implicit, model.problem.continuous.implicit_rhs.len()?)?;
+    for block in plan.blocks.scalar_blocks() {
+        for &row in &block.rows {
+            if implicit.output_position(row).is_none() {
+                return Err(EvalSolveError::InvalidRow {
+                    message: "an initial read cone requests an unproduced continuous equation"
+                        .into(),
+                    span: implicit.first_source_span(),
+                });
+            }
+        }
+    }
+    Ok(Some(read_cones(
+        &residual_reads,
+        &implicit_reads,
+        plan.blocks.scalar_blocks(),
+        implicit.first_source_span(),
+    )?))
 }
 
-/// [`settled_read_cones`] over the patterns: `residual` has one row per
-/// initialization row and `implicit` one per continuous row, both over
-/// `[solver-y | parameter]` columns.
+/// Route every primal output through its checked output placement. Guards can
+/// read a coordinate while its derivative is identically zero.
+fn primal_row_reads(
+    block: &solve::ScalarProgramBlock,
+    row_count: usize,
+) -> Result<Vec<std::collections::BTreeSet<usize>>, EvalSolveError> {
+    let mut rows = vec![std::collections::BTreeSet::new(); row_count];
+    for (program_index, program) in block.programs().iter().enumerate() {
+        let span = block.program_span(program_index);
+        let error = || EvalSolveError::InvalidRow {
+            message: "initial primal read projection disagrees with its checked output placement"
+                .into(),
+            span,
+        };
+        let dependencies = solve::StructuralPattern::derive_output_y_dependencies(program, span)
+            .map_err(|failure| EvalSolveError::InvalidRow {
+                message: failure.to_string(),
+                span,
+            })?;
+        let ordinals = block
+            .program_output_ordinals(program_index)
+            .ok_or_else(error)?;
+        if ordinals.len() != dependencies.len() {
+            return Err(error());
+        }
+        for (ordinal, reads) in ordinals.zip(dependencies) {
+            let output = block.output_index_at(ordinal).ok_or_else(error)?;
+            let destination = rows.get_mut(output).ok_or_else(error)?;
+            destination.extend(reads);
+        }
+    }
+    Ok(rows)
+}
+
+/// [`settled_read_cones`] over primal solver-Y dependencies, with one entry per
+/// initialization or continuous equation rather than scalar program number.
 fn read_cones(
-    residual: &solve::StructuralPattern,
-    implicit: &solve::StructuralPattern,
+    residual: &[std::collections::BTreeSet<usize>],
+    implicit: &[std::collections::BTreeSet<usize>],
     blocks: &[solve::AlgebraicProjectionBlock],
-) -> Box<[Box<[usize]>]> {
-    let columns = residual.columns().max(implicit.columns()) as usize;
-    (0..residual.rows() as usize)
-        .map(|row| {
-            let mut read = vec![false; columns];
-            residual.visit_row_columns(row, &mut |column| read[column] = true);
+    source_span: Option<Span>,
+) -> Result<Box<[Box<[usize]>]>, EvalSolveError> {
+    residual
+        .iter()
+        .map(|dependencies| {
+            let mut read = dependencies.clone();
             let mut needed = vec![false; blocks.len()];
             // Plan order puts most readers after the blocks they read, so a
             // sweep from the last block back usually closes the set in one
             // pass; the loop stops at the first pass that adds no block.
-            while add_blocks_read(blocks, implicit, &mut read, &mut needed) {}
-            (0..blocks.len())
+            while add_blocks_read(blocks, implicit, &mut read, &mut needed, source_span)? {}
+            Ok((0..blocks.len())
                 .filter(|&position| needed[position])
-                .collect()
+                .collect())
         })
         .collect()
 }
@@ -800,23 +838,30 @@ fn read_cones(
 /// in `read` and adding the columns its rows read; whether any block was added.
 fn add_blocks_read(
     blocks: &[solve::AlgebraicProjectionBlock],
-    implicit: &solve::StructuralPattern,
-    read: &mut [bool],
+    implicit: &[std::collections::BTreeSet<usize>],
+    read: &mut std::collections::BTreeSet<usize>,
     needed: &mut [bool],
-) -> bool {
+    source_span: Option<Span>,
+) -> Result<bool, EvalSolveError> {
     let mut grew = false;
     for (position, block) in blocks.iter().enumerate().rev() {
-        let solves_a_read = block.y_indices.iter().any(|&y| read.get(y) == Some(&true));
+        let solves_a_read = block.y_indices.iter().any(|y| read.contains(y));
         if needed[position] || !solves_a_read {
             continue;
         }
         needed[position] = true;
         grew = true;
         for &row in &block.rows {
-            implicit.visit_row_columns(row, &mut |column| read[column] = true);
+            let dependencies = implicit
+                .get(row)
+                .ok_or_else(|| EvalSolveError::InvalidRow {
+                    message: "an initial read cone references an absent continuous equation".into(),
+                    span: source_span,
+                })?;
+            read.extend(dependencies);
         }
     }
-    grew
+    Ok(grew)
 }
 
 /// Write the update rows' tangents `values` into the seed entries of their
@@ -843,7 +888,7 @@ pub(super) fn write_update_tangents(
     changed
 }
 
-impl SolveRuntime {
+impl ScalarExecutionView<'_> {
     /// Project the initialization unknowns, sweeping the homotopy continuation
     /// parameter when the model has a solve for it to steer.
     ///
@@ -871,13 +916,14 @@ impl SolveRuntime {
         max_iters: usize,
     ) -> Result<(), RuntimeSolveError> {
         let drives_algebraic_refresh = self
+            .scalar
             .initial_continuation
             .as_ref()
             .is_some_and(InitialContinuationCoverage::drives_algebraic_refresh);
         project_initial_variables_with_homotopy(
             InitialHomotopySystem {
                 model: &InitialProjectionModel {
-                    runtime: self,
+                    runtime: *self,
                     tol,
                     max_iters,
                     refreshes_algebraic_reads: self.initial_rows_read_settled_view(),
@@ -885,6 +931,7 @@ impl SolveRuntime {
                 t,
                 plan: self.model.problem.initialization.projection_plan(),
                 homotopy_parameter_index: self
+                    .scalar
                     .initial_continuation
                     .as_ref()
                     .and_then(InitialContinuationCoverage::sweep_parameter_index),
@@ -957,9 +1004,8 @@ impl SolveRuntime {
             // initialization instant that memory must be the relation evaluated
             // at the solution itself (MLS 3.7 §8.6, every equation holds at
             // once), so a change sends the projection round again.
-            let state = y[..self.model.state_scalar_count().min(y.len())].to_vec();
             let relations_changed =
-                self.update_relation_memory_from_state(t, &state, p, tol, max_iters)?;
+                self.refresh_initial_relation_memory(t, y, p, tol, max_iters)?;
             let update_changed = self.apply_initialization_updates(y, p, t, tol, max_iters)?;
             if !delay_changed && !update_changed && !relations_changed {
                 return Ok(());
@@ -969,26 +1015,10 @@ impl SolveRuntime {
             "initial algebraic/update projection did not converge at t={t}"
         )))
     }
-
-    /// Whether any initialization update row reads an algebraic coordinate.
-    ///
-    /// States occupy the first `state_scalar_count` solver-vector slots and
-    /// algebraic/output coordinates occupy the remainder, so an update program
-    /// that loads a solver slot at or beyond the state count depends on a
-    /// coordinate the continuous equations determine rather than a state the
-    /// projection owns. Such an update needs the algebraics reconstructed into
-    /// the coordinate vector before it re-reads them (see the caller). Both the
-    /// scalar solver-vector load and the packed tensor load reach the algebraic
-    /// range; a vector-valued binding (an analytic-loop geometry read, say) is
-    /// lowered to the tensor form, so testing only the scalar load would miss
-    /// exactly the reads that select an assembly branch.
-    pub fn initialization_updates_read_algebraic_slots(&self) -> bool {
-        updates_read_algebraic_slots(&self.model)
-    }
 }
 
 /// Whether an initialization update row of `model` reads an algebraic slot.
-fn updates_read_algebraic_slots(model: &solve::SolveModel) -> bool {
+pub(super) fn updates_read_algebraic_slots(model: &solve::SolveModel) -> bool {
     let state_count = model.state_scalar_count();
     model
         .problem
@@ -996,36 +1026,63 @@ fn updates_read_algebraic_slots(model: &solve::SolveModel) -> bool {
         .update_rhs()
         .programs()
         .iter()
-        .flatten()
-        .any(|op| match op {
-            solve::LinearOp::LoadY { index, .. } => *index >= state_count,
-            solve::LinearOp::TensorLoad {
-                input: solve::TensorInputKind::Y,
-                input_start,
-                count,
-                ..
-            } => input_start.saturating_add(*count) > state_count,
-            _ => false,
-        })
+        .any(|ops| program_reads_algebraic_slots(ops, state_count))
+}
+
+/// Nested regions read the same solver vector as their enclosing program.
+/// Reuse the canonical Solve walker for scalar and compact Map update queries.
+pub(super) fn program_reads_algebraic_slots(ops: &[solve::LinearOp], state_count: usize) -> bool {
+    struct Reads {
+        state_count: usize,
+        found: bool,
+    }
+    impl solve::visitor::SolveVisitor for Reads {
+        type Error = std::convert::Infallible;
+
+        fn visit_linear_op(
+            &mut self,
+            _kind: solve::visitor::LinearOpSliceKind,
+            _index: usize,
+            op: &solve::LinearOp,
+        ) -> Result<(), Self::Error> {
+            self.found |= reads_algebraic_slot(op, self.state_count);
+            Ok(())
+        }
+    }
+    let mut reads = Reads {
+        state_count,
+        found: false,
+    };
+    let kind = solve::visitor::LinearOpSliceKind::ScalarProgram {
+        program_index: 0,
+        span: None,
+    };
+    let Ok(()) = solve::visitor::walk_linear_op_slice(&mut reads, kind, ops);
+    reads.found
+}
+
+fn reads_algebraic_slot(op: &solve::LinearOp, state_count: usize) -> bool {
+    match op {
+        solve::LinearOp::LoadY { index, .. } => *index >= state_count,
+        solve::LinearOp::TensorLoad {
+            input: solve::TensorInputKind::Y,
+            input_start,
+            count,
+            ..
+        } => input_start.saturating_add(*count) > state_count,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod read_cone_tests {
     use super::*;
+    use std::sync::Arc;
 
-    fn pattern(rows: &[Vec<usize>], columns: usize) -> solve::StructuralPattern {
-        let span = rumoca_core::Span::from_offsets(
-            rumoca_core::SourceId::from_source_name("read_cone_tests.mo"),
-            0,
-            1,
-        );
-        let provenance = solve::PatternProvenance::derived(
-            solve::PatternDerivation::DependencyPropagation,
-            span,
-        )
-        .expect("fixture provenance");
-        solve::StructuralPattern::from_row_dependencies(rows.len(), columns, rows, provenance)
-            .expect("fixture pattern")
+    fn reads(rows: &[Vec<usize>]) -> Vec<std::collections::BTreeSet<usize>> {
+        rows.iter()
+            .map(|row| row.iter().copied().collect())
+            .collect()
     }
 
     fn block(row: usize, y: usize) -> solve::AlgebraicProjectionBlock {
@@ -1036,6 +1093,70 @@ mod read_cone_tests {
         }
     }
 
+    #[test]
+    fn primal_output_routing_keeps_comparison_control_and_multiple_stores() {
+        use solve::LinearOp as Op;
+        let span = rumoca_core::Span::from_offsets(
+            rumoca_core::SourceId::from_source_name("primal_read_cone.mo"),
+            0,
+            1,
+        );
+        let region = solve::FunctionConditionalProgram::checked(
+            0,
+            [1],
+            [(
+                vec![Op::LoadP { dst: 0, index: 0 }, Op::StoreOutput { src: 0 }],
+                vec![
+                    Op::LoadY { dst: 0, index: 1 },
+                    Op::Const { dst: 1, value: 0.0 },
+                    Op::Compare {
+                        dst: 2,
+                        op: solve::CompareOp::Gt,
+                        lhs: 0,
+                        rhs: 1,
+                    },
+                    Op::StoreOutput { src: 2 },
+                ],
+            )],
+            vec![Op::Const { dst: 0, value: 0.0 }, Op::StoreOutput { src: 0 }],
+        )
+        .unwrap();
+        let program = solve::ScalarProgramBlock::with_output_indices(
+            vec![vec![
+                Op::LoadY { dst: 0, index: 2 },
+                Op::FunctionConditional {
+                    dst_start: 1,
+                    capture_start: 1,
+                    program: Arc::new(region),
+                },
+                Op::Binary {
+                    dst: 2,
+                    op: solve::BinaryOp::Sub,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Op::StoreOutput { src: 2 },
+                Op::LoadY { dst: 3, index: 1 },
+                Op::StoreOutput { src: 3 },
+            ]],
+            vec![span],
+            vec![2, 0],
+        )
+        .unwrap();
+        let rows = primal_row_reads(&program, 3).unwrap();
+        assert_eq!(rows, reads(&[vec![1], vec![], vec![1, 2]]));
+        let cones = read_cones(
+            &reads(&[vec![2]]),
+            &rows,
+            &[block(0, 1), block(2, 2)],
+            Some(span),
+        )
+        .unwrap();
+        assert_eq!(&*cones[0], &[0, 1]);
+        let error = primal_row_reads(&program, 2).unwrap_err();
+        assert_eq!(error.source_span(), Some(span));
+    }
+
     /// TwoTanks in miniature over `[m, H, level, h, T]`: block 0 solves `level`
     /// from `m`, block 1 solves `h` from `H = m*h` (singular at `m = 0`), and
     /// block 2 solves `T` from `h`. The level row reads only block 0, so the
@@ -1043,13 +1164,15 @@ mod read_cone_tests {
     /// and, through it, block 1.
     #[test]
     fn an_unread_singular_block_is_outside_the_level_rows_cone() {
-        let implicit = pattern(&[vec![0, 2], vec![0, 1, 3], vec![3, 4]], 5);
-        let residual = pattern(&[vec![2], vec![4]], 5);
+        let implicit = reads(&[vec![0, 2], vec![0, 1, 3], vec![3, 4]]);
+        let residual = reads(&[vec![2], vec![4]]);
         let cones = read_cones(
             &residual,
             &implicit,
             &[block(0, 2), block(1, 3), block(2, 4)],
-        );
+            None,
+        )
+        .unwrap();
         assert_eq!(&*cones[0], &[0]);
         assert_eq!(&*cones[1], &[1, 2]);
     }
@@ -1058,20 +1181,21 @@ mod read_cone_tests {
     /// sweep repeats until it adds nothing.
     #[test]
     fn a_block_reading_a_later_block_is_closed_over() {
-        let implicit = pattern(&[vec![1], vec![2], vec![]], 3);
-        let residual = pattern(&[vec![0]], 3);
+        let implicit = reads(&[vec![1], vec![2], vec![]]);
+        let residual = reads(&[vec![0]]);
         let cones = read_cones(
             &residual,
             &implicit,
             &[block(2, 2), block(0, 0), block(1, 1)],
-        );
+            None,
+        )
+        .unwrap();
         assert_eq!(&*cones[0], &[0, 1, 2]);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use indexmap::IndexMap;
     use rumoca_core::{BytePos, SourceId, Span};
 
     use super::*;
@@ -1121,12 +1245,11 @@ mod tests {
         ]]);
         let model = solve::SolveModel {
             problem: solve::SolveProblem {
+                layout: crate::fixture_layout::named_y_layout(
+                    rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 1),
+                    vec!["x".to_string()],
+                ),
                 solve_layout: solve::SolveLayout {
-                    solver_maps: solve::SolverNameIndexMaps {
-                        names: vec!["x".to_string()],
-                        name_to_idx: IndexMap::from([("x".to_string(), 0)]),
-                        base_to_indices: IndexMap::from([("x".to_string(), vec![0])]),
-                    },
                     state_scalar_count: 1,
                     compiled_parameter_len: 1,
                     initial_homotopy_parameter_index: Some(0),
@@ -1134,7 +1257,7 @@ mod tests {
                 },
                 continuous: solve::ContinuousSolveSystem {
                     implicit_rhs: implicit,
-                    implicit_row_targets: vec![Some(solve::scalar_slot_y(0))],
+                    implicit_row_targets: (vec![Some(solve::scalar_slot_y(0))]).into(),
                     ..Default::default()
                 },
                 initialization: solve::InitializationSolveSystem::construct(
@@ -1168,13 +1291,13 @@ mod tests {
                     ..Default::default()
                 },
             },
-            initial_y: vec![0.0],
-            parameters: vec![0.0],
+            initial_y: vec![0.0].into(),
+            parameters: vec![0.0].into(),
             ..Default::default()
         };
         let runtime = SolveRuntime::new_fixture(&model).expect("runtime should prepare");
-        let mut y = model.initial_y.clone();
-        let mut p = model.parameters.clone();
+        let mut y = model.initial_y.to_vec();
+        let mut p = model.parameters.to_vec();
 
         runtime
             .project_initial_variables(&mut y, &mut p, 0.0, 1.0e-10, 8)
@@ -1207,12 +1330,11 @@ mod tests {
         ]]);
         let model = solve::SolveModel {
             problem: solve::SolveProblem {
+                layout: crate::fixture_layout::named_y_layout(
+                    rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 1),
+                    vec!["source".to_string()],
+                ),
                 solve_layout: solve::SolveLayout {
-                    solver_maps: solve::SolverNameIndexMaps {
-                        names: vec!["source".to_string()],
-                        name_to_idx: IndexMap::from([("source".to_string(), 0)]),
-                        base_to_indices: IndexMap::from([("source".to_string(), vec![0])]),
-                    },
                     state_scalar_count: 1,
                     compiled_parameter_len: 1,
                     ..Default::default()
@@ -1256,13 +1378,13 @@ mod tests {
                 },
                 ..Default::default()
             },
-            initial_y: vec![0.0],
-            parameters: vec![0.0],
+            initial_y: vec![0.0].into(),
+            parameters: vec![0.0].into(),
             ..Default::default()
         };
         let runtime = SolveRuntime::new_fixture(&model).expect("runtime should prepare");
-        let mut y = model.initial_y.clone();
-        let mut p = model.parameters.clone();
+        let mut y = model.initial_y.to_vec();
+        let mut p = model.parameters.to_vec();
         runtime
             .initialize_delay_history(0.0, &y, &mut p)
             .expect("delay history should seed from the declaration start");
@@ -1300,11 +1422,9 @@ mod tests {
         (scalar(&implicit_full_jacobian), scalar(&update_jacobian))
     }
 
-    fn fixed_algebraic_parameter_model() -> solve::SolveModel {
-        // Continuous a = nested_q - 49; initialization update nested_q = q; initial
-        // equation a = 0. The compiled partial JVP of the initial row w.r.t. q is
-        // zero (it reads stored `a`); the settled total derivative is one.
-        let implicit = block(vec![vec![
+    /// Continuous row a = nested_q - 49.
+    fn fixed_algebraic_implicit_residual() -> solve::ComputeBlock {
+        block(vec![vec![
             solve::LinearOp::LoadY { dst: 0, index: 0 },
             solve::LinearOp::LoadP { dst: 1, index: 1 },
             solve::LinearOp::Const {
@@ -1324,7 +1444,14 @@ mod tests {
                 rhs: 3,
             },
             solve::LinearOp::StoreOutput { src: 4 },
-        ]]);
+        ]])
+    }
+
+    fn fixed_algebraic_parameter_model() -> solve::SolveModel {
+        // Continuous a = nested_q - 49; initialization update nested_q = q; initial
+        // equation a = 0. The compiled partial JVP of the initial row w.r.t. q is
+        // zero (it reads stored `a`); the settled total derivative is one.
+        let implicit = fixed_algebraic_implicit_residual();
         let initial = block(vec![vec![
             solve::LinearOp::LoadY { dst: 0, index: 0 },
             solve::LinearOp::StoreOutput { src: 0 },
@@ -1340,27 +1467,28 @@ mod tests {
             solve::LinearOp::LoadP { dst: 0, index: 0 },
             solve::LinearOp::StoreOutput { src: 0 },
         ]]);
-        solve::SolveModel {
+        let mut model = solve::SolveModel {
             problem: solve::SolveProblem {
+                layout: crate::fixture_layout::named_y_layout(
+                    rumoca_ir_solve::VarLayout::from_parts(Default::default(), 0, 2),
+                    vec!["a".to_string()],
+                ),
                 solve_layout: solve::SolveLayout {
-                    solver_maps: solve::SolverNameIndexMaps {
-                        names: vec!["a".to_string()],
-                        name_to_idx: IndexMap::from([("a".to_string(), 0)]),
-                        base_to_indices: IndexMap::from([("a".to_string(), vec![0])]),
-                    },
+                    algebraic_scalar_count: 1,
                     compiled_parameter_len: 2,
                     ..Default::default()
                 },
                 continuous: solve::ContinuousSolveSystem {
                     implicit_rhs: implicit,
-                    implicit_row_targets: vec![Some(solve::scalar_slot_y(0))],
+                    implicit_row_targets: (vec![Some(solve::scalar_slot_y(0))]).into(),
                     algebraic_projection_plan: solve::AlgebraicProjectionPlan {
-                        blocks: vec![solve::AlgebraicProjectionBlock {
+                        blocks: (vec![solve::AlgebraicProjectionBlock {
                             rows: vec![0],
                             y_indices: vec![0],
                             tearing: None,
                             alternate_charts: Vec::new(),
-                        }],
+                        }])
+                        .into(),
                     },
                     ..Default::default()
                 },
@@ -1401,18 +1529,97 @@ mod tests {
                     ..Default::default()
                 },
             },
-            initial_y: vec![51.0],
-            parameters: vec![100.0, 100.0],
+            initial_y: vec![51.0].into(),
+            parameters: vec![100.0, 100.0].into(),
             ..Default::default()
+        };
+        crate::test_fixtures::derive_structural_artifacts(&mut model);
+        model
+    }
+
+    #[test]
+    fn initial_updates_find_algebraic_reads_in_checked_nested_regions() {
+        // MLS §8.6: initialization depends on the solved algebraic even when
+        // its load is inside a checked nested region, rather than a top-level op.
+        let row = vec![
+            solve::LinearOp::LoadY { dst: 0, index: 0 },
+            solve::LinearOp::StoreOutput { src: 0 },
+        ];
+        let domain = rumoca_core::StructuredIndexDomain {
+            binders: vec![rumoca_core::StructuredIndexBinder {
+                provenance: rumoca_core::IndexBinderProvenance::Generated,
+                id: 0,
+                display_name: "iteration".into(),
+                lower: 1,
+                upper: 1,
+                step: 1,
+            }],
+        };
+        let fold = solve::FunctionFoldProgram::checked(domain, 1, 0, row.clone())
+            .expect("checked single-iteration algebraic read");
+        let conditional = solve::FunctionConditionalProgram::checked(
+            0,
+            vec![1],
+            [(
+                vec![
+                    solve::LinearOp::Const { dst: 0, value: 1.0 },
+                    solve::LinearOp::StoreOutput { src: 0 },
+                ],
+                row.clone(),
+            )],
+            row,
+        )
+        .expect("checked conditional algebraic read");
+        for nested in [
+            solve::LinearOp::FunctionFold {
+                dst_start: 1,
+                initial_start: 0,
+                capture_start: 0,
+                program: std::sync::Arc::new(fold),
+            },
+            solve::LinearOp::FunctionConditional {
+                dst_start: 1,
+                capture_start: 0,
+                program: std::sync::Arc::new(conditional),
+            },
+        ] {
+            let mut model = fixed_algebraic_parameter_model();
+            let mut input = model.problem.initialization.clone().into_input();
+            input.update_rhs = scalar_block(vec![vec![
+                solve::LinearOp::Const { dst: 0, value: 0.0 },
+                nested,
+                solve::LinearOp::StoreOutput { src: 1 },
+            ]]);
+            model.problem.initialization = solve::InitializationSolveSystem::construct(input)
+                .expect("checked nested initialization update");
+            let mut outputs = [f64::NAN];
+            solve_eval::eval_scalar_program_block_with_context(
+                model.problem.initialization.update_rhs(),
+                &model.initial_y,
+                &model.parameters,
+                0.0,
+                Default::default(),
+                &mut outputs,
+            )
+            .expect("canonical nested read executes");
+            assert_eq!(outputs, [51.0], "reads the actual algebraic slot");
+            assert!(
+                updates_read_algebraic_slots(&model),
+                "a nested LoadY still requires solved algebraic reconstruction"
+            );
         }
+        assert!(
+            !updates_read_algebraic_slots(&fixed_algebraic_parameter_model()),
+            "parameter-only update remains independent of algebraic refresh"
+        );
     }
 
     #[test]
     fn fixed_algebraic_row_uses_total_sensitivity_of_continuous_refresh() {
         let model = fixed_algebraic_parameter_model();
         let runtime = SolveRuntime::new_fixture(&model).expect("runtime should prepare");
-        let mut y = model.initial_y.clone();
-        let mut p = model.parameters.clone();
+        let mut y = model.initial_y.to_vec();
+        let mut p = model.parameters.to_vec();
 
         runtime
             .settle_initialization_system(&mut y, &mut p, 0.0, 1.0e-9, 12)

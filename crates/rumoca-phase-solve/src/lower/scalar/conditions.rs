@@ -2,7 +2,7 @@ use rumoca_core::Span;
 use rumoca_ir_dae as dae;
 use rumoca_ir_solve as solve;
 
-use super::{ActivationCondition, ActivationGuard, ScalarCompiler};
+use super::{ActivationCondition, ActivationGuard, ScalarCompiler, ScalarContextFrame};
 use crate::LowerError;
 
 impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
@@ -11,8 +11,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         condition: dae::ConditionId<'dae>,
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
         let output = self.condition(condition)?;
-        self.ops.push(solve::LinearOp::StoreOutput { src: output });
-        Ok(self.ops)
+        self.emit(solve::LinearOp::StoreOutput { src: output })?;
+        self.finish_operations()
     }
 
     /// Compile a condition that lives inside `clock`'s partition.
@@ -26,8 +26,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
         self.active_clock = Some(clock);
         let output = self.condition(condition)?;
-        self.ops.push(solve::LinearOp::StoreOutput { src: output });
-        Ok(self.ops)
+        self.emit(solve::LinearOp::StoreOutput { src: output })?;
+        self.finish_operations()
     }
 
     pub(in crate::lower) fn edge_condition_program(
@@ -40,8 +40,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let edge = self.trigger_edge(trigger, trigger_memory, span)?;
         let guard = self.condition(guard)?;
         let output = self.binary(dae::BinaryOperator::And, edge, guard, span)?;
-        self.ops.push(solve::LinearOp::StoreOutput { src: output });
-        Ok(self.ops)
+        self.emit(solve::LinearOp::StoreOutput { src: output })?;
+        self.finish_operations()
     }
 
     /// A warning-level action (MLS §8.3.7): `edge(trigger) and guard and not
@@ -59,8 +59,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let guard = self.condition(guard)?;
         let active = self.binary(dae::BinaryOperator::And, edge, guard, span)?;
         let output = self.violated(active, holds, span)?;
-        self.ops.push(solve::LinearOp::StoreOutput { src: output });
-        Ok(self.ops)
+        self.emit(solve::LinearOp::StoreOutput { src: output })?;
+        self.finish_operations()
     }
 
     /// A warning-level action owned by a clock: active on its ticks.
@@ -84,8 +84,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let activation = self.load_slot(solve::scalar_slot_p(activation), span)?;
         let active = self.binary(dae::BinaryOperator::And, activation, guard, span)?;
         let output = self.violated(active, holds, span)?;
-        self.ops.push(solve::LinearOp::StoreOutput { src: output });
-        Ok(self.ops)
+        self.emit(solve::LinearOp::StoreOutput { src: output })?;
+        self.finish_operations()
     }
 
     fn violated(
@@ -117,8 +117,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             })?;
         let activation = self.load_slot(solve::scalar_slot_p(activation), span)?;
         let output = self.binary(dae::BinaryOperator::And, activation, guard, span)?;
-        self.ops.push(solve::LinearOp::StoreOutput { src: output });
-        Ok(self.ops)
+        self.emit(solve::LinearOp::StoreOutput { src: output })?;
+        self.finish_operations()
     }
 
     /// Compile roots owned by one exact source occurrence as one program.
@@ -126,28 +126,32 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     /// dependencies and are evaluated with the source call's cardinality.
     pub(in crate::lower) fn root_program_outputs(
         mut self,
-        relations: impl IntoIterator<Item = dae::RelationId<'dae>>,
+        relations: impl IntoIterator<Item = (dae::RelationId<'dae>, Option<dae::ExprId<'dae>>)>,
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
-        for relation in relations {
+        for (relation, guard) in relations {
             let relation = self
                 .view
                 .relation(relation)
                 .expect("checked relation identity resolves");
-            let output =
-                self.root_expression(relation.expression(), relation.provenance().span())?;
-            self.ops.push(solve::LinearOp::StoreOutput { src: output });
+            let output = self.activated_root_expression(
+                relation.expression(),
+                guard,
+                relation.provenance().span(),
+            )?;
+            self.emit(solve::LinearOp::StoreOutput { src: output })?;
         }
-        Ok(self.ops)
+        self.finish_operations()
     }
 
     pub(in crate::lower) fn root_expression_program(
         mut self,
         expression: dae::ExprId<'dae>,
+        guard: Option<dae::ExprId<'dae>>,
         span: Span,
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
-        let output = self.root_expression(expression, span)?;
-        self.ops.push(solve::LinearOp::StoreOutput { src: output });
-        Ok(self.ops)
+        let output = self.activated_root_expression(expression, guard, span)?;
+        self.emit(solve::LinearOp::StoreOutput { src: output })?;
+        self.finish_operations()
     }
 
     /// A relation's root is negative exactly when the relation holds: the
@@ -160,10 +164,11 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     fn inclusive_root(
         &mut self,
         inclusive: bool,
+        expression: dae::ExprId<'dae>,
         root: solve::Reg,
         span: Span,
     ) -> Result<solve::Reg, LowerError> {
-        if !inclusive {
+        if !inclusive || self.quotient_root(expression) {
             return Ok(root);
         }
         let zero = self.constant(0.0, span)?;
@@ -172,12 +177,39 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         self.select(at_boundary, holds, root, span)
     }
 
-    fn root_expression(
+    // Quotient memory certifies the exact live ratio indicator and owns its
+    // boundary behavior. Its issued root must retain that canonical program.
+    fn quotient_root(&self, expression: dae::ExprId<'dae>) -> bool {
+        (0..self.view.runtime_quotient_owner_count()).any(|index| {
+            let Some(owner) = self.view.runtime_quotient_owner_at(index) else {
+                return false;
+            };
+            match owner.kind() {
+                dae::RuntimeQuotientOwnerKind::ModelEvent { generated, .. }
+                | dae::RuntimeQuotientOwnerKind::StructuredModelEvent { generated, .. } => {
+                    generated[5] == expression
+                }
+                dae::RuntimeQuotientOwnerKind::FunctionBody { .. } => false,
+            }
+        })
+    }
+
+    pub(super) fn root_expression(
         &mut self,
         expression: dae::ExprId<'dae>,
         span: Span,
     ) -> Result<solve::Reg, LowerError> {
         let node = self.node(expression);
+        if node.value_type().scalar_type() == dae::ScalarType::Boolean
+            && let Some(condition) = self.exact_integer_expression(expression, 0)?
+        {
+            // Integer relations change at discrete events (MLS §3.8.5).
+            // Their signed truth surface must not subtract rounded operands
+            // or introduce overflow by subtracting two valid Integers.
+            let when_true = self.constant(-1.0, span)?;
+            let when_false = self.constant(1.0, span)?;
+            return self.select(condition, when_true, when_false, span);
+        }
         let output = match node.operation() {
             dae::ExpressionOperation::Binary {
                 operator: operator @ (dae::BinaryOperator::Less | dae::BinaryOperator::LessEqual),
@@ -187,7 +219,12 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 let lhs = self.expression(lhs, 0)?;
                 let rhs = self.expression(rhs, 0)?;
                 let root = self.binary(dae::BinaryOperator::Subtract, lhs, rhs, span)?;
-                self.inclusive_root(operator == dae::BinaryOperator::LessEqual, root, span)?
+                self.inclusive_root(
+                    operator == dae::BinaryOperator::LessEqual,
+                    expression,
+                    root,
+                    span,
+                )?
             }
             dae::ExpressionOperation::Binary {
                 operator:
@@ -198,7 +235,12 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 let lhs = self.expression(lhs, 0)?;
                 let rhs = self.expression(rhs, 0)?;
                 let root = self.binary(dae::BinaryOperator::Subtract, rhs, lhs, span)?;
-                self.inclusive_root(operator == dae::BinaryOperator::GreaterEqual, root, span)?
+                self.inclusive_root(
+                    operator == dae::BinaryOperator::GreaterEqual,
+                    expression,
+                    root,
+                    span,
+                )?
             }
             _ => {
                 let condition = self.unbuffered_expression(expression, 0)?;
@@ -219,7 +261,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         let branch_count = self.guarded_dynamic_branch_count(targets)?;
         if branch_count == 0 {
             self.store_guarded_assignment_fallbacks(targets)?;
-            return Ok(self.ops);
+            return self.finish_operations();
         }
         let target_widths = targets
             .iter()
@@ -250,17 +292,17 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             })?;
         let result_count = program.result_count;
         let dst_start = self.register_range(result_count, span)?;
-        self.ops.push(solve::LinearOp::FunctionConditional {
+        self.emit(solve::LinearOp::FunctionConditional {
             dst_start,
             capture_start: 0,
             program: std::sync::Arc::new(program),
-        });
-        self.ops.push(solve::LinearOp::StoreOutputRange {
+        })?;
+        self.emit(solve::LinearOp::StoreOutputRange {
             start: dst_start,
             count: result_count,
             stride: 1,
-        });
-        Ok(self.ops)
+        })?;
+        self.finish_operations()
     }
 
     fn guarded_dynamic_branch_count(
@@ -325,7 +367,14 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         path: &[(ActivationCondition<'dae>, bool)],
     ) -> ScalarCompiler<'layout, 'dae> {
         let mut compiler = Self::new(self.view, self.layout, None);
+        compiler.call_use = self.call_use;
         compiler.active_clock = clock;
+        compiler.derivative_definitions = self.derivative_definitions;
+        compiler.affine_derivative_systems = self.affine_derivative_systems;
+        compiler.active_derivatives = self.active_derivatives.clone();
+        compiler.derivative_seeds = self.derivative_seeds.clone();
+        compiler.same_tick_definitions = self.same_tick_definitions.clone();
+        compiler.function_conditional_owners = self.function_conditional_owners;
         compiler.activation_path = path
             .iter()
             .copied()
@@ -347,10 +396,8 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
         let mut compiler = self.guarded_region_compiler(self.active_clock, prior);
         let condition = compiler.materialize_activation_condition(owner, span)?;
-        compiler
-            .ops
-            .push(solve::LinearOp::StoreOutput { src: condition });
-        Ok(compiler.ops)
+        compiler.emit(solve::LinearOp::StoreOutput { src: condition })?;
+        compiler.finish_operations()
     }
 
     fn guarded_assignment_result_region(
@@ -361,12 +408,16 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         path: &[(ActivationCondition<'dae>, bool)],
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
         let mut compiler = self.guarded_region_compiler(clock, path);
+        compiler.project_current_definitions = compiler.same_tick_definitions.is_some();
+        compiler.enter_context(ScalarContextFrame::CurrentDefinitions {
+            parent: compiler.context_id,
+        });
         for target in targets {
             let branch = compiler.dynamic_guarded_branches(target)[ordinal];
             compiler.sampled_source = target.sampled;
             compiler.store_guarded_assignment_value(branch.2, target.width, target.span)?;
         }
-        Ok(compiler.ops)
+        compiler.finish_operations()
     }
 
     fn guarded_assignment_fallback_region(
@@ -377,7 +428,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     ) -> Result<Vec<solve::LinearOp>, LowerError> {
         let mut compiler = self.guarded_region_compiler(clock, path);
         compiler.store_guarded_assignment_fallbacks(targets)?;
-        Ok(compiler.ops)
+        compiler.finish_operations()
     }
 
     fn store_guarded_assignment_fallbacks(
@@ -389,11 +440,11 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                 self.store_guarded_assignment_value(value, target.width, target.span)?;
             } else {
                 let start = self.load_guarded_target_range(target)?;
-                self.ops.push(solve::LinearOp::StoreOutputRange {
+                self.emit(solve::LinearOp::StoreOutputRange {
                     start,
                     count: target.width,
                     stride: 1,
-                });
+                })?;
             }
         }
         Ok(())
@@ -409,6 +460,11 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
     ) -> Result<solve::Reg, LowerError> {
         match condition {
             ActivationCondition::Expression(expression) => self.expression(expression, 0),
+            owner @ ActivationCondition::GuardedAssignment { .. }
+                if self.project_current_definitions =>
+            {
+                self.with_entry_definition_reads(owner, span)
+            }
             ActivationCondition::GuardedAssignment {
                 clock,
                 periodic,
@@ -438,6 +494,16 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
         width: usize,
         span: Span,
     ) -> Result<(), LowerError> {
+        if !self.project_current_definitions && self.same_tick_definitions.is_some() {
+            self.project_current_definitions = true;
+            self.enter_context(ScalarContextFrame::CurrentDefinitions {
+                parent: self.context_id,
+            });
+            let result = self.store_guarded_assignment_value(value, width, span);
+            self.leave_context();
+            self.project_current_definitions = false;
+            return result;
+        }
         if self.node(value).value_type().scalar_count() != Some(width) {
             return Err(LowerError::contract(
                 "guarded-assignment value width differs from its target range",
@@ -445,11 +511,11 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             ));
         }
         let start = self.pack_expression(value)?;
-        self.ops.push(solve::LinearOp::StoreOutputRange {
+        self.emit(solve::LinearOp::StoreOutputRange {
             start,
             count: width,
             stride: 1,
-        });
+        })?;
         Ok(())
     }
 
@@ -474,14 +540,14 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
             }
         };
         let dst_start = self.register_range(target.width, target.span)?;
-        self.ops.push(solve::LinearOp::TensorLoad {
+        self.emit(solve::LinearOp::TensorLoad {
             dst_start,
             input,
             input_start,
             count: target.width,
             seed_start: None,
             lanes: 1,
-        });
+        })?;
         Ok(dst_start)
     }
 
@@ -573,7 +639,7 @@ impl<'layout, 'dae> ScalarCompiler<'layout, 'dae> {
                     .relation(relation)
                     .expect("checked condition relation resolves")
                     .expression();
-                self.expression(expression, 0)
+                self.activated_relation_expression(expression, span)
             }
             dae::ConditionOperation::Discrete(expression) => self.expression(expression, 0),
             dae::ConditionOperation::Clock(clock) => match self.active_clock {

@@ -6,8 +6,10 @@ mod class_body_tests;
 mod class_interface_tests;
 mod class_member_query_tests;
 mod compile_diagnostics_tests;
+mod construction_evidence_tests;
 mod dae_model_query_tests;
 mod declaration_index_tests;
+mod discrete_real_ownership_tests;
 mod empty_reduction_tests;
 mod file_outline_tests;
 mod file_summary_tests;
@@ -19,6 +21,7 @@ mod overconstrained_closure_tests;
 mod package_def_map_tests;
 mod persisted_summary_tests;
 mod record_forwarding_tests;
+mod reported_bug_regressions;
 mod semantic_diagnostics_tests;
 mod source_root_tests;
 mod static_reduction_tests;
@@ -26,6 +29,7 @@ mod typed_model_query_tests;
 mod workspace_symbol_snapshot_tests;
 
 mod semantic_cache_tests;
+mod shared_standard_resolution_tests;
 
 use super::*;
 use rumoca_core::Span;

@@ -39,6 +39,10 @@
 //! let result = session.compile_model("MyPackage.MyModel")?;
 //! ```
 
+#[cfg(test)]
+mod adversarial_function_projection_tests;
+#[cfg(test)]
+mod adversarial_when_call_tests;
 pub mod cache;
 mod codegen_api;
 mod codegen_target;
@@ -57,6 +61,8 @@ mod session;
 mod source_root_cache;
 mod source_root_discovery;
 mod traversal_adapter;
+#[cfg(test)]
+mod when_array_element_tests;
 mod workspace_config;
 
 /// Source-root discovery and cache helpers.
@@ -116,12 +122,12 @@ pub mod scenario {
         codegen_config_to_json, is_rumoca_task_filename, load_codegen_config_for_model,
         load_plot_views_for_model, load_simulation_snapshot_for_model, load_source_roots_for_model,
         load_source_roots_for_model_task, normalize_solver_opt, parse_fallback_simulation,
-        parse_scenario_config_file, parse_views_payload, scenario_config_full_to_json,
-        scenario_config_response, scenario_config_text_from_json, simulation_override_from_json,
-        simulation_preset_to_json, simulation_settings_to_json, source_roots_from_json,
-        source_roots_to_json, visualization_views_to_json, write_codegen_config_for_model,
-        write_model_simulation_preset, write_plot_views_for_model, write_source_roots_for_model,
-        write_source_roots_for_model_task,
+        parse_scenario_config_file, parse_views_payload, resolve_scenario_codegen_target,
+        scenario_config_full_to_json, scenario_config_response, scenario_config_text_from_json,
+        simulation_override_from_json, simulation_preset_to_json, simulation_settings_to_json,
+        source_roots_from_json, source_roots_to_json, visualization_views_to_json,
+        write_codegen_config_for_model, write_model_simulation_preset, write_plot_views_for_model,
+        write_source_roots_for_model, write_source_roots_for_model_task,
     };
 }
 
@@ -137,23 +143,25 @@ pub mod workspace {
 pub mod codegen {
     pub use crate::codegen_api::templates;
     pub use crate::codegen_api::{
-        CodegenError, SolveTemplateRenderer, dae_to_template_json,
-        render_algorithm_code_template_with_artifact, render_ast_template_with_name,
-        render_dae_template, render_dae_template_with_name, render_flat_template_with_name,
-        render_solve_template_with_name,
+        AlgorithmCodeTemplateRenderer, CodegenError, NativeFmiTemplateRenderer,
+        SolveTemplateRenderer, dae_to_template_json, render_algorithm_code_template_with_artifact,
+        render_ast_template_with_name, render_dae_template, render_dae_template_with_name,
+        render_flat_template_with_name, render_solve_template_with_name,
     };
     pub mod targets {
         pub use crate::codegen_target::{
             AssetBundle, BuiltinTargetDescriptor, ChecksumAlgorithm, ChecksumNeed,
             RenderedTargetFile, TargetArchive, TargetArchiveFormat, TargetArchiveRoot,
             TargetAssetFile, TargetBundle, TargetCapabilities, TargetCompatibilityEntry,
-            TargetFeatureSupport, TargetFile, TargetIntegerDomain, TargetManifest, TargetPackage,
-            TargetPartial, TargetTemplateIr, TargetTemplateSource, TensorCapabilities,
-            TensorCapability, TensorLayoutCapability, builtin_target_compatibility_matrix,
-            builtin_target_descriptors_for_ir, ensure_target_has_rendered_files,
-            parse_target_manifest, render_dae_target_files, safe_target_join,
-            target_ir_is_dae_renderable, target_manifest_ir, validate_dae_target_capabilities,
-            validate_solve_target_capabilities, validate_solve_tensor_inventory,
+            TargetCompiledInput, TargetFeatureSupport, TargetFile, TargetIntegerDomain,
+            TargetManifest, TargetPackage, TargetPartial, TargetTemplateIr, TargetTemplateSource,
+            TensorCapabilities, TensorCapability, TensorLayoutCapability,
+            builtin_target_compatibility_matrix, builtin_target_descriptors_for_ir,
+            ensure_target_has_rendered_files, parse_target_manifest, render_dae_target_files,
+            safe_target_join, target_ir_is_dae_renderable, target_manifest_ir,
+            validate_dae_target_capabilities, validate_flat_target_capabilities,
+            validate_solve_target_capabilities, validate_solve_target_capabilities_with_calls,
+            validate_solve_tensor_inventory,
         };
     }
 }

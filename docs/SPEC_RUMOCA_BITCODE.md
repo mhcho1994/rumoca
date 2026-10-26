@@ -547,8 +547,9 @@ loop. The only iteration is `Comprehension` over a `DomainId` and
 trip count is known before evaluation starts.
 
 **Carried function bodies cannot iterate without a bound or recurse.** A
-body (`RbcFunctionBody::Modelica`) has four statement forms: assignment,
-grouped assignment, assertion, and `For` -- a fold over a compact `DomainId`
+body (`RbcFunctionBody::Modelica`) has assignment,
+grouped assignment, assertion, ordered conditional branches, assigned-value
+checks, and `For` -- a fold over a compact `DomainId`
 whose trip count is fixed before evaluation, the same bound `Comprehension`
 has. There is no `while`, no `break`, no `return`. Recursion across calls is
 excluded by validation: once any body is carried, the call graph over
@@ -556,6 +557,16 @@ carried bodies must be acyclic (`check_call_graph_acyclic`), the same guard
 the execution IR uses (`EX2-030`). A recursive function's body is exported as
 `ElidedModelica`, so the check never has to reject a model the compiler
 accepted.
+
+Ordered conditionals carry each branch's statement list and provenance, their
+conditions, and their complete output definitions. `FunctionConditionalOutput`
+addresses those definitions by function, conditional owner, value and definition
+ordinal. `RequireAssigned` preserves a read that must fail when the selected
+branch leaves a value undefined. Reconstruction replays scoped branch owners
+through checked DAE constructors, preserving assertion order and partial state.
+The earlier version-2 grouped-assignment correlation remains readable: its
+shared guards and branch results must agree with the carried expression joins.
+These are additive tagged variants of version 2, not internal DAE wire data.
 
 *Amended 2026-09-29.* Until bodies were carried this property read "function
 bodies are not carried, so recursion is not expressible". The claim is the

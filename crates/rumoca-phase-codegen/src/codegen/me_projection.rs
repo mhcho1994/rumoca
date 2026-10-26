@@ -68,6 +68,7 @@ fn algebraic_refresh_covers(
             solve::StagedRefreshStep::ProjectComplete => settled.extend(
                 plan.simultaneous_plan
                     .blocks
+                    .scalar_blocks()
                     .iter()
                     .flat_map(|block| block.y_indices.iter().copied()),
             ),
@@ -91,6 +92,7 @@ fn algebraic_refresh_covers(
                     .continuous
                     .algebraic_projection_plan
                     .blocks
+                    .scalar_blocks()
                     .get(*block_index)
                 else {
                     return false;
@@ -117,6 +119,7 @@ fn unsupported_runtime_shape(problem: &solve::SolveProblem) -> Option<&'static s
     if continuous
         .algebraic_projection_plan
         .blocks
+        .scalar_blocks()
         .iter()
         .any(|block| !block.alternate_charts.is_empty())
     {
@@ -198,6 +201,7 @@ impl BlockCatalog<'_> {
             .continuous
             .algebraic_projection_plan
             .blocks
+            .scalar_blocks()
             .get(block_index)
             .ok_or_else(|| {
                 block::refuse(block_index, "is outside the canonical projection plan")
@@ -597,6 +601,7 @@ fn block_folds(problem: &solve::SolveProblem, records: &[BlockRecord]) -> Vec<Op
                 .continuous
                 .algebraic_projection_plan
                 .blocks
+                .scalar_blocks()
                 .get(record.canonical())?;
             let guard = block
                 .y_indices
@@ -617,4 +622,35 @@ fn importer_seed_rule(problem: &solve::SolveProblem) -> String {
             .refresh_owners
             .seed_rule(solve::RefreshExecutor::ImporterDriven)
     )
+}
+
+/// Replay the issued exact algebraic schedule for an explicit-assignment target.
+/// No residual inspection or assignment-shape derivation happens in codegen.
+pub(super) fn exact_algebraic_assignments_value(
+    problem: &solve::SolveProblem,
+) -> Result<minijinja::Value, crate::errors::CodegenError> {
+    if !super::solve_lazy::explicit_algebraic_assignment_complete(problem)
+        || unsupported_runtime_shape(problem).is_some()
+    {
+        return Ok(minijinja::Value::from(()));
+    }
+    let owners = &problem.continuous.refresh_owners;
+    let mut catalog = AssignmentCatalog::default();
+    for stage in &owners.algebraic().value_stages {
+        let solve::RefreshStage::ExactAssignments {
+            static_sequence,
+            dynamic_sequence,
+            ..
+        } = stage
+        else {
+            continue;
+        };
+        for sequence in [*static_sequence, *dynamic_sequence] {
+            let Some(schedule) = owners.exact_assignment_schedule(sequence) else {
+                continue;
+            };
+            catalog.schedule((0, problem), schedule)?;
+        }
+    }
+    catalog.into_value()
 }

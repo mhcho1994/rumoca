@@ -1,17 +1,41 @@
-//! Review-only typed pure-call backend. This is not a model assignment profile.
+//! Checked typed-call helpers shared by retained programs and event transactions.
 mod aggregates;
+mod assigned_state;
 mod calls;
+mod checked_assertions;
 mod control;
+mod cost;
 mod emit;
+mod form;
+mod known;
 mod layout;
 mod link;
 mod math;
 mod matrix;
 mod numbers;
+mod observations;
 pub(crate) mod program;
+mod promote;
+pub(crate) mod retained_event;
+mod runtime;
+pub use retained_event::CompiledRetainedEventWasm;
+mod scalars;
 mod tensor;
+mod value_assertions;
 mod views;
 
+#[cfg(all(feature = "host-engine", not(target_arch = "wasm32")))]
+pub use checked_assertions::PreparedCheckedAssertionHost;
+pub use runtime::PreparedTypedCallWasm;
+
+pub use checked_assertions::{
+    CheckedAssertionWasmOutcome, CompiledCheckedAssertionWasm, NativeAssertionCells,
+    NativeAssertionFrame, NativeAssertionObservation, compile_checked_assertion_wasm,
+};
+pub use observations::{
+    ObservationFrame as NativeAssertionFrameDescriptor,
+    ObservationSource as NativeAssertionSourceDescriptor,
+};
 use rumoca_core::Span;
 use rumoca_ir_solve as solve;
 
@@ -23,6 +47,9 @@ pub enum TypedCallFaultKind {
     IntegerArithmetic,
     IntegerConversion,
     IndexBounds,
+    AssertionFailed,
+    ObservationCapacity,
+    ObservationIntegrity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +57,7 @@ pub struct TypedCallFault {
     pub status: u32,
     pub owner: solve::SolvePureCallOwnerId,
     pub operation: Option<usize>,
-    /// Enclosing (operation ordinal, branch ordinal); Fold transition is zero.
+    /// Enclosing (operation, arm); Fold transition and failed-only message are zero.
     pub region_path: Vec<(usize, usize)>,
     pub opcode: &'static str,
     pub kind: TypedCallFaultKind,
@@ -46,6 +73,15 @@ pub enum TypedCallCompileError {
         provenance: Span,
     },
     SizeLimit,
+    /// The largest typed helper whose encoded body exceeds the function byte budget.
+    FunctionBudgetExceeded {
+        owner: solve::SolvePureCallOwnerId,
+        provenance: Span,
+        bytes: usize,
+        operations: usize,
+        budget: usize,
+        over_budget_owners: usize,
+    },
     UnsupportedOutputKind {
         owner: solve::SolvePureCallOwnerId,
         output: usize,
@@ -113,8 +149,8 @@ impl CompiledTypedCallWasm {
 /// Compile one exact issued site, with atomic publication of its complete tuple.
 /// Structured branches are lazy; checked finite folds snapshot carried tuples.
 /// Carried tensors and calls use private whole-tuple snapshots.
-/// Assertion predicate interfaces are refused until checked fatal/warning
-/// continuation and pre-publication failure handling are issued by the producer.
+/// Only constructor-derived fatal assigned-read predicates enter the normal
+/// call profile; authored assertions retain their separate checked profile.
 pub fn compile_pure_call_wasm(
     table: &solve::SolvePureCallTable,
     site: &solve::SolvePureCallSite,

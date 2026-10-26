@@ -16,7 +16,7 @@ impl RefreshProjectionModel<'_> {
                 "grouped residual output extent mismatch",
             ));
         }
-        let mut values = self.runtime.compiled_output_scratch.borrow_mut();
+        let mut values = self.runtime.scalar.compiled_output_scratch.borrow_mut();
         for program in selection.programs() {
             self.eval_residual_program_outputs(program.program(), y, p, t, &mut values)?;
             if values.len() != program.output_count() {
@@ -42,7 +42,9 @@ impl RefreshProjectionModel<'_> {
             if !value.is_finite() {
                 let source = self
                     .runtime
+                    .scalar
                     .implicit_scalar_rhs
+                    .source()
                     .row_output_index(program.program(), offset)
                     .ok_or(RuntimeSolveError::solve_ir(
                         "grouped residual source output is absent",
@@ -65,35 +67,19 @@ impl RefreshProjectionModel<'_> {
     ) -> Result<(), RuntimeSolveError> {
         if self
             .runtime
-            .eval_split_residual_program(program, (y, p, t), out)
+            .eval_split_residual_program(program, (y, p, t), out)?
             .is_some()
         {
             return Ok(());
         }
-        if let Some(compiled) = &self.runtime.compiled_implicit_rhs
-            && compiled
-                .call_program_outputs(
-                    program,
-                    y,
-                    p,
-                    t,
-                    self.runtime.model.external_tables.as_slice(),
-                    out,
-                )
-                .map_err(RuntimeSolveError::solve_ir)?
-        {
-            return Ok(());
-        }
         self.runtime
+            .scalar
             .implicit_scalar_rhs
-            .eval_row_outputs_unchecked_with_context(
+            .eval_program_outputs(
                 program,
-                y,
-                p,
-                t,
+                RowEvalPoint { y, p, t },
                 self.runtime.row_eval_context(),
                 out,
             )
-            .map_err(Into::into)
     }
 }

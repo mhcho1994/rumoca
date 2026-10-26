@@ -10,7 +10,15 @@ experiments, foreign-function prototypes, and numerical differential tests.
 
 - Readiness 2: the emitted C is compiled and numerically executed in CI.
 - Input: checked Solve IR.
-- Output: a C header and C11 implementation of `derivative_rhs(t, y, p, out)`.
+- Algebraic variables: when every algebraic slot has an issued exact
+  assignment (`exact_algebraic_assignments`), the function assigns them
+  in-function, in checked order, before the derivative rows. Only the state
+  slots of the input are read. Coupled or implicit algebraic blocks, and
+  tensor-affine assignments, are still rejected (`residual_equations`).
+- Output: a C header and C11 implementation of `derivative_rhs(t, y, p, out)`,
+  `refresh_algebraics(t, y, p)`, which applies the same exact assignments to the
+  host's `y`, and `y_slot(name)` / `p_slot(name)`, which return the base slot of
+  a named variable, parameter, or input, or -1.
 - The ABI returns an error for numerical helper failures and writes outputs in
   the checked Solve layout.
 - Tensor nodes are scalar views derived by the evaluator; Solve IR remains
@@ -29,6 +37,10 @@ tensor operations are rejected before files are written.
 - `scalar_plan_template_tests` checks indexed access, sparse outputs, and
   explicit linear-solve failure behavior.
 - `explicit_rhs_targets_reject_implicit_algebraic_models` is the negative gate.
+- `fmi2_and_fmi3_consume_an_exact_isolable_algebraic_schedule` renders the exact
+  algebraic refresh for every scalar ODE target and executes the c-ode one.
+- `c_ode_refreshes_algebraics_into_named_slots` reads a refreshed algebraic
+  slot by name.
 
 ## Example
 

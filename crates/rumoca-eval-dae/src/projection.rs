@@ -1,10 +1,16 @@
 mod array_update;
+mod coordinate_query;
 mod dependencies;
 mod domain_context;
 mod fold_graph;
+mod function_conditionals;
 mod indexed_write_fold;
 mod integer;
 mod literal_bindings;
+mod pruned;
+pub use coordinate_query::CoordinateQuery;
+use coordinate_query::ProjectionQuery;
+pub use pruned::PrunedScalarCoordinateProjection;
 mod literal_update_sweeps;
 #[cfg(test)]
 mod merge_profile_tests;
@@ -27,7 +33,7 @@ use rumoca_core::{Span, flatten_coordinates, row_major_coordinates};
 use rumoca_ir_dae as dae;
 
 /// Failure to derive one exact scalar view from a checked DAE expression.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ProjectionError {
     #[error("scalar projection {index} is outside an expression containing {count} scalars")]
     ScalarOutOfBounds {
@@ -60,6 +66,22 @@ pub enum ProjectionError {
         symbol: String,
         span: Span,
     },
+}
+
+impl ProjectionError {
+    /// The source span retained by the exact scalar projection owner.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        match self {
+            Self::ScalarOutOfBounds { span, .. }
+            | Self::DynamicSubscript { span }
+            | Self::IndexOutOfBounds { span, .. }
+            | Self::IntegerOverflow { span }
+            | Self::FunctionRecursion { span }
+            | Self::UnsupportedRecordOperation { span, .. }
+            | Self::ExternalFunction { span, .. } => *span,
+        }
+    }
 }
 
 /// Report an MLS §12.9 external body that projection cannot look through.
@@ -144,6 +166,19 @@ pub fn for_each_scalar_coordinate<'dae>(
 /// parameter-scalar summary, then substitute the actual call arguments.
 #[derive(Default)]
 pub struct ScalarCoordinateProjectionCache<'dae> {
+    plain_actuals: HashMap<u32, query::PlainActual<'dae>>,
+    plain_call_arguments: HashMap<u32, Box<[query::PlainActual<'dae>]>>,
+    /// Whether a model-level expression reads no coordinate a named query
+    /// selects. Each named query is a fixed predicate, so the answer is a
+    /// property of the expression alone.
+    query_free_expressions: HashMap<(u32, CoordinateQuery), bool>,
+    /// The model-level membership storage every projection walk starts from, so
+    /// consecutive scalar views reuse its capacity instead of regrowing it.
+    model_visited: visited::Visited,
+    #[cfg(test)]
+    plain_argument_classifications: std::cell::Cell<u64>,
+    #[cfg(test)]
+    plain_argument_cache_lookups: std::cell::Cell<u64>,
     function_results: HashMap<FunctionSummaryKey, FunctionSummaryEntry>,
     completed_folds: HashMap<fold_graph::FoldNode<'dae>, Arc<[FunctionParameterDependency]>>,
     parameter_fragments: parameter_fragments::reuse::Cache,
@@ -201,7 +236,7 @@ pub fn for_each_scalar_coordinate_cached<'dae>(
         scalar_index,
         domain_point,
         cache,
-        None,
+        ProjectionRequest::default(),
         &mut visit,
     )
 }
@@ -234,9 +269,53 @@ pub fn for_each_scalar_coordinate_filtered_cached<'dae>(
         scalar_index,
         domain_point,
         cache,
-        Some(&relevant),
+        ProjectionRequest {
+            relevant: Some(ProjectionQuery::Predicate(&relevant)),
+            omitted: None,
+        },
         &mut filtered,
     )
+}
+
+/// Visit the coordinates one named query selects.
+///
+/// This is [`for_each_scalar_coordinate_filtered_cached`] with a predicate the
+/// cache can recognize, so a call whose actuals hold no selected coordinate is
+/// classified once per call rather than once per scalar view of it.
+#[track_caller]
+pub fn for_each_scalar_coordinate_queried_cached<'dae>(
+    view: dae::DaeView<'dae>,
+    root: dae::ExprId<'dae>,
+    scalar_index: usize,
+    domain_point: Option<(dae::DomainId<'dae>, &[i64])>,
+    cache: &mut ScalarCoordinateProjectionCache<'dae>,
+    query: CoordinateQuery,
+    mut visit: impl FnMut(dae::CoordinateView<'dae>, usize),
+) -> Result<(), ProjectionError> {
+    let relevant = |coordinate| query.selects(coordinate);
+    let mut filtered = |coordinate, scalar| {
+        if relevant(coordinate) {
+            visit(coordinate, scalar);
+        }
+    };
+    project_coordinates(
+        view,
+        root,
+        scalar_index,
+        domain_point,
+        cache,
+        ProjectionRequest {
+            relevant: Some(ProjectionQuery::Named(query)),
+            omitted: None,
+        },
+        &mut filtered,
+    )
+}
+
+#[derive(Default)]
+struct ProjectionRequest<'visit, 'dae> {
+    relevant: Option<ProjectionQuery<'visit, 'dae>>,
+    omitted: Option<&'visit dyn Fn(dae::ExprId<'dae>) -> bool>,
 }
 
 fn project_coordinates<'dae>(
@@ -245,7 +324,7 @@ fn project_coordinates<'dae>(
     scalar_index: usize,
     domain_point: Option<(dae::DomainId<'dae>, &[i64])>,
     cache: &mut ScalarCoordinateProjectionCache<'dae>,
-    relevant: Option<&dyn Fn(dae::CoordinateView<'dae>) -> bool>,
+    request: ProjectionRequest<'_, 'dae>,
     visit: &mut dyn FnMut(dae::CoordinateView<'dae>, usize),
 ) -> Result<(), ProjectionError> {
     let mut projection = Projection {
@@ -260,13 +339,18 @@ fn project_coordinates<'dae>(
         function_call_active: HashSet::default(),
         function_fold_active: HashSet::default(),
         function_summary_captures: Vec::new(),
-        model_visited: visited::Visited::default(),
+        model_visited: std::mem::take(&mut cache.model_visited),
         frame_memos: Vec::new(),
         cache,
         visit,
-        relevant,
+        relevant: request.relevant,
+        omitted: request.omitted,
     };
-    projection.expression(root, scalar_index)
+    projection.model_visited.clear();
+    let result = projection.expression(root, scalar_index);
+    let model_visited = std::mem::take(&mut projection.model_visited);
+    cache.model_visited = model_visited;
+    result
 }
 
 /// Whether a source read must execute if the enclosing expression executes.
@@ -312,7 +396,8 @@ struct Projection<'visit, 'dae> {
     frame_memos: Vec<FrameMemo>,
     cache: &'visit mut ScalarCoordinateProjectionCache<'dae>,
     visit: &'visit mut dyn FnMut(dae::CoordinateView<'dae>, usize),
-    relevant: Option<&'visit dyn Fn(dae::CoordinateView<'dae>) -> bool>,
+    relevant: Option<ProjectionQuery<'visit, 'dae>>,
+    omitted: Option<&'visit dyn Fn(dae::ExprId<'dae>) -> bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -455,6 +540,9 @@ impl<'dae> Projection<'_, 'dae> {
         expression: dae::ExprId<'dae>,
         scalar_index: usize,
     ) -> Result<(), ProjectionError> {
+        if self.expression_is_query_free(expression) {
+            return Ok(());
+        }
         let Some(node) = self.expression_to_project(expression, scalar_index)? else {
             return Ok(());
         };
@@ -499,6 +587,9 @@ impl<'dae> Projection<'_, 'dae> {
             dae::ExpressionOperation::FunctionValue { definition, .. } => {
                 self.expression(definition.rhs(), scalar_index)
             }
+            dae::ExpressionOperation::FunctionConditionalOutput {
+                conditional, value, ..
+            } => self.function_conditional_dependency(node, conditional, value, None, scalar_index),
             dae::ExpressionOperation::FunctionFoldParameter { fold, carried, .. }
             | dae::ExpressionOperation::FunctionFoldOutput { fold, carried, .. } => {
                 self.function_fold_dependency(fold, carried, None, scalar_index)
@@ -531,13 +622,7 @@ impl<'dae> Projection<'_, 'dae> {
                 output,
                 arguments,
                 ..
-            } => self.function_call(
-                function,
-                output,
-                arguments,
-                scalar_index,
-                node.provenance().span(),
-            ),
+            } => self.function_call(expression, function, output, arguments, scalar_index),
             dae::ExpressionOperation::StringConversion { value, format, .. } => {
                 self.string_conversion_dependencies(value, format)
             }
@@ -918,40 +1003,48 @@ impl<'dae> Projection<'_, 'dae> {
 
     fn function_call(
         &mut self,
+        call: dae::ExprId<'dae>,
         function: dae::FunctionId<'dae>,
         output: u32,
         arguments: dae::ExpressionOperands<'dae>,
         scalar_index: usize,
-        span: Span,
     ) -> Result<(), ProjectionError> {
         if self.function_frames.len() >= 256 {
-            return Err(ProjectionError::FunctionRecursion { span });
+            return Err(ProjectionError::FunctionRecursion {
+                span: self.node(call).provenance().span(),
+            });
         }
-        let arguments = arguments.iter().collect::<Vec<_>>();
         if self.is_native_table_call(function) {
             // A native table interpolation (MLS §12.9) is a solver primitive:
             // its result depends on its argument incidence, and the opaque
             // external body is never entered.
-            for argument in &arguments {
-                self.expression(*argument, 0)?;
+            for argument in arguments.iter() {
+                self.expression(argument, 0)?;
             }
             return Ok(());
         }
         if self.has_native_body(function) || self.is_active_function(function) {
+            let arguments = arguments.iter().collect::<Vec<_>>();
             return self.native_body_arguments(&arguments);
         }
-        if self.query_free_arguments(&arguments) {
+        if self.query_free_arguments(call, arguments) {
             // A pure call reads only its arguments, so a call whose actuals
             // hold no queried coordinate contributes none.
             return Ok(());
         }
+        let arguments = arguments.iter().collect::<Vec<_>>();
         let dependency = FunctionResultDependency {
             function: function.index(),
             output,
             field: None,
             scalar: scalar_index,
         };
-        self.project_function_result(dependency, function, arguments, span)
+        self.project_function_result(
+            dependency,
+            function,
+            arguments,
+            self.node(call).provenance().span(),
+        )
     }
 
     /// Whether `function` is already being projected on this walk, so the call
@@ -996,32 +1089,40 @@ impl<'dae> Projection<'_, 'dae> {
 
     fn function_call_record_field(
         &mut self,
+        call: dae::ExprId<'dae>,
         function: dae::FunctionId<'dae>,
         output: u32,
         arguments: dae::ExpressionOperands<'dae>,
         field: &FieldPath,
         scalar: usize,
-        span: Span,
     ) -> Result<(), ProjectionError> {
         if self.function_frames.len() >= 256 {
-            return Err(ProjectionError::FunctionRecursion { span });
+            return Err(ProjectionError::FunctionRecursion {
+                span: self.node(call).provenance().span(),
+            });
         }
-        let arguments = arguments.iter().collect::<Vec<_>>();
         if self.is_active_function(function) {
+            let arguments = arguments.iter().collect::<Vec<_>>();
             return self.native_body_arguments(&arguments);
         }
-        if self.query_free_arguments(&arguments) {
+        if self.query_free_arguments(call, arguments) {
             // A pure call reads only its arguments, so a call whose actuals
             // hold no queried coordinate contributes none.
             return Ok(());
         }
+        let arguments = arguments.iter().collect::<Vec<_>>();
         let dependency = FunctionResultDependency {
             function: function.index(),
             output,
             field: Some(field.clone()),
             scalar,
         };
-        self.project_function_result(dependency, function, arguments, span)
+        self.project_function_result(
+            dependency,
+            function,
+            arguments,
+            self.node(call).provenance().span(),
+        )
     }
 
     /// Project one function result scalar at a call site.

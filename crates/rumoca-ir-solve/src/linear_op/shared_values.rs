@@ -12,6 +12,7 @@
 //! the segments over one hash-consed term table and requires identical output
 //! and final slot terms.
 
+mod checking;
 mod registers;
 mod symbolic;
 #[cfg(test)]
@@ -25,6 +26,53 @@ use registers::{
 use symbolic::{SymbolicSlots, Term, Terms, ValueKey, ValueShape, value_shape};
 
 use super::*;
+
+/// Compare outputs under the existing exact, register-independent term proof.
+/// Each program reads the same entry slots; neither program commits into the
+/// other's symbolic environment. An unsupported operation cannot prove equality.
+pub(crate) fn check_same_output(
+    left: &[LinearOp],
+    left_output: usize,
+    right: &[LinearOp],
+    right_output: usize,
+) -> Result<(), SharedValueError> {
+    check_same_output_transformed(left, left_output, right, right_output, |_, op| {
+        Some(std::borrow::Cow::Borrowed(op))
+    })
+}
+
+/// Stream an affine view into the same checker. It retains one transient op,
+/// never a pointwise program or a second symbolic evaluator.
+pub(crate) fn check_same_output_transformed<'a>(
+    left: &'a [LinearOp],
+    left_output: usize,
+    right: &[LinearOp],
+    right_output: usize,
+    transform: impl FnMut(usize, &'a LinearOp) -> Option<std::borrow::Cow<'a, LinearOp>>,
+) -> Result<(), SharedValueError> {
+    let mut terms = Terms::default();
+    let evaluate = |terms: &mut Terms, ops: &[LinearOp], output: usize| {
+        ScalarProgramRegisterFlow::derive(ops).ok()?;
+        let targets = (0..crate::ScalarProgramBlock::program_output_count(ops)).collect::<Vec<_>>();
+        SymbolicSlots::value_proof()
+            .run(terms, ops, &targets)?
+            .get(output)
+            .copied()
+    };
+    ScalarProgramRegisterFlow::derive(left).map_err(|_| SharedValueError::Unevaluable)?;
+    let targets = (0..crate::ScalarProgramBlock::program_output_count(left)).collect::<Vec<_>>();
+    let a = SymbolicSlots::value_proof()
+        .run_transformed(&mut terms, left, &targets, transform)
+        .and_then(|outputs| outputs.get(left_output).copied())
+        .ok_or(SharedValueError::Unevaluable)?;
+    let b = evaluate(&mut terms, right, right_output).ok_or(SharedValueError::Unevaluable)?;
+    if a != b {
+        return Err(SharedValueError::Output {
+            index: right_output,
+        });
+    }
+    Ok(())
+}
 
 /// Most registers one segment's register file may hold. A program that would
 /// exceed it starts the next segment, and every value that segment recomputes
@@ -132,7 +180,10 @@ impl SharedValueSegments {
 
     /// Evaluate `programs` and the segments symbolically and require every
     /// output, in order, and every final slot to be the identical term.
-    pub fn check(&self, programs: &[AssignmentProgram<'_>]) -> Result<(), SharedValueError> {
+    fn check_symbolically(
+        programs: &[AssignmentProgram<'_>],
+        segments: &[SharedValueSegment],
+    ) -> Result<(), SharedValueError> {
         let mut terms = Terms::default();
         let mut original = SymbolicSlots::default();
         let mut expected = Vec::new();
@@ -144,7 +195,7 @@ impl SharedValueSegments {
         }
         let mut shared = SymbolicSlots::default();
         let mut found = Vec::new();
-        for segment in &self.segments {
+        for segment in segments {
             let outputs = shared
                 .run(&mut terms, &segment.ops, &segment.targets)
                 .ok_or(SharedValueError::Unevaluable)?;
@@ -279,6 +330,12 @@ enum Step<'a> {
 
 impl<'a> FusibleProgram<'a> {
     fn classify(ops: &'a [LinearOp]) -> Option<Self> {
+        // The scalar sharing construction does not own a native range's
+        // lanes. Keep its canonical program intact rather than expanding a
+        // range into scalar stores and rediscovering it later.
+        if checking::native_range(ops) {
+            return None;
+        }
         let registers = ScalarProgramRegisterFlow::derive(ops)
             .ok()?
             .register_count();
@@ -512,9 +569,18 @@ impl Builder {
 
     fn push_opaque(&mut self, index: usize, program: &AssignmentProgram<'_>) {
         self.close(false);
-        let _ = self
-            .slots
-            .run(&mut self.terms, program.ops, program.targets);
+        if checking::native_range(program.ops) {
+            // A native identity barrier commits its original program. Later
+            // scalar sharing proves itself for arbitrary incoming slots and
+            // cannot depend on terms obtained by expanding this range.
+            self.terms = Terms::default();
+            self.slots = SymbolicSlots::default();
+            self.closed.clear();
+        } else {
+            let _ = self
+                .slots
+                .run(&mut self.terms, program.ops, program.targets);
+        }
         self.done.push(SharedValueSegment {
             ops: program.ops.to_vec(),
             targets: program.targets.to_vec(),
